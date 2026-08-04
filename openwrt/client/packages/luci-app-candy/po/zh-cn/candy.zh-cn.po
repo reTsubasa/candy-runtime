@@ -1,0 +1,1390 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: luci-app-candy 0.4.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-03 00:00+0800\n"
+"PO-Revision-Date: 2026-07-03 00:00+0800\n"
+"Last-Translator: Candy Project\n"
+"Language-Team: Chinese Simplified\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+msgid "Add rule"
+msgstr "添加规则"
+
+msgid "Advanced"
+msgstr "高级"
+
+msgid "Expert DNS, provider, and transparent proxy controls. Candy negotiates transport performance automatically."
+msgstr "DNS、规则数据源和透明代理的专家设置。传输性能由 Candy 自动协商。"
+
+msgid "DNS and GEO expert settings"
+msgstr "DNS 与 GEO 专家设置"
+
+msgid "Provider updates"
+msgstr "规则数据更新"
+
+msgid "Enable Candy DNS and China routing with sensible defaults. Custom DNS servers are optional."
+msgstr "使用合理默认值启用 Candy DNS 与国内直连；DNS 服务器均可选填。"
+
+msgid "Use Candy DNS"
+msgstr "使用 Candy DNS"
+
+msgid "Send router DNS through Candy. Leave disabled to keep using the router's current DNS path."
+msgstr "通过 Candy 转发路由器 DNS；关闭时继续使用路由器当前的 DNS 路径。"
+
+msgid "Keep LAN DNS requests on the router policy even when devices specify another DNS server."
+msgstr "即使终端指定了其他 DNS，也让局域网 DNS 请求遵循路由器策略。"
+
+msgid "GFWList split DNS"
+msgstr "GFWList 分流 DNS"
+
+msgid "China direct routing"
+msgstr "国内直连"
+
+msgid "Custom domestic DNS servers"
+msgstr "自定义国内 DNS 服务器"
+
+msgid "Optional. Separate multiple servers with commas; leave empty to use Candy defaults."
+msgstr "可选。多个服务器用逗号分隔；留空使用 Candy 默认值。"
+
+msgid "Custom foreign DNS server"
+msgstr "自定义国外 DNS 服务器"
+
+msgid "Optional. This resolver is reached through the selected Candy node; leave empty to use Candy defaults."
+msgstr "可选。该解析器通过选中的 Candy 节点访问；留空使用 Candy 默认值。"
+
+msgid "DNS tunnel status"
+msgstr "DNS 隧道状态"
+
+msgid "Long-lived DNS tunnel"
+msgstr "DNS 长连接"
+
+msgid "Connected"
+msgstr "已连接"
+
+msgid "Disconnected"
+msgstr "未连接"
+
+msgid "Not connected"
+msgstr "尚未连接"
+
+msgid "Resolver"
+msgstr "解析器"
+
+msgid "Server version"
+msgstr "服务端版本"
+
+msgid "GFWList update interval (hours)"
+msgstr "GFWList 更新间隔（小时）"
+
+msgid "China IP provider URL"
+msgstr "国内 IP 数据源地址"
+
+msgid "Auto update China IP provider"
+msgstr "自动更新国内 IP 数据"
+
+msgid "China IP update interval (hours)"
+msgstr "国内 IP 更新间隔（小时）"
+
+msgid "Applied"
+msgstr "已应用"
+
+msgid "Apply"
+msgstr "应用"
+
+msgid "Auth secret"
+msgstr "认证密钥"
+
+msgid "Auto"
+msgstr "自动"
+
+msgid "Answer GEO validation"
+msgstr "应答 GEO 校验"
+
+msgid "Auto update GFWList"
+msgstr "自动更新 GFWList"
+
+msgid "Automatic traffic"
+msgstr "自动接管流量"
+
+msgid "A group is a named node set. Rules normally target a group, then the group policy chooses which node handles the traffic."
+msgstr "组是一组命名节点。规则通常指向组，然后由组策略决定使用哪个节点承载流量。"
+
+msgid "A node is one Candy server endpoint. Groups reference these nodes and traffic rules target groups."
+msgstr "节点是一个 Candy 服务端出口。组引用这些节点，流量规则再指向组。"
+
+msgid "Base64 GFWList provider URL used by split DNS when remote DNS is off."
+msgstr "远端 DNS 关闭时，分流 DNS 使用的 Base64 GFWList Provider URL。"
+
+msgid "Block LAN UDP/443"
+msgstr "阻断 LAN UDP/443"
+
+msgid "Boot status"
+msgstr "开机状态"
+
+msgid "Bootstrap resolvers"
+msgstr "Bootstrap 解析器"
+
+msgid "Build"
+msgstr "构建号"
+
+msgid "Candy"
+msgstr "Candy"
+
+msgid "Capture LAN DNS"
+msgstr "接管 LAN DNS"
+
+msgid "Client"
+msgstr "客户端"
+
+msgid "Config file"
+msgstr "配置文件"
+
+msgid "Command"
+msgstr "命令"
+
+msgid "Copy rules"
+msgstr "复制规则"
+
+msgid "Current rules"
+msgstr "当前规则"
+
+msgid "DNS"
+msgstr "DNS"
+
+msgid "DNS blackhole: remote DNS can break all lookups when the local DNS forwarder is unhealthy. QUIC: browsers prefer UDP/443 for Google and YouTube, so an unstable UDP data path can look like the internet is down. LAN DNS: clients may use external DNS and bypass router policy unless port 53 is captured. AAAA: IPv6 answers can bypass an IPv4-only proxy path, so Candy filters AAAA only while it is active."
+msgstr "DNS 黑洞：本地 DNS 转发器不健康时，远端 DNS 可能导致所有解析失败。QUIC：浏览器会优先为 Google 和 YouTube 使用 UDP/443，不稳定的 UDP 数据面会表现得像断网。LAN DNS：如果不接管 53 端口，客户端可能使用外部 DNS 并绕过路由器策略。AAAA：IPv6 结果可能绕过仅支持 IPv4 的代理路径，所以 Candy 只在运行时过滤 AAAA。"
+
+msgid "DNS policy used while the Candy service is running. These settings are applied through temporary runtime rules and are cleaned up when Candy stops."
+msgstr "Candy 服务运行期间使用的 DNS 策略。这些设置会通过临时运行时规则应用，并在 Candy 停止时清理。"
+
+msgid "DNS status"
+msgstr "DNS 状态"
+
+msgid "DNS trace"
+msgstr "DNS 追踪"
+
+msgid "Download rules"
+msgstr "下载规则"
+
+msgid "DNS cache"
+msgstr "DNS 缓存"
+
+msgid "Debug summary"
+msgstr "调试摘要"
+
+msgid "Diagnostics"
+msgstr "诊断"
+
+msgid "Overall performance trends"
+msgstr "整体性能趋势"
+
+msgid "Solid: measured goodput; dashed: estimated healthy capacity"
+msgstr "实线：实测有效吞吐；虚线：估算健康容量"
+
+msgid "Solid: RTT; dashed: 100 ms reference"
+msgstr "实线：RTT；虚线：100 ms 参考线"
+
+msgid "Latency quality"
+msgstr "时延质量"
+
+msgid "RTT variation"
+msgstr "RTT 抖动"
+
+msgid "Delivery"
+msgstr "交付质量"
+
+msgid "Flight control"
+msgstr "在途控制"
+
+msgid "Transport state"
+msgstr "传输状态"
+
+msgid "Path"
+msgstr "路径"
+
+msgid "Current"
+msgstr "当前"
+
+msgid "Minimum"
+msgstr "最低"
+
+msgid "Goodput"
+msgstr "有效吞吐"
+
+msgid "Loss"
+msgstr "丢包"
+
+msgid "In flight"
+msgstr "在途/CWND"
+
+msgid "Pacing"
+msgstr "发送节奏"
+
+msgid "Direct"
+msgstr "直连"
+
+msgid "Disabled"
+msgstr "已禁用"
+
+msgid "Domestic first"
+msgstr "国内优先"
+
+msgid "Domestic resolvers"
+msgstr "国内解析器"
+
+msgid "ECS mode"
+msgstr "ECS 模式"
+
+msgid "Enable"
+msgstr "启用"
+
+msgid "Enabled"
+msgstr "已启用"
+
+msgid "Experimental. Candy only enables UDP TProxy when QUIC blocking is off."
+msgstr "实验功能。只有关闭 QUIC 阻断时，Candy 才会启用 UDP TProxy。"
+
+msgid "Export"
+msgstr "导出"
+
+msgid "Export diagnostic bundle"
+msgstr "导出诊断包"
+
+msgid "Fallback order"
+msgstr "故障切换顺序"
+
+msgid "Fallback mode"
+msgstr "自动回退模式"
+
+msgid "Filter AAAA records"
+msgstr "过滤 AAAA 记录"
+
+msgid "Foreign resolver strategy"
+msgstr "境外解析策略"
+
+msgid "Forward router DNS through Candy's local DNS forwarder. Keep this off unless the DNS forward path is confirmed healthy."
+msgstr "通过 Candy 本地 DNS 转发器转发路由器 DNS。除非已确认 DNS 转发路径健康，否则保持关闭。"
+
+msgid "Forwards"
+msgstr "转发"
+
+msgid "Global"
+msgstr "全局"
+
+msgid "Groups"
+msgstr "组"
+
+msgid "Import"
+msgstr "导入"
+
+msgid "Import / Export"
+msgstr "导入 / 导出"
+
+msgid "Invalid provider update URL."
+msgstr "Provider 更新地址无效。"
+
+msgid "Invalid GFWList update URL."
+msgstr "GFWList 更新地址无效。"
+
+msgid "Invalid rule value"
+msgstr "规则值无效"
+
+msgid "Key ID"
+msgstr "密钥 ID"
+
+msgid "Last error"
+msgstr "最后错误"
+
+msgid "Last updated"
+msgstr "最后更新时间"
+
+msgid "Last connection error"
+msgstr "最后连接错误"
+
+msgid "Latency"
+msgstr "延迟"
+
+msgid "Lane mode"
+msgstr "通道模式"
+
+msgid "Listening sockets"
+msgstr "监听套接字"
+
+msgid "Load balance"
+msgstr "负载均衡"
+
+msgid "Local listen"
+msgstr "本地监听"
+
+msgid "Local forwards (advanced)"
+msgstr "本地转发（高级）"
+
+msgid "Log"
+msgstr "日志"
+
+msgid "Lowest latency"
+msgstr "最低延迟"
+
+msgid "Manage firewall rules"
+msgstr "管理防火墙规则"
+
+msgid "Manual edit"
+msgstr "手动编辑"
+
+msgid "Manual select"
+msgstr "手动选择"
+
+msgid "Mode"
+msgstr "模式"
+
+msgid "Multi lane"
+msgstr "多通道"
+
+msgid "Name"
+msgstr "名称"
+
+msgid "Network"
+msgstr "网络"
+
+msgid "No node status available"
+msgstr "暂无节点状态"
+
+msgid "No resolve"
+msgstr "不解析"
+
+msgid "No rules configured"
+msgstr "尚未配置规则"
+
+msgid "Node"
+msgstr "节点"
+
+msgid "Node pool"
+msgstr "节点池"
+
+msgid "Node status file"
+msgstr "节点状态文件"
+
+msgid "Nodes"
+msgstr "节点"
+
+msgid "Group name is required"
+msgstr "节点组名称不能为空"
+
+msgid "This group name is reserved"
+msgstr "该节点组名称为保留名称"
+
+msgid "Group name must be unique"
+msgstr "节点组名称必须唯一"
+
+msgid "Unknown node"
+msgstr "未知节点"
+
+msgid "Disabled nodes cannot be added to a group"
+msgstr "已禁用的节点不能加入节点组"
+
+msgid "At least one node is required"
+msgstr "节点组至少需要一个节点"
+
+msgid "Nodes/Groups"
+msgstr "节点/组"
+
+msgid "Off"
+msgstr "关闭"
+
+msgid "Option"
+msgstr "选项"
+
+msgid "Optional local port forwards through the Candy tunnel. Leave empty for normal transparent proxy use."
+msgstr "通过 Candy 隧道提供可选的本地端口转发。普通透明代理场景保持为空即可。"
+
+msgid "Parallel with GEO validation"
+msgstr "并发并做 GEO 校验"
+
+msgid "Processes"
+msgstr "进程"
+
+msgid "Performance mode"
+msgstr "性能策略"
+
+msgid "Proxy LAN UDP/443 with TProxy"
+msgstr "用 TProxy 代理 LAN UDP/443"
+
+msgid "QUIC and UDP"
+msgstr "QUIC 和 UDP"
+
+msgid "QUIC datagram"
+msgstr "QUIC 数据报"
+
+msgid "Recommended for most browsers. Blocking QUIC forces Google, YouTube, and similar sites to fall back to TCP, which uses the stable transparent TCP path."
+msgstr "推荐用于大多数浏览器。阻断 QUIC 会强制 Google、YouTube 等站点回落到 TCP，从而使用稳定的透明 TCP 路径。"
+
+msgid "Recommended general configuration"
+msgstr "推荐通用配置"
+
+msgid "Reconnect policy"
+msgstr "重连策略"
+
+msgid "Redirect LAN TCP traffic"
+msgstr "重定向 LAN TCP 流量"
+
+msgid "Redirect LAN UDP/TCP port 53 queries back to the router dnsmasq while Candy is running. This keeps clients that use public DNS servers on the router policy."
+msgstr "Candy 运行时，将 LAN 内 UDP/TCP 53 端口查询重定向回路由器 dnsmasq。这会让使用公共 DNS 的客户端仍然遵循路由器策略。"
+
+msgid "Remote target"
+msgstr "远端目标"
+
+msgid "Restart"
+msgstr "重启"
+
+msgid "Rule"
+msgstr "规则"
+
+msgid "Rules"
+msgstr "规则"
+
+msgid "Running"
+msgstr "运行中"
+
+msgid "Runtime mode"
+msgstr "运行模式"
+
+msgid "Runtime snapshot"
+msgstr "运行时快照"
+
+msgid "Save rules"
+msgstr "保存规则"
+
+msgid "Selected group"
+msgstr "已选组"
+
+msgid "Selected node"
+msgstr "已选节点"
+
+msgid "Server"
+msgstr "服务器"
+
+msgid "Server address"
+msgstr "服务器地址"
+
+msgid "Server certificate pin"
+msgstr "服务器证书指纹"
+
+msgid "Service log"
+msgstr "服务日志"
+
+msgid "Service status"
+msgstr "服务状态"
+
+msgid "Security smoke"
+msgstr "安全冒烟"
+
+msgid "Single lane"
+msgstr "单通道"
+
+msgid "Start"
+msgstr "启动"
+
+msgid "Stable mode"
+msgstr "稳定模式"
+
+msgid "Status"
+msgstr "状态"
+
+msgid "Stop"
+msgstr "停止"
+
+msgid "Stopping"
+msgstr "停止中"
+
+msgid "Stopped"
+msgstr "已停止"
+
+msgid "Stream fallback"
+msgstr "流式回退"
+
+msgid "Smart DNS"
+msgstr "智能 DNS"
+
+msgid "Smart DNS mode"
+msgstr "智能 DNS 模式"
+
+msgid "Split DNS"
+msgstr "分流 DNS"
+
+msgid "System log"
+msgstr "系统日志"
+
+msgid "System DNS"
+msgstr "系统 DNS"
+
+msgid "TLS server name"
+msgstr "TLS 服务器名"
+
+msgid "TCP path, blocks browser QUIC/UDP, best compatibility."
+msgstr "TCP 路径，阻断浏览器 QUIC/UDP，兼容性最好。"
+
+msgid "TProxy routing mark"
+msgstr "TProxy 路由标记"
+
+msgid "Target"
+msgstr "目标"
+
+msgid "Temporarily enables dnsmasq AAAA filtering while Candy is running, reducing IPv6 bypasses when the proxy path is IPv4-only."
+msgstr "Candy 运行时临时启用 dnsmasq AAAA 过滤，在代理路径仅支持 IPv4 时减少 IPv6 绕过。"
+
+msgid "Transparent TCP listen port"
+msgstr "透明 TCP 监听端口"
+
+msgid "Transparent UDP listen port"
+msgstr "透明 UDP 监听端口"
+
+msgid "Trace domain"
+msgstr "追踪域名"
+
+msgid "Trace result"
+msgstr "追踪结果"
+
+msgid "Type"
+msgstr "类型"
+
+msgid "Through selected node"
+msgstr "通过已选节点"
+
+msgid "UDP resolver address used by DNS trace when collecting evidence through the selected egress node."
+msgstr "DNS trace 通过已选出口节点采集证据时使用的 UDP 解析器地址。"
+
+msgid "UDP mode"
+msgstr "UDP 模式"
+
+msgid "UDP/TProxy"
+msgstr "UDP/TProxy"
+
+msgid "UDP TProxy path, better throughput and latency when UDP is healthy."
+msgstr "UDP TProxy 路径，UDP 健康时吞吐和延迟更好。"
+
+msgid "Unknown-domain strategy"
+msgstr "未知域名策略"
+
+msgid "Use LAN DNS capture, AAAA filtering, QUIC blocking, and TCP transparent proxying for the general case. This keeps browser traffic on the stable TCP tunnel while Candy is running, and leaves the router's normal DNS state untouched when Candy is stopped."
+msgstr "通用场景下使用 LAN DNS 接管、AAAA 过滤、QUIC 阻断和 TCP 透明代理。这样 Candy 运行时浏览器流量会走稳定的 TCP 隧道，Candy 停止时不会改动路由器的正常 DNS 状态。"
+
+msgid "Use remote DNS"
+msgstr "使用远端 DNS"
+
+msgid "Value"
+msgstr "值"
+
+msgid "Version"
+msgstr "版本"
+
+msgid "Weak-link performance"
+msgstr "弱网性能"
+
+msgid "Active provider"
+msgstr "当前 Provider"
+
+msgid "Auto update provider"
+msgstr "自动更新 Provider"
+
+msgid "Update interval (hours)"
+msgstr "更新间隔（小时）"
+
+msgid "When enabled, Candy refreshes this provider at the configured interval while the service is running."
+msgstr "启用后，Candy 会在服务运行期间按配置间隔刷新此 Provider。"
+
+msgid "Automatic update cadence. 24 means once per day."
+msgstr "自动更新周期。24 表示每天一次。"
+
+msgid "China IP bypass"
+msgstr "中国 IP 分流"
+
+msgid "China IP bypass routes provider-matched China destination IPs directly while Candy is running. Provider matching is compiled by candy-core; LuCI only manages the update source and shows status."
+msgstr "Candy 运行时，中国 IP 分流会将 Provider 命中的中国目标 IP 直连。Provider 匹配由 candy-core 编译，LuCI 只管理更新源并显示状态。"
+
+msgid "CIDR text provider URL used by the manual update action."
+msgstr "手动更新动作使用的 CIDR 文本 Provider URL。"
+
+msgid "Entry count"
+msgstr "条目数"
+
+msgid "Egress DNS resolver"
+msgstr "出口 DNS 解析器"
+
+msgid "GEO"
+msgstr "GEO"
+
+msgid "GFWList provider status"
+msgstr "GFWList Provider 状态"
+
+msgid "GFWList update URL"
+msgstr "GFWList 更新地址"
+
+msgid "GFWList update URL is required."
+msgstr "GFWList 更新地址不能为空。"
+
+msgid "GFWList update failed. Check /tmp/candy-gfwlist-update.log."
+msgstr "GFWList 更新失败，请查看 /tmp/candy-gfwlist-update.log。"
+
+msgid "GFWList update completed. Check provider status and /tmp/candy-gfwlist-update.log if it fails."
+msgstr "GFWList 更新已完成；如失败，请查看 Provider 状态和 /tmp/candy-gfwlist-update.log。"
+
+msgid "Manual update"
+msgstr "手动更新"
+
+msgid "Prepend private IP DIRECT rules and GEOIP,CN,DIRECT,no-resolve to the runtime rules."
+msgstr "在运行时规则前置私网 IP DIRECT 规则和 GEOIP,CN,DIRECT,no-resolve。"
+
+msgid "Provider status"
+msgstr "Provider 状态"
+
+msgid "Provider freshness"
+msgstr "Provider 新鲜度"
+
+msgid "Provider"
+msgstr "Provider"
+
+msgid "Provider update failed. Check /tmp/candy-geo-update.log."
+msgstr "Provider 更新失败，请查看 /tmp/candy-geo-update.log。"
+
+msgid "Provider update completed. Check provider status and /tmp/candy-geo-update.log if it fails."
+msgstr "Provider 更新已完成；如失败，请查看 Provider 状态和 /tmp/candy-geo-update.log。"
+
+msgid "Provider update URL"
+msgstr "Provider 更新地址"
+
+msgid "Provider update URL is required."
+msgstr "Provider 更新地址不能为空。"
+
+msgid "Reserved for scheduled updates. Manual update is available now."
+msgstr "预留给定时更新；当前可使用手动更新。"
+
+msgid "Client packet multiplier"
+msgstr "客户端发包倍率"
+
+msgid "Server packet multiplier"
+msgstr "服务端发包倍率"
+
+msgid "UDP packet multiplier"
+msgstr "UDP 发包倍率"
+
+msgid "How many copies the client sends for each UDP packet on weak links. Higher values trade bandwidth for delivery speed."
+msgstr "弱网下客户端为每个 UDP 包发送的副本数。数值越高，越偏向用带宽换送达速度。"
+
+msgid "How many copies the server sends for each UDP packet on weak links. Higher values trade bandwidth for delivery speed."
+msgstr "弱网下服务端为每个 UDP 包发送的副本数。数值越高，越偏向用带宽换送达速度。"
+
+msgid "Action"
+msgstr "操作"
+
+msgid "Run security smoke"
+msgstr "运行安全冒烟"
+
+msgid "Security smoke result"
+msgstr "安全冒烟结果"
+
+msgid "Overview"
+msgstr "概览"
+
+msgid "Protocol features"
+msgstr "协议特性"
+
+msgid "Feature"
+msgstr "特性"
+
+msgid "Supported"
+msgstr "支持"
+
+msgid "Authorized"
+msgstr "已授权"
+
+msgid "Active"
+msgstr "运行中"
+
+msgid "Inactive"
+msgstr "未运行"
+
+msgid "Unsupported"
+msgstr "不支持"
+
+msgid "Supported, inactive"
+msgstr "支持，未运行"
+
+msgid "Supported, not authorized"
+msgstr "支持，未授权"
+
+msgid "Evidence"
+msgstr "依据"
+
+msgid "Traffic Policy"
+msgstr "流量策略"
+
+msgid "DNS & GEO"
+msgstr "DNS 与 GEO"
+
+msgid "Quick actions"
+msgstr "快捷操作"
+
+msgid "Trace from overview"
+msgstr "概览追踪"
+
+msgid "Debug logs"
+msgstr "调试日志"
+
+msgid "Raw diagnostics"
+msgstr "原始诊断"
+
+msgid "Advanced DNS policy"
+msgstr "高级 DNS 策略"
+
+msgid "Transport and TProxy"
+msgstr "传输与 TProxy"
+
+msgid "LAN DNS"
+msgstr "LAN DNS"
+
+msgid "GFWList provider"
+msgstr "GFWList Provider"
+
+msgid "DNS policy and provider lifecycle used while Candy is running. dnsmasq remains the LAN DNS front door; Candy owns resolver choice, answer validation, GFWList split rules, and China IP bypass."
+msgstr "Candy 运行期间使用的 DNS 策略和 Provider 生命周期。dnsmasq 仍是 LAN DNS 入口；Candy 负责解析器选择、应答校验、GFWList 分流规则和中国 IP 分流。"
+
+msgid "Link conclusion"
+msgstr "链路结论"
+
+msgid "Suggested packet multiplier"
+msgstr "建议发包倍率"
+
+msgid "Effective packet multiplier"
+msgstr "当前生效倍率"
+
+msgid "Not a weak link: keep the current packet multiplier."
+msgstr "非弱网：保持当前发包倍率。"
+
+msgid "Weak link: adjust the packet multiplier to the suggested value."
+msgstr "弱网：按建议值调整发包倍率。"
+
+msgid "UDP is impaired: avoid high performance UDP mode until the path recovers."
+msgstr "UDP 受限：链路恢复前避免使用高性能 UDP 模式。"
+
+msgid "CPU limited: avoid increasing packet multiplier."
+msgstr "CPU 受限：避免继续提高发包倍率。"
+
+msgid "Network tools"
+msgstr "网络工具"
+
+msgid "Ping / traceroute result"
+msgstr "Ping / Traceroute 结果"
+
+msgid "Run ping / traceroute"
+msgstr "运行 Ping / Traceroute"
+
+msgid "Logs"
+msgstr "日志"
+
+msgid "Traffic log"
+msgstr "用户流量日志"
+
+msgid "Stable performance"
+msgstr "稳定优先"
+
+msgid "Maximum throughput"
+msgstr "吞吐优先"
+
+msgid "Weak link"
+msgstr "弱网优化"
+
+msgid "UDP impaired"
+msgstr "UDP 受限"
+
+msgid "CPU limited"
+msgstr "CPU 受限"
+
+msgid "Completed"
+msgstr "已完成"
+
+msgid "Failed"
+msgstr "失败"
+
+msgid "Missing selected node"
+msgstr "未配置已选节点"
+
+msgid "Invalid input"
+msgstr "输入无效"
+
+msgid "Not run"
+msgstr "未运行"
+
+msgid "Unknown"
+msgstr "未知"
+
+msgid "Healthy"
+msgstr "健康"
+
+msgid "High jitter"
+msgstr "抖动偏高"
+
+msgid "Error"
+msgstr "错误"
+
+msgid "No service log for this boot yet."
+msgstr "本次启动暂无服务日志。"
+
+msgid "System service events"
+msgstr "系统服务事件"
+
+msgid "No traffic events for this boot yet. Counters appear after LAN traffic matches Candy firewall rules."
+msgstr "本次启动暂无流量事件。LAN 流量命中 Candy 防火墙规则后会显示计数。"
+
+msgid "Firewall counters"
+msgstr "防火墙计数"
+
+msgid "No traffic decisions for this boot yet. New transparent proxy flows will appear as source -> destination, matched rule, and outbound."
+msgstr "本次启动暂无流量决策。新的透明代理流量会显示源地址 -> 目的地址、命中规则和出口。"
+
+msgid "No traffic decisions for this boot yet. New transparent proxy flows will appear as time, source -> destination, matched rule, and outbound."
+msgstr "本次启动暂无流量决策。新的透明代理流量会显示时间、源地址 -> 目的地址、命中规则和出口。"
+
+msgid "Review Candy service events and user traffic decisions from the current boot. Newest entries are shown first."
+msgstr "查看本次启动以来的 Candy 服务事件和用户流量决策，最近的记录显示在最上方。"
+
+msgid "Monitor service state, build version, packet multiplier, and selected node quality."
+msgstr "查看服务状态、构建版本、发包倍率和已选节点质量。"
+
+msgid "Candy is a smart proxy and link quality control service for OpenWrt."
+msgstr "Candy 是面向 OpenWrt 的智能代理和链路质量控制服务。"
+
+msgid "Unifies traffic policy, DNS/GEO split routing, node groups, and transport controls."
+msgstr "统一管理流量策略、DNS/GEO 分流、节点组和传输控制。"
+
+msgid "Smart DNS/GEO"
+msgstr "智能 DNS/GEO"
+
+msgid "Weak-link QoS"
+msgstr "弱网 QoS"
+
+msgid "Video/CDN diagnostics"
+msgstr "视频/CDN 诊断"
+
+msgid "Starting"
+msgstr "启动中"
+
+msgid "Yes"
+msgstr "是"
+
+msgid "No"
+msgstr "否"
+
+msgid "Field"
+msgstr "字段"
+
+msgid "Meaning"
+msgstr "含义"
+
+msgid "Conclusion"
+msgstr "结论"
+
+msgid "RTT"
+msgstr "往返延迟"
+
+msgid "Jitter"
+msgstr "抖动"
+
+msgid "Packet loss"
+msgstr "丢包率"
+
+msgid "Downlink"
+msgstr "下行"
+
+msgid "Uplink"
+msgstr "上行"
+
+msgid "Round-trip delay to the selected server. Lower is better."
+msgstr "到已选服务器的往返延迟，越低越好。"
+
+msgid "Estimated packet loss. Loss raises the recommended packet multiplier."
+msgstr "估算丢包率。丢包越高，建议发包倍率越高。"
+
+msgid "Estimated receive throughput from the server to this router."
+msgstr "服务器到本路由器的估算接收吞吐。"
+
+msgid "Estimated send throughput from this router to the server."
+msgstr "本路由器到服务器的估算发送吞吐。"
+
+msgid "Whether UDP appears blocked, lossy, or too unstable for high performance mode."
+msgstr "判断 UDP 是否被阻断、丢包明显，或对高性能模式来说过于不稳定。"
+
+msgid "Recommended client/server duplicate packet ratio for weak-link redundancy."
+msgstr "弱网冗余建议使用的客户端/服务端重复发包倍率。"
+
+msgid "The multiplier currently applied by runtime configuration."
+msgstr "当前运行时配置实际应用的发包倍率。"
+
+msgid "Advanced transparent proxy controls for LAN UDP/443 and QUIC behavior."
+msgstr "用于 LAN UDP/443 和 QUIC 行为的高级透明代理控制。"
+
+msgid "Client-proposed server-side UDP response multiplier. It takes effect when the Candy server enables [qos].accept_client_udp_multiplier_proposal."
+msgstr "客户端提议的服务端 UDP 回包倍率。只有 Candy 服务端开启 [qos].accept_client_udp_multiplier_proposal 后才会生效。"
+
+msgid "Invalid reason"
+msgstr "无效原因"
+
+msgid "Local forwards"
+msgstr "本地转发"
+
+msgid "Missing valid downlink throughput sample."
+msgstr "缺少有效的下行吞吐样本。"
+
+msgid "No traffic decisions since this log page was opened. New transparent proxy flows will appear as time, source -> destination, matched rule, and outbound while this page remains open."
+msgstr "打开本日志页后暂无流量决策。页面保持打开时，新的透明代理流量会显示时间、源地址 -> 目的地址、命中规则和出口。"
+
+msgid "Optional local port forwards through the Candy tunnel. Normal transparent proxy use does not need entries here."
+msgstr "通过 Candy 隧道转发本地端口的可选配置。正常透明代理使用不需要在这里添加条目。"
+
+msgid "Policy name"
+msgstr "策略名"
+
+msgid "Selection policy"
+msgstr "选择策略"
+
+msgid "These settings affect packet redundancy and lane selection. Leave them on auto unless diagnostics show a weak-link problem."
+msgstr "这些设置会影响发包冗余和通道选择。除非诊断显示存在弱网问题，否则保持自动即可。"
+
+msgid "Tune weak-link performance, transport capture, and optional local forwards."
+msgstr "调整弱网性能、传输接管和可选本地转发。"
+
+msgid "Tune weak-link performance and transport capture."
+msgstr "调整弱网性能和传输接管。"
+
+msgid "Why the result cannot drive packet multiplier policy yet."
+msgstr "说明为什么当前结果还不能用于驱动发包倍率策略。"
+
+msgid "Bind answers to routes"
+msgstr "将 DNS 应答绑定到路由"
+
+msgid "Classify CNAME targets"
+msgstr "识别 CNAME 目标"
+
+msgid "ECS IPv4 prefix"
+msgstr "ECS IPv4 前缀"
+
+msgid "ECS IPv6 prefix"
+msgstr "ECS IPv6 前缀"
+
+msgid "Maximum cache entries"
+msgstr "最大缓存条目数"
+
+msgid "Negative TTL (seconds)"
+msgstr "负缓存 TTL（秒）"
+
+msgid "Positive TTL cap (seconds)"
+msgstr "正缓存 TTL 上限（秒）"
+
+msgid "Remote DNS"
+msgstr "远程 DNS"
+
+msgid "Resolver default"
+msgstr "跟随解析器默认设置"
+
+msgid "Selected node first"
+msgstr "优先所选节点"
+
+msgid "Client version"
+msgstr "客户端版本"
+
+msgid "LuCI version"
+msgstr "LuCI 版本"
+
+msgid "Serve stale while refreshing"
+msgstr "刷新期间提供过期缓存"
+
+msgid "Passive transport status"
+msgstr "被动传输状态"
+
+msgid "Configured intent"
+msgstr "配置意图"
+
+msgid "Applied profile"
+msgstr "实际应用配置"
+
+msgid "Congestion controller"
+msgstr "拥塞控制器"
+
+msgid "Active congestion controller"
+msgstr "当前拥塞控制器"
+
+msgid "Candy BBR automatic fallback"
+msgstr "Candy BBR 自动回退"
+
+msgid "Client UDP multiplier"
+msgstr "客户端 UDP 倍率"
+
+msgid "Server UDP multiplier"
+msgstr "服务端 UDP 倍率"
+
+msgid "Local RTT"
+msgstr "本地 RTT"
+
+msgid "Local goodput"
+msgstr "本地有效吞吐"
+
+msgid "Local loss packets"
+msgstr "本地丢包数"
+
+msgid "Congestion window"
+msgstr "拥塞窗口"
+
+msgid "Pacing rate"
+msgstr "发送节奏速率"
+
+msgid "Bandwidth estimate"
+msgstr "带宽估计"
+
+msgid "Congestion mode"
+msgstr "拥塞阶段"
+
+msgid "Startup acceleration"
+msgstr "启动加速"
+
+msgid "Queue drain"
+msgstr "队列排空"
+
+msgid "Bandwidth probing"
+msgstr "带宽探测"
+
+msgid "Bandwidth probing: refill"
+msgstr "带宽探测：补充"
+
+msgid "Bandwidth probing: accelerate"
+msgstr "带宽探测：提速"
+
+msgid "Bandwidth probing: slow down"
+msgstr "带宽探测：降速"
+
+msgid "Bandwidth probing: cruise"
+msgstr "带宽探测：巡航"
+
+msgid "Minimum RTT probing"
+msgstr "最小延迟探测"
+
+msgid "Recovery state"
+msgstr "恢复状态"
+
+msgid "Normal"
+msgstr "正常"
+
+msgid "Recovery: conservative"
+msgstr "恢复：保守"
+
+msgid "Recovery: growth"
+msgstr "恢复：增长"
+
+msgid "Path MTU"
+msgstr "路径 MTU"
+
+msgid "Process CPU"
+msgstr "进程 CPU"
+
+msgid "Resident memory"
+msgstr "常驻内存"
+
+msgid "UDP receive buffer"
+msgstr "UDP 接收缓冲区"
+
+msgid "UDP send buffer"
+msgstr "UDP 发送缓冲区"
+
+msgid "UDP buffer target"
+msgstr "UDP 缓冲区目标值"
+
+msgid "Peer directional goodput"
+msgstr "对端双向有效吞吐"
+
+msgid "Peer trust"
+msgstr "对端数据可信状态"
+
+msgid "Fallback reason"
+msgstr "回退原因"
+
+msgid "Not negotiated"
+msgstr "未协商"
+
+msgid "Trusted"
+msgstr "可信"
+
+msgid "Untrusted"
+msgstr "不可信"
+
+msgid "Configure the node pool and node groups used by traffic policy rules."
+msgstr "配置供流量策略规则使用的节点池和节点组。"
+
+msgid "A node is one Candy server endpoint. Node groups reference these nodes, and traffic policy rules select a node group as their outbound."
+msgstr "一个节点对应一个 Candy 服务端入口。节点组引用这些节点，流量策略规则选择节点组作为出口。"
+
+msgid "Node groups"
+msgstr "节点组"
+
+msgid "A node group can carry traffic across multiple nodes. Each new flow is assigned according to the selected algorithm."
+msgstr "一个节点组可以由多个节点同时承载流量。每个新流都会按所选算法分配。"
+
+msgid "Group name"
+msgstr "组名称"
+
+msgid "Algorithm"
+msgstr "算法"
+
+msgid "Round robin"
+msgstr "轮询"
+
+msgid "Consistent hash"
+msgstr "一致性哈希"
+
+msgid "Node status"
+msgstr "节点状态"
+
+msgid "URL latency"
+msgstr "URL 延迟"
+
+msgid "URL Test status"
+msgstr "URL Test 状态"
+
+msgid "Active TCP flows"
+msgstr "活动 TCP 流"
+
+msgid "Active UDP flows"
+msgstr "活动 UDP 流"
+
+msgid "Throughput"
+msgstr "吞吐速率"
+
+msgid "Reconnects"
+msgstr "重连次数"
+
+msgid "Service resources"
+msgstr "服务资源"
+
+msgid "Per-node passive diagnostics"
+msgstr "分节点被动诊断"
+
+msgid "No node diagnostics available"
+msgstr "暂无节点诊断数据"
+
+msgid "Define how traffic is matched and whether it goes direct, is rejected, or uses a Candy node group."
+msgstr "定义流量如何匹配，以及走直连、拒绝还是使用 Candy 节点组。"
+
+msgid "Rule targets must be DIRECT, REJECT, or an existing node group."
+msgstr "规则目标必须是 DIRECT、REJECT 或已存在的节点组。"
+
+msgid "Remove this node from all node groups before disabling it."
+msgstr "禁用此节点前，请先将其从所有节点组中移除。"
+
+msgid "Remove this node from all node groups before deleting it."
+msgstr "删除此节点前，请先将其从所有节点组中移除。"
+
+msgid "Update traffic policy rules before renaming this node group."
+msgstr "重命名此节点组前，请先更新引用它的流量策略规则。"
+
+msgid "Update traffic policy rules before deleting this node group."
+msgstr "删除此节点组前，请先更新引用它的流量策略规则。"
+
+msgid "Node name must be unique"
+msgstr "节点名称必须唯一"
+
+msgid "Group name cannot contain commas or control characters"
+msgstr "节点组名称不能包含逗号或控制字符"
+
+msgid "Matched node group first"
+msgstr "优先使用命中规则的节点组"
+
+msgid "Through matched node group"
+msgstr "通过命中规则的节点组"
+
+msgid "Port hopping ports"
+msgstr "端口跳跃端口"
+
+msgid "Port hopping interval"
+msgstr "端口跳跃周期"
+
+msgid "Add the extra UDP ports configured on the server; leave empty to disable port hopping."
+msgstr "填写服务端配置的附加 UDP 端口；留空即关闭端口跳跃。"
+
+msgid "Rotation period in seconds."
+msgstr "轮换周期，单位为秒。"
+
+msgid "SD-WAN status"
+msgstr "SD-WAN 状态"
+
+msgid "Phase"
+msgstr "阶段"
+
+msgid "Site"
+msgstr "站点"
+
+msgid "Active Hub"
+msgstr "活动 Hub"
+
+msgid "Route generation"
+msgstr "路由代次"
+
+msgid "Attachment epoch"
+msgstr "接入 epoch"
+
+msgid "Effective MTU"
+msgstr "生效 MTU"
+
+msgid "Traffic counters"
+msgstr "流量计数"
+
+msgid "Drop counters"
+msgstr "丢包计数"
+
+msgid "Last failover"
+msgstr "最近切换"
+
+msgid "Congestion controller"
+msgstr "拥塞控制器"
+
+msgid "Candy BBR preset"
+msgstr "Candy BBR 参数预设"
+
+msgid "Current (1.50 / 0.90, default)"
+msgstr "当前参数（1.50 / 0.90，默认）"
+
+msgid "BBR v1 (1.25 / 0.75)"
+msgstr "BBR v1（1.25 / 0.75）"
+
+msgid "Aggressive (2.00 / 0.75)"
+msgstr "激进（2.00 / 0.75）"
+
+msgid "Congestion controller comparison"
+msgstr "拥塞控制器对比测试"
+
+msgid "Start comparison"
+msgstr "开始对比"
+
+msgid "Not run"
+msgstr "尚未运行"
+
+msgid "Candy BBR"
+msgstr "Candy BBR"
+
+msgid "CUBIC"
+msgstr "CUBIC"
+
+msgid "Select the congestion controller explicitly. Changing the controller or BBR preset restarts Candy so new QUIC connections use the selected parameters."
+msgstr "显式选择拥塞控制器。更改控制器或 BBR 预设后 Candy 将重启，使新的 QUIC 连接使用所选参数。"
+
+msgid "Runs one bounded 2 MiB download through CUBIC and each Candy BBR preset. It does not change the running configuration."
+msgstr "分别通过 CUBIC 和每个 Candy BBR 预设运行一次有上限的 2 MiB 下载，不会更改当前运行配置。"
+
+msgid "Controller / preset"
+msgstr "控制器 / 预设"
+
+msgid "Total time"
+msgstr "总耗时"
+
+msgid "Data"
+msgstr "数据量"
+
+msgid "Result"
+msgstr "结果"
+
+msgid "Expert DNS, provider, congestion-control, and transparent proxy controls."
+msgstr "DNS、规则源、拥塞控制和透明代理的专家设置。"
+
+msgid "Choose one of four explicit congestion profiles. Saving a change restarts Candy so new QUIC connections use the selected parameters."
+msgstr "选择四种明确的拥塞配置之一。保存更改后 Candy 将重启，使新的 QUIC 连接使用所选参数。"
+
+msgid "Congestion profile"
+msgstr "拥塞配置"
+
+msgid "Candy BBR - current (1.50 / 0.90, default)"
+msgstr "Candy BBR - 当前参数（1.50 / 0.90，默认）"
+
+msgid "Candy BBR - BBR v1 (1.25 / 0.75)"
+msgstr "Candy BBR - BBR v1（1.25 / 0.75）"
+
+msgid "Candy BBR - aggressive (2.00 / 0.75)"
+msgstr "Candy BBR - 激进（2.00 / 0.75）"
+
+msgid "Core"
+msgstr "核心"
+
+msgid "Runtime Core"
+msgstr "运行核心"
+
+msgid "Active version"
+msgstr "当前版本"
+
+msgid "Rollback version"
+msgstr "回滚版本"
+
+msgid "Core API"
+msgstr "核心 API"
+
+msgid "Protocol version"
+msgstr "协议版本"
+
+msgid "Architecture"
+msgstr "架构"
+
+msgid "Rollback"
+msgstr "回滚"
+
+msgid "Install Core bundle"
+msgstr "安装核心包"
+
+msgid "Bundle URL"
+msgstr "核心包地址"
+
+msgid "SHA-256"
+msgstr "SHA-256"
+
+msgid "Install"
+msgstr "安装"
+
+msgid "Installed Core versions"
+msgstr "已安装的核心版本"
+
+msgid "State"
+msgstr "状态"
+
+msgid "Managed"
+msgstr "可管理"
+
+msgid "Actions"
+msgstr "操作"
+
+msgid "Activate"
+msgstr "启用"
+
+msgid "Remove"
+msgstr "删除"
+
+msgid "None"
+msgstr "无"
+
+msgid "Candy version"
+msgstr "Candy 版本"
+
+msgid "Core version"
+msgstr "核心版本"
+
+msgid "Activation"
+msgstr "激活条件"
+
+msgid "This Core build does not implement this capability."
+msgstr "当前核心构建未实现此特性。"
+
+msgid "The current connection did not authorize this capability."
+msgstr "当前连接未授权此特性。"
+
+msgid "Observed in the current connection"
+msgstr "当前连接已观测到运行证据"
+
+msgid "Authorized, but no runtime use has been observed yet."
+msgstr "已授权，但尚未观测到运行证据。"

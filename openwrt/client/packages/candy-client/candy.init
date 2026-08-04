@@ -1,0 +1,2646 @@
+#!/bin/sh /etc/rc.common
+
+START=95
+STOP=10
+USE_PROCD=1
+EXTRA_COMMANDS="provider_update_once provider_update_loop network_apply network_cleanup reload_runtime restart_queued congestion_test run_client run_sdwan run_netd"
+EXTRA_HELP="	provider_update_once	Run due provider auto updates once
+	provider_update_loop	Run provider auto update scheduler loop
+	network_apply	Apply firewall and DNS policy in background
+	network_cleanup	Clean firewall and DNS policy in background
+	reload_runtime	Validate and apply the current Candy configuration
+	restart_queued	Restart Candy with lifecycle serialization
+	congestion_test	Run a bounded CUBIC/BBR comparison without changing configuration
+	run_client	Run candy-client after listener preflight
+	run_netd	Run the privileged SD-WAN network helper"
+
+case "${action:-${1:-}}" in
+status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|congestion_test|run_client|run_sdwan|run_netd)
+		CANDY_FAST_STATUS_ACTION="${action:-$1}"
+		EXTRA_COMMANDS="$EXTRA_COMMANDS status running"
+		USE_PROCD=
+		;;
+esac
+
+RUNTIME_DIR=/var/run/candy
+RUNTIME_CONFIG=$RUNTIME_DIR/runtime.json
+RUNTIME_NEXT_CONFIG=$RUNTIME_DIR/runtime.next.json
+CANDY_CONTROL_SOCKET=${CANDY_CONTROL_SOCKET:-$RUNTIME_DIR/control.sock}
+CANDY_GENERATION_FILE=${CANDY_GENERATION_FILE:-$RUNTIME_DIR/generation}
+CANDY_FIREWALL_STATE_FILE=${CANDY_FIREWALL_STATE_FILE:-$RUNTIME_DIR/firewall.state}
+CANDY_PASSIVE_STATUS_FILE=${CANDY_PASSIVE_STATUS_FILE:-$RUNTIME_DIR/passive-status.json}
+LOG_FILE=/tmp/candy.log
+TRAFFIC_LOG_FILE=${TRAFFIC_LOG_FILE:-/tmp/candy-traffic.log}
+NODE_STATUS_FILE=/tmp/candy.nodes
+STATUS_PROBE_LOCK_DIR=${STATUS_PROBE_LOCK_DIR:-/tmp/candy-status-probe.lock}
+NETWORK_APPLY_LOCK_DIR=${NETWORK_APPLY_LOCK_DIR:-/tmp/candy-network-apply.lock}
+CANDY_LIFECYCLE_FILE=${CANDY_LIFECYCLE_FILE:-/tmp/candy.lifecycle}
+CANDY_DNS_LISTEN=${CANDY_DNS_LISTEN:-127.0.0.1:15353}
+CANDY_LISTENER_WAIT_SECONDS=${CANDY_LISTENER_WAIT_SECONDS:-8}
+CANDY_SERVICE_LOCK_DIR=${CANDY_SERVICE_LOCK_DIR:-/tmp/candy-service.lock}
+CANDY_SERVICE_LOCK_WAIT_SECONDS=${CANDY_SERVICE_LOCK_WAIT_SECONDS:-30}
+CANDY_LIFECYCLE_TTL_SECONDS=${CANDY_LIFECYCLE_TTL_SECONDS:-10}
+CANDY_READY_FILE=${CANDY_READY_FILE:-$RUNTIME_DIR/client.ready}
+CANDY_SERVICE_WAIT_SECONDS=${CANDY_SERVICE_WAIT_SECONDS:-8}
+CANDY_CLIENT_BIN=${CANDY_CLIENT_BIN:-/usr/bin/candy-client}
+CANDY_SDWAN_BIN=${CANDY_SDWAN_BIN:-/usr/bin/candy-sdwan}
+CANDY_SDWAN_CONFIG=${CANDY_SDWAN_CONFIG:-/etc/candy/sdwan.toml}
+CANDY_NETD_BIN=${CANDY_NETD_BIN:-/usr/bin/candy-netd}
+CANDY_NETD_SOCKET=${CANDY_NETD_SOCKET:-$RUNTIME_DIR/netd.sock}
+CANDY_NETD_JOURNAL=${CANDY_NETD_JOURNAL:-/var/lib/candy/netd.journal}
+CANDY_EPOCH_DIRECTORY=${CANDY_EPOCH_DIRECTORY:-/var/lib/candy/epochs}
+CANDY_SDWAN_STATUS_FILE=${CANDY_SDWAN_STATUS_FILE:-$RUNTIME_DIR/sdwan-status.json}
+CANDY_VERSION=${CANDY_VERSION:-0.4.0}
+CANDY_RELEASE=${CANDY_RELEASE:-1}
+CONFIG_FILE=/etc/config/candy
+LEGACY_CONFIG_FILE=/etc/config/carrier
+FW4_INCLUDE_DIR=${FW4_INCLUDE_DIR:-/etc/nftables.d}
+FW4_INCLUDE=$FW4_INCLUDE_DIR/90-candy.nft
+DNSMASQ_CONF_GLOB=${DNSMASQ_CONF_GLOB:-/var/etc/dnsmasq.conf.*}
+DNSMASQ_CANDY_CONF=candy.conf
+GEO_ETC_RULESETS_DIR=${GEO_ETC_RULESETS_DIR:-/etc/candy/rulesets}
+GEO_SHARE_RULESETS_DIR=${GEO_SHARE_RULESETS_DIR:-/usr/share/candy/rulesets}
+GEO_RUNTIME_RULESETS_DIR=${GEO_RUNTIME_RULESETS_DIR:-$RUNTIME_DIR/rulesets}
+DNS_ETC_RULESETS_DIR=${DNS_ETC_RULESETS_DIR:-/etc/candy/rulesets}
+DNS_SHARE_RULESETS_DIR=${DNS_SHARE_RULESETS_DIR:-/usr/share/candy/rulesets}
+DNS_RUNTIME_RULESETS_DIR=${DNS_RUNTIME_RULESETS_DIR:-$RUNTIME_DIR/rulesets}
+DNS_TRACE_LOG_FILE=${DNS_TRACE_LOG_FILE:-/tmp/candy-dns-trace.log}
+NETWORK_CHECK_LOG_FILE=${NETWORK_CHECK_LOG_FILE:-/tmp/candy-network-check.log}
+CONGESTION_TEST_LOCK_DIR=${CONGESTION_TEST_LOCK_DIR:-/tmp/candy-congestion-test.lock}
+CONGESTION_TEST_RESULT_FILE=${CONGESTION_TEST_RESULT_FILE:-/tmp/candy-congestion-test.json}
+CONGESTION_TEST_LOG_FILE=${CONGESTION_TEST_LOG_FILE:-/tmp/candy-congestion-test.log}
+TRAFFIC_LOG_CONTROL_FILE=${TRAFFIC_LOG_CONTROL_FILE:-/tmp/candy-traffic-log.enabled}
+CANDY_INIT_SELF=${CANDY_INIT_SELF:-/etc/init.d/candy}
+CANDY_BACKGROUND_INLINE=${CANDY_BACKGROUND_INLINE:-0}
+
+if [ -n "${CANDY_DIRECT_COMMAND:-}" ] && [ -f /lib/functions.sh ]; then
+	. /lib/functions.sh
+fi
+
+log_msg() {
+	mkdir -p "$(dirname "$LOG_FILE")"
+	printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"
+	if command -v logger >/dev/null 2>&1; then
+		logger -t candy -- "$*"
+	fi
+}
+
+log_error() {
+	log_msg "ERROR: $*"
+}
+
+rotate_log_file() {
+	local path="$1" max_bytes="${2:-262144}" size
+	[ -f "$path" ] || return 0
+	size=$(wc -c < "$path" 2>/dev/null || printf 0)
+	case "$size" in ''|*[!0-9]*) return 0 ;; esac
+	[ "$size" -le "$max_bytes" ] || mv -f "$path" "$path.1"
+}
+
+log_traffic_msg() {
+	mkdir -p "$(dirname "$TRAFFIC_LOG_FILE")"
+	printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$TRAFFIC_LOG_FILE"
+}
+
+log_command_output() {
+	local line
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		log_msg "$line"
+	done
+}
+
+json_string() {
+	printf '"'
+	printf '%s' "$1" | awk '
+		NR > 1 { printf "\\n" }
+		{
+			gsub(/\\/, "\\\\")
+			gsub(/"/, "\\\"")
+			gsub(/\t/, "\\t")
+			gsub(/\r/, "\\r")
+			printf "%s", $0
+		}
+	'
+	printf '"'
+}
+
+json_bool() {
+	if [ "$1" -eq 1 ]; then
+		printf 'true'
+	else
+		printf 'false'
+	fi
+}
+
+atomic_temp_path() {
+	local destination="$1" dir base
+	dir=$(dirname "$destination")
+	base=$(basename "$destination")
+	mkdir -p "$dir"
+	printf '%s/.%s.tmp.%s\n' "$dir" "$base" "$$"
+}
+
+atomic_commit_file() {
+	local temporary="$1" destination="$2" mode="${3:-}"
+	if [ -n "$mode" ]; then
+		chmod "$mode" "$temporary" || {
+			rm -f "$temporary"
+			return 1
+		}
+	fi
+	mv -f "$temporary" "$destination" || {
+		rm -f "$temporary"
+		return 1
+	}
+}
+
+atomic_copy_file() {
+	local source="$1" destination="$2" temporary
+	temporary=$(atomic_temp_path "$destination") || return 1
+	cp "$source" "$temporary" 2>/dev/null || {
+		rm -f "$temporary"
+		return 1
+	}
+	atomic_commit_file "$temporary" "$destination"
+}
+
+write_lifecycle_state() {
+	local action="$1" state="$2" temporary
+	mkdir -p "$(dirname "$CANDY_LIFECYCLE_FILE")"
+	temporary=$(atomic_temp_path "$CANDY_LIFECYCLE_FILE") || return 1
+	{
+		printf '{"action":'
+		json_string "$action"
+		printf ',"state":'
+		json_string "$state"
+		printf ',"updated_at":%s}\n' "$(date +%s 2>/dev/null || printf 0)"
+	} > "$temporary" || {
+		rm -f "$temporary"
+		return 1
+	}
+	atomic_commit_file "$temporary" "$CANDY_LIFECYCLE_FILE"
+}
+
+json_number_or_null() {
+	case "$1" in
+		''|*[!0-9]*) printf 'null' ;;
+		*) printf '%s' "$1" ;;
+	esac
+}
+
+file_updated_at() {
+	local path="$1"
+	[ -f "$path" ] || return 0
+	date -r "$path" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true
+}
+
+run_with_timeout() {
+	local seconds="$1" pid i
+	shift
+	if command -v timeout >/dev/null 2>&1; then
+		timeout "$seconds" "$@"
+		return $?
+	fi
+	"$@" &
+	pid=$!
+	i=0
+	while kill -0 "$pid" 2>/dev/null; do
+		[ "$i" -lt "$seconds" ] || {
+			kill "$pid" 2>/dev/null || true
+			wait "$pid" 2>/dev/null || true
+			return 124
+		}
+		sleep 1
+		i=$((i + 1))
+	done
+	wait "$pid"
+}
+
+candy_ps() {
+	ps axww 2>/dev/null || ps ww 2>/dev/null || ps w 2>/dev/null || true
+}
+
+candy_process_running() {
+	[ -n "$(candy_client_pids)" ]
+}
+
+candy_client_pids() {
+	local pids
+	pids=$(candy_ps | grep -F "$CANDY_CLIENT_BIN --config $RUNTIME_CONFIG" | grep -v grep | awk '{print $1}' 2>/dev/null || true)
+	if [ -n "$pids" ]; then
+		printf '%s\n' "$pids"
+		return 0
+	fi
+	return 0
+}
+
+wait_for_candy_client_exit() {
+	local wait_seconds="${1:-$CANDY_SERVICE_WAIT_SECONDS}" waited=0
+	while [ -n "$(candy_client_pids)" ]; do
+		[ "$waited" -lt "$wait_seconds" ] || return 1
+		waited=$((waited + 1))
+		sleep 1
+	done
+	return 0
+}
+
+current_readiness() {
+	local ready_pid
+	[ -s "$CANDY_READY_FILE" ] || return 1
+	ready_pid=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$CANDY_READY_FILE" | head -1)
+	case "$ready_pid" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	kill -0 "$ready_pid" 2>/dev/null
+}
+
+wait_for_current_readiness() {
+	local waited=0 wait_seconds="${1:-$CANDY_LISTENER_WAIT_SECONDS}"
+	while ! current_readiness; do
+		[ "$waited" -lt "$wait_seconds" ] || return 1
+		waited=$((waited + 1))
+		sleep 1
+	done
+}
+
+ensure_no_existing_candy_client_before_start() {
+	local pids
+	pids=$(candy_client_pids)
+	[ -n "$pids" ] || return 0
+	log_msg "existing candy-client process still running before start: $pids"
+	if wait_for_candy_client_exit "$CANDY_SERVICE_WAIT_SECONDS"; then
+		log_msg "previous candy-client process exited before start"
+		return 0
+	fi
+	pids=$(candy_client_pids)
+	[ -n "$pids" ] || return 0
+	kill -TERM $pids 2>/dev/null || true
+	if wait_for_candy_client_exit 3; then
+		log_msg "terminated stale candy-client process before start: $pids"
+		return 0
+	fi
+	pids=$(candy_client_pids)
+	[ -n "$pids" ] || return 0
+	kill -KILL $pids 2>/dev/null || true
+	if wait_for_candy_client_exit 2; then
+		log_msg "killed stale candy-client process before start: $pids"
+		return 0
+	fi
+	log_msg "failed to clear existing candy-client process before start: $pids"
+	return 1
+}
+
+reserved_candy_dns_forward() {
+	local network="$1" local_addr="$2"
+	[ "$network" = "udp" ] && [ "$local_addr" = "$CANDY_DNS_LISTEN" ]
+}
+
+skip_reserved_forward() {
+	local section="$1" network local_addr
+	config_get network "$section" network tcp
+	config_get local_addr "$section" local
+	if reserved_candy_dns_forward "$network" "$local_addr"; then
+		log_msg "forward local listen conflicts with reserved Candy DNS listener: $section $network $local_addr"
+		return 0
+	fi
+	return 1
+}
+
+migrate_reserved_dns_forward() {
+	command -v uci >/dev/null 2>&1 || return 0
+	local network local_addr target current_resolver
+	network=$(uci -q get candy.dns_remote_forward.network 2>/dev/null || true)
+	local_addr=$(uci -q get candy.dns_remote_forward.local 2>/dev/null || true)
+	reserved_candy_dns_forward "$network" "$local_addr" || return 0
+	target=$(uci -q get candy.dns_remote_forward.target 2>/dev/null || true)
+	current_resolver=$(uci -q get candy.client.dns_egress_resolver 2>/dev/null || true)
+	if [ -n "$target" ] && { [ -z "$current_resolver" ] || [ "$current_resolver" = "8.8.8.8:53" ]; }; then
+		uci -q set candy.client.dns_egress_resolver="$target" >/dev/null 2>&1 || true
+	fi
+	uci -q delete candy.dns_remote_forward >/dev/null 2>&1 || true
+	uci -q commit candy >/dev/null 2>&1 || true
+	log_msg "migrated reserved Candy DNS forward dns_remote_forward to dns_egress_resolver"
+}
+
+run_client() {
+	local congestion candy_bbr_preset automatic_bbr_fallback
+	if ! ensure_no_existing_candy_client_before_start; then
+		log_msg "run_client skipped; listeners still owned by stale candy-client"
+		exit 1
+	fi
+	clear_passive_status
+	rm -f "$CANDY_GENERATION_FILE"
+	config_load candy
+	config_get congestion client congestion candy-bbr
+	case "$congestion" in candy-bbr|cubic) ;; *) congestion=candy-bbr ;; esac
+	config_get candy_bbr_preset client candy_bbr_preset current
+	case "$candy_bbr_preset" in current|bbr-v1|aggressive) ;; *) candy_bbr_preset=current ;; esac
+	config_get_bool automatic_bbr_fallback client automatic_bbr_fallback 0
+	set -- "$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format candy-json --platform openwrt \
+		--congestion "$congestion" --candy-bbr-preset "$candy_bbr_preset" \
+		--passive-status-path "$CANDY_PASSIVE_STATUS_FILE" --control-socket-path "$CANDY_CONTROL_SOCKET"
+	[ "$automatic_bbr_fallback" -eq 1 ] && set -- "$@" --automatic-bbr-fallback
+	exec "$@"
+}
+
+run_sdwan() {
+	exec "$CANDY_SDWAN_BIN" --config "$CANDY_SDWAN_CONFIG"
+}
+
+sdwan_enabled() {
+	local enabled mode
+	config_get enabled sdwan enabled 0
+	config_get mode sdwan mode sdwan_tun
+	[ "$enabled" = 1 ] && [ "$mode" = sdwan_tun ]
+}
+
+prepare_sdwan_state() {
+	config_get CANDY_NETD_SOCKET sdwan netd_socket "$CANDY_NETD_SOCKET"
+	config_get CANDY_NETD_JOURNAL sdwan netd_journal "$CANDY_NETD_JOURNAL"
+	config_get CANDY_EPOCH_DIRECTORY sdwan epoch_directory "$CANDY_EPOCH_DIRECTORY"
+	case "$CANDY_NETD_SOCKET" in /var/run/candy/*) ;; *) return 1 ;; esac
+	case "$CANDY_NETD_JOURNAL" in /var/lib/candy/*) ;; *) return 1 ;; esac
+	case "$CANDY_EPOCH_DIRECTORY" in /var/lib/candy/*) ;; *) return 1 ;; esac
+	mkdir -p "$RUNTIME_DIR" /var/lib/candy "$CANDY_EPOCH_DIRECTORY" || return 1
+	chmod 0700 /var/lib/candy "$CANDY_EPOCH_DIRECTORY" || return 1
+	chown -R candy-sdwan:candy-sdwan /var/lib/candy "$CANDY_EPOCH_DIRECTORY" 2>/dev/null || return 1
+}
+
+run_netd() {
+	local sdwan_uid sdwan_gid
+	sdwan_uid=$(id -u candy-sdwan 2>/dev/null) || return 1
+	sdwan_gid=$(id -g candy-sdwan 2>/dev/null) || return 1
+	exec "$CANDY_NETD_BIN" \
+		--socket "$CANDY_NETD_SOCKET" \
+		--allowed-uid "$sdwan_uid" \
+		--allowed-gid "$sdwan_gid" \
+		--journal "$CANDY_NETD_JOURNAL"
+}
+
+start_sdwan_netd() {
+	sdwan_enabled || return 0
+	prepare_sdwan_state || {
+		log_msg "invalid SD-WAN state path or permissions"
+		return 1
+	}
+	[ -x "$CANDY_NETD_BIN" ] || {
+		log_msg "candy-netd is missing"
+		return 1
+	}
+	[ -x "$CANDY_SDWAN_BIN" ] || {
+		log_msg "candy-sdwan is missing"
+		return 1
+	}
+	procd_open_instance sdwan-netd
+	procd_set_param command "$CANDY_INIT_SELF" run_netd
+	procd_set_param user root
+	procd_set_param respawn 3600 10 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+wait_for_sdwan_netd() {
+	local waited=0
+	sdwan_enabled || return 0
+	while [ ! -S "$CANDY_NETD_SOCKET" ]; do
+		[ "$waited" -lt "$CANDY_LISTENER_WAIT_SECONDS" ] || return 1
+		waited=$((waited + 1))
+		sleep 1
+	done
+}
+
+with_service_lifecycle_lock() {
+	local waited=0 lock_pid rc
+	while ! mkdir "$CANDY_SERVICE_LOCK_DIR" 2>/dev/null; do
+		lock_pid=$(cat "$CANDY_SERVICE_LOCK_DIR/pid" 2>/dev/null || true)
+		case "$lock_pid" in
+			''|*[!0-9]*) ;;
+			*)
+				if ! kill -0 "$lock_pid" 2>/dev/null; then
+					rm -rf "$CANDY_SERVICE_LOCK_DIR" 2>/dev/null || true
+					continue
+				fi
+				;;
+		esac
+		if [ "$waited" -ge "$CANDY_SERVICE_LOCK_WAIT_SECONDS" ]; then
+			log_msg "service lifecycle action skipped; another lifecycle action is running"
+			return 0
+		fi
+		waited=$((waited + 1))
+		sleep 1
+	done
+	printf '%s\n' "$$" > "$CANDY_SERVICE_LOCK_DIR/pid"
+	"$@"
+	rc=$?
+	rm -rf "$CANDY_SERVICE_LOCK_DIR" 2>/dev/null || true
+	return "$rc"
+}
+
+json_string_list() {
+	local value="$1" first=1 item old_ifs="$IFS"
+	printf '['
+	IFS=,
+	for item in $value; do
+		IFS="$old_ifs"
+		item=$(printf '%s' "$item" | sed 's/^ *//; s/ *$//')
+		if [ -n "$item" ]; then
+			[ "$first" -eq 1 ] || printf ','
+			json_string "$item"
+			first=0
+		fi
+		IFS=,
+	done
+	IFS="$old_ifs"
+	printf ']'
+}
+
+status_group_member() {
+	if [ "$1" = "$STATUS_NODE_SECTION" ]; then
+		STATUS_GROUP_HAS_NODE=1
+	fi
+	return 0
+}
+
+append_status_node_group() {
+	local group_id="$1" group_name
+	STATUS_GROUP_HAS_NODE=0
+	config_list_foreach "$group_id" node status_group_member
+	[ "$STATUS_GROUP_HAS_NODE" -eq 1 ] || return 0
+	config_get group_name "$group_id" name "$group_id"
+	[ -z "$STATUS_NODE_GROUPS" ] || STATUS_NODE_GROUPS="$STATUS_NODE_GROUPS,"
+	STATUS_NODE_GROUPS="$STATUS_NODE_GROUPS$group_name"
+}
+
+node_group_names() {
+	STATUS_NODE_SECTION="$1"
+	STATUS_NODE_GROUPS=
+	config_foreach append_status_node_group group
+	printf '%s\n' "$STATUS_NODE_GROUPS"
+}
+
+write_node_status() {
+	local node_id="$1"
+	local enabled name server state="unused" groups
+	config_get_bool enabled "$node_id" enabled 1
+	config_get name "$node_id" name "$node_id"
+	config_get server "$node_id" server
+	[ -n "$server" ] || return 0
+	[ "$enabled" -eq 1 ] || state="disabled"
+	groups=$(node_group_names "$node_id")
+	if [ "$enabled" -eq 1 ] && [ -n "$groups" ]; then
+		state="down"
+	fi
+	if [ "$FIRST_STATUS_NODE" -eq 0 ]; then
+		printf ','
+	fi
+	printf '{"id":'
+	json_string "$node_id"
+	printf ',"state":'
+	json_string "$state"
+	printf ',"name":'
+	json_string "$name"
+	printf ',"server":'
+	json_string "$server"
+	printf ',"groups":'
+	json_string_list "$groups"
+	printf ',"active_tcp_flows":0,"active_udp_flows":0,"reconnects":0'
+	printf ',"url_test":{"status":"not-run","latency_ms":null,"checked_unix_ms":null,"error":""}'
+	printf ',"passive":null,"last_error":""}'
+	FIRST_STATUS_NODE=0
+}
+
+write_dns_status() {
+	local dns_remote dns_capture_lan filter_aaaa dir config_path applied=0 last_error=
+	config_get_bool dns_remote client dns_remote 0
+	config_get_bool dns_capture_lan client dns_capture_lan 1
+	config_get_bool filter_aaaa client filter_aaaa 1
+	dir=$(dnsmasq_conf_dir 2>/dev/null || true)
+	if [ -n "$dir" ]; then
+		config_path="$dir/$DNSMASQ_CANDY_CONF"
+		[ -f "$config_path" ] && applied=1
+	elif [ "$dns_remote" -eq 1 ] || [ "$filter_aaaa" -eq 1 ]; then
+		config_path=
+		last_error="dnsmasq conf-dir not found"
+	else
+		config_path=
+	fi
+	printf '"dns":{"remote":'
+	json_bool "$dns_remote"
+	printf ',"capture_lan":'
+	json_bool "$dns_capture_lan"
+	printf ',"filter_aaaa":'
+	json_bool "$filter_aaaa"
+	printf ',"applied":'
+	json_bool "$applied"
+	printf ',"dns_port":15353'
+	printf ',"config_path":'
+	if [ -n "$config_path" ]; then
+		json_string "$config_path"
+	else
+		printf 'null'
+	fi
+	printf ',"last_error":'
+	json_string "$last_error"
+	printf '}'
+}
+
+geo_provider_entry_count() {
+	local path="$1"
+	[ -f "$path" ] || {
+		printf '0\n'
+		return 0
+	}
+	sed 's/#.*//' "$path" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' '
+}
+
+geo_provider_source_path() {
+	if [ -s "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" ]; then
+		printf '%s\n' "$GEO_ETC_RULESETS_DIR/cn-ip.cidr"
+	elif [ -s "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr" ]; then
+		printf '%s\n' "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr"
+	fi
+}
+
+geo_provider_firewall_path() {
+	if [ -s "$GEO_RUNTIME_RULESETS_DIR/cn-ip.cidr" ]; then
+		printf '%s\n' "$GEO_RUNTIME_RULESETS_DIR/cn-ip.cidr"
+	else
+		geo_provider_source_path
+	fi
+}
+
+write_nft_cidr_set() {
+	local set_name="$1" path="$2" first=1 cidr
+	[ -s "$path" ] || return 1
+	printf 'set %s {\n' "$set_name"
+	printf '  type ipv4_addr\n'
+	printf '  flags interval\n'
+	printf '  elements = { '
+	while IFS= read -r cidr; do
+		cidr=${cidr%%#*}
+		cidr=$(printf '%s' "$cidr" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+		case "$cidr" in
+			''|*:*|*[!0-9./]*) continue ;;
+		esac
+		if [ "$first" -eq 0 ]; then
+			printf ', '
+		fi
+		printf '%s' "$cidr"
+		first=0
+	done < "$path"
+	printf ' }\n'
+	printf '}\n'
+	[ "$first" -eq 0 ]
+}
+
+refresh_runtime_geo_provider() {
+	local bypass_china_ip source_path runtime_path
+	config_get_bool bypass_china_ip client bypass_china_ip 1
+	GEO_ACTIVE_PATH=
+	GEO_LAST_ERROR=
+	GEO_RUNTIME_PROVIDER_PATH="$GEO_RUNTIME_RULESETS_DIR/cn-ip.cidr"
+	if [ "$bypass_china_ip" -ne 1 ]; then
+		return 0
+	fi
+	source_path=$(geo_provider_source_path)
+	runtime_path="$GEO_RUNTIME_PROVIDER_PATH"
+	mkdir -p "$GEO_RUNTIME_RULESETS_DIR"
+	if [ -n "$source_path" ]; then
+		if atomic_copy_file "$source_path" "$runtime_path"; then
+			GEO_ACTIVE_PATH="$runtime_path"
+		else
+			GEO_LAST_ERROR="failed to copy provider"
+		fi
+	else
+		GEO_LAST_ERROR="cn-ip provider not found"
+	fi
+}
+
+write_geo_status() {
+	local bypass_china_ip active_path entry_count updated_at
+	config_get_bool bypass_china_ip client bypass_china_ip 1
+	active_path="$GEO_RUNTIME_RULESETS_DIR/cn-ip.cidr"
+	entry_count=$(geo_provider_entry_count "$active_path")
+	updated_at=$(file_updated_at "$active_path")
+	printf '"geo":{"bypass_china_ip":'
+	json_bool "$bypass_china_ip"
+	printf ',"active_path":'
+	if [ -f "$active_path" ]; then
+		json_string "$active_path"
+	else
+		printf 'null'
+	fi
+	printf ',"entry_count":%s' "$entry_count"
+	printf ',"updated_at":'
+	if [ -n "$updated_at" ]; then
+		json_string "$updated_at"
+	else
+		printf 'null'
+	fi
+	printf ',"last_error":'
+	if [ -n "${GEO_LAST_ERROR:-}" ]; then
+		json_string "$GEO_LAST_ERROR"
+	else
+		json_string ""
+	fi
+	printf '}'
+}
+
+domain_provider_entry_count() {
+	local path="$1"
+	[ -f "$path" ] || {
+		printf '0\n'
+		return 0
+	}
+	sed 's/#.*//' "$path" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' '
+}
+
+gfwlist_provider_source_path() {
+	if [ -s "$DNS_ETC_RULESETS_DIR/gfwlist.domains" ]; then
+		printf '%s\n' "$DNS_ETC_RULESETS_DIR/gfwlist.domains"
+	elif [ -s "$DNS_SHARE_RULESETS_DIR/gfwlist.domains" ]; then
+		printf '%s\n' "$DNS_SHARE_RULESETS_DIR/gfwlist.domains"
+	fi
+}
+
+refresh_runtime_gfwlist_provider() {
+	local source_path runtime_path
+	GFWLIST_ACTIVE_PATH=
+	GFWLIST_LAST_ERROR=
+	GFWLIST_RUNTIME_PROVIDER_PATH="$DNS_RUNTIME_RULESETS_DIR/gfwlist.domains"
+	source_path=$(gfwlist_provider_source_path)
+	runtime_path="$GFWLIST_RUNTIME_PROVIDER_PATH"
+	mkdir -p "$DNS_RUNTIME_RULESETS_DIR"
+	if [ -n "$source_path" ]; then
+		if atomic_copy_file "$source_path" "$runtime_path"; then
+			GFWLIST_ACTIVE_PATH="$runtime_path"
+		else
+			GFWLIST_LAST_ERROR="failed to copy gfwlist provider"
+		fi
+	else
+		GFWLIST_LAST_ERROR="gfwlist provider not found"
+	fi
+}
+
+write_gfwlist_status() {
+	local active_path entry_count updated_at
+	active_path="$DNS_RUNTIME_RULESETS_DIR/gfwlist.domains"
+	entry_count=$(domain_provider_entry_count "$active_path")
+	updated_at=$(file_updated_at "$active_path")
+	printf '"gfwlist":{"active_path":'
+	if [ -f "$active_path" ]; then
+		json_string "$active_path"
+	else
+		printf 'null'
+	fi
+	printf ',"entry_count":%s' "$entry_count"
+	printf ',"updated_at":'
+	if [ -n "$updated_at" ]; then
+		json_string "$updated_at"
+	else
+		printf 'null'
+	fi
+	printf ',"last_error":'
+	if [ -n "${GFWLIST_LAST_ERROR:-}" ]; then
+		json_string "$GFWLIST_LAST_ERROR"
+	else
+		json_string ""
+	fi
+	printf '}'
+}
+
+provider_update_interval_hours() {
+	local option="$1" value
+	config_get value client "$option" 24
+	case "$value" in
+		''|*[!0-9]*) value=24 ;;
+	esac
+	if [ "$value" -lt 1 ] || [ "$value" -gt 168 ]; then
+		value=24
+	fi
+	printf '%s\n' "$value"
+}
+
+provider_file_mtime() {
+	local path="$1"
+	stat -c %Y "$path" 2>/dev/null || stat -f %m "$path" 2>/dev/null || printf '0\n'
+}
+
+provider_update_due() {
+	local path="$1" interval_hours="$2" now mtime age
+	[ -s "$path" ] || return 0
+	now=$(date +%s)
+	mtime=$(provider_file_mtime "$path")
+	case "$mtime" in
+		''|*[!0-9]*) return 0 ;;
+	esac
+	age=$((now - mtime))
+	[ "$age" -ge $((interval_hours * 3600)) ]
+}
+
+provider_url_allowed() {
+	local url="$1"
+	case "$url" in
+		*[[:space:]]*) return 1 ;;
+		https://?*) return 0 ;;
+		file://?*) [ "${CANDY_ALLOW_LOCAL_PROVIDER_URLS:-0}" -eq 1 ] ;;
+		*) return 1 ;;
+	esac
+}
+
+run_geo_provider_update() {
+	local url="$1"
+	provider_url_allowed "$url" || return 1
+	mkdir -p "$GEO_ETC_RULESETS_DIR"
+	"$CANDY_CLIENT_BIN" geo update cn-ip --url "$url" --output "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" >/tmp/candy-geo-update.log 2>&1
+}
+
+run_gfwlist_provider_update() {
+	local url="$1"
+	provider_url_allowed "$url" || return 1
+	mkdir -p "$DNS_ETC_RULESETS_DIR"
+	"$CANDY_CLIENT_BIN" dns update gfwlist --url "$url" --output "$DNS_ETC_RULESETS_DIR/gfwlist.domains" >/tmp/candy-gfwlist-update.log 2>&1
+}
+
+provider_update_once() {
+	config_load candy
+	local geo_auto gfwlist_auto geo_interval gfwlist_interval geo_url gfwlist_url updated=0
+	PROVIDER_UPDATED=0
+	config_get_bool geo_auto client geo_auto_update 0
+	config_get_bool gfwlist_auto client gfwlist_auto_update 0
+	geo_interval=$(provider_update_interval_hours geo_update_interval_hours)
+	gfwlist_interval=$(provider_update_interval_hours gfwlist_update_interval_hours)
+	config_get geo_url client geo_update_url 'https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt'
+	config_get gfwlist_url client gfwlist_update_url 'https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt'
+
+	if [ "$geo_auto" -eq 1 ] && provider_update_due "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" "$geo_interval"; then
+		if run_geo_provider_update "$geo_url"; then
+			log_msg "auto updated China IP provider"
+			updated=1
+		else
+			log_msg "auto update failed for China IP provider"
+		fi
+	fi
+
+	if [ "$gfwlist_auto" -eq 1 ] && provider_update_due "$DNS_ETC_RULESETS_DIR/gfwlist.domains" "$gfwlist_interval"; then
+		if run_gfwlist_provider_update "$gfwlist_url"; then
+			log_msg "auto updated GFWList provider"
+			updated=1
+		else
+			log_msg "auto update failed for GFWList provider"
+		fi
+	fi
+
+	if [ "$updated" -eq 1 ]; then
+		refresh_node_status_fast "running"
+	fi
+	PROVIDER_UPDATED="$updated"
+}
+
+provider_update_sleep_seconds() {
+	local geo_auto gfwlist_auto geo_interval gfwlist_interval interval=24
+	config_get_bool geo_auto client geo_auto_update 0
+	config_get_bool gfwlist_auto client gfwlist_auto_update 0
+	if [ "$geo_auto" -eq 1 ]; then
+		geo_interval=$(provider_update_interval_hours geo_update_interval_hours)
+		interval="$geo_interval"
+	fi
+	if [ "$gfwlist_auto" -eq 1 ]; then
+		gfwlist_interval=$(provider_update_interval_hours gfwlist_update_interval_hours)
+		if [ "$gfwlist_interval" -lt "$interval" ] || [ "$geo_auto" -ne 1 ]; then
+			interval="$gfwlist_interval"
+		fi
+	fi
+	printf '%s\n' $((interval * 3600))
+}
+
+provider_update_loop() {
+	while :; do
+		provider_update_once
+		if [ "${PROVIDER_UPDATED:-0}" -eq 1 ]; then
+			log_msg "reloading candy service after provider auto update"
+			(sleep 1; "$CANDY_INIT_SELF" reload_runtime >/dev/null 2>&1) &
+			exit 0
+		fi
+		sleep "$(provider_update_sleep_seconds)"
+	done
+}
+
+runtime_mode_value() {
+	local runtime_mode
+	config_get runtime_mode client runtime_mode fallback
+	case "$runtime_mode" in
+		fallback|performance|stable) printf '%s\n' "$runtime_mode" ;;
+		*) printf '%s\n' fallback ;;
+	esac
+}
+
+udp_redundancy_multiplier_value() {
+	local option="$1" value
+	config_get value client "$option" 1
+	case "$value" in
+		1|2|3) printf '%s\n' "$value" ;;
+		*) printf '%s\n' 1 ;;
+	esac
+}
+
+effective_udp_redundancy_multiplier_value() {
+	udp_redundancy_multiplier_value "$1"
+}
+
+apply_runtime_mode_preset() {
+	local runtime_mode="$1"
+	case "$runtime_mode" in
+		performance)
+			EFFECTIVE_REDIRECT_TCP=1
+			EFFECTIVE_REDIRECT_UDP=1
+			EFFECTIVE_BLOCK_QUIC=0
+			;;
+		*)
+			EFFECTIVE_REDIRECT_TCP=1
+			EFFECTIVE_REDIRECT_UDP=0
+			EFFECTIVE_BLOCK_QUIC=1
+			;;
+	esac
+}
+
+read_passive_status_json() {
+	local status size
+	[ -s "$CANDY_PASSIVE_STATUS_FILE" ] || return 0
+	status=$("$CANDY_CLIENT_BIN" status --path "$CANDY_PASSIVE_STATUS_FILE" 2>/dev/null || true)
+	if [ -z "$status" ] && command -v jsonfilter >/dev/null 2>&1; then
+		size=$(wc -c < "$CANDY_PASSIVE_STATUS_FILE" 2>/dev/null || printf 0)
+		case "$size" in ''|*[!0-9]*) return 0 ;; esac
+		[ "$size" -le 262144 ] || return 0
+		status=$(jsonfilter -i "$CANDY_PASSIVE_STATUS_FILE" -e '@' 2>/dev/null || true)
+	fi
+	case "$status" in
+		*'"auth"'*|*'"secret"'*|*'"credentials"'*) return 0 ;;
+	esac
+	printf '%s\n' "$status"
+}
+
+write_runtime_status() {
+	local runtime_mode performance_mode lanes udp_client_multiplier udp_server_multiplier passive_status congestion candy_bbr_preset automatic_bbr_fallback
+	runtime_mode=$(runtime_mode_value)
+	config_get performance_mode client performance_mode auto
+	config_get lanes client lanes auto
+	udp_client_multiplier=$(effective_udp_redundancy_multiplier_value udp_client_multiplier udp_client_multiplier)
+	udp_server_multiplier=$(effective_udp_redundancy_multiplier_value udp_server_multiplier udp_server_multiplier)
+	config_get congestion client congestion candy-bbr
+	case "$congestion" in candy-bbr|cubic) ;; *) congestion=candy-bbr ;; esac
+	config_get candy_bbr_preset client candy_bbr_preset current
+	case "$candy_bbr_preset" in current|bbr-v1|aggressive) ;; *) candy_bbr_preset=current ;; esac
+	config_get_bool automatic_bbr_fallback client automatic_bbr_fallback 0
+	printf '"runtime":{"mode":'
+	json_string "$runtime_mode"
+	printf ',"performance":{"mode":'
+	json_string "$performance_mode"
+	printf ',"lanes":'
+	json_string "$lanes"
+	printf ',"configured_congestion":'
+	json_string "$congestion"
+	printf ',"configured_candy_bbr_preset":'
+	json_string "$candy_bbr_preset"
+	printf ',"automatic_bbr_fallback":%s' "$([ "$automatic_bbr_fallback" -eq 1 ] && printf true || printf false)"
+	printf ',"udp_client_multiplier":%s,"udp_server_multiplier":%s' "$udp_client_multiplier" "$udp_server_multiplier"
+	passive_status=
+	if [ -s "$CANDY_PASSIVE_STATUS_FILE" ]; then
+		passive_status=$(read_passive_status_json)
+	fi
+	if [ -n "$passive_status" ]; then
+		if printf '%s' "$passive_status" | grep -Eq '"schema_version"[[:space:]]*:[[:space:]]*2([,}])'; then
+			printf ',"multi_node":%s' "$passive_status"
+		else
+			printf ',"passive":%s' "$passive_status"
+		fi
+	fi
+	printf '}'
+	printf '}'
+}
+
+congestion_test() {
+	local temporary rc
+	if ! mkdir "$CONGESTION_TEST_LOCK_DIR" 2>/dev/null; then
+		log_error "congestion comparison already running"
+		return 1
+	fi
+	trap 'rm -rf "$CONGESTION_TEST_LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+	printf '%s\n' "$$" > "$CONGESTION_TEST_LOCK_DIR/pid"
+	rotate_log_file "$CONGESTION_TEST_LOG_FILE"
+	temporary=$(atomic_temp_path "$CONGESTION_TEST_RESULT_FILE") || return 1
+	log_msg "starting bounded congestion comparison: CUBIC, current BBR, BBR v1, aggressive BBR"
+	"$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format candy-json --platform openwrt \
+		congestion-test --samples 1 --max-bytes 2097152 --timeout-ms 20000 \
+		> "$temporary" 2> "$CONGESTION_TEST_LOG_FILE"
+	rc=$?
+	if [ "$rc" -eq 0 ] && [ -s "$temporary" ]; then
+		atomic_commit_file "$temporary" "$CONGESTION_TEST_RESULT_FILE" 0600 || return 1
+		log_msg "bounded congestion comparison completed"
+		return 0
+	fi
+	rm -f "$temporary"
+	log_error "bounded congestion comparison failed (exit $rc)"
+	return "$rc"
+}
+
+recent_connection_error() {
+	local line system_line
+	system_line=
+	line=$(grep -E 'connection lost|control manager stopped|timed out|reset by peer|authentication rejected|runtime config preflight failed' "$LOG_FILE" 2>/dev/null | tail -n 1 || true)
+	if command -v logread >/dev/null 2>&1; then
+		system_line=$(logread 2>/dev/null | grep -i candy | grep -E 'connection lost|control manager stopped|timed out|reset by peer|authentication rejected|runtime config preflight failed|crash loop' | tail -n 1 || true)
+	fi
+	if [ -n "$system_line" ]; then
+		printf '%s\n' "$system_line"
+	else
+		printf '%s\n' "$line"
+	fi
+}
+
+write_diagnostics_status() {
+	local connection_error dns_egress_resolver
+	local udp_client_multiplier udp_server_multiplier
+	config_get dns_egress_resolver client dns_egress_resolver '8.8.8.8:53'
+	udp_client_multiplier=$(effective_udp_redundancy_multiplier_value udp_client_multiplier udp_client_multiplier)
+	udp_server_multiplier=$(effective_udp_redundancy_multiplier_value udp_server_multiplier udp_server_multiplier)
+	connection_error=$(recent_connection_error)
+	printf '"diagnostics":{'
+	printf '"network_check":{"status":"not-run","log_path":'
+	json_string "$NETWORK_CHECK_LOG_FILE"
+	printf '}'
+	printf ',"udp_redundancy":{"client_multiplier":%s,"server_multiplier":%s,"last_error":""}' "$udp_client_multiplier" "$udp_server_multiplier"
+	printf ',"dns_trace":{"domain":"","status":"not-run","command":'
+	json_string "candy-client dns trace --config $RUNTIME_CONFIG --format candy-json --egress-dns $dns_egress_resolver"
+	printf ',"log_path":'
+	json_string "$DNS_TRACE_LOG_FILE"
+	printf ',"last_error":""}'
+	printf ',"connection":{"last_error":'
+	json_string "$connection_error"
+	printf ',"recent_event":'
+	json_string "$connection_error"
+	printf '}'
+	printf ',"reconnect_policy":{"enabled":true,"initial_delay_ms":1000,"max_delay_ms":30000,"max_attempts":null}'
+	printf '}'
+}
+
+refresh_node_status() {
+	local temporary
+	mkdir -p "$(dirname "$NODE_STATUS_FILE")"
+	temporary=$(atomic_temp_path "$NODE_STATUS_FILE") || return 1
+	{
+		printf '{"updated_at":'
+		json_string "$(date '+%Y-%m-%d %H:%M:%S')"
+		printf ',"version":'
+		json_string "$CANDY_VERSION"
+		printf ',"release":'
+		json_string "$CANDY_RELEASE"
+		printf ',"nodes":['
+		FIRST_STATUS_NODE=1
+		config_foreach write_node_status node
+		printf '],'
+		write_runtime_status
+		printf ','
+		write_dns_status
+		printf ','
+		write_geo_status
+		printf ','
+		write_gfwlist_status
+		printf ','
+		write_diagnostics_status
+		printf '}\n'
+	} > "$temporary" || {
+		rm -f "$temporary"
+		return 1
+	}
+	atomic_commit_file "$temporary" "$NODE_STATUS_FILE" || return 1
+}
+
+refresh_node_status_fast() {
+	refresh_node_status "$1"
+}
+
+run_status_probe() {
+	local state="$1"
+	if ! mkdir "$STATUS_PROBE_LOCK_DIR" 2>/dev/null; then
+		exit 0
+	fi
+	trap 'rmdir "$STATUS_PROBE_LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+	config_load candy || exit 0
+	refresh_node_status_fast "$state"
+}
+
+run_detached_direct_command() {
+	local command="$1" state="${2:-}"
+	(
+		exec 1000>&- 2>/dev/null || true
+		(
+			CANDY_DIRECT_COMMAND="$command" CANDY_DIRECT_STATE="$state" CANDY_BACKGROUND_INLINE=1 /bin/sh "$CANDY_INIT_SELF"
+		) >/dev/null 2>&1 &
+	) >/dev/null 2>&1 &
+}
+
+append_group_node() {
+	local node="$1"
+	local enabled node_name node_server
+	config_get_bool enabled "$node" enabled 1
+	config_get node_server "$node" server
+	[ "$enabled" -eq 1 ] || return 0
+	[ -n "$node_server" ] || return 0
+	config_get node_name "$node" name "$node"
+	if [ "$GROUP_FIRST_NODE" -eq 0 ]; then
+		printf ','
+	fi
+	json_string "$node_name"
+	GROUP_FIRST_NODE=0
+}
+
+append_port_hopping_port() {
+	local port="$1"
+	case "$port" in ''|*[!0-9]*) return 0 ;; esac
+	[ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 0
+	if [ "$PORT_HOPPING_FIRST" -eq 0 ]; then
+		printf ','
+	fi
+	printf '%s' "$port"
+	PORT_HOPPING_FIRST=0
+}
+
+write_group() {
+	local group_id="$1"
+	local group_name type url interval timeout tolerance validity=180
+	config_get group_name "$group_id" name "$group_id"
+	config_get type "$group_id" type fallback
+	case "$type" in
+		select) type=fallback ;;
+		load-balance) type=round-robin ;;
+		round-robin|consistent-hash|fallback|url-test) ;;
+		*) type=fallback ;;
+	esac
+	if [ "$FIRST_GROUP" -eq 0 ]; then
+		printf ','
+	fi
+	printf '{"name":'
+	json_string "$group_name"
+	printf ',"type":'
+	json_string "$type"
+	printf ',"nodes":['
+	GROUP_FIRST_NODE=1
+	config_list_foreach "$group_id" node append_group_node
+	printf ']'
+	if [ "$type" = "url-test" ]; then
+		config_get url "$group_id" url_test_url 'http://www.gstatic.com/generate_204'
+		config_get interval "$group_id" url_test_interval_seconds 60
+		config_get timeout "$group_id" url_test_timeout_ms 3000
+		config_get tolerance "$group_id" url_test_tolerance_ms 20
+		case "$url" in http://?*|https://?*) ;; *) url='http://www.gstatic.com/generate_204' ;; esac
+		case "$interval" in ''|*[!0-9]*) interval=60 ;; esac
+		case "$timeout" in ''|*[!0-9]*) timeout=3000 ;; esac
+		case "$tolerance" in ''|*[!0-9]*) tolerance=20 ;; esac
+		[ "$interval" -ge 10 ] && [ "$interval" -le 3600 ] || interval=60
+		[ "$timeout" -ge 100 ] && [ "$timeout" -le 30000 ] || timeout=3000
+		[ "$tolerance" -le 1000 ] || tolerance=20
+		printf ',"url_test":{"url":'
+		json_string "$url"
+		printf ',"interval_seconds":%s,"timeout_ms":%s,"validity_seconds":%s,"tolerance_ms":%s}' "$interval" "$timeout" "$validity" "$tolerance"
+	fi
+	printf '}'
+	FIRST_GROUP=0
+}
+
+write_node_profile() {
+	local section="$1"
+	local enabled node_name key_id server server_name server_pin auth port_hopping_interval
+	config_get_bool enabled "$section" enabled 1
+	config_get server "$section" server
+	[ "$enabled" -eq 1 ] || return 0
+	[ -n "$server" ] || return 0
+	config_get node_name "$section" name "$section"
+	config_get key_id "$section" key_id "$node_name"
+	config_get server_name "$section" server_name "$node_name"
+	config_get server_pin "$section" server_pin
+	config_get auth "$section" auth
+	if [ "$FIRST_NODE" -eq 0 ]; then
+		printf ','
+	fi
+	printf '{"name":'
+	json_string "$node_name"
+	printf ',"key_id":'
+	json_string "$key_id"
+	printf ',"server":'
+	json_string "$server"
+	printf ',"server_name":'
+	json_string "$server_name"
+	printf ',"auth":'
+	json_string "$auth"
+	printf ',"pin":'
+	json_string "$server_pin"
+	config_get port_hopping_interval "$section" port_hopping_interval_seconds 300
+	case "$port_hopping_interval" in ''|*[!0-9]*) port_hopping_interval=300 ;; esac
+	[ "$port_hopping_interval" -ge 30 ] && [ "$port_hopping_interval" -le 86400 ] || port_hopping_interval=300
+	printf ',"port_hopping":{"ports":['
+	PORT_HOPPING_FIRST=1
+	config_list_foreach "$section" port_hopping_port append_port_hopping_port
+	printf '],"interval_seconds":%s}' "$port_hopping_interval"
+	printf '}'
+	FIRST_NODE=0
+}
+
+write_rule() {
+	local section="$1"
+	local value
+	config_get value "$section" value
+	[ -n "$value" ] || return 0
+	write_rule_value "$value"
+}
+
+write_rule_value() {
+	local value="$1"
+	if [ "$FIRST_RULE" -eq 0 ]; then
+		printf ','
+	fi
+	json_string "$value"
+	FIRST_RULE=0
+}
+
+write_builtin_geo_rules() {
+	local bypass_china_ip
+	config_get_bool bypass_china_ip client bypass_china_ip 1
+	[ "$bypass_china_ip" -eq 1 ] || return 0
+	write_rule_value "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve"
+	write_rule_value "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve"
+	write_rule_value "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve"
+	write_rule_value "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve"
+}
+
+write_forward_entry() {
+	local network="$1" local_addr="$2" target="$3"
+	if [ "$FIRST_FORWARD" -eq 0 ]; then
+		printf ','
+	fi
+	printf '{"network":'
+	json_string "$network"
+	printf ',"local":'
+	json_string "$local_addr"
+	printf ',"target":'
+	json_string "$target"
+	printf '}'
+	FIRST_FORWARD=0
+}
+
+write_builtin_dns_forward() {
+	local target="$1"
+	[ -n "$target" ] || return 0
+	write_forward_entry udp "$CANDY_DNS_LISTEN" "$target"
+}
+
+write_forward() {
+	local section="$1"
+	local network local_addr target
+	config_get network "$section" network tcp
+	config_get local_addr "$section" local
+	config_get target "$section" target
+	[ -n "$local_addr" ] || return 0
+	[ -n "$target" ] || return 0
+	if skip_reserved_forward "$section"; then
+		return 0
+	fi
+	write_forward_entry "$network" "$local_addr" "$target"
+}
+
+generate_config() {
+	mkdir -p "$RUNTIME_DIR"
+	local mode runtime_mode dns_remote dns_mode dns_split dns_unknown_strategy dns_answer_geo_validate dns_domestic_resolvers dns_foreign_strategy dns_egress_resolver dns_bootstrap_resolvers dns_cache dns_cache_max_entries dns_bind_answers_to_route dns_ttl_cap_seconds dns_negative_ttl_seconds performance_mode lanes udp_client_multiplier udp_server_multiplier redirect_tcp redirect_udp block_quic transparent_tcp_port transparent_udp_port bypass_china_ip
+	local temporary
+
+	config_get mode client mode rule
+	runtime_mode=$(runtime_mode_value)
+	apply_runtime_mode_preset "$runtime_mode"
+	config_get_bool dns_remote client dns_remote 0
+	config_get dns_mode client dns_mode smart
+	config_get_bool dns_split client dns_split 1
+	config_get dns_unknown_strategy client dns_unknown_strategy parallel-validate
+	config_get_bool dns_answer_geo_validate client dns_answer_geo_validate 1
+	config_get dns_domestic_resolvers client dns_domestic_resolvers 'system,223.5.5.5:53,119.29.29.29:53'
+	config_get dns_foreign_strategy client dns_foreign_strategy through-selected-node
+	config_get dns_egress_resolver client dns_egress_resolver '8.8.8.8:53'
+	config_get dns_bootstrap_resolvers client dns_bootstrap_resolvers 'system,223.5.5.5:53'
+	config_get_bool dns_cache client dns_cache 1
+	config_get dns_cache_max_entries client dns_cache_max_entries 4096
+	config_get_bool dns_bind_answers_to_route client dns_bind_answers_to_route 1
+	config_get dns_ttl_cap_seconds client dns_ttl_cap_seconds 300
+	config_get dns_negative_ttl_seconds client dns_negative_ttl_seconds 60
+	case "$dns_cache_max_entries" in ''|*[!0-9]*) dns_cache_max_entries=4096 ;; esac
+	case "$dns_ttl_cap_seconds" in ''|*[!0-9]*) dns_ttl_cap_seconds=300 ;; esac
+	case "$dns_negative_ttl_seconds" in ''|*[!0-9]*) dns_negative_ttl_seconds=60 ;; esac
+	config_get performance_mode client performance_mode auto
+	config_get lanes client lanes auto
+	config_get_bool bypass_china_ip client bypass_china_ip 1
+	config_get transparent_tcp_port client transparent_tcp_port 12345
+	config_get transparent_udp_port client transparent_udp_port 12346
+
+	refresh_runtime_geo_provider
+	refresh_runtime_gfwlist_provider
+	redirect_tcp=$EFFECTIVE_REDIRECT_TCP
+	redirect_udp=$EFFECTIVE_REDIRECT_UDP
+	block_quic=$EFFECTIVE_BLOCK_QUIC
+	udp_client_multiplier=$(effective_udp_redundancy_multiplier_value udp_client_multiplier udp_client_multiplier)
+	udp_server_multiplier=$(effective_udp_redundancy_multiplier_value udp_server_multiplier udp_server_multiplier)
+
+	temporary=$(atomic_temp_path "$RUNTIME_CONFIG") || return 1
+	{
+		printf '{'
+		printf '"name":"candy-openwrt"'
+		printf ',"mode":'
+		json_string "$mode"
+		printf ',"runtime_mode":'
+		json_string "$runtime_mode"
+		printf ',"dns":{"remote":'
+		json_bool "$dns_remote"
+		printf ',"mode":'
+		json_string "$dns_mode"
+		printf ',"cache":{"enabled":'
+		json_bool "$dns_cache"
+		printf ',"max_entries":%s' "$dns_cache_max_entries"
+		printf '}'
+		printf ',"split":{"enabled":'
+		json_bool "$dns_split"
+		printf ',"unknown_strategy":'
+		json_string "$dns_unknown_strategy"
+		printf ',"answer_geo_validate":'
+		json_bool "$dns_answer_geo_validate"
+		printf ',"bind_answers_to_route":'
+		json_bool "$dns_bind_answers_to_route"
+		printf ',"ttl_cap_seconds":%s,"negative_ttl_seconds":%s' "$dns_ttl_cap_seconds" "$dns_negative_ttl_seconds"
+		printf ',"domestic_resolvers":'
+		json_string_list "$dns_domestic_resolvers"
+		printf ',"foreign_strategy":'
+		json_string "$dns_foreign_strategy"
+		printf ',"egress_resolver":'
+		json_string "$dns_egress_resolver"
+		printf ',"bootstrap_resolvers":'
+		json_string_list "$dns_bootstrap_resolvers"
+		printf '}'
+		printf '}'
+		printf ',"performance":{"mode":'
+		json_string "$performance_mode"
+		printf ',"lanes":'
+		json_string "$lanes"
+		printf ',"udp_redundancy":{"client_multiplier":%s,"server_multiplier":%s}' "$udp_client_multiplier" "$udp_server_multiplier"
+		printf '}'
+		printf ',"geo":{"bypass_china_ip":'
+		json_bool "$bypass_china_ip"
+		printf ',"providers":['
+		if [ "$bypass_china_ip" -eq 1 ]; then
+			printf '{"name":"cn-ip","kind":"ip-cidr","path":'
+			json_string "$GEO_RUNTIME_RULESETS_DIR/cn-ip.cidr"
+			printf ',"fallback_path":'
+			json_string "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr"
+			printf '}'
+		fi
+		printf ']}'
+		printf ',"nodes":['
+		FIRST_NODE=1
+		config_foreach write_node_profile node
+		printf ']'
+		printf ',"groups":['
+		FIRST_GROUP=1
+		config_foreach write_group group
+		printf ']'
+		printf ',"rules":['
+		FIRST_RULE=1
+		write_builtin_geo_rules
+		config_foreach write_rule rule
+		printf ']'
+		printf ',"forwards":['
+		FIRST_FORWARD=1
+		write_builtin_dns_forward "$dns_egress_resolver"
+		config_foreach write_forward forward
+		printf ']'
+		if [ "$redirect_tcp" -eq 1 ]; then
+			printf ',"transparent_tcp":[{"local":'
+			json_string "0.0.0.0:$transparent_tcp_port"
+			printf '}]'
+		fi
+		if [ "$redirect_udp" -eq 1 ] && [ "$block_quic" -ne 1 ]; then
+			printf ',"transparent_udp":[{"local":'
+			json_string "0.0.0.0:$transparent_udp_port"
+			printf '}]'
+		fi
+		printf '}\n'
+	} > "$temporary" || {
+		rm -f "$temporary"
+		return 1
+	}
+	atomic_commit_file "$temporary" "$RUNTIME_CONFIG" 0600 || return 1
+	log_msg "generated runtime config $RUNTIME_CONFIG"
+	[ "${CANDY_GENERATE_SKIP_STATUS:-0}" -eq 1 ] || refresh_node_status_fast "starting"
+}
+
+server_host() {
+	local address="$1"
+	case "$address" in
+		\[*\]:*) address=${address#\[}; printf '%s\n' "${address%%\]*}" ;;
+		*:*) printf '%s\n' "${address%:*}" ;;
+		*) printf '%s\n' "$address" ;;
+	esac
+}
+
+is_ipv4_addr() {
+	local old_ifs="$IFS" o1 o2 o3 o4 extra
+	IFS=.
+	set -- $1
+	IFS="$old_ifs"
+	o1=${1:-}; o2=${2:-}; o3=${3:-}; o4=${4:-}; extra=${5:-}
+	[ -z "$extra" ] || return 1
+	for octet in "$o1" "$o2" "$o3" "$o4"; do
+		case "$octet" in
+			''|*[!0-9]*) return 1 ;;
+		esac
+		[ "$octet" -ge 0 ] 2>/dev/null && [ "$octet" -le 255 ] || return 1
+	done
+	return 0
+}
+
+is_ipv6_addr() {
+	case "$1" in
+		*:*[0-9A-Fa-f]*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+resolve_server_host_addresses() {
+	local family="$1" host="$2" address
+	if [ "$family" = 4 ] && is_ipv4_addr "$host"; then
+		printf '%s\n' "$host"
+		return 0
+	fi
+	if [ "$family" = 6 ] && is_ipv6_addr "$host"; then
+		printf '%s\n' "$host"
+		return 0
+	fi
+	command -v resolveip >/dev/null 2>&1 || return 0
+	resolveip "-$family" -t 3 "$host" 2>/dev/null | while IFS= read -r address; do
+		if { [ "$family" = 4 ] && is_ipv4_addr "$address"; } || { [ "$family" = 6 ] && is_ipv6_addr "$address"; }; then
+			printf '%s\n' "$address"
+		fi
+	done
+}
+
+append_referenced_server_hosts() {
+	local node_id="$1" enabled server host groups
+	config_get_bool enabled "$node_id" enabled 1
+	[ "$enabled" -eq 1 ] || return 0
+	groups=$(node_group_names "$node_id")
+	[ -n "$groups" ] || return 0
+	config_get server "$node_id" server
+	[ -n "$server" ] || return 0
+	host=$(server_host "$server")
+	[ -n "$host" ] || return 0
+	resolve_server_host_addresses "$BYPASS_ADDRESS_FAMILY" "$host"
+}
+
+referenced_server_hosts() {
+	BYPASS_ADDRESS_FAMILY="$1"
+	config_foreach append_referenced_server_hosts node | awk 'NF && !seen[$0]++' | tr '\n' ' '
+}
+
+firewall_state_value() {
+	local key="$1"
+	[ -f "$CANDY_FIREWALL_STATE_FILE" ] || return 1
+	sed -n "s/^${key}=//p" "$CANDY_FIREWALL_STATE_FILE" 2>/dev/null | head -n1
+}
+
+load_applied_firewall_state() {
+	local backend transparent_udp_port tproxy_mark
+	APPLIED_FIREWALL_BACKEND=
+	APPLIED_TRANSPARENT_UDP_PORT=
+	APPLIED_TPROXY_MARK=
+	backend=$(firewall_state_value backend) || return 1
+	transparent_udp_port=$(firewall_state_value transparent_udp_port) || return 1
+	tproxy_mark=$(firewall_state_value tproxy_mark) || return 1
+	case "$backend" in iptables|fw4) ;; *) return 1 ;; esac
+	case "$transparent_udp_port" in ''|*[!0-9]*) return 1 ;; esac
+	case "$tproxy_mark" in ''|*[!0-9]*) return 1 ;; esac
+	APPLIED_FIREWALL_BACKEND="$backend"
+	APPLIED_TRANSPARENT_UDP_PORT="$transparent_udp_port"
+	APPLIED_TPROXY_MARK="$tproxy_mark"
+}
+
+persist_applied_firewall_state() {
+	local backend="$1" transparent_udp_port="$2" tproxy_mark="$3" temporary
+	case "$backend" in iptables|fw4) ;; *) return 1 ;; esac
+	case "$transparent_udp_port" in ''|*[!0-9]*) return 1 ;; esac
+	case "$tproxy_mark" in ''|*[!0-9]*) return 1 ;; esac
+	temporary=$(atomic_temp_path "$CANDY_FIREWALL_STATE_FILE") || return 1
+	{
+		printf 'backend=%s\n' "$backend"
+		printf 'transparent_udp_port=%s\n' "$transparent_udp_port"
+		printf 'tproxy_mark=%s\n' "$tproxy_mark"
+	} > "$temporary" || {
+		rm -f "$temporary"
+		return 1
+	}
+	atomic_commit_file "$temporary" "$CANDY_FIREWALL_STATE_FILE" 0600
+}
+
+cleanup_tproxy_policy() {
+	local tproxy_mark="$1" deleted_rules=0
+	while ip rule del fwmark "$tproxy_mark" table "$tproxy_mark" 2>/dev/null; do
+		deleted_rules=$((deleted_rules + 1))
+		[ "$deleted_rules" -lt 32 ] || break
+	done
+	ip route del local 0.0.0.0/0 dev lo table "$tproxy_mark" 2>/dev/null || true
+}
+
+apply_tproxy_policy() {
+	local tproxy_mark="$1"
+	cleanup_tproxy_policy "$tproxy_mark"
+	ip rule add fwmark "$tproxy_mark" table "$tproxy_mark" 2>/dev/null || true
+	ip route add local 0.0.0.0/0 dev lo table "$tproxy_mark" 2>/dev/null || true
+}
+
+dnsmasq_conf_dir() {
+	local conf dir
+	for conf in $DNSMASQ_CONF_GLOB; do
+		[ -f "$conf" ] || continue
+		dir=$(sed -n 's/^conf-dir=\([^,]*\).*/\1/p' "$conf" | head -n1)
+		[ -n "$dir" ] || continue
+		printf '%s\n' "$dir"
+		return 0
+	done
+	return 1
+}
+
+valid_dns_domain() {
+	case "$1" in
+		""|*[!A-Za-z0-9._-]*|.*|*.) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+write_remote_dns_server() {
+	local domain="$1"
+	domain=${domain#.}
+	valid_dns_domain "$domain" || return 0
+	printf 'server=/%s/127.0.0.1#%s\n' "$domain" "$REMOTE_DNS_PORT"
+	DNS_WROTE_REMOTE_DOMAIN=1
+}
+
+write_gfwlist_remote_dns_servers() {
+	local provider_path domain
+	refresh_runtime_gfwlist_provider
+	provider_path="$DNS_RUNTIME_RULESETS_DIR/gfwlist.domains"
+	[ -f "$provider_path" ] || return 0
+	if command -v awk >/dev/null 2>&1; then
+		if awk -v port="$REMOTE_DNS_PORT" '
+			function trim(value) {
+				gsub(/^[ \t]+|[ \t]+$/, "", value)
+				return value
+			}
+			function valid_domain(value) {
+				return value != "" && value !~ /[^A-Za-z0-9._-]/ && value !~ /^\./ && value !~ /\.$/
+			}
+			{
+				sub(/#.*/, "")
+				domain = trim($0)
+				if (valid_domain(domain)) {
+					printf "server=/%s/127.0.0.1#%s\n", domain, port
+					wrote = 1
+				}
+			}
+			END { exit wrote ? 0 : 1 }
+		' "$provider_path"; then
+			DNS_WROTE_REMOTE_DOMAIN=1
+		fi
+		return 0
+	fi
+	while IFS= read -r domain || [ -n "$domain" ]; do
+		domain=${domain%%#*}
+		domain=$(printf '%s' "$domain" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+		write_remote_dns_server "$domain"
+	done < "$provider_path"
+}
+
+write_rule_remote_dns_server() {
+	local section="$1"
+	local value kind domain target _rest old_ifs
+	config_get value "$section" value
+	[ -n "$value" ] || return 0
+	old_ifs="$IFS"
+	IFS=,
+	set -- $value
+	IFS="$old_ifs"
+	kind=$(printf '%s' "${1:-}" | tr 'a-z' 'A-Z')
+	case "$kind" in
+		DOMAIN|DOMAIN-SUFFIX)
+			domain="$2"
+			target=$(printf '%s' "${3:-}" | tr 'a-z' 'A-Z')
+			;;
+		*)
+			return 0
+			;;
+	esac
+	case "$target" in
+		""|DIRECT|REJECT) return 0 ;;
+	esac
+	write_remote_dns_server "$domain"
+}
+
+remove_dns_config() {
+	local dir
+	dir=$(dnsmasq_conf_dir 2>/dev/null || true)
+	if [ -n "$dir" ]; then
+		rm -f "$dir/$DNSMASQ_CANDY_CONF"
+	fi
+}
+
+reload_dnsmasq() {
+	local pids
+	pids=$(pidof dnsmasq 2>/dev/null || true)
+	if [ -n "$pids" ]; then
+		if ! kill -HUP $pids 2>/dev/null; then
+			log_msg "failed to send SIGHUP to dnsmasq"
+			return 1
+		fi
+		log_msg "sent SIGHUP to dnsmasq"
+		return 0
+	fi
+	if command -v ubus >/dev/null 2>&1; then
+		if run_with_timeout 3 ubus call service event '{"type":"reload","data":{"name":"dnsmasq"}}' >/dev/null 2>&1; then
+			log_msg "requested dnsmasq reload via ubus"
+			return 0
+		fi
+		log_msg "dnsmasq ubus reload timed out or failed"
+	fi
+	if [ -x /etc/init.d/dnsmasq ]; then
+		if run_with_timeout 3 /etc/init.d/dnsmasq reload >/dev/null 2>&1; then
+			log_msg "reloaded dnsmasq via init script"
+			return 0
+		fi
+		log_msg "dnsmasq init reload timed out or failed"
+	fi
+	return 1
+}
+
+restart_dnsmasq() {
+	if [ -x /etc/init.d/dnsmasq ]; then
+		if run_with_timeout 8 /etc/init.d/dnsmasq restart >/dev/null 2>&1; then
+			log_msg "restarted dnsmasq and cleared cached DNS answers"
+			return 0
+		fi
+		log_msg "dnsmasq init restart timed out or failed"
+	fi
+	if command -v ubus >/dev/null 2>&1; then
+		if run_with_timeout 8 ubus call service event '{"type":"restart","data":{"name":"dnsmasq"}}' >/dev/null 2>&1; then
+			log_msg "requested dnsmasq restart to clear cached DNS answers"
+			return 0
+		fi
+		log_msg "dnsmasq ubus restart timed out or failed"
+	fi
+	return 1
+}
+
+cleanup_dns() {
+	local rc=0 dir destination had_config=0
+	dir=$(dnsmasq_conf_dir 2>/dev/null || true)
+	destination="$dir/$DNSMASQ_CANDY_CONF"
+	[ -n "$dir" ] && [ -f "$destination" ] && had_config=1
+	remove_dns_config || rc=1
+	if [ "$had_config" -eq 1 ]; then
+		restart_dnsmasq || rc=1
+	fi
+	config_load candy 2>/dev/null || rc=1
+	refresh_node_status_fast "standby" || rc=1
+	return "$rc"
+}
+
+apply_dns() {
+	config_load candy || return 1
+	local dns_remote filter_aaaa dns_port dir wrote_config=0 temporary destination policy_changed=1
+	config_get_bool dns_remote client dns_remote 0
+	config_get_bool filter_aaaa client filter_aaaa 1
+	dns_port=15353
+	dir=$(dnsmasq_conf_dir 2>/dev/null || true)
+	if [ -z "$dir" ]; then
+		log_msg "dnsmasq conf-dir not found; DNS policy not applied"
+		[ "${CANDY_SUPPRESS_STATUS_REFRESH:-0}" -eq 1 ] || refresh_node_status_fast "standby"
+		return 1
+	fi
+	mkdir -p "$dir"
+	destination="$dir/$DNSMASQ_CANDY_CONF"
+	temporary=$(atomic_temp_path "$destination") || return 1
+	REMOTE_DNS_PORT="$dns_port"
+	DNS_WROTE_REMOTE_DOMAIN=0
+	{
+		if [ "$filter_aaaa" -eq 1 ]; then
+			printf 'filter-AAAA\n'
+			wrote_config=1
+		fi
+		if [ "$dns_remote" -eq 1 ]; then
+			printf 'no-resolv\n'
+			printf 'server=127.0.0.1#%s\n' "$dns_port"
+			wrote_config=1
+		else
+			write_gfwlist_remote_dns_servers
+			config_foreach write_rule_remote_dns_server rule
+			if [ "$DNS_WROTE_REMOTE_DOMAIN" -eq 1 ]; then
+				wrote_config=1
+			fi
+		fi
+	} > "$temporary" || {
+		rm -f "$temporary"
+		return 1
+	}
+	if [ -f "$destination" ] && cmp -s "$temporary" "$destination"; then
+		policy_changed=0
+	fi
+	atomic_commit_file "$temporary" "$destination" || return 1
+	if [ "$policy_changed" -eq 1 ]; then
+		restart_dnsmasq || return 1
+	fi
+	if [ "$wrote_config" -eq 1 ]; then
+		log_msg "applied dnsmasq DNS policy"
+	fi
+	[ "${CANDY_SUPPRESS_STATUS_REFRESH:-0}" -eq 1 ] || refresh_node_status_fast "standby"
+}
+
+cleanup_firewall() {
+	local backend transparent_udp_port tproxy_mark chain rc=0
+	if load_applied_firewall_state; then
+		backend="$APPLIED_FIREWALL_BACKEND"
+		transparent_udp_port="$APPLIED_TRANSPARENT_UDP_PORT"
+		tproxy_mark="$APPLIED_TPROXY_MARK"
+	else
+		config_load candy || return 1
+		config_get transparent_udp_port client transparent_udp_port 12346
+		config_get tproxy_mark client tproxy_mark 100
+		if command -v iptables >/dev/null 2>&1; then
+			backend=iptables
+		elif command -v fw4 >/dev/null 2>&1 && command -v nft >/dev/null 2>&1; then
+			backend=fw4
+		else
+			backend=none
+		fi
+	fi
+	cleanup_tproxy_policy "$tproxy_mark" || rc=1
+
+	if [ "$backend" = iptables ] && command -v iptables >/dev/null 2>&1; then
+		iptables -t nat -D PREROUTING -p tcp -j CANDY 2>/dev/null || true
+		iptables -t mangle -D PREROUTING -i br-lan -p udp --dport 443 -j TPROXY --on-port "$transparent_udp_port" --tproxy-mark "$tproxy_mark/$tproxy_mark" 2>/dev/null || true
+		iptables -D FORWARD -i br-lan -p udp --dport 443 -j REJECT 2>/dev/null || true
+		iptables -t nat -D PREROUTING -i br-lan -p udp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null || true
+		iptables -t nat -D PREROUTING -i br-lan -p tcp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null || true
+		iptables -t nat -F CANDY 2>/dev/null || true
+		iptables -t nat -X CANDY 2>/dev/null || true
+	elif [ "$backend" = iptables ]; then
+		log_msg "iptables firewall cleanup unavailable"
+		rc=1
+	fi
+
+	if [ "$backend" = fw4 ] && command -v fw4 >/dev/null 2>&1; then
+		rm -f "$FW4_INCLUDE" || rc=1
+		if ! run_with_timeout 12 fw4 reload >/dev/null 2>&1; then
+			log_msg "fw4 reload timed out during firewall cleanup"
+			rc=1
+		fi
+		if command -v nft >/dev/null 2>&1; then
+			for chain in candy_prerouting candy_forward candy_tproxy carrier_prerouting carrier_forward carrier_tproxy; do
+				if nft list chain inet fw4 "$chain" >/dev/null 2>&1 && ! nft delete chain inet fw4 "$chain" 2>/dev/null; then
+					log_msg "failed to delete nftables chain $chain during firewall cleanup"
+					rc=1
+			fi
+		done
+		fi
+	elif [ "$backend" = fw4 ]; then
+		log_msg "fw4 firewall cleanup unavailable"
+		rc=1
+	fi
+	if [ "$rc" -eq 0 ]; then
+		rm -f "$CANDY_FIREWALL_STATE_FILE"
+		log_msg "cleaned firewall rules"
+	else
+		log_msg "firewall cleanup incomplete"
+	fi
+	return "$rc"
+}
+
+write_fw4_include() {
+	local redirect_tcp="$1"
+	local dns_capture_lan="$2"
+	local block_quic="$3"
+	local redirect_udp="$4"
+	local transparent_tcp_port="$5"
+	local transparent_udp_port="$6"
+	local bypass_ipv4_hosts="$7"
+	local bypass_ipv6_hosts="$8"
+	local tproxy_mark="$9"
+	local temporary bypass_host
+
+	mkdir -p "$FW4_INCLUDE_DIR"
+	temporary=$(atomic_temp_path "$FW4_INCLUDE") || return 1
+	{
+		if [ "$block_quic" -eq 1 ]; then
+			printf 'chain candy_forward {\n'
+			printf '  type filter hook forward priority -1; policy accept;\n'
+			printf '  iifname "br-lan" udp dport 443 counter reject\n'
+			printf '}\n'
+		fi
+		if [ "$redirect_udp" -eq 1 ] && [ "$block_quic" -ne 1 ]; then
+			printf 'chain candy_tproxy {\n'
+			printf '  type filter hook prerouting priority mangle; policy accept;\n'
+			for bypass_host in $bypass_ipv4_hosts; do
+				printf '  iifname "br-lan" ip daddr %s counter return\n' "$bypass_host"
+			done
+			for bypass_host in $bypass_ipv6_hosts; do
+				printf '  iifname "br-lan" ip6 daddr %s counter return\n' "$bypass_host"
+			done
+			printf '  iifname "br-lan" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } counter return\n'
+			printf '  iifname "br-lan" udp dport 443 counter tproxy to :%s meta mark set %s accept\n' "$transparent_udp_port" "$tproxy_mark"
+			printf '}\n'
+		fi
+		printf 'chain candy_prerouting {\n'
+		printf '  type nat hook prerouting priority -101; policy accept;\n'
+		for bypass_host in $bypass_ipv4_hosts; do
+			printf '  iifname "br-lan" ip daddr %s counter return\n' "$bypass_host"
+		done
+		for bypass_host in $bypass_ipv6_hosts; do
+			printf '  iifname "br-lan" ip6 daddr %s counter return\n' "$bypass_host"
+		done
+		if [ "$redirect_tcp" -eq 1 ]; then
+			printf '  iifname "br-lan" ip daddr != { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } meta l4proto tcp counter redirect to %s\n' "$transparent_tcp_port"
+		fi
+		if [ "$dns_capture_lan" -eq 1 ]; then
+			printf '  iifname "br-lan" udp dport 53 counter redirect to 53\n'
+			printf '  iifname "br-lan" tcp dport 53 counter redirect to 53\n'
+		fi
+		printf '}\n'
+	} > "$temporary" || {
+		rm -f "$temporary"
+		return 1
+	}
+	atomic_commit_file "$temporary" "$FW4_INCLUDE"
+}
+
+apply_firewall() {
+	config_load candy
+	local auto_firewall redirect_tcp redirect_udp dns_capture_lan block_quic transparent_tcp_port transparent_udp_port tproxy_mark previous_tproxy_mark bypass_ipv4_hosts bypass_ipv6_hosts bypass_host runtime_mode
+	previous_tproxy_mark=
+	config_get_bool auto_firewall client auto_firewall 1
+	runtime_mode=$(runtime_mode_value)
+	apply_runtime_mode_preset "$runtime_mode"
+	redirect_tcp=$EFFECTIVE_REDIRECT_TCP
+	redirect_udp=$EFFECTIVE_REDIRECT_UDP
+	block_quic=$EFFECTIVE_BLOCK_QUIC
+	config_get_bool dns_capture_lan client dns_capture_lan 1
+	config_get transparent_tcp_port client transparent_tcp_port 12345
+	config_get transparent_udp_port client transparent_udp_port 12346
+	config_get tproxy_mark client tproxy_mark 100
+	bypass_ipv4_hosts=$(referenced_server_hosts 4)
+	bypass_ipv6_hosts=$(referenced_server_hosts 6)
+	if [ "$auto_firewall" -ne 1 ]; then
+		[ ! -f "$CANDY_FIREWALL_STATE_FILE" ] || cleanup_firewall
+		return $?
+	fi
+
+	if command -v iptables >/dev/null 2>&1; then
+		cleanup_firewall || return 1
+		iptables -t nat -N CANDY 2>/dev/null || true
+		iptables -t nat -F CANDY
+		for bypass_host in $bypass_ipv4_hosts; do
+			iptables -t nat -A CANDY -d "$bypass_host" -j RETURN
+		done
+		iptables -t nat -A CANDY -d 0.0.0.0/8 -j RETURN
+		iptables -t nat -A CANDY -d 10.0.0.0/8 -j RETURN
+		iptables -t nat -A CANDY -d 127.0.0.0/8 -j RETURN
+		iptables -t nat -A CANDY -d 169.254.0.0/16 -j RETURN
+		iptables -t nat -A CANDY -d 172.16.0.0/12 -j RETURN
+		iptables -t nat -A CANDY -d 192.168.0.0/16 -j RETURN
+		iptables -t nat -A CANDY -d 224.0.0.0/4 -j RETURN
+		iptables -t nat -A CANDY -d 240.0.0.0/4 -j RETURN
+		if [ "$redirect_tcp" -eq 1 ]; then
+			iptables -t nat -A CANDY -p tcp -j REDIRECT --to-ports "$transparent_tcp_port"
+			iptables -t nat -A PREROUTING -p tcp -j CANDY
+		fi
+		if [ "$block_quic" -eq 1 ]; then
+			iptables -D FORWARD -i br-lan -p udp --dport 443 -j REJECT 2>/dev/null || true
+			iptables -A FORWARD -i br-lan -p udp --dport 443 -j REJECT
+		elif [ "$redirect_udp" -eq 1 ]; then
+			apply_tproxy_policy "$tproxy_mark"
+			iptables -t mangle -A PREROUTING -i br-lan -p udp --dport 443 -j TPROXY --on-port "$transparent_udp_port" --tproxy-mark "$tproxy_mark/$tproxy_mark"
+		fi
+		if [ "$dns_capture_lan" -eq 1 ]; then
+			iptables -t nat -A PREROUTING -i br-lan -p udp --dport 53 -j REDIRECT --to-ports 53
+			iptables -t nat -A PREROUTING -i br-lan -p tcp --dport 53 -j REDIRECT --to-ports 53
+		fi
+		persist_applied_firewall_state iptables "$transparent_udp_port" "$tproxy_mark" || return 1
+		log_msg "applied iptables firewall rules"
+	elif command -v nft >/dev/null 2>&1 && command -v fw4 >/dev/null 2>&1; then
+		if load_applied_firewall_state; then
+			if [ "$APPLIED_FIREWALL_BACKEND" != fw4 ]; then
+				cleanup_firewall || return 1
+			else
+				previous_tproxy_mark="$APPLIED_TPROXY_MARK"
+			fi
+		else
+			cleanup_tproxy_policy "$tproxy_mark"
+		fi
+		if [ "$redirect_udp" -eq 1 ] && [ "$block_quic" -ne 1 ]; then
+			apply_tproxy_policy "$tproxy_mark"
+		fi
+		write_fw4_include "$redirect_tcp" "$dns_capture_lan" "$block_quic" "$redirect_udp" "$transparent_tcp_port" "$transparent_udp_port" "$bypass_ipv4_hosts" "$bypass_ipv6_hosts" "$tproxy_mark"
+		if run_with_timeout 8 fw4 check >/dev/null 2>&1; then
+			if run_with_timeout 12 fw4 reload >/dev/null 2>&1; then
+				log_msg "applied fw4 nftables firewall rules"
+				if [ -n "$previous_tproxy_mark" ] && [ "$previous_tproxy_mark" != "$tproxy_mark" ]; then
+					cleanup_tproxy_policy "$previous_tproxy_mark"
+				fi
+			else
+				rm -f "$FW4_INCLUDE"
+				log_msg "fw4 reload timed out; firewall policy rolled back"
+				return 1
+			fi
+			persist_applied_firewall_state fw4 "$transparent_udp_port" "$tproxy_mark" || return 1
+		else
+			rm -f "$FW4_INCLUDE"
+			log_msg "fw4 nftables firewall rule validation failed"
+			return 1
+		fi
+	else
+		log_msg "iptables/fw4 not found; firewall rules not applied"
+		return 1
+	fi
+}
+
+firewall_restart_can_skip_cleanup() {
+	if load_applied_firewall_state; then
+		[ "$APPLIED_FIREWALL_BACKEND" = fw4 ]
+		return $?
+	fi
+	command -v fw4 >/dev/null 2>&1 && command -v nft >/dev/null 2>&1 && ! command -v iptables >/dev/null 2>&1
+}
+
+uci_value() {
+	local section="$1" option="$2" file="$3"
+	awk -v section="$section" -v option="$option" '
+		$1 == "config" {
+			current = $3
+			gsub(/\047/, "", current)
+		}
+		$1 == "option" && current == section && $2 == option {
+			value = $0
+			sub(/^[[:space:]]*option[[:space:]]+[^[:space:]]+[[:space:]]+/, "", value)
+			gsub(/\047/, "", value)
+			print value
+			exit
+		}
+	' "$file"
+}
+
+migrate_legacy_config() {
+	[ ! -f "$CONFIG_FILE" ] || return 0
+	[ -f "$LEGACY_CONFIG_FILE" ] || return 0
+	local selected_node enabled server server_name server_pin key_id secret auto_firewall redirect_tcp redirect_udp block_quic transparent_tcp_port transparent_udp_port tproxy_mark node_name node_server node_server_name node_server_pin node_key_id node_secret
+	selected_node=$(uci_value client selected_node "$LEGACY_CONFIG_FILE")
+	[ -n "$selected_node" ] || selected_node=primary
+	enabled=$(uci_value client enabled "$LEGACY_CONFIG_FILE")
+	server=$(uci_value client server "$LEGACY_CONFIG_FILE")
+	server_name=$(uci_value client server_name "$LEGACY_CONFIG_FILE")
+	server_pin=$(uci_value client server_pin "$LEGACY_CONFIG_FILE")
+	key_id=$(uci_value client key_id "$LEGACY_CONFIG_FILE")
+	secret=$(uci_value client secret "$LEGACY_CONFIG_FILE")
+	auto_firewall=$(uci_value client auto_firewall "$LEGACY_CONFIG_FILE")
+	redirect_tcp=$(uci_value client redirect_tcp "$LEGACY_CONFIG_FILE")
+	redirect_udp=$(uci_value client redirect_udp "$LEGACY_CONFIG_FILE")
+	block_quic=$(uci_value client block_quic "$LEGACY_CONFIG_FILE")
+	transparent_tcp_port=$(uci_value client transparent_tcp_port "$LEGACY_CONFIG_FILE")
+	transparent_udp_port=$(uci_value client transparent_udp_port "$LEGACY_CONFIG_FILE")
+	tproxy_mark=$(uci_value client tproxy_mark "$LEGACY_CONFIG_FILE")
+	node_name=$(uci_value "$selected_node" label "$LEGACY_CONFIG_FILE")
+	node_server=$(uci_value "$selected_node" server "$LEGACY_CONFIG_FILE")
+	node_server_name=$(uci_value "$selected_node" server_name "$LEGACY_CONFIG_FILE")
+	node_server_pin=$(uci_value "$selected_node" server_pin "$LEGACY_CONFIG_FILE")
+	node_key_id=$(uci_value "$selected_node" key_id "$LEGACY_CONFIG_FILE")
+	node_secret=$(uci_value "$selected_node" secret "$LEGACY_CONFIG_FILE")
+	[ -n "$node_name" ] || node_name="$selected_node"
+	[ -n "$node_server" ] || node_server="$server"
+	[ -n "$node_server_name" ] || node_server_name="$server_name"
+	[ -n "$node_server_pin" ] || node_server_pin="$server_pin"
+	[ -n "$node_key_id" ] || node_key_id="$key_id"
+	[ -n "$node_key_id" ] || node_key_id="$selected_node"
+	[ -n "$node_secret" ] || node_secret="$secret"
+	mkdir -p "$(dirname "$CONFIG_FILE")"
+	{
+		printf "config candy 'client'\n"
+		printf "\toption enabled '%s'\n" "${enabled:-0}"
+		printf "\toption mode 'rule'\n"
+		printf "\toption runtime_mode 'fallback'\n"
+		printf "\toption dns_remote '0'\n"
+		printf "\toption dns_mode 'smart'\n"
+		printf "\toption dns_split '1'\n"
+		printf "\toption dns_unknown_strategy 'parallel-validate'\n"
+		printf "\toption dns_answer_geo_validate '1'\n"
+			printf "\toption dns_domestic_resolvers 'system,223.5.5.5:53,119.29.29.29:53'\n"
+			printf "\toption dns_foreign_strategy 'through-selected-node'\n"
+			printf "\toption dns_egress_resolver '8.8.8.8:53'\n"
+			printf "\toption dns_bootstrap_resolvers 'system,223.5.5.5:53'\n"
+		printf "\toption dns_cache '1'\n"
+		printf "\toption performance_mode 'auto'\n"
+		printf "\toption lanes 'auto'\n"
+		printf "\toption udp_client_multiplier '1'\n"
+		printf "\toption udp_server_multiplier '1'\n"
+		printf "\toption dns_capture_lan '1'\n"
+		printf "\toption filter_aaaa '1'\n"
+		printf "\toption gfwlist_update_url 'https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt'\n"
+		printf "\toption gfwlist_auto_update '0'\n"
+		printf "\toption gfwlist_update_interval_hours '24'\n"
+		printf "\toption bypass_china_ip '1'\n"
+		printf "\toption geo_update_url 'https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt'\n"
+		printf "\toption geo_auto_update '0'\n"
+		printf "\toption geo_update_interval_hours '24'\n"
+		printf "\toption auto_firewall '%s'\n" "${auto_firewall:-0}"
+		printf "\toption redirect_tcp '%s'\n" "${redirect_tcp:-0}"
+		printf "\toption redirect_udp '%s'\n" "${redirect_udp:-0}"
+		printf "\toption block_quic '%s'\n" "${block_quic:-1}"
+		printf "\toption transparent_tcp_port '%s'\n" "${transparent_tcp_port:-12345}"
+		printf "\toption transparent_udp_port '%s'\n" "${transparent_udp_port:-12346}"
+		printf "\toption tproxy_mark '%s'\n\n" "${tproxy_mark:-100}"
+		printf "config node '%s'\n" "$selected_node"
+		printf "\toption enabled '1'\n"
+		printf "\toption name '%s'\n" "$node_name"
+		printf "\toption key_id '%s'\n" "$node_key_id"
+		printf "\toption server '%s'\n" "$node_server"
+		printf "\toption server_name '%s'\n" "$node_server_name"
+		printf "\toption server_pin '%s'\n" "$node_server_pin"
+		printf "\toption auth '%s'\n\n" "$node_secret"
+		printf "config group 'Proxy'\n"
+		printf "\toption type 'fallback'\n"
+		printf "\tlist node '%s'\n\n" "$selected_node"
+		printf "config rule\n"
+		printf "\toption value 'GEOIP,CN,DIRECT,no-resolve'\n\n"
+		printf "config rule\n"
+		printf "\toption value 'MATCH,Proxy'\n"
+	} > "$CONFIG_FILE"
+	chmod 0600 "$CONFIG_FILE"
+	log_msg "migrated legacy carrier config to candy"
+}
+
+find_rule_target_group() {
+	local group_id="$1" group_name
+	config_get group_name "$group_id" name "$group_id"
+	if [ "$group_name" = "$MIGRATION_RULE_TARGET" ]; then
+		MIGRATION_TARGET_IS_GROUP=1
+	fi
+}
+
+find_rule_target_node() {
+	local node_id="$1" node_name
+	[ -z "$MIGRATION_NODE_SECTION" ] || return 0
+	config_get node_name "$node_id" name "$node_id"
+	if [ "$MIGRATION_RULE_TARGET" = "$node_id" ] || [ "$MIGRATION_RULE_TARGET" = "$node_name" ]; then
+		MIGRATION_NODE_SECTION="$node_id"
+	fi
+}
+
+ensure_single_node_group() {
+	local node_id="$1" safe_id group_id group_name existing_type existing_name existing_nodes suffix=0
+	safe_id=$(printf '%s' "$node_id" | sed 's/[^A-Za-z0-9_]/_/g')
+	[ -n "$safe_id" ] || safe_id=node
+	while [ "$suffix" -lt 1000 ]; do
+		if [ "$suffix" -eq 0 ]; then
+			group_id="node_route_$safe_id"
+			group_name="node-$safe_id"
+		else
+			group_id="node_route_${safe_id}_$suffix"
+			group_name="node-$safe_id-$suffix"
+		fi
+		existing_type=$(uci -q get "candy.$group_id" 2>/dev/null || true)
+		if [ "$existing_type" = group ]; then
+			existing_name=$(uci -q get "candy.$group_id.name" 2>/dev/null || true)
+			existing_nodes=$(uci -q get "candy.$group_id.node" 2>/dev/null || true)
+			if [ "$existing_name" = "$group_name" ] && [ "$existing_nodes" = "$node_id" ]; then
+				printf '%s\n' "$group_name"
+				return 0
+			fi
+		elif [ -z "$existing_type" ] && ! uci -q show candy 2>/dev/null | grep -F ".name='$group_name'" >/dev/null; then
+			break
+		fi
+		suffix=$((suffix + 1))
+	done
+	[ "$suffix" -lt 1000 ] || return 1
+	uci -q set "candy.$group_id=group" || return 1
+	uci -q set "candy.$group_id.name=$group_name" || return 1
+	uci -q set "candy.$group_id.type=fallback" || return 1
+	uci -q delete "candy.$group_id.node" >/dev/null 2>&1 || true
+	uci -q add_list "candy.$group_id.node=$node_id" || return 1
+	printf '%s\n' "$group_name"
+}
+
+migrate_node_target_rule() {
+	local rule_id="$1" value kind target group_name rewritten
+	config_get value "$rule_id" value
+	[ -n "$value" ] || return 0
+	kind=$(printf '%s' "$value" | awk -F, '{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print toupper($1) }')
+	if [ "$kind" = MATCH ]; then
+		target=$(printf '%s' "$value" | awk -F, '{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2 }')
+	else
+		target=$(printf '%s' "$value" | awk -F, '{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3); print $3 }')
+	fi
+	[ -n "$target" ] || return 0
+	case "$target" in DIRECT|REJECT) return 0 ;; esac
+	MIGRATION_RULE_TARGET="$target"
+	MIGRATION_TARGET_IS_GROUP=0
+	config_foreach find_rule_target_group group
+	[ "$MIGRATION_TARGET_IS_GROUP" -eq 0 ] || return 0
+	MIGRATION_NODE_SECTION=
+	config_foreach find_rule_target_node node
+	[ -n "$MIGRATION_NODE_SECTION" ] || return 0
+	group_name=$(ensure_single_node_group "$MIGRATION_NODE_SECTION") || return 1
+	rewritten=$(printf '%s\n' "$value" | awk -F, -v replacement="$group_name" 'BEGIN { OFS="," } { target_index = toupper($1) == "MATCH" ? 2 : 3; $target_index = replacement; print }')
+	uci -q set "candy.$rule_id.value=$rewritten" || return 1
+	CANDY_NODE_RULES_MIGRATED=1
+}
+
+migrate_candy_node_rule_targets() {
+	[ -f "$CONFIG_FILE" ] || return 0
+	command -v uci >/dev/null 2>&1 || return 0
+	config_load candy || return 0
+	CANDY_NODE_RULES_MIGRATED=0
+	config_foreach migrate_node_target_rule rule || return 1
+	if [ "$CANDY_NODE_RULES_MIGRATED" -eq 1 ]; then
+		uci -q commit candy || return 1
+		log_msg "migrated direct node rule targets to single-node groups"
+	fi
+}
+
+validate_runtime_config() {
+	local output rc
+	if [ ! -x "$CANDY_CLIENT_BIN" ]; then
+		log_error "Candy Core is not installed or the active Core link is invalid"
+		return 1
+	fi
+	output=$("$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format candy-json --check-config 2>&1)
+	rc=$?
+	printf '%s\n' "$output" | log_command_output
+	return "$rc"
+}
+
+start_provider_updater() {
+	local geo_auto gfwlist_auto
+	config_get_bool geo_auto client geo_auto_update 0
+	config_get_bool gfwlist_auto client gfwlist_auto_update 0
+	if [ "$geo_auto" -ne 1 ] && [ "$gfwlist_auto" -ne 1 ]; then
+		return 0
+	fi
+	procd_open_instance provider-updater
+	procd_set_param command /etc/init.d/candy provider_update_loop
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+	log_msg "provider auto updater enabled"
+}
+
+with_network_apply_lock() {
+	local action="$1" waited=0 wait_seconds="${CANDY_NETWORK_LOCK_WAIT_SECONDS:-0}"
+	shift
+	while ! mkdir "$NETWORK_APPLY_LOCK_DIR" 2>/dev/null; do
+		if [ -f "$NETWORK_APPLY_LOCK_DIR/pid" ]; then
+			local lock_pid
+			lock_pid=$(cat "$NETWORK_APPLY_LOCK_DIR/pid" 2>/dev/null || true)
+			case "$lock_pid" in
+				''|*[!0-9]*) ;;
+				*)
+					if ! kill -0 "$lock_pid" 2>/dev/null; then
+						rm -rf "$NETWORK_APPLY_LOCK_DIR" 2>/dev/null || true
+						continue
+					fi
+					;;
+			esac
+		fi
+		if [ "$waited" -ge "$wait_seconds" ]; then
+			log_msg "network policy $action failed; another network apply is running"
+			return 1
+		fi
+		waited=$((waited + 1))
+		sleep 1
+	done
+	printf '%s\n' "$$" > "$NETWORK_APPLY_LOCK_DIR/pid" 2>/dev/null || true
+	printf '%s\n' "$action" > "$NETWORK_APPLY_LOCK_DIR/action" 2>/dev/null || true
+	trap 'rm -rf "$NETWORK_APPLY_LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+	"$@"
+	local rc=$?
+	rm -rf "$NETWORK_APPLY_LOCK_DIR" 2>/dev/null || true
+	trap - EXIT INT TERM
+	return "$rc"
+}
+
+apply_network_policy_now() {
+	config_load candy
+	log_msg "applying network policy"
+	if ! apply_firewall; then
+		rollback_network_policy_apply
+		return 1
+	fi
+	CANDY_SUPPRESS_STATUS_REFRESH=1
+	if ! apply_dns; then
+		CANDY_SUPPRESS_STATUS_REFRESH=0
+		rollback_network_policy_apply
+		return 1
+	fi
+	CANDY_SUPPRESS_STATUS_REFRESH=0
+	refresh_node_status_fast "running"
+	log_msg "network policy applied"
+}
+
+rollback_network_policy_apply() {
+	local rc=0
+	log_msg "rolling back partial network policy apply"
+	cleanup_firewall || rc=1
+	cleanup_dns || rc=1
+	if [ "$rc" -eq 0 ]; then
+		log_msg "partial network policy apply rolled back"
+	else
+		log_msg "partial network policy rollback incomplete"
+	fi
+	return "$rc"
+}
+
+cleanup_network_policy_now() {
+	local state="${CANDY_NETWORK_CLEANUP_STATE:-standby}" rc=0
+	log_msg "cleaning network policy"
+	cleanup_firewall || rc=1
+	cleanup_dns || rc=1
+	refresh_node_status_fast "$state" || rc=1
+	if [ "$rc" -eq 0 ]; then
+		log_msg "network policy cleaned"
+	else
+		log_msg "network policy cleanup incomplete"
+	fi
+	return "$rc"
+}
+
+network_apply() {
+	CANDY_NETWORK_LOCK_WAIT_SECONDS=20 with_network_apply_lock apply apply_network_policy_now
+}
+
+network_cleanup() {
+	CANDY_NETWORK_LOCK_WAIT_SECONDS="${CANDY_NETWORK_LOCK_WAIT_SECONDS:-30}" with_network_apply_lock cleanup cleanup_network_policy_now
+}
+
+schedule_network_policy_apply() {
+	if [ "$CANDY_BACKGROUND_INLINE" -eq 1 ]; then
+		(network_apply) >/dev/null 2>&1 &
+	else
+		run_detached_direct_command network_apply
+	fi
+}
+
+schedule_network_policy_cleanup() {
+	local state="${1:-standby}"
+	if [ "$CANDY_BACKGROUND_INLINE" -eq 1 ]; then
+		(CANDY_NETWORK_CLEANUP_STATE="$state"; network_cleanup) >/dev/null 2>&1 &
+	else
+		run_detached_direct_command network_cleanup "$state"
+	fi
+}
+
+current_lifecycle_transition() {
+	local state updated_at now age
+	[ -s "$CANDY_LIFECYCLE_FILE" ] || return 1
+	state=$(sed -n 's/.*"state":"\([^"]*\)".*/\1/p' "$CANDY_LIFECYCLE_FILE" | head -n1)
+	updated_at=$(sed -n 's/.*"updated_at":\([0-9][0-9]*\).*/\1/p' "$CANDY_LIFECYCLE_FILE" | head -n1)
+	case "$state" in starting|stopping) ;; *) return 1 ;; esac
+	case "$updated_at" in ''|*[!0-9]*) return 1 ;; esac
+	now=$(date +%s 2>/dev/null || true)
+	case "$now" in ''|*[!0-9]*) return 1 ;; esac
+	age=$((now - updated_at))
+	[ "$age" -ge 0 ] && [ "$age" -le "$CANDY_LIFECYCLE_TTL_SECONDS" ] || return 1
+	printf '%s\n' "$state"
+}
+
+status_service() {
+	local transition
+	if candy_process_running && current_readiness; then
+		printf 'running\n'
+		return 0
+	fi
+	if candy_process_running; then
+		printf 'starting\n'
+		return 0
+	fi
+	if [ -s "$NODE_STATUS_FILE" ] && grep -q '"state":"starting"' "$NODE_STATUS_FILE" 2>/dev/null; then
+		printf 'starting\n'
+		return 0
+	fi
+	transition=$(current_lifecycle_transition 2>/dev/null || true)
+	if [ -n "$transition" ]; then
+		printf '%s\n' "$transition"
+		return 0
+	fi
+	printf 'stopped\n'
+	return 3
+}
+
+running() {
+	candy_process_running && current_readiness
+}
+
+status() {
+	status_service
+}
+
+clear_passive_status() {
+	rm -f "$CANDY_PASSIVE_STATUS_FILE"
+}
+
+abort_failed_start() {
+	if [ -f /lib/functions/procd.sh ]; then
+		. /lib/functions/procd.sh
+		procd_kill candy >/dev/null 2>&1 || true
+	fi
+	rm -f "$CANDY_READY_FILE"
+}
+
+cleanup_failed_start() {
+	local cleanup_state="${1:-down}"
+	local abort_client="${2:-0}"
+	if [ "$abort_client" -eq 1 ]; then
+		abort_failed_start
+	else
+		rm -f "$CANDY_READY_FILE"
+	fi
+	clear_passive_status
+	write_lifecycle_state start stopping
+	if ! CANDY_NETWORK_CLEANUP_STATE="$cleanup_state" network_cleanup; then
+		log_msg "failed start cleanup incomplete; service remains stopping"
+		refresh_node_status_fast "down" || true
+		return 1
+	fi
+	refresh_node_status_fast "down" || true
+	write_lifecycle_state start stopped
+}
+
+start_service() {
+	CANDY_START_PHASE=failed
+	clear_passive_status
+	write_lifecycle_state start starting
+	rotate_log_file "$LOG_FILE"
+	: > "$TRAFFIC_LOG_FILE"
+	log_msg "start requested"
+	migrate_legacy_config
+	migrate_candy_node_rule_targets
+	migrate_reserved_dns_forward
+	config_load candy
+	local enabled
+	config_get_bool enabled client enabled 0
+	if [ "$enabled" -ne 1 ]; then
+		log_msg "start skipped: service disabled"
+		log_traffic_msg "service disabled; traffic capture is not active"
+		if cleanup_failed_start standby; then
+			CANDY_START_PHASE=disabled
+			return 0
+		fi
+		return 1
+	fi
+	log_msg "starting candy service"
+	if ! generate_config; then
+		log_error "runtime config generation failed"
+		rm -f "$RUNTIME_CONFIG" || log_msg "failed to remove stale runtime config"
+		cleanup_failed_start down || true
+		return 1
+	fi
+	if ! validate_runtime_config; then
+		log_error "runtime config preflight failed"
+		cleanup_failed_start down || true
+		return 1
+	fi
+	if ! ensure_no_existing_candy_client_before_start; then
+		log_error "stale Candy process could not be cleared"
+		cleanup_failed_start down || true
+		return 1
+	fi
+	if ! start_sdwan_netd; then
+		log_error "SD-WAN helper could not be started"
+		cleanup_failed_start down || true
+		return 1
+	fi
+	procd_open_instance
+	rm -f "$CANDY_READY_FILE"
+	if sdwan_enabled; then
+		procd_set_param command "$CANDY_INIT_SELF" run_sdwan
+		procd_set_param user candy-sdwan
+	else
+		procd_set_param command "$CANDY_INIT_SELF" run_client
+		# Root remains required for ordinary transparent proxy routing.
+		procd_set_param user root
+	fi
+	procd_set_param env CANDY_TRAFFIC_LOG="$TRAFFIC_LOG_FILE" CANDY_TRAFFIC_LOG_CONTROL="$TRAFFIC_LOG_CONTROL_FILE" CANDY_READY_FILE="$CANDY_READY_FILE" CANDY_PASSIVE_STATUS_FILE="$CANDY_PASSIVE_STATUS_FILE"
+	procd_set_param respawn 3600 10 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+	CANDY_START_PHASE=submitted
+	start_provider_updater
+}
+
+service_started() {
+	case "${CANDY_START_PHASE:-failed}" in
+		disabled)
+			return 0
+			;;
+		submitted)
+			CANDY_START_PHASE=post-submit
+			;;
+		*)
+			log_msg "candy service was not submitted to procd"
+			return 1
+			;;
+	esac
+	log_traffic_msg "traffic decision log started for this boot"
+	if ! wait_for_sdwan_netd; then
+		log_error "candy-netd socket readiness timed out"
+		cleanup_failed_start down 1 || true
+		return 1
+	fi
+	if ! wait_for_current_readiness "$CANDY_LISTENER_WAIT_SECONDS"; then
+		log_error "candy listener readiness timed out"
+		cleanup_failed_start down 1 || true
+		return 1
+	fi
+	if ! network_apply; then
+		log_error "network policy apply failed after readiness"
+		cleanup_failed_start down 1 || true
+		return 1
+	fi
+	refresh_node_status_fast "running"
+	log_msg "candy service submitted to procd"
+	write_lifecycle_state start running
+	CANDY_START_PHASE=running
+}
+
+stop_service() {
+	local cleanup_state=standby
+	log_msg "stop requested"
+	clear_passive_status
+	if [ "${CANDY_RESTART_IN_PROGRESS:-0}" -eq 1 ]; then
+		cleanup_state=starting
+		write_lifecycle_state restart starting
+		log_msg "restarting candy service"
+	else
+		write_lifecycle_state stop stopping
+		log_msg "stopping candy service"
+	fi
+	config_load candy 2>/dev/null || true
+	if [ "${CANDY_RESTART_IN_PROGRESS:-0}" -eq 1 ]; then
+		refresh_node_status_fast "starting"
+	else
+		refresh_node_status_fast "standby"
+	fi
+	if [ "${CANDY_SKIP_NETWORK_CLEANUP:-0}" -ne 1 ] && ! CANDY_NETWORK_CLEANUP_STATE="$cleanup_state" network_cleanup; then
+		log_error "network policy cleanup failed; service remains stopping"
+		return 1
+	fi
+	if [ "${CANDY_RESTART_IN_PROGRESS:-0}" -eq 1 ]; then
+		write_lifecycle_state restart starting
+	else
+		write_lifecycle_state stop stopped
+	fi
+	log_msg "stop completed"
+}
+
+stop() {
+	local pids cleanup_state=standby
+	log_msg "procd stop requested"
+	clear_passive_status
+	if [ "${CANDY_RESTART_IN_PROGRESS:-0}" -eq 1 ]; then
+		cleanup_state=starting
+		write_lifecycle_state restart starting
+		log_msg "restarting candy service"
+	else
+		write_lifecycle_state stop stopping
+		log_msg "stopping candy service"
+	fi
+	config_load candy 2>/dev/null || true
+	if [ "${CANDY_RESTART_IN_PROGRESS:-0}" -eq 1 ]; then
+		refresh_node_status_fast "starting"
+	else
+		refresh_node_status_fast "standby"
+	fi
+	if [ -f /lib/functions/procd.sh ]; then
+		. /lib/functions/procd.sh
+		procd_kill candy >/dev/null 2>&1 || true
+	fi
+	if ! wait_for_candy_client_exit 2; then
+		pids=$(candy_client_pids)
+		[ -z "$pids" ] || kill -TERM $pids 2>/dev/null || true
+		wait_for_candy_client_exit 1 >/dev/null 2>&1 || true
+	fi
+	if [ "${CANDY_SKIP_NETWORK_CLEANUP:-0}" -ne 1 ] && ! CANDY_NETWORK_CLEANUP_STATE="$cleanup_state" network_cleanup; then
+		log_error "network policy cleanup failed; service remains stopping"
+		return 1
+	fi
+	if [ "${CANDY_RESTART_IN_PROGRESS:-0}" -eq 1 ]; then
+		write_lifecycle_state restart starting
+	else
+		write_lifecycle_state stop stopped
+	fi
+	log_msg "procd stop completed"
+	return 0
+}
+
+service_failed() {
+	log_error "procd reported a Candy service instance failure"
+	write_lifecycle_state start failed || true
+}
+
+restart_queued_locked() {
+	write_lifecycle_state restart starting
+	log_msg "restart requested and queued"
+	if firewall_restart_can_skip_cleanup; then
+		CANDY_RESTART_IN_PROGRESS=1 CANDY_SKIP_NETWORK_CLEANUP=1 "$CANDY_INIT_SELF" stop >/dev/null 2>&1 || true
+	else
+		CANDY_RESTART_IN_PROGRESS=1 "$CANDY_INIT_SELF" stop >/dev/null 2>&1 || true
+	fi
+	write_lifecycle_state restart starting
+	wait_for_candy_client_exit "$CANDY_SERVICE_WAIT_SECONDS" || true
+	if "$CANDY_INIT_SELF" start >/dev/null 2>&1; then
+		log_msg "restart completed"
+	else
+		log_error "restart start phase failed"
+		return 1
+	fi
+}
+
+restart_queued() {
+	with_service_lifecycle_lock restart_queued_locked
+}
+
+generate_runtime_candidate() {
+	local active_runtime="$RUNTIME_CONFIG" rc
+	RUNTIME_CONFIG="$RUNTIME_NEXT_CONFIG"
+	CANDY_GENERATE_SKIP_STATUS=1 generate_config
+	rc=$?
+	RUNTIME_CONFIG="$active_runtime"
+	return "$rc"
+}
+
+validate_runtime_candidate() {
+	local active_runtime="$RUNTIME_CONFIG" rc
+	RUNTIME_CONFIG="$RUNTIME_NEXT_CONFIG"
+	validate_runtime_config
+	rc=$?
+	RUNTIME_CONFIG="$active_runtime"
+	return "$rc"
+}
+
+persist_runtime_generation() {
+	local generation="$1" temporary
+	temporary=$(atomic_temp_path "$CANDY_GENERATION_FILE") || return 1
+	printf '%s\n' "$generation" > "$temporary" || {
+		rm -f "$temporary"
+		return 1
+	}
+	atomic_commit_file "$temporary" "$CANDY_GENERATION_FILE" 0600
+}
+
+verify_promoted_runtime_candidate() {
+	local expected_sha="$1" active_sha
+	if [ -e "$RUNTIME_NEXT_CONFIG" ] || [ -L "$RUNTIME_NEXT_CONFIG" ]; then
+		log_msg "runtime reload protocol error: candidate was not promoted"
+		return 1
+	fi
+	if [ ! -f "$RUNTIME_CONFIG" ] || [ -L "$RUNTIME_CONFIG" ]; then
+		log_msg "runtime reload protocol error: active config is not a regular file"
+		return 1
+	fi
+	active_sha=$(sha256sum "$RUNTIME_CONFIG" 2>/dev/null | awk '{print $1}')
+	if [ "$active_sha" != "$expected_sha" ]; then
+		log_msg "runtime reload protocol error: active config SHA-256 mismatch"
+		return 1
+	fi
+	chmod 0600 "$RUNTIME_CONFIG" || {
+		log_msg "runtime reload protocol error: active config permissions could not be secured"
+		return 1
+	}
+}
+
+reload_runtime_locked() {
+	local candidate_sha expected_generation applied_generation output ack_json rc ok mode error_code
+	if ! candy_process_running || [ ! -S "$CANDY_CONTROL_SOCKET" ]; then
+		log_msg "runtime reload unavailable: Candy control socket is not active"
+		return 1
+	fi
+	migrate_legacy_config
+	migrate_candy_node_rule_targets
+	migrate_reserved_dns_forward
+	config_load candy || return 1
+	rm -f "$RUNTIME_NEXT_CONFIG"
+	if ! generate_runtime_candidate; then
+		log_msg "runtime reload candidate generation failed"
+		rm -f "$RUNTIME_NEXT_CONFIG"
+		return 1
+	fi
+	if ! validate_runtime_candidate; then
+		log_msg "runtime reload candidate validation failed"
+		rm -f "$RUNTIME_NEXT_CONFIG"
+		return 1
+	fi
+	candidate_sha=$(sha256sum "$RUNTIME_NEXT_CONFIG" 2>/dev/null | awk '{print $1}')
+	case "$candidate_sha" in
+		????????????????????????????????????????????????????????????????) ;;
+		*)
+			log_msg "runtime reload candidate SHA-256 failed"
+			rm -f "$RUNTIME_NEXT_CONFIG"
+			return 1
+			;;
+	esac
+	expected_generation=$(cat "$CANDY_GENERATION_FILE" 2>/dev/null || true)
+	case "$expected_generation" in
+		''|*[!0-9]*) expected_generation=$(jsonfilter -i "$CANDY_PASSIVE_STATUS_FILE" -e '@.generation' 2>/dev/null || true) ;;
+	esac
+	case "$expected_generation" in
+		''|*[!0-9]*)
+			log_msg "runtime reload generation is unavailable"
+			rm -f "$RUNTIME_NEXT_CONFIG"
+			return 1
+			;;
+	esac
+	output=$("$CANDY_CLIENT_BIN" reload \
+		--control-socket "$CANDY_CONTROL_SOCKET" \
+		--candidate "$RUNTIME_NEXT_CONFIG" \
+		--active "$RUNTIME_CONFIG" \
+		--sha256 "$candidate_sha" \
+		--expected-generation "$expected_generation" 2>&1)
+	rc=$?
+	printf '%s\n' "$output" | log_command_output
+	ack_json=$(printf '%s\n' "$output" | sed -n '1p')
+	ok=$(printf '%s' "$ack_json" | jsonfilter -e '@.ok' 2>/dev/null || true)
+	mode=$(printf '%s' "$ack_json" | jsonfilter -e '@.mode' 2>/dev/null || true)
+	error_code=$(printf '%s' "$ack_json" | jsonfilter -e '@.error_code' 2>/dev/null || true)
+	applied_generation=$(printf '%s' "$ack_json" | jsonfilter -e '@.generation' 2>/dev/null || true)
+	if [ "$ok" = true ] || [ "$ok" = 1 ]; then
+		verify_promoted_runtime_candidate "$candidate_sha" || return 1
+		case "$applied_generation" in
+			''|*[!0-9]*)
+				log_msg "runtime reload protocol error: ACK generation is invalid"
+				return 1
+				;;
+			*) persist_runtime_generation "$applied_generation" || return 1 ;;
+		esac
+		CANDY_SUPPRESS_STATUS_REFRESH=1
+		if ! apply_dns; then
+			CANDY_SUPPRESS_STATUS_REFRESH=0
+			log_msg "runtime configuration applied, but dnsmasq policy refresh failed"
+			refresh_node_status_fast "running" || true
+			return 1
+		fi
+		CANDY_SUPPRESS_STATUS_REFRESH=0
+		log_msg "runtime configuration applied in ${mode:-unknown} mode"
+		refresh_node_status_fast "running" || true
+		return 0
+	fi
+	if [ "$mode" = cold-network ] || [ "$error_code" = cold_network_change ]; then
+		mv -f "$RUNTIME_NEXT_CONFIG" "$RUNTIME_CONFIG" || return 1
+		chmod 0600 "$RUNTIME_CONFIG" || return 1
+		log_msg "network bindings changed; scheduling controlled Candy restart"
+		restart_queued_locked
+		return $?
+	fi
+	if [ "$rc" -ne 0 ] && [ -z "$error_code" ]; then
+		log_msg "runtime reload request failed"
+		rm -f "$RUNTIME_NEXT_CONFIG"
+		return 1
+	fi
+	log_msg "runtime reload rejected: ${error_code:-unknown_error}"
+	rm -f "$RUNTIME_NEXT_CONFIG"
+	return 1
+}
+
+reload_runtime() {
+	with_service_lifecycle_lock reload_runtime_locked
+}
+
+reload_service() {
+	reload_runtime
+}
+
+service_triggers() {
+	procd_add_reload_trigger "candy"
+}
+
+case "${CANDY_DIRECT_COMMAND:-}" in
+	status_probe)
+		run_status_probe "${CANDY_DIRECT_STATE:-running}"
+		exit $?
+		;;
+	network_apply)
+		network_apply
+		exit $?
+		;;
+	network_cleanup)
+		CANDY_NETWORK_CLEANUP_STATE="${CANDY_DIRECT_STATE:-standby}" network_cleanup
+		exit $?
+		;;
+esac

@@ -1,0 +1,17 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y lua5.1
+      - run: scripts/verify.sh
+
+# Rust builds and platform release matrices are enabled after the private
+# candy-core repository and an immutable Core commit are configured. Runtime
+# releases must never fetch a branch or silently fall back to copied Core source.

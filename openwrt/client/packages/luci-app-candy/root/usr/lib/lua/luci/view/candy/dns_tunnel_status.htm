@@ -1,0 +1,37 @@
+<style>
+.candy-dns-tunnels { margin: 0; }
+.candy-dns-tunnels .table { margin: 0; }
+.candy-dns-tunnel-state { display: inline-flex; align-items: center; gap: .45em; white-space: nowrap; }
+.candy-dns-tunnel-dot { width: .65em; height: .65em; border-radius: 50%; background: #c00; box-shadow: 0 0 0 2px rgba(204, 0, 0, .12); }
+.candy-dns-tunnel-state.connected .candy-dns-tunnel-dot { background: #2a7; box-shadow: 0 0 0 2px rgba(34, 170, 119, .14); }
+.candy-dns-tunnel-resolver { font-family: monospace; }
+@media screen and (max-width: 600px) {
+	.candy-dns-tunnels .table-titles { display: none; }
+	.candy-dns-tunnels .tr { display: grid; grid-template-columns: 1fr auto; gap: .35em 1em; padding: .75em 0; }
+	.candy-dns-tunnels .td { display: block; padding: 0; border: 0; }
+	.candy-dns-tunnels .candy-dns-tunnel-resolver { grid-column: 1 / -1; color: #666; }
+}
+</style>
+
+<div class="candy-dns-tunnels">
+	<table class="table">
+		<thead><tr class="tr table-titles">
+			<th class="th"><%:Node%></th>
+			<th class="th"><%:Status%></th>
+			<th class="th"><%:Resolver%></th>
+		</tr></thead>
+		<tbody>
+		<% if #self.rows == 0 then %>
+			<tr class="tr"><td class="td" colspan="3"><em><%:Not connected%></em></td></tr>
+		<% else %>
+			<% for _, row in ipairs(self.rows) do %>
+			<tr class="tr">
+				<td class="td"><%=luci.xml.pcdata(row.node)%></td>
+				<td class="td"><span class="candy-dns-tunnel-state<%=row.connected and " connected" or ""%>"><span class="candy-dns-tunnel-dot"></span><%=luci.xml.pcdata(row.connected and translate("Connected") or translate("Disconnected"))%></span></td>
+				<td class="td candy-dns-tunnel-resolver"><%=luci.xml.pcdata(row.resolver)%></td>
+			</tr>
+			<% end %>
+		<% end %>
+		</tbody>
+	</table>
+</div>

@@ -1,0 +1,92 @@
+include $(TOPDIR)/rules.mk
+
+PKG_NAME:=candy-client
+PKG_VERSION:=0.4.0
+# OpenWrt requires a package revision. This is internal metadata, not part of
+# the Candy product version shown to users.
+PKG_RELEASE:=1
+CANDY_RUNTIME_BIN_DIR?=
+
+PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
+
+include $(INCLUDE_DIR)/package.mk
+
+define Package/candy-client
+  SECTION:=net
+  CATEGORY:=Network
+  TITLE:=Candy OpenWrt client runtime
+  DEPENDS:=+libgcc +ca-bundle +uclient-fetch +jsonfilter +kmod-tun +kmod-nft-tproxy +kmod-nf-tproxy
+  USERID:=candy-sdwan=789:candy-sdwan=789
+endef
+
+define Package/candy-client/description
+  Candy client Runtime binaries, lifecycle, network policy and Core version management.
+endef
+
+define Package/candy-client/conffiles
+/etc/config/candy
+endef
+
+define Build/Prepare
+	rm -rf $(PKG_BUILD_DIR)
+	mkdir -p $(PKG_BUILD_DIR)
+	[ -n "$(CANDY_RUNTIME_BIN_DIR)" ] || { echo "CANDY_RUNTIME_BIN_DIR is required"; exit 1; }
+	for component in candy-client candy-netd candy-sdwan; do \
+		[ -x "$(CANDY_RUNTIME_BIN_DIR)/$$$$component" ] || { echo "missing Runtime binary: $$$$component"; exit 1; }; \
+		cp "$(CANDY_RUNTIME_BIN_DIR)/$$$$component" "$(PKG_BUILD_DIR)/$$$$component"; \
+	done
+endef
+
+define Build/Compile
+endef
+
+define Package/candy-client/install
+	$(INSTALL_DIR) $(1)/usr/bin/
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-client $(1)/usr/bin/candy-client
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-netd $(1)/usr/bin/candy-netd
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan $(1)/usr/bin/candy-sdwan
+	ln -sf candy-client $(1)/usr/bin/client-cli
+	$(INSTALL_DIR) $(1)/usr/libexec
+	$(INSTALL_BIN) ./candy-core-manager $(1)/usr/libexec/candy-core-manager
+	$(INSTALL_DIR) $(1)/etc/init.d
+	$(INSTALL_BIN) ./candy.init $(1)/etc/init.d/candy
+	$(SED) 's|^CANDY_VERSION=.*|CANDY_VERSION=$$$${CANDY_VERSION:-$(PKG_VERSION)}|' $(1)/etc/init.d/candy
+	$(SED) 's|^CANDY_RELEASE=.*|CANDY_RELEASE=$$$${CANDY_RELEASE:-$(PKG_RELEASE)}|' $(1)/etc/init.d/candy
+	$(INSTALL_DIR) $(1)/etc/config
+	$(INSTALL_CONF) ./candy.config $(1)/etc/config/candy
+	$(INSTALL_DIR) $(1)/usr/share/candy/rulesets
+	$(INSTALL_DATA) ./rulesets/cn-ip.cidr $(1)/usr/share/candy/rulesets/cn-ip.cidr
+	$(INSTALL_DATA) ./rulesets/gfwlist.domains $(1)/usr/share/candy/rulesets/gfwlist.domains
+endef
+
+define Package/candy-client/postinst
+#!/bin/sh
+[ -n "$$IPKG_INSTROOT" ] && exit 0
+if [ "$$(id -u candy-sdwan 2>/dev/null)" != "789" ]; then
+	awk -F: '$$1 != "candy-sdwan" && $$3 == 789 { found=1 } END { exit !found }' /etc/passwd && exit 1
+	awk -F: '$$1 != "candy-sdwan" && $$3 == 789 { found=1 } END { exit !found }' /etc/group && exit 1
+	sed -i 's/^\(candy-sdwan:[^:]*:\)[0-9][0-9]*:[0-9][0-9]*:/\1789:789:/' /etc/passwd || exit 1
+	sed -i 's/^\(candy-sdwan:[^:]*:\)[0-9][0-9]*:/\1789:/' /etc/group || exit 1
+fi
+if [ -f /etc/init.d/candy.apk-new ]; then
+	cp /etc/init.d/candy.apk-new /etc/init.d/candy
+	chmod 0755 /etc/init.d/candy
+	rm -f /etc/init.d/candy.apk-new
+fi
+mkdir -p /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache
+chmod 0700 /var/lib/candy /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache
+exit 0
+endef
+
+define Package/candy-client/prerm
+#!/bin/sh
+[ -n "$$IPKG_INSTROOT" ] && exit 0
+if [ -x /etc/init.d/candy ]; then
+	/etc/init.d/candy disable >/dev/null 2>&1 || true
+	/etc/init.d/candy stop >/dev/null 2>&1 || exit 1
+fi
+# Identity, signed caches, netd journal, and epoch files are deliberately kept.
+exit 0
+endef
+
+$(eval $(call BuildPackage,candy-client))

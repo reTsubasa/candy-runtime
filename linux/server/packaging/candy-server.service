@@ -1,0 +1,20 @@
+[Unit]
+Description=Candy server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=candy
+Group=candy
+WorkingDirectory=/var/lib/candy
+ExecStart=/opt/candy/current/serverd-linux --config /etc/candy/server.toml
+Restart=on-failure
+RestartSec=2s
+LimitNOFILE=1048576
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

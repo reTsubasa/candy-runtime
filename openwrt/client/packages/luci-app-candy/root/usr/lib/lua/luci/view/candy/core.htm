@@ -1,0 +1,195 @@
+<%+header%>
+
+<%
+local i18n = require "luci.i18n"
+local xml = require "luci.xml"
+local auth_token = luci.dispatcher.context.authsession or ""
+local function js_string(value)
+	return string.format("%q", tostring(value or ""))
+end
+%>
+
+<h2 name="content"><%:Core%></h2>
+
+<style>
+.candy-core-actions { display: flex; flex-wrap: wrap; gap: .5em; align-items: center; }
+.candy-core-actions form { margin: 0; }
+.candy-core-operation { border-left: 4px solid #777; padding: .65em .9em; margin-bottom: 1em; }
+.candy-core-operation.running { border-color: #d7a51d; }
+.candy-core-operation.completed { border-color: #2e7d32; }
+.candy-core-operation.error { border-color: #c62828; }
+.candy-core-table-scroll { overflow-x: auto; }
+.candy-core-table-scroll .table { min-width: 46em; }
+.candy-core-install-grid { display: grid; grid-template-columns: minmax(10em, .7fr) minmax(18em, 2fr); gap: .75em 1em; align-items: center; }
+.candy-core-install-grid label { font-weight: 600; }
+.candy-core-install-grid input { width: 100%; box-sizing: border-box; }
+.candy-core-install-submit { grid-column: 2; }
+@media (max-width: 700px) {
+	.candy-core-install-grid { grid-template-columns: 1fr; }
+	.candy-core-install-submit { grid-column: 1; }
+}
+</style>
+
+<div id="candy-core-operation" class="candy-core-operation" style="display:none"></div>
+
+<div class="cbi-map">
+	<h3><%:Runtime Core%></h3>
+	<div class="cbi-section">
+		<table class="table">
+			<tr class="tr"><td class="td left" width="33%"><%:Active version%></td><td id="candy-core-current" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Rollback version%></td><td id="candy-core-previous" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Core API%></td><td id="candy-core-api" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Protocol version%></td><td id="candy-core-protocol" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Architecture%></td><td id="candy-core-architecture" class="td left">-</td></tr>
+		</table>
+		<div class="candy-core-actions">
+			<form method="post" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core_rollback')%>">
+				<input type="hidden" name="token" value="<%=xml.pcdata(auth_token)%>" />
+				<button id="candy-core-rollback" class="cbi-button cbi-button-action" type="submit"><%:Rollback%></button>
+			</form>
+		</div>
+	</div>
+</div>
+
+<div class="cbi-map">
+	<h3><%:Install Core bundle%></h3>
+	<div class="cbi-section">
+		<form method="post" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core_install')%>" class="candy-core-install-grid">
+			<input type="hidden" name="token" value="<%=xml.pcdata(auth_token)%>" />
+			<label for="candy-core-install-version"><%:Version%></label>
+			<input id="candy-core-install-version" class="cbi-input-text" type="text" name="version" required pattern="[0-9]+\.[0-9]+\.[0-9]+([+.-][0-9A-Za-z][0-9A-Za-z.+-]*)?" />
+			<label for="candy-core-install-url"><%:Bundle URL%></label>
+			<input id="candy-core-install-url" class="cbi-input-text" type="url" name="url" required pattern="https://.*" />
+			<label for="candy-core-install-sha"><%:SHA-256%></label>
+			<input id="candy-core-install-sha" class="cbi-input-text" type="text" name="sha256" required minlength="64" maxlength="64" pattern="[0-9A-Fa-f]{64}" />
+			<div class="candy-core-install-submit"><button id="candy-core-install-submit" class="cbi-button cbi-button-apply" type="submit"><%:Install%></button></div>
+		</form>
+	</div>
+</div>
+
+<div class="cbi-map">
+	<h3><%:Installed Core versions%></h3>
+	<div class="cbi-section candy-core-table-scroll">
+		<table class="table">
+			<thead><tr class="tr table-titles"><th class="th"><%:Version%></th><th class="th"><%:State%></th><th class="th"><%:Managed%></th><th class="th"><%:Actions%></th></tr></thead>
+			<tbody id="candy-core-installed"><tr class="tr"><td class="td" colspan="4">-</td></tr></tbody>
+		</table>
+	</div>
+</div>
+
+<script type="text/javascript">
+var candyCoreStatusUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core_status')%>";
+var candyCoreActivateUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core_activate')%>";
+var candyCoreRemoveUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core_remove')%>";
+var candyCoreToken = <%=js_string(auth_token)%>;
+var candyCoreTimer = null;
+var candyCoreLabels = {
+	active: <%=js_string(i18n.translate("Active"))%>,
+	rollback: <%=js_string(i18n.translate("Rollback"))%>,
+	inactive: <%=js_string(i18n.translate("Inactive"))%>,
+	yes: <%=js_string(i18n.translate("Yes"))%>,
+	no: <%=js_string(i18n.translate("No"))%>,
+	activate: <%=js_string(i18n.translate("Activate"))%>,
+	remove: <%=js_string(i18n.translate("Remove"))%>,
+	none: <%=js_string(i18n.translate("None"))%>
+};
+
+function candyCoreText(value) {
+	return value === null || value === undefined || value === "" ? "-" : String(value);
+}
+
+function candyCoreSetText(id, value) {
+	var node = document.getElementById(id);
+	if (node) node.textContent = candyCoreText(value);
+}
+
+function candyCoreActionForm(url, version, label, className) {
+	var form = document.createElement("form");
+	var input = document.createElement("input");
+	var button = document.createElement("button");
+	form.method = "post";
+	form.action = url;
+	input.type = "hidden";
+	input.name = "version";
+	input.value = version;
+	var token = document.createElement("input");
+	token.type = "hidden";
+	token.name = "token";
+	token.value = candyCoreToken;
+	button.type = "submit";
+	button.className = className;
+	button.textContent = label;
+	form.appendChild(input);
+	form.appendChild(token);
+	form.appendChild(button);
+	return form;
+}
+
+function candyCoreRender(data) {
+	var bundle = data.current_manifest || {};
+	var manifest = bundle.core || {};
+	var artifact = bundle.artifact || {};
+	var protocol = manifest.protocol_version || {};
+	var operation = data.operation || {};
+	var operationNode = document.getElementById("candy-core-operation");
+	var rollbackButton = document.getElementById("candy-core-rollback");
+	var installButton = document.getElementById("candy-core-install-submit");
+	var body = document.getElementById("candy-core-installed");
+	var installed = data.installed || [];
+	var busy = operation.state === "running";
+	var row, cell, actions, state;
+	candyCoreSetText("candy-core-current", data.current_version);
+	candyCoreSetText("candy-core-previous", data.previous_version);
+	candyCoreSetText("candy-core-api", manifest.core_api_version || data.required_core_api_version);
+	candyCoreSetText("candy-core-protocol", protocol.major === undefined ? null : protocol.major + "." + protocol.minor);
+	candyCoreSetText("candy-core-architecture", artifact.target_arch);
+	if (rollbackButton) rollbackButton.disabled = !data.previous_version || busy;
+	if (installButton) installButton.disabled = busy;
+	if (operationNode) {
+		operationNode.style.display = operation.state || data.error ? "" : "none";
+		operationNode.className = "candy-core-operation " + (operation.state || "error");
+		operationNode.textContent = data.error || operation.message || "";
+	}
+	if (!body) return;
+	body.textContent = "";
+	if (!installed.length) {
+		row = document.createElement("tr");
+		cell = document.createElement("td");
+		cell.className = "td";
+		cell.colSpan = 4;
+		cell.textContent = candyCoreLabels.none;
+		row.appendChild(cell);
+		body.appendChild(row);
+		return;
+	}
+	installed.forEach(function(item) {
+		row = document.createElement("tr"); row.className = "tr";
+		cell = document.createElement("td"); cell.className = "td"; cell.textContent = candyCoreText(item.version); row.appendChild(cell);
+		state = item.active ? candyCoreLabels.active : (item.rollback ? candyCoreLabels.rollback : candyCoreLabels.inactive);
+		cell = document.createElement("td"); cell.className = "td"; cell.textContent = state; row.appendChild(cell);
+		cell = document.createElement("td"); cell.className = "td"; cell.textContent = item.managed ? candyCoreLabels.yes : candyCoreLabels.no; row.appendChild(cell);
+		actions = document.createElement("td"); actions.className = "td candy-core-actions";
+		if (!busy && item.managed && !item.active) actions.appendChild(candyCoreActionForm(candyCoreActivateUrl, item.version, candyCoreLabels.activate, "cbi-button cbi-button-apply"));
+		if (!busy && !item.active && !item.rollback) actions.appendChild(candyCoreActionForm(candyCoreRemoveUrl, item.version, candyCoreLabels.remove, "cbi-button cbi-button-reset"));
+		row.appendChild(actions); body.appendChild(row);
+	});
+}
+
+function refreshCandyCoreStatus() {
+	var xhr = new XMLHttpRequest();
+	if (candyCoreTimer !== null) { clearTimeout(candyCoreTimer); candyCoreTimer = null; }
+	xhr.open("GET", candyCoreStatusUrl + "?_=" + Date.now(), true);
+	xhr.onreadystatechange = function() {
+		if (xhr.readyState !== 4) return;
+		if (xhr.status === 200) {
+			try { candyCoreRender(JSON.parse(xhr.responseText || "{}")); } catch (e) {}
+		}
+		candyCoreTimer = setTimeout(refreshCandyCoreStatus, 2000);
+	};
+	xhr.send(null);
+}
+
+refreshCandyCoreStatus();
+</script>
+
+<%+footer%>

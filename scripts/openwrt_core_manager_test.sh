@@ -1,0 +1,200 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/candy-core-manager-test.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+bin="$tmp/bin"
+cores="$tmp/cores"
+mkdir -p "$bin" "$cores"
+case "$(uname -m)" in
+	x86_64|amd64) test_arch=x86_64 ;;
+	aarch64|arm64) test_arch=aarch64 ;;
+	arm*) test_arch=arm ;;
+	*) printf '%s\n' "unsupported test architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+export TEST_CORE_ARCH="$test_arch"
+
+cat > "$bin/jsonfilter" <<'EOF'
+#!/bin/sh
+file=
+expression=
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		-i) file=$2; shift 2 ;;
+		-e) expression=$2; shift 2 ;;
+		*) shift ;;
+	esac
+done
+case "$expression" in
+	'@.schema_version') key=schema_version ;;
+	'@.core_api_version') key=core_api_version ;;
+	'@.core_version') key=core_version ;;
+	'@.core.schema_version') key=schema_version ;;
+	'@.core.core_api_version') key=core_api_version ;;
+	'@.core.core_version') key=core_version ;;
+	'@.artifact.target_os') key=target_os ;;
+	'@.artifact.target_arch') key=target_arch ;;
+	'@.artifact.library') key=library ;;
+	'@.artifact.library_sha256') key=library_sha256 ;;
+	'@.state') key=state ;;
+	*) exit 1 ;;
+esac
+sed -n "s/.*\"$key\":[ ]*\"\{0,1\}\([^\",}]*\).*/\1/p" "$file"
+EOF
+chmod +x "$bin/jsonfilter"
+
+cat > "$bin/uclient-fetch" <<'EOF'
+#!/bin/sh
+destination=
+url=
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		-O) destination=$2; shift 2 ;;
+		-q) shift ;;
+		*) url=$1; shift ;;
+	esac
+done
+case "$url" in file://*) cp "${url#file://}" "$destination" ;; *) exit 1 ;; esac
+EOF
+chmod +x "$bin/uclient-fetch"
+
+cat > "$bin/timeout" <<'EOF'
+#!/bin/sh
+shift
+exec "$@"
+EOF
+chmod +x "$bin/timeout"
+
+cat > "$bin/core-inspector" <<'EOF'
+#!/bin/sh
+cat "$1"
+EOF
+chmod +x "$bin/core-inspector"
+
+cat > "$bin/core-signature-verifier" <<'EOF'
+#!/bin/sh
+[ "$(cat "$2")" = trusted-test-signature ]
+EOF
+chmod +x "$bin/core-signature-verifier"
+
+cat > "$bin/runtime-health-check" <<'EOF'
+#!/bin/sh
+[ "$1" = client ]
+EOF
+chmod +x "$bin/runtime-health-check"
+
+cat > "$bin/candy-service" <<'EOF'
+#!/bin/sh
+case "$1" in
+	status) printf '%s\n' running ;;
+	restart)
+		printf '%s\n' restart >> "$FAKE_SERVICE_LOG"
+		if [ -f "$FAKE_SERVICE_FAIL_ONCE" ]; then
+			rm -f "$FAKE_SERVICE_FAIL_ONCE"
+			exit 1
+		fi
+		;;
+	*) exit 1 ;;
+esac
+EOF
+chmod +x "$bin/candy-service"
+
+make_bundle() {
+	local version="$1" api="$2" bundle="$3" stage="$tmp/stage-$1" library_sha
+	rm -rf "$stage"
+	mkdir -p "$stage"
+	printf '%s\n' "{\"schema_version\":1,\"core_api_version\":$api,\"core_version\":\"$version\",\"protocol_version\":{\"major\":0,\"minor\":3},\"features\":[]}" > "$stage/libcandy_core.so"
+	library_sha=$(sha256sum "$stage/libcandy_core.so" | awk '{ print $1 }')
+	cat > "$stage/manifest.json" <<EOF
+{"schema_version":1,"core":{"schema_version":1,"core_api_version":$api,"core_version":"$version","protocol_version":{"major":0,"minor":3},"features":[]},"artifact":{"target_os":"linux","target_arch":"$TEST_CORE_ARCH","libc":"test","library":"libcandy_core.so","library_sha256":"$library_sha"}}
+EOF
+	printf '%s\n' trusted-test-signature > "$stage/manifest.sig"
+	tar -czf "$bundle" -C "$stage" manifest.json manifest.sig libcandy_core.so
+}
+
+manager="$root/openwrt/client/packages/candy-client/candy-core-manager"
+export PATH="$bin:$PATH"
+export CANDY_CORE_ROOT="$cores"
+export CANDY_CORE_CURRENT_LINK="$cores/current"
+export CANDY_CORE_PREVIOUS_LINK="$cores/previous"
+export CANDY_SERVICE_INIT="$bin/candy-service"
+export CANDY_CORE_INSPECTOR="$bin/core-inspector"
+export CANDY_CORE_SIGNATURE_VERIFIER="$bin/core-signature-verifier"
+export CANDY_RUNTIME_HEALTH_CHECK="$bin/runtime-health-check"
+export CANDY_CORE_LOCK_DIR="$tmp/core-manager.lock"
+export CANDY_CORE_OPERATION_FILE="$tmp/core-operation.json"
+export CANDY_CORE_ALLOW_FILE_URL=1
+export FAKE_SERVICE_LOG="$tmp/service.log"
+export FAKE_SERVICE_FAIL_ONCE="$tmp/service-fail-once"
+
+mkdir "$CANDY_CORE_LOCK_DIR"
+printf '%s\n' "$$" > "$CANDY_CORE_LOCK_DIR/pid"
+printf '%s\n' '{"state":"running","action":"install","version":"0.4.0","message":"busy","updated_at":1}' > "$CANDY_CORE_OPERATION_FILE"
+if "$manager" remove 0.4.0 >/dev/null 2>&1; then
+	echo "concurrent Core operation bypassed the manager lock" >&2
+	exit 1
+fi
+grep -q '"state":"running"' "$CANDY_CORE_OPERATION_FILE"
+rm -f "$CANDY_CORE_LOCK_DIR/pid"
+rmdir "$CANDY_CORE_LOCK_DIR"
+mkdir "$CANDY_CORE_LOCK_DIR"
+printf '%s\n' 99999999 > "$CANDY_CORE_LOCK_DIR/pid"
+
+make_bundle 0.4.1 1 "$tmp/core-0.4.1.tar.gz"
+sha_041=$(sha256sum "$tmp/core-0.4.1.tar.gz" | awk '{ print $1 }')
+"$manager" install 0.4.1 "file://$tmp/core-0.4.1.tar.gz" "$sha_041" >/dev/null
+"$manager" activate 0.4.1 >/dev/null
+[ "$(readlink "$cores/current")" = 0.4.1 ]
+grep -q '"state":"completed"' "$CANDY_CORE_OPERATION_FILE"
+grep -q '"current_version":"0.4.1"' <<EOF
+$("$manager" status)
+EOF
+
+if "$manager" install 0.4.9 "file://$tmp/core-0.4.1.tar.gz" "$(printf '0%.0s' $(seq 1 64))" >/dev/null 2>&1; then
+	echo "bad SHA-256 was accepted" >&2
+	exit 1
+fi
+
+make_bundle 0.4.2 1 "$tmp/core-0.4.2.tar.gz"
+sha_042=$(sha256sum "$tmp/core-0.4.2.tar.gz" | awk '{ print $1 }')
+"$manager" install 0.4.2 "file://$tmp/core-0.4.2.tar.gz" "$sha_042" >/dev/null
+"$manager" activate 0.4.2 >/dev/null
+[ "$(readlink "$cores/current")" = 0.4.2 ]
+[ "$(readlink "$cores/previous")" = 0.4.1 ]
+"$manager" rollback >/dev/null
+[ "$(readlink "$cores/current")" = 0.4.1 ]
+[ "$(readlink "$cores/previous")" = 0.4.2 ]
+
+make_bundle 0.4.3 1 "$tmp/core-0.4.3.tar.gz"
+sha_043=$(sha256sum "$tmp/core-0.4.3.tar.gz" | awk '{ print $1 }')
+"$manager" install 0.4.3 "file://$tmp/core-0.4.3.tar.gz" "$sha_043" >/dev/null
+"$manager" remove 0.4.3 >/dev/null
+[ ! -e "$cores/0.4.3" ]
+
+make_bundle 0.5.0 2 "$tmp/core-bad-api.tar.gz"
+sha_bad_api=$(sha256sum "$tmp/core-bad-api.tar.gz" | awk '{ print $1 }')
+if "$manager" install 0.5.0 "file://$tmp/core-bad-api.tar.gz" "$sha_bad_api" >/dev/null 2>&1; then
+	echo "incompatible Core API was accepted" >&2
+	exit 1
+fi
+
+make_bundle 0.4.4 1 "$tmp/core-0.4.4.tar.gz"
+sha_044=$(sha256sum "$tmp/core-0.4.4.tar.gz" | awk '{ print $1 }')
+"$manager" install 0.4.4 "file://$tmp/core-0.4.4.tar.gz" "$sha_044" >/dev/null
+touch "$FAKE_SERVICE_FAIL_ONCE"
+if "$manager" activate 0.4.4 >/dev/null 2>&1; then
+	echo "failed service restart did not reject Core activation" >&2
+	exit 1
+fi
+[ "$(readlink "$cores/current")" = 0.4.1 ]
+[ "$(readlink "$cores/previous")" = 0.4.2 ]
+
+if "$manager" remove 0.4.1 >/dev/null 2>&1; then
+	echo "active Core was removed" >&2
+	exit 1
+fi
+grep -q '"state":"error"' "$CANDY_CORE_OPERATION_FILE"
+
+[ "$(wc -l < "$FAKE_SERVICE_LOG")" -ge 3 ]
+printf '%s\n' "OpenWrt Candy Core bundle manager test passed"

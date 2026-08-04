@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "mode": "sdwan_site_to_site",
+  "wire": "0.3",
+  "sites": ["site_a", "site_b"],
+  "overlay": {
+    "primary": "100.65.0.0/30",
+    "standby": "100.65.0.4/30",
+    "mtu": 1180
+  },
+  "convergence_ms_max": 3000
+}

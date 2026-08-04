@@ -1,0 +1,21 @@
+[package]
+name = "candy-netd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+candy-netd-client = { path = "../../crates/candy-netd-client" }
+candy-netd-proto = { path = "../../crates/candy-netd-proto" }
+clap.workspace = true
+nix.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+futures-util.workspace = true
+netlink-packet-route.workspace = true
+rtnetlink.workspace = true
+tokio.workspace = true

@@ -1,0 +1,119 @@
+<%+header%>
+
+<h2 name="content"><%:Logs%></h2>
+<p><%:Review Candy service events and user traffic decisions from the current boot. Newest entries are shown first.%></p>
+
+<%
+local fs = require "nixio.fs"
+local xml = require "luci.xml"
+local process = require "luci.candy.process"
+local traffic_enabled_file = "/tmp/candy-traffic-log.enabled"
+
+fs.writefile(traffic_enabled_file, tostring(os.time()))
+fs.writefile("/tmp/candy-traffic.log", "")
+
+local service_log = fs.readfile("/tmp/candy.log") or ""
+local traffic_log = fs.readfile("/tmp/candy-traffic.log") or ""
+local _, raw_system_log = process.capture({ "/sbin/logread" })
+
+local function candy_system_log(text)
+	local lines = {}
+	for line in (text or ""):gmatch("[^\r\n]+") do
+		if line:lower():find("candy", 1, true) then
+			lines[#lines + 1] = line
+			if #lines > 160 then
+				table.remove(lines, 1)
+			end
+		end
+	end
+	return table.concat(lines, "\n")
+end
+
+local system_log = candy_system_log(raw_system_log)
+
+local function newest_first(text)
+	local lines = {}
+	text = text or ""
+	for line in text:gmatch("[^\r\n]+") do
+		lines[#lines + 1] = line
+	end
+	local out = {}
+	for i = #lines, 1, -1 do
+		out[#out + 1] = lines[i]
+	end
+	return table.concat(out, "\n")
+end
+
+local function empty_note(text, note)
+	text = text or ""
+	if text:gsub("%s+", "") == "" then
+		return note
+	end
+	return text
+end
+
+local function service_text()
+	local parts = {}
+	parts[#parts + 1] = empty_note(newest_first(service_log), translate("No service log for this boot yet."))
+	if system_log and system_log:gsub("%s+", "") ~= "" then
+		parts[#parts + 1] = "\n== " .. translate("System service events") .. " ==\n" .. newest_first(system_log)
+	end
+	return table.concat(parts, "\n")
+end
+
+local function traffic_text()
+	return empty_note(newest_first(traffic_log), translate("No traffic decisions since this log page was opened. New transparent proxy flows will appear as time, source -> destination, matched rule, and outbound while this page remains open."))
+end
+%>
+
+<style>
+.candy-log-box {
+	width: 100%;
+	min-height: 18em;
+	font-family: monospace;
+	white-space: pre;
+	box-sizing: border-box;
+}
+.candy-log-section + .candy-log-section {
+	border-top: 1px solid rgba(127, 127, 127, 0.35);
+	margin-top: 1.5em;
+	padding-top: 1.5em;
+}
+</style>
+
+<script type="text/javascript">
+document.addEventListener("DOMContentLoaded", function() {
+	var trafficBox = document.getElementById("candy_traffic_log");
+	var emptyTrafficText = trafficBox ? trafficBox.value : "";
+
+	function keepTrafficLogActive() {
+		var xhr = new XMLHttpRequest();
+		xhr.open("GET", "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'traffic_log_active')%>?_=" + Date.now(), true);
+		xhr.setRequestHeader("Cache-Control", "no-cache");
+		xhr.onreadystatechange = function() {
+			if (xhr.readyState === 4 && xhr.status === 200 && trafficBox) {
+				trafficBox.value = xhr.responseText && xhr.responseText.replace(/\s+/g, "") ? xhr.responseText : emptyTrafficText;
+			}
+		};
+		xhr.send();
+	}
+	keepTrafficLogActive();
+	window.setInterval(keepTrafficLogActive, 2000);
+});
+</script>
+
+<div class="cbi-map">
+	<div class="cbi-section">
+		<div class="candy-log-section">
+			<h4><%:Service log%></h4>
+			<textarea class="candy-log-box" readonly="readonly"><%=xml.pcdata(service_text())%></textarea>
+		</div>
+
+		<div class="candy-log-section">
+			<h4><%:Traffic log%></h4>
+			<textarea id="candy_traffic_log" class="candy-log-box" readonly="readonly"><%=xml.pcdata(traffic_text())%></textarea>
+		</div>
+	</div>
+</div>
+
+<%+footer%>

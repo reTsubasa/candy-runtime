@@ -1,0 +1,370 @@
+<%+header%>
+
+<h2 name="content"><%:Diagnostics%></h2>
+
+<%
+local jsonc = require "luci.jsonc"
+local fs = require "nixio.fs"
+local i18n = require "luci.i18n"
+local xml = require "luci.xml"
+local status = jsonc.parse(fs.readfile("/tmp/candy.nodes") or "") or {}
+local nodes = status.nodes or {}
+local runtime = status.runtime or {}
+local runtime_performance = runtime.performance or {}
+local legacy_passive = runtime_performance.passive
+local process_status = status.process or {}
+
+if #nodes == 0 and type(legacy_passive) == "table" then
+	nodes = {{ id = "-", name = "-", state = "-", passive = legacy_passive }}
+end
+
+local legacy_local = type(legacy_passive) == "table" and (legacy_passive["local"] or {}) or {}
+local process_cpu = process_status.cpu_percent or legacy_local.process_cpu_percent
+local process_rss = process_status.resident_memory_bytes or legacy_local.resident_memory_bytes
+local socket_buffers = process_status.socket_buffers or {}
+
+local function js_string(value)
+	return string.format("%q", tostring(value or ""))
+end
+
+local function text_label(value)
+	if value == nil or value == "" then return "-" end
+	return tostring(value)
+end
+
+local congestion_mode_labels = {
+	["startup"] = i18n.translate("Startup acceleration"),
+	["drain"] = i18n.translate("Queue drain"),
+	["probe-bw"] = i18n.translate("Bandwidth probing"),
+	["probe-bw-refill"] = i18n.translate("Bandwidth probing: refill"),
+	["probe-bw-up"] = i18n.translate("Bandwidth probing: accelerate"),
+	["probe-bw-down"] = i18n.translate("Bandwidth probing: slow down"),
+	["probe-bw-cruise"] = i18n.translate("Bandwidth probing: cruise"),
+	["probe-rtt"] = i18n.translate("Minimum RTT probing")
+}
+
+local recovery_state_labels = {
+	["none"] = i18n.translate("Normal"),
+	["conservation"] = i18n.translate("Recovery: conservative"),
+	["growth"] = i18n.translate("Recovery: growth")
+}
+
+local controller_labels = {
+	["candy-bbr"] = "Candy BBR",
+	["cubic"] = "CUBIC"
+}
+
+local function mapped_label(labels, value)
+	if value == nil or value == "" then return "-" end
+	return labels[tostring(value)] or tostring(value)
+end
+
+local function controller_label(applied, passive)
+	return mapped_label(controller_labels, applied and applied.congestion)
+end
+
+local function bps_label(value)
+	local n = tonumber(value)
+	if n == nil then return "-" end
+	if n >= 1000000 then return string.format("%.1f Mbps", n / 1000000) end
+	if n >= 1000 then return string.format("%.1f Kbps", n / 1000) end
+	return tostring(n) .. " bps"
+end
+
+local function micros_label(value)
+	local n = tonumber(value)
+	return n and string.format("%.2f ms", n / 1000) or "-"
+end
+
+local function bytes_label(value)
+	local n = tonumber(value)
+	if n == nil then return "-" end
+	if n >= 1048576 then return string.format("%.1f MiB", n / 1048576) end
+	if n >= 1024 then return string.format("%.1f KiB", n / 1024) end
+	return tostring(n) .. " B"
+end
+
+local function metric_line(label, value)
+	return i18n.translate(label) .. ": " .. value
+end
+
+local function percent_label(numerator, denominator)
+	local n, d = tonumber(numerator), tonumber(denominator)
+	if n == nil or d == nil or d <= 0 then return "-" end
+	return string.format("%.0f %%", n * 100 / d)
+end
+
+%>
+
+<style>
+.candy-diagnostics-table-scroll { overflow-x: auto; }
+.candy-diagnostics-table-scroll .table { width: 100%; min-width: 76em; table-layout: fixed; }
+.candy-diagnostics-table-scroll .th, .candy-diagnostics-table-scroll .td { box-sizing: border-box; overflow-wrap: anywhere; vertical-align: top; }
+.candy-chart-grid { display: grid; grid-template-columns: repeat(2, minmax(18em, 1fr)); gap: 1em; }
+.candy-chart { min-width: 0; }
+.candy-chart h4 { margin: 0 0 .35em; font-size: 1em; }
+.candy-chart-legend { min-height: 2.8em; font-size: .88em; line-height: 1.4; }
+.candy-chart-legend span { display: inline-block; margin-right: 1em; white-space: nowrap; }
+.candy-chart-legend i { display: inline-block; width: .7em; height: .7em; margin-right: .3em; }
+.candy-chart-key { color: #666; margin-top: .2em; font-size: .82em; }
+.candy-chart svg { display: block; width: 100%; height: 10em; border-bottom: 1px solid #ccc; background: repeating-linear-gradient(to bottom, transparent 0, transparent 24%, rgba(127,127,127,.15) 25%); }
+.candy-chart svg text { fill: #666; font-size: 11px; }
+.candy-metric-lines { white-space: pre-line; line-height: 1.55; }
+.candy-test-actions { display:flex; align-items:center; gap:1em; margin:.75em 0; }
+@media (max-width: 1000px) { .candy-chart-grid { grid-template-columns: 1fr; } }
+</style>
+
+<div class="cbi-map">
+	<h3><%:Congestion controller comparison%></h3>
+	<div class="cbi-section">
+		<p><%:Runs one bounded 2 MiB download through CUBIC and each Candy BBR preset. It does not change the running configuration.%></p>
+		<div class="candy-test-actions"><button id="candy-congestion-test-start" class="cbi-button cbi-button-action"><%:Start comparison%></button><span id="candy-congestion-test-state"><%:Not run%></span></div>
+		<table class="table"><thead><tr class="tr table-titles"><th class="th"><%:Controller / preset%></th><th class="th"><%:Goodput%></th><th class="th">TTFB</th><th class="th"><%:Total time%></th><th class="th"><%:Data%></th><th class="th"><%:Result%></th></tr></thead><tbody id="candy-congestion-test-results"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table>
+	</div>
+</div>
+
+<div class="cbi-map">
+	<h3><%:Service resources%></h3>
+	<div class="cbi-section">
+		<table class="table">
+			<tr class="tr"><td class="td left" width="33%"><%:Process CPU%></td><td id="candy-diagnostics-process-cpu" class="td left"><%=xml.pcdata(process_cpu ~= nil and tostring(process_cpu) .. " %" or "-")%></td></tr>
+			<tr class="tr"><td class="td left"><%:Resident memory%></td><td id="candy-diagnostics-process-rss" class="td left"><%=xml.pcdata(bytes_label(process_rss))%></td></tr>
+			<tr class="tr"><td class="td left"><%:UDP receive buffer%></td><td id="candy-diagnostics-socket-rx" class="td left"><%=xml.pcdata(bytes_label(socket_buffers.receive_bytes))%></td></tr>
+			<tr class="tr"><td class="td left"><%:UDP send buffer%></td><td id="candy-diagnostics-socket-tx" class="td left"><%=xml.pcdata(bytes_label(socket_buffers.send_bytes))%></td></tr>
+			<tr class="tr"><td class="td left"><%:UDP buffer target%></td><td id="candy-diagnostics-socket-target" class="td left"><%=xml.pcdata(bytes_label(socket_buffers.target_bytes))%></td></tr>
+		</table>
+	</div>
+</div>
+
+<div class="cbi-map">
+	<h3><%:Overall performance trends%></h3>
+	<div class="cbi-section candy-chart-grid">
+		<div class="candy-chart"><h4><%:Throughput%></h4><div id="candy-chart-throughput-legend" class="candy-chart-legend"></div><svg id="candy-chart-throughput" viewBox="0 0 600 160" preserveAspectRatio="none"></svg><div class="candy-chart-key"><%:Solid: measured goodput; dashed: estimated healthy capacity%></div></div>
+		<div class="candy-chart"><h4><%:Latency%></h4><div id="candy-chart-latency-legend" class="candy-chart-legend"></div><svg id="candy-chart-latency" viewBox="0 0 600 160" preserveAspectRatio="none"></svg><div class="candy-chart-key"><%:Solid: RTT; dashed: 100 ms reference%></div></div>
+	</div>
+</div>
+
+<div class="cbi-map">
+	<h3><%:Per-node passive diagnostics%></h3>
+	<div class="cbi-section candy-diagnostics-table-scroll">
+		<table class="table">
+			<colgroup><col style="width:8%"><col style="width:7%"><col style="width:20%"><col style="width:14%"><col style="width:23%"><col style="width:20%"><col style="width:8%"></colgroup>
+			<thead><tr class="tr table-titles">
+				<th class="th"><%:Node%></th><th class="th"><%:Status%></th><th class="th"><%:Latency quality%></th>
+				<th class="th"><%:Delivery%></th><th class="th"><%:Flight control%></th><th class="th"><%:Transport state%></th>
+				<th class="th"><%:Path%></th>
+			</tr></thead>
+			<tbody id="candy-diagnostics-nodes">
+			<% if #nodes == 0 then %>
+					<tr class="tr"><td class="td" colspan="7"><em><%:No node diagnostics available%></em></td></tr>
+			<% else %>
+				<% for _, node in ipairs(nodes) do local passive = node.passive or {}; local local_status = passive["local"] or {}; local applied = passive.applied_transport or {} %>
+				<tr class="tr">
+					<td class="td"><%=xml.pcdata(text_label(node.name or node.id))%></td><td class="td"><%=xml.pcdata(text_label(node.state))%></td>
+					<td class="td candy-metric-lines"><%=xml.pcdata(metric_line("RTT", micros_label(local_status.smoothed_rtt_micros)) .. "\n" .. metric_line("RTT variation", micros_label(local_status.rtt_variance_micros)))%></td>
+					<td class="td candy-metric-lines"><%=xml.pcdata(metric_line("Goodput", bps_label(local_status.goodput_bps)) .. "\n" .. metric_line("Loss", text_label(local_status.lost_packets)))%></td>
+					<td class="td candy-metric-lines"><%=xml.pcdata(metric_line("In flight", bytes_label(local_status.bytes_in_flight)) .. " / " .. bytes_label(local_status.cwnd_bytes) .. " (" .. percent_label(local_status.bytes_in_flight, local_status.cwnd_bytes) .. ")\n" .. metric_line("Pacing", bps_label(local_status.pacing_rate_bps)))%></td>
+					<td class="td candy-metric-lines"><%=xml.pcdata(mapped_label(congestion_mode_labels, local_status.congestion_mode) .. "\n" .. mapped_label(recovery_state_labels, local_status.recovery_state) .. "\n" .. controller_label(applied, passive))%></td>
+					<td class="td candy-metric-lines"><%=xml.pcdata(metric_line("MTU", text_label(local_status.path_mtu)))%></td>
+				</tr>
+				<% end %>
+			<% end %>
+			</tbody>
+		</table>
+	</div>
+</div>
+
+<script type="text/javascript">
+var candyDiagnosticsStatusUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'status_json')%>";
+var candyCongestionTestUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'congestion_test')%>";
+var candyCongestionTestStatusUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'congestion_test_status')%>";
+var candyCongestionTestLoaded = false;
+var candyDiagnosticsRequestGeneration = 0;
+var candyDiagnosticsActiveRequest = null;
+var candyDiagnosticsRefreshTimer = null;
+var candyDiagnosticsHistory = { throughput: [], latency: [] };
+var candyDiagnosticsColors = ["#1976d2", "#2e7d32", "#ef6c00", "#8e24aa", "#00838f", "#c62828", "#6d4c41", "#455a64"];
+var candyDiagnosticsLabels = {
+	noNodes: <%=js_string(i18n.translate("No node diagnostics available"))%>,
+	congestionModes: {
+		"startup": <%=js_string(i18n.translate("Startup acceleration"))%>,
+		"drain": <%=js_string(i18n.translate("Queue drain"))%>,
+		"probe-bw": <%=js_string(i18n.translate("Bandwidth probing"))%>,
+		"probe-bw-refill": <%=js_string(i18n.translate("Bandwidth probing: refill"))%>,
+		"probe-bw-up": <%=js_string(i18n.translate("Bandwidth probing: accelerate"))%>,
+		"probe-bw-down": <%=js_string(i18n.translate("Bandwidth probing: slow down"))%>,
+		"probe-bw-cruise": <%=js_string(i18n.translate("Bandwidth probing: cruise"))%>,
+		"probe-rtt": <%=js_string(i18n.translate("Minimum RTT probing"))%>
+	},
+	recoveryStates: {
+		"none": <%=js_string(i18n.translate("Normal"))%>,
+		"conservation": <%=js_string(i18n.translate("Recovery: conservative"))%>,
+		"growth": <%=js_string(i18n.translate("Recovery: growth"))%>
+	},
+	controllers: {
+		"candy-bbr": "Candy BBR",
+		"cubic": "CUBIC"
+	},
+	rtt: "RTT", rttVariation: <%=js_string(i18n.translate("RTT variation"))%>,
+	goodput: <%=js_string(i18n.translate("Goodput"))%>, loss: <%=js_string(i18n.translate("Loss"))%>,
+	inFlight: <%=js_string(i18n.translate("In flight"))%>, pacing: <%=js_string(i18n.translate("Pacing"))%>, bandwidth: <%=js_string(i18n.translate("Bandwidth estimate"))%>,
+	cwnd: "CWND", mtu: "MTU"
+};
+
+function candyDiagnosticsText(value) { return value === null || value === undefined || value === "" ? "-" : String(value); }
+function candyDiagnosticsMappedText(labels, value) {
+	var text = candyDiagnosticsText(value);
+	return text === "-" ? text : labels[text] || text;
+}
+function candyDiagnosticsController(applied, passive) {
+	return candyDiagnosticsMappedText(candyDiagnosticsLabels.controllers, applied && applied.congestion);
+}
+
+function candyCongestionTestLabel(sample) {
+	var presets = { current: "Current 1.50/0.90", "bbr-v1": "BBR v1 1.25/0.75", aggressive: "Aggressive 2.00/0.75" };
+	return sample.controller === "cubic" ? "CUBIC" : "Candy BBR / " + (presets[sample.preset] || candyDiagnosticsText(sample.preset));
+}
+function candyCongestionTestRender(data) {
+	var state = document.getElementById("candy-congestion-test-state"), body = document.getElementById("candy-congestion-test-results"), button = document.getElementById("candy-congestion-test-start"), samples = data.result || [];
+	if (!state || !body || !button) return;
+	button.disabled = data.state === "running";
+	state.textContent = data.state === "running" ? "Running…" : data.state === "completed" ? "Completed" : data.state === "error" ? (data.message || "Failed") : "Not run";
+	if (!samples.length) return;
+	body.textContent = "";
+	samples.forEach(function(sample) {
+		var row = document.createElement("tr"); row.className = "tr";
+		candyDiagnosticsAppendCell(row, candyCongestionTestLabel(sample)); candyDiagnosticsAppendCell(row, candyDiagnosticsBps(sample.goodput_bps));
+		candyDiagnosticsAppendCell(row, sample.ttfb_ms == null ? "-" : sample.ttfb_ms + " ms"); candyDiagnosticsAppendCell(row, sample.total_ms == null ? "-" : sample.total_ms + " ms");
+		candyDiagnosticsAppendCell(row, candyDiagnosticsBytes(sample.bytes_read)); candyDiagnosticsAppendCell(row, sample.error || "OK"); body.appendChild(row);
+	});
+}
+function refreshCandyCongestionTest() {
+	var xhr = new XMLHttpRequest(); xhr.open("GET", candyCongestionTestStatusUrl + "?_=" + Date.now(), true);
+	xhr.onreadystatechange = function() { if (xhr.readyState !== 4 || xhr.status !== 200) return; try { var data = JSON.parse(xhr.responseText || "{}"); candyCongestionTestRender(data); if (data.state === "running") setTimeout(refreshCandyCongestionTest, 2000); } catch (e) {} }; xhr.send(null);
+}
+function startCandyCongestionTest(event) {
+	event.preventDefault(); var xhr = new XMLHttpRequest(); xhr.open("POST", candyCongestionTestUrl, true);
+	xhr.onreadystatechange = function() { if (xhr.readyState === 4) setTimeout(refreshCandyCongestionTest, 500); }; xhr.send(null);
+}
+function candyDiagnosticsBps(value) {
+	var n = Number(value);
+	if (value === null || value === undefined || !isFinite(n)) return "-";
+	if (n >= 1000000) return (n / 1000000).toFixed(1) + " Mbps";
+	if (n >= 1000) return (n / 1000).toFixed(1) + " Kbps";
+	return String(n) + " bps";
+}
+function candyDiagnosticsMicros(value) { var n = Number(value); return value !== null && value !== undefined && isFinite(n) ? (n / 1000).toFixed(2) + " ms" : "-"; }
+function candyDiagnosticsBytes(value) {
+	var n = Number(value);
+	if (value === null || value === undefined || !isFinite(n)) return "-";
+	if (n >= 1048576) return (n / 1048576).toFixed(1) + " MiB";
+	if (n >= 1024) return (n / 1024).toFixed(1) + " KiB";
+	return String(n) + " B";
+}
+function candyDiagnosticsSetText(id, value) { var element = document.getElementById(id); if (element) element.textContent = value; }
+function candyDiagnosticsAppendCell(row, value) { var cell = document.createElement("td"); cell.className = "td"; cell.textContent = value; row.appendChild(cell); }
+function candyDiagnosticsFirstDefined(values) {
+	for (var i = 0; i < values.length; i++) if (values[i] !== null && values[i] !== undefined) return values[i];
+	return undefined;
+}
+function candyDiagnosticsPercent(numerator, denominator) {
+	var n = Number(numerator), d = Number(denominator);
+	return isFinite(n) && isFinite(d) && d > 0 ? (n * 100 / d).toFixed(0) + " %" : "-";
+}
+function candyDiagnosticsLines(lines) { return lines.join("\n"); }
+function candyDiagnosticsPushHistory(name, nodes, valueField, referenceField, fixedReference) {
+	var sample = {};
+	nodes.forEach(function(node) {
+		var local = (node.passive || {}).local || {}, id = candyDiagnosticsText(node.name || node.id), value = Number(local[valueField]), reference = fixedReference !== undefined ? fixedReference : Number(local[referenceField]);
+		sample[id] = { value: isFinite(value) ? value : null, reference: isFinite(reference) ? reference : null };
+	});
+	var history = candyDiagnosticsHistory[name]; history.push(sample); if (history.length > 60) history.shift();
+}
+function candyDiagnosticsRenderChart(name, formatter, sharedReference) {
+	var svg = document.getElementById("candy-chart-" + name), legend = document.getElementById("candy-chart-" + name + "-legend"), history = candyDiagnosticsHistory[name];
+	if (!svg || !legend) return;
+	while (svg.firstChild) svg.removeChild(svg.firstChild);
+	var nodeNames = [], maximum = 0, latest = history.length ? history[history.length - 1] : {};
+	history.forEach(function(sample) { Object.keys(sample).forEach(function(node) { if (nodeNames.indexOf(node) < 0) nodeNames.push(node); maximum = Math.max(maximum, sample[node].value || 0, sharedReference === undefined ? sample[node].reference || 0 : sharedReference); }); }); maximum = maximum || 1;
+	[1, 0.5, 0].forEach(function(ratio) {
+		var y = 8 + (1 - ratio) * 136, label = document.createElementNS("http://www.w3.org/2000/svg", "text"), grid = document.createElementNS("http://www.w3.org/2000/svg", "line");
+		label.setAttribute("x", "2"); label.setAttribute("y", String(y + 4)); label.textContent = formatter(maximum * ratio); svg.appendChild(label);
+		grid.setAttribute("x1", "76"); grid.setAttribute("x2", "599"); grid.setAttribute("y1", String(y)); grid.setAttribute("y2", String(y)); grid.setAttribute("stroke", "#aaa"); grid.setAttribute("stroke-opacity", "0.28"); grid.setAttribute("vector-effect", "non-scaling-stroke"); svg.appendChild(grid);
+	});
+	if (sharedReference !== undefined) {
+		var referenceLine = document.createElementNS("http://www.w3.org/2000/svg", "line"), referenceY = 144 - sharedReference * 136 / maximum;
+		referenceLine.setAttribute("x1", "76"); referenceLine.setAttribute("x2", "599"); referenceLine.setAttribute("y1", String(referenceY)); referenceLine.setAttribute("y2", String(referenceY)); referenceLine.setAttribute("stroke", "#777"); referenceLine.setAttribute("stroke-width", "2"); referenceLine.setAttribute("stroke-dasharray", "7 6"); referenceLine.setAttribute("vector-effect", "non-scaling-stroke"); svg.appendChild(referenceLine);
+	}
+	nodeNames.forEach(function(node, nodeIndex) {
+		(sharedReference === undefined ? ["reference", "value"] : ["value"]).forEach(function(kind) {
+			var points = [], path = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+			history.forEach(function(sample, index) { var value = sample[node] && sample[node][kind]; if (value !== null && value !== undefined && isFinite(value)) points.push((history.length === 1 ? 599 : 76 + index * 523 / (history.length - 1)).toFixed(1) + "," + (144 - value * 136 / maximum).toFixed(1)); });
+			path.setAttribute("points", points.join(" ")); path.setAttribute("fill", "none"); path.setAttribute("stroke", candyDiagnosticsColors[nodeIndex % candyDiagnosticsColors.length]); path.setAttribute("stroke-width", kind === "value" ? "3" : "2"); if (kind === "reference") path.setAttribute("stroke-dasharray", "7 6"); path.setAttribute("vector-effect", "non-scaling-stroke"); svg.appendChild(path);
+		});
+	});
+	legend.textContent = ""; nodeNames.forEach(function(node, index) { var item = document.createElement("span"), swatch = document.createElement("i"); swatch.style.backgroundColor = candyDiagnosticsColors[index % candyDiagnosticsColors.length]; item.appendChild(swatch); item.appendChild(document.createTextNode(node)); legend.appendChild(item); });
+}
+function candyDiagnosticsUpdateCharts(nodes) {
+	candyDiagnosticsPushHistory("throughput", nodes, "goodput_bps", "bandwidth_estimate_bps");
+	candyDiagnosticsPushHistory("latency", nodes, "smoothed_rtt_micros", null);
+	candyDiagnosticsRenderChart("throughput", candyDiagnosticsBps);
+	candyDiagnosticsRenderChart("latency", candyDiagnosticsMicros, 100000);
+}
+
+function candyDiagnosticsRender(data) {
+	var runtime = data.runtime || {}, performance = runtime.performance || {}, legacy = performance.passive;
+	var processStatus = data.process || {}, socketBuffers = processStatus.socket_buffers || {}, legacyLocal = legacy && legacy.local || {};
+	var nodes = data.nodes || [], body = document.getElementById("candy-diagnostics-nodes"), row, cell, text;
+	if (!nodes.length && legacy) nodes = [{ id: "-", name: "-", state: "-", passive: legacy }];
+	candyDiagnosticsUpdateCharts(nodes);
+	var cpu = candyDiagnosticsFirstDefined([processStatus.cpu_percent, legacyLocal.process_cpu_percent]);
+	var rss = candyDiagnosticsFirstDefined([processStatus.resident_memory_bytes, legacyLocal.resident_memory_bytes]);
+	candyDiagnosticsSetText("candy-diagnostics-process-cpu", cpu === undefined ? "-" : candyDiagnosticsText(cpu) + " %");
+	candyDiagnosticsSetText("candy-diagnostics-process-rss", candyDiagnosticsBytes(rss));
+	candyDiagnosticsSetText("candy-diagnostics-socket-rx", candyDiagnosticsBytes(socketBuffers.receive_bytes));
+	candyDiagnosticsSetText("candy-diagnostics-socket-tx", candyDiagnosticsBytes(socketBuffers.send_bytes));
+	candyDiagnosticsSetText("candy-diagnostics-socket-target", candyDiagnosticsBytes(socketBuffers.target_bytes));
+	if (!body) return;
+	body.textContent = "";
+	if (!nodes.length) {
+		row = document.createElement("tr"); cell = document.createElement("td"); text = document.createElement("em");
+		row.className = "tr"; cell.className = "td"; cell.colSpan = 7; text.textContent = candyDiagnosticsLabels.noNodes;
+		cell.appendChild(text); row.appendChild(cell); body.appendChild(row); return;
+	}
+	nodes.forEach(function(node) {
+		var passive = node.passive || {}, localStatus = passive.local || {}, applied = passive.applied_transport || {};
+		row = document.createElement("tr"); row.className = "tr";
+		candyDiagnosticsAppendCell(row, candyDiagnosticsText(node.name || node.id)); candyDiagnosticsAppendCell(row, candyDiagnosticsText(node.state));
+		candyDiagnosticsAppendCell(row, candyDiagnosticsLines(["RTT: " + candyDiagnosticsMicros(localStatus.smoothed_rtt_micros), candyDiagnosticsLabels.rttVariation + ": " + candyDiagnosticsMicros(localStatus.rtt_variance_micros)]));
+		candyDiagnosticsAppendCell(row, candyDiagnosticsLines([candyDiagnosticsLabels.goodput + ": " + candyDiagnosticsBps(localStatus.goodput_bps), candyDiagnosticsLabels.loss + ": " + candyDiagnosticsText(localStatus.lost_packets)]));
+		candyDiagnosticsAppendCell(row, candyDiagnosticsLines([candyDiagnosticsLabels.inFlight + ": " + candyDiagnosticsBytes(localStatus.bytes_in_flight) + " / " + candyDiagnosticsBytes(localStatus.cwnd_bytes) + " (" + candyDiagnosticsPercent(localStatus.bytes_in_flight, localStatus.cwnd_bytes) + ")", candyDiagnosticsLabels.pacing + ": " + candyDiagnosticsBps(localStatus.pacing_rate_bps)]));
+		candyDiagnosticsAppendCell(row, candyDiagnosticsLines([candyDiagnosticsMappedText(candyDiagnosticsLabels.congestionModes, localStatus.congestion_mode), candyDiagnosticsMappedText(candyDiagnosticsLabels.recoveryStates, localStatus.recovery_state), candyDiagnosticsController(applied, passive)]));
+		candyDiagnosticsAppendCell(row, "MTU: " + candyDiagnosticsText(localStatus.path_mtu)); body.appendChild(row);
+	});
+}
+
+function refreshCandyDiagnosticsStatus() {
+	var generation = ++candyDiagnosticsRequestGeneration, xhr = new XMLHttpRequest();
+	if (candyDiagnosticsRefreshTimer !== null) { clearTimeout(candyDiagnosticsRefreshTimer); candyDiagnosticsRefreshTimer = null; }
+	if (candyDiagnosticsActiveRequest !== null) { try { candyDiagnosticsActiveRequest.abort(); } catch (e) {} }
+	candyDiagnosticsActiveRequest = xhr;
+	xhr.open("GET", candyDiagnosticsStatusUrl + "?_=" + Date.now(), true);
+	xhr.onreadystatechange = function() {
+		var data;
+		if (xhr.readyState !== 4 || generation !== candyDiagnosticsRequestGeneration) return;
+		if (candyDiagnosticsActiveRequest === xhr) candyDiagnosticsActiveRequest = null;
+		candyDiagnosticsRefreshTimer = setTimeout(refreshCandyDiagnosticsStatus, 2000);
+		if (xhr.status !== 200) return;
+		try { data = JSON.parse(xhr.responseText || "{}"); } catch (e) { return; }
+		candyDiagnosticsRender(data);
+		if (!candyCongestionTestLoaded) { candyCongestionTestLoaded = true; refreshCandyCongestionTest(); }
+	};
+	try { xhr.send(null); } catch (e) { if (generation === candyDiagnosticsRequestGeneration) { candyDiagnosticsActiveRequest = null; candyDiagnosticsRefreshTimer = setTimeout(refreshCandyDiagnosticsStatus, 2000); } }
+}
+
+refreshCandyDiagnosticsStatus();
+var candyCongestionTestButton = document.getElementById("candy-congestion-test-start");
+if (candyCongestionTestButton) candyCongestionTestButton.onclick = startCandyCongestionTest;
+</script>
+
+<%+footer%>

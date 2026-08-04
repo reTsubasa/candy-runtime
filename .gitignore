@@ -1,0 +1,6 @@
+/.cargo-openwrt-cache/
+/.openwrt-sdk-cache/
+/dist/
+/openwrt-sdk/
+*.apk
+*.ipk

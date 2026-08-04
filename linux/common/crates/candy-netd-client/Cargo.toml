@@ -1,0 +1,11 @@
+[package]
+name = "candy-netd-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+candy-netd-proto = { path = "../candy-netd-proto" }
+nix.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,617 @@
+<%+header%>
+
+<%
+local jsonc = require "luci.jsonc"
+local i18n = require "luci.i18n"
+local xml = require "luci.xml"
+local fs = require "nixio.fs"
+local process = require "luci.candy.process"
+local init_ok, init_output = process.capture({ "/etc/init.d/candy", "status" })
+local init_status = init_ok and init_output:gsub("^%s+", ""):gsub("%s+$", "") or ""
+local process_running = process.run({ "/bin/pidof", "candy-client" })
+local enabled = luci.sys.init.enabled("candy")
+local status_text = fs.readfile("/tmp/candy.nodes") or ""
+local transition = jsonc.parse(fs.readfile("/tmp/candy.lifecycle") or "") or {}
+local status = jsonc.parse(status_text) or {}
+local nodes = status.nodes or {}
+local any_starting = false
+for _, node in ipairs(nodes) do
+		if node.state == "starting" or node.state == "checking" then
+			any_starting = true
+		end
+	end
+local version = status.version or "0.4.0"
+local release = status.release or "1"
+local client_version = tostring(version)
+if tostring(release) ~= "" and not client_version:match("%-r[0-9]+$") then
+	client_version = client_version .. "-r" .. tostring(release)
+end
+local service_status = "stopped"
+if init_status == "running" or process_running then
+	service_status = "running"
+elseif init_status == "starting" or any_starting then
+	service_status = "starting"
+end
+if service_status ~= "running" and tonumber(transition.updated_at) and os.time() - tonumber(transition.updated_at) <= 10 then
+	if transition.state == "starting" or transition.state == "stopping" or transition.state == "running" or transition.state == "stopped" then
+		if service_status ~= "stopped" or transition.state == "starting" then
+			service_status = transition.state
+		end
+	end
+end
+
+local function node_class(state)
+	if state == nil or state == "" then
+		return "idle"
+	end
+	if state == "running" or state == "ready" or state == "ok" then
+		return "ok"
+	elseif state == "starting" or state == "stopping" or state == "checking" or state == "connecting" or state == "reconnecting" then
+		return "warn"
+	elseif state == "standby" or state == "disabled" or state == "unused" or state == "unknown" then
+		return "idle"
+	end
+	return "bad"
+end
+
+local function service_label_class(value)
+	if value == "running" then
+		return "label notice"
+	elseif value == "starting" or value == "stopping" then
+		return "label warning"
+	end
+	return "label"
+end
+
+local function service_label(value)
+	if value == "running" then
+		return i18n.translate("Running")
+	elseif value == "starting" then
+		return i18n.translate("Starting")
+	elseif value == "stopping" then
+		return i18n.translate("Stopping")
+	end
+	return i18n.translate("Stopped")
+end
+
+local function js_string(value)
+	return string.format("%q", tostring(value or ""))
+end
+
+local function latency_label(value)
+	if value == nil then
+		return "-"
+	end
+	return tostring(value) .. " ms"
+end
+
+local function local_rtt_label(node)
+	local passive = (node or {}).passive or {}
+	local local_status = passive["local"] or {}
+	local micros = tonumber(local_status.smoothed_rtt_micros)
+	if micros == nil then
+		return "-"
+	end
+	return string.format("%.2f ms", micros / 1000)
+end
+
+local function text_label(value)
+	if value == nil or value == "" then
+		return "-"
+	end
+	return tostring(value)
+end
+
+local function list_label(value)
+	if type(value) == "table" then
+		return #value > 0 and table.concat(value, ", ") or "-"
+	end
+	return text_label(value)
+end
+
+%>
+
+<style>
+.node-dot {
+	display: inline-block;
+	width: 0.75em;
+	height: 0.75em;
+	border-radius: 50%;
+	margin-right: 0.4em;
+	background: #8c8c8c;
+	vertical-align: middle;
+}
+.node-dot.ok { background: #2e7d32; }
+.node-dot.warn { background: #f9a825; }
+.node-dot.bad { background: #c62828; }
+.node-dot.idle { background: #8c8c8c; }
+.candy-overview-header {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 0.75em;
+	margin: 0 auto 1.2em;
+	text-align: center;
+}
+.candy-overview-brand {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 0.7em;
+	min-width: 0;
+}
+.candy-logo {
+	position: relative;
+	width: 4.2em;
+	height: 4.2em;
+	border-radius: 50%;
+	background:
+		radial-gradient(circle at 32% 28%, rgba(255, 255, 255, 0.34), transparent 28%),
+		linear-gradient(145deg, #19a974 0%, #2575d8 58%, #1f2a44 100%);
+	box-shadow: 0 0.4em 1.1em rgba(31, 42, 68, 0.18), inset 0 0 0 1px rgba(255, 255, 255, 0.34);
+	flex: 0 0 auto;
+}
+.candy-logo-mark {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	color: #fff;
+	font-size: 2.35em;
+	font-weight: 700;
+	line-height: 1;
+	letter-spacing: 0;
+}
+.candy-overview-header h2 {
+	border-bottom: 0;
+	margin: 0;
+	font-size: 2.05em;
+}
+.candy-overview-header p {
+	margin: 0;
+	max-width: 52em;
+}
+.candy-overview-actions {
+	display: flex;
+	gap: 0.5em;
+	flex-wrap: wrap;
+	justify-content: center;
+}
+.candy-overview-actions form {
+	margin: 0;
+}
+.candy-node-table-scroll {
+	overflow-x: auto;
+}
+.candy-node-table-scroll .table {
+	min-width: 62em;
+}
+.candy-feature-card {
+	border: 2px solid #2e7d32;
+	border-radius: 6px;
+	background: #fff;
+	padding: 1em;
+	min-width: 0;
+}
+.candy-feature-card.active {
+	border-color: #2e7d32;
+	background: #2e7d32;
+	color: #fff;
+}
+.candy-feature-card.unsupported {
+	border-color: #c62828;
+}
+.candy-feature-card.unauthorized {
+	border-color: #d7a51d;
+}
+.candy-feature-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(16em, 1fr));
+	gap: 0.75em;
+}
+.candy-feature-head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 0.75em;
+}
+.candy-feature-name { font-weight: 700; font-size: 1.05em; }
+.candy-feature-badge {
+	border: 1px solid currentColor;
+	border-radius: 4px;
+	padding: 0.15em 0.45em;
+	font-weight: 700;
+	white-space: nowrap;
+}
+.candy-feature-description { margin: 0.65em 0; line-height: 1.5; }
+.candy-feature-evidence { font-size: 0.9em; color: #555; }
+.candy-feature-card.active .candy-feature-evidence { color: #fff; }
+@media (max-width: 480px) {
+	.candy-feature-grid { grid-template-columns: 1fr; }
+}
+</style>
+
+<div class="candy-overview-header">
+	<div class="candy-overview-brand">
+		<div class="candy-logo" aria-hidden="true"><span class="candy-logo-mark">C</span></div>
+		<div>
+			<h2 name="content">Candy</h2>
+		</div>
+	</div>
+	<div class="candy-overview-actions">
+		<form method="post" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'action', 'restart')%>">
+			<input class="btn cbi-button cbi-button-apply" type="submit" value="<%:Restart%>" />
+		</form>
+		<form method="post" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'action', 'start')%>">
+			<input class="btn cbi-button cbi-button-apply" type="submit" value="<%:Start%>" />
+		</form>
+		<form method="post" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'action', 'stop')%>">
+			<input class="btn cbi-button cbi-button-reset" type="submit" value="<%:Stop%>" />
+		</form>
+	</div>
+</div>
+
+<div class="cbi-map">
+	<div class="cbi-section">
+		<table class="table">
+			<tr class="tr">
+				<td class="td left" width="33%"><%:Service status%></td>
+				<td class="td left">
+					<span id="candy-status-service" class="<%=service_label_class(service_status)%>"><%=xml.pcdata(service_label(service_status))%></span>
+				</td>
+			</tr>
+			<tr class="tr">
+				<td class="td left"><%:Boot status%></td>
+				<td class="td left">
+					<% if enabled then %>
+						<span id="candy-status-boot" class="label notice"><%:Enabled%></span>
+					<% else %>
+						<span id="candy-status-boot" class="label"><%:Disabled%></span>
+					<% end %>
+				</td>
+			</tr>
+			<tr class="tr">
+				<td class="td left"><%:Candy version%></td>
+				<td id="candy-status-client-version" class="td left"><%=xml.pcdata(client_version)%></td>
+			</tr>
+			<tr class="tr">
+				<td class="td left"><%:Core version%></td>
+				<td id="candy-status-core-version" class="td left">-</td>
+			</tr>
+		</table>
+	</div>
+</div>
+
+<div id="candy-protocol-features" class="cbi-map" style="display: none">
+	<h3><%:Protocol features%></h3>
+	<div id="candy-status-features" class="candy-feature-grid"></div>
+</div>
+
+<div id="candy-sdwan-status" class="cbi-map" style="display: none">
+	<h3><%:SD-WAN status%></h3>
+	<div class="cbi-section">
+		<table class="table">
+			<tr class="tr"><td class="td left" width="33%"><%:Phase%></td><td id="candy-sdwan-phase" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Site%></td><td id="candy-sdwan-site" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Active Hub%></td><td id="candy-sdwan-hub" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Route generation%></td><td id="candy-sdwan-generation" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Attachment epoch%></td><td id="candy-sdwan-epoch" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Effective MTU%></td><td id="candy-sdwan-mtu" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Traffic counters%></td><td id="candy-sdwan-traffic" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Drop counters%></td><td id="candy-sdwan-drops" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Last failover%></td><td id="candy-sdwan-failover" class="td left">-</td></tr>
+		</table>
+	</div>
+</div>
+
+<div class="cbi-map">
+	<h3><%:Node status%></h3>
+	<div class="cbi-section candy-node-table-scroll">
+		<table class="table">
+			<thead>
+				<tr class="tr table-titles">
+					<th class="th"><%:Status%></th>
+					<th class="th"><%:Node%></th>
+					<th class="th"><%:Server%></th>
+					<th class="th"><%:Server version%></th>
+					<th class="th"><%:Node groups%></th>
+					<th class="th"><%:Local RTT%></th>
+					<th class="th"><%:URL latency%></th>
+				</tr>
+			</thead>
+			<tbody id="candy-status-nodes">
+			<% if #nodes == 0 then %>
+				<tr class="tr">
+						<td class="td" colspan="7"><em><%:No node status available%></em></td>
+				</tr>
+			<% else %>
+				<% for _, node in ipairs(nodes) do %>
+					<tr class="tr">
+						<td class="td">
+							<span class="node-dot <%=node_class(node.state)%>"></span>
+							<%=xml.pcdata(text_label(node.state))%>
+						</td>
+						<td class="td"><%=xml.pcdata(node.name ~= "" and node.name or node.id)%></td>
+						<td class="td"><%=xml.pcdata(text_label(node.server))%></td>
+						<td class="td"><%=xml.pcdata(text_label(node.server_version))%></td>
+						<td class="td"><%=xml.pcdata(list_label(node.groups))%></td>
+							<td class="td"><%=xml.pcdata(local_rtt_label(node))%></td>
+							<td class="td"><%=xml.pcdata(latency_label((node.url_test or {}).latency_ms))%></td>
+					</tr>
+				<% end %>
+			<% end %>
+			</tbody>
+		</table>
+	</div>
+</div>
+
+<script type="text/javascript">
+var candyOverviewStatusUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'status_json')%>";
+var candyOverviewRequestGeneration = 0;
+var candyOverviewActiveRequest = null;
+var candyOverviewRefreshTimer = null;
+var candyOverviewLabels = {
+	running: <%=js_string(i18n.translate("Running"))%>,
+	starting: <%=js_string(i18n.translate("Starting"))%>,
+	stopping: <%=js_string(i18n.translate("Stopping"))%>,
+	stopped: <%=js_string(i18n.translate("Stopped"))%>,
+	enabled: <%=js_string(i18n.translate("Enabled"))%>,
+	disabled: <%=js_string(i18n.translate("Disabled"))%>,
+	noNodes: <%=js_string(i18n.translate("No node status available"))%>
+};
+function candyOverviewText(value) {
+	if (value === null || value === undefined || value === "") {
+		return "-";
+	}
+	return String(value);
+}
+
+function candyOverviewLatency(value) {
+	if (value === null || value === undefined || value === "") {
+		return "-";
+	}
+	return String(value) + " ms";
+}
+
+function candyOverviewLocalRtt(node) {
+	var passive = (node && node.passive) || {};
+	var localStatus = passive.local || {};
+	var micros = localStatus.smoothed_rtt_micros;
+	var value;
+	if (micros === null || micros === undefined || micros === "") {
+		return "-";
+	}
+	value = Number(micros) / 1000;
+	return isFinite(value) ? value.toFixed(2) + " ms" : "-";
+}
+
+function candyOverviewList(value) {
+	if (Array.isArray(value)) {
+		return value.length ? value.join(", ") : "-";
+	}
+	return candyOverviewText(value);
+}
+
+function candyOverviewNodeClass(state) {
+	if (state === null || state === undefined || state === "") {
+		return "idle";
+	}
+	if (state === "running" || state === "ready" || state === "ok") {
+		return "ok";
+	}
+	if (state === "starting" || state === "stopping" || state === "checking" || state === "connecting" || state === "reconnecting") {
+		return "warn";
+	}
+	if (state === "standby" || state === "disabled" || state === "unused" || state === "unknown") {
+		return "idle";
+	}
+	return "bad";
+}
+
+function candyOverviewSetText(id, value) {
+	var node = document.getElementById(id);
+	if (node) {
+		node.textContent = value;
+	}
+}
+
+function candyOverviewSetService(status) {
+	var node = document.getElementById("candy-status-service");
+	var value = status || "stopped";
+	if (!node) {
+		return;
+	}
+	node.textContent = candyOverviewLabels[value] || candyOverviewLabels.stopped;
+	node.className = value === "running" ? "label notice" : ((value === "starting" || value === "stopping") ? "label warning" : "label");
+}
+
+function candyOverviewSetBoot(enabled) {
+	var node = document.getElementById("candy-status-boot");
+	if (!node) {
+		return;
+	}
+	node.textContent = enabled ? candyOverviewLabels.enabled : candyOverviewLabels.disabled;
+	node.className = enabled ? "label notice" : "label";
+}
+
+function candyOverviewClientVersion(data) {
+	var version = candyOverviewText(data.version);
+	var release = candyOverviewText(data.release);
+	if (version === "-" || release === "-" || /-r[0-9]+$/.test(version)) {
+		return version;
+	}
+	return version + "-r" + release;
+}
+
+function candyOverviewRenderSdwan(sdwan) {
+	sdwan = sdwan || {};
+	var section = document.getElementById("candy-sdwan-status");
+	var visible = sdwan.enabled === true &&
+		sdwan.phase !== "disabled" &&
+		sdwan.phase !== "unavailable" &&
+		sdwan.phase !== "invalid";
+	if (section) {
+		section.style.display = visible ? "" : "none";
+	}
+	if (!visible) {
+		return;
+	}
+	var counters = sdwan.counters || {};
+	var failover = sdwan.last_failover || {};
+	candyOverviewSetText("candy-sdwan-phase", candyOverviewText(sdwan.phase));
+	candyOverviewSetText("candy-sdwan-site", candyOverviewText(sdwan.site));
+	candyOverviewSetText("candy-sdwan-hub", candyOverviewText(sdwan.active_hub));
+	candyOverviewSetText("candy-sdwan-generation", candyOverviewText(sdwan.route_generation));
+	candyOverviewSetText("candy-sdwan-epoch", candyOverviewText(sdwan.attachment_epoch));
+	candyOverviewSetText("candy-sdwan-mtu", candyOverviewText(sdwan.effective_mtu));
+	candyOverviewSetText("candy-sdwan-traffic", "rx " + candyOverviewText(counters.rx_bytes) + " B / tx " + candyOverviewText(counters.tx_bytes) + " B");
+	candyOverviewSetText("candy-sdwan-drops", candyOverviewText(counters.drops));
+	candyOverviewSetText("candy-sdwan-failover", candyOverviewText(failover.reason) + " / " + candyOverviewText(failover.at));
+}
+
+function candyOverviewRenderFeatures(manifest, nodes) {
+	var body = document.getElementById("candy-status-features");
+	var section = document.getElementById("candy-protocol-features");
+	var definitions = (manifest && manifest.core && manifest.core.features) || [];
+	var features = {}, nodeFeatures, nodeIndex;
+	var card, head, name, badge, description, activation, evidence, value, definition, state, supported, authorized, i;
+	if (!body) return;
+	for (nodeIndex = 0; nodes && nodeIndex < nodes.length; nodeIndex += 1) {
+		nodeFeatures = ((nodes[nodeIndex].passive || {}).features);
+		if (nodeFeatures) { features = nodeFeatures; break; }
+	}
+	body.textContent = "";
+	if (section) section.style.display = definitions.length ? "" : "none";
+	for (i = 0; i < definitions.length; i += 1) {
+		definition = definitions[i] || {};
+		value = features[definition.status_key || definition.id] || {};
+		supported = definition.supported !== false;
+		authorized = value.authorized === true;
+		state = !supported ? "unsupported" :
+			(value.active === true ? "active" : (authorized ? "inactive" : "unauthorized"));
+		card = document.createElement("div"); card.className = "candy-feature-card " + state;
+		head = document.createElement("div"); head.className = "candy-feature-head";
+		name = document.createElement("span"); name.className = "candy-feature-name"; name.textContent = candyOverviewText(definition.name || definition.id);
+		badge = document.createElement("span"); badge.className = "candy-feature-badge";
+		badge.textContent = state === "active" ? <%=js_string(i18n.translate("Active"))%> :
+			(state === "unsupported" ? <%=js_string(i18n.translate("Unsupported"))%> :
+			(authorized ? <%=js_string(i18n.translate("Supported, inactive"))%> : <%=js_string(i18n.translate("Supported, not authorized"))%>));
+		head.appendChild(name); head.appendChild(badge); card.appendChild(head);
+		description = document.createElement("p"); description.className = "candy-feature-description"; description.textContent = candyOverviewText(definition.description); card.appendChild(description);
+		activation = document.createElement("div"); activation.className = "candy-feature-evidence";
+		activation.textContent = <%=js_string(i18n.translate("Activation"))%> + ": " + candyOverviewText(definition.activation);
+		card.appendChild(activation);
+		evidence = document.createElement("div"); evidence.className = "candy-feature-evidence";
+		evidence.textContent = <%=js_string(i18n.translate("Evidence"))%> + ": " + candyOverviewFeatureEvidence(value, supported, authorized);
+		card.appendChild(evidence); body.appendChild(card);
+	}
+}
+
+function candyOverviewFeatureEvidence(value, supported, authorized) {
+	var count = Number(value.evidence || 0);
+	if (!supported) return <%=js_string(i18n.translate("This Core build does not implement this capability."))%>;
+	if (!authorized) return <%=js_string(i18n.translate("The current connection did not authorize this capability."))%>;
+	if (value.active === true) return <%=js_string(i18n.translate("Observed in the current connection"))%> + " (" + count + ")";
+	return <%=js_string(i18n.translate("Authorized, but no runtime use has been observed yet."))%> + " (" + count + ")";
+}
+
+function candyOverviewAppendCell(row, value) {
+	var cell = document.createElement("td");
+	cell.className = "td";
+	cell.textContent = value;
+	row.appendChild(cell);
+	return cell;
+}
+
+function candyOverviewRenderNodes(nodes) {
+	var body = document.getElementById("candy-status-nodes");
+	var row, cell, dot, text;
+	if (!body) {
+		return;
+	}
+	body.textContent = "";
+	if (!nodes || !nodes.length) {
+		row = document.createElement("tr");
+		row.className = "tr";
+		cell = document.createElement("td");
+		cell.className = "td";
+		cell.colSpan = 7;
+		text = document.createElement("em");
+		text.textContent = candyOverviewLabels.noNodes;
+		cell.appendChild(text);
+		row.appendChild(cell);
+		body.appendChild(row);
+		return;
+	}
+	nodes.forEach(function(node) {
+		row = document.createElement("tr");
+		row.className = "tr";
+		cell = candyOverviewAppendCell(row, "");
+		dot = document.createElement("span");
+		dot.className = "node-dot " + candyOverviewNodeClass(node.state);
+		cell.appendChild(dot);
+		cell.appendChild(document.createTextNode(candyOverviewText(node.state)));
+		candyOverviewAppendCell(row, candyOverviewText(node.name || node.id));
+		candyOverviewAppendCell(row, candyOverviewText(node.server));
+		candyOverviewAppendCell(row, candyOverviewText(node.server_version));
+		candyOverviewAppendCell(row, candyOverviewList(node.groups));
+		candyOverviewAppendCell(row, candyOverviewLocalRtt(node));
+		candyOverviewAppendCell(row, candyOverviewLatency((node.url_test || {}).latency_ms));
+		body.appendChild(row);
+	});
+}
+
+function refreshCandyOverviewStatus() {
+	var generation = ++candyOverviewRequestGeneration;
+	var xhr = new XMLHttpRequest();
+	if (candyOverviewRefreshTimer !== null) {
+		clearTimeout(candyOverviewRefreshTimer);
+		candyOverviewRefreshTimer = null;
+	}
+	if (candyOverviewActiveRequest !== null) {
+		try {
+			candyOverviewActiveRequest.abort();
+		} catch (e) {}
+	}
+	candyOverviewActiveRequest = xhr;
+	xhr.open("GET", candyOverviewStatusUrl + "?_=" + Date.now(), true);
+	xhr.onreadystatechange = function() {
+		var data;
+		if (xhr.readyState !== 4 || generation !== candyOverviewRequestGeneration) {
+			return;
+		}
+		if (candyOverviewActiveRequest === xhr) {
+			candyOverviewActiveRequest = null;
+		}
+		candyOverviewRefreshTimer = setTimeout(refreshCandyOverviewStatus, 2000);
+		if (xhr.status !== 200) {
+			return;
+		}
+		try {
+			data = JSON.parse(xhr.responseText || "{}");
+		} catch (e) {
+			return;
+		}
+		candyOverviewSetService(data.service && data.service.status);
+		candyOverviewSetBoot(data.service && data.service.enabled);
+		candyOverviewSetText("candy-status-client-version", candyOverviewClientVersion(data));
+		candyOverviewSetText("candy-status-core-version", data.core && data.core.current_version);
+		candyOverviewRenderSdwan(data.sdwan);
+		candyOverviewRenderNodes(data.nodes || []);
+		candyOverviewRenderFeatures(data.core && data.core.current_manifest, data.nodes || []);
+	};
+	try {
+		xhr.send(null);
+	} catch (e) {
+		if (generation === candyOverviewRequestGeneration) {
+			candyOverviewActiveRequest = null;
+			candyOverviewRefreshTimer = setTimeout(refreshCandyOverviewStatus, 2000);
+		}
+	}
+}
+
+refreshCandyOverviewStatus();
+</script>
+
+<%+footer%>

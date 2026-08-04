@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "mode": "sdwan_tun",
+  "namespaces": {
+    "edge": "10.250.0.1/30",
+    "hub": "10.250.0.2/30",
+    "edge_lan": "10.251.1.1/24",
+    "private_workload": "10.251.2.1/24"
+  },
+  "overlay": {
+    "interface": "candy0",
+    "table": 20999,
+    "effective_mtu": 1180,
+    "edge_prefix": "10.251.1.0/24",
+    "private_prefix": "10.251.2.0/24"
+  },
+  "required_features": [
+    "CLOUD_GRANT_V1",
+    "DATAGRAM",
+    "IP_PACKET_TUNNEL_V1"
+  ]
+}

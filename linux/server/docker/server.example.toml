@@ -1,0 +1,75 @@
+listen = "0.0.0.0:8443"
+
+# For root-level Compose, use ./server.example.toml instead.
+#
+# Production deployments must mount certificate files readable by UID 10001.
+# The container fails to start when either file is missing.
+cert_pem = "/etc/carrier/server.crt"
+key_pem = "/etc/carrier/server.key"
+
+# Optional ECH key ring. Mount this directory read-only after running
+# `serverd-linux --setup-ech PUBLIC_NAME --ech-directory ./ech` once.
+# [ech]
+# directory = "/etc/carrier/ech"
+
+# Optional keyed port hopping. Keep empty to listen only on the primary port.
+[port_hopping]
+ports = []
+
+[admission]
+# Bound total live QUIC connections and authentication work.
+max_connections = 1024
+auth_timeout_seconds = 10
+# Bound authenticated connections independently for each configured user.
+max_connections_per_user = 8
+
+[limits]
+max_sessions_per_connection = 256
+max_udp_flows = 256
+max_datagram_size = 65536
+
+[qos]
+# Duplicate each UDP response packet up to 3 times for weak links.
+# Keep this at 1 unless the client link probe recommends redundancy.
+server_udp_multiplier = 1
+# Disabled by default: when enabled, the server accepts the client's proposed
+# server_udp_multiplier from the Candy handshake for this connection.
+accept_client_udp_multiplier_proposal = false
+# Optional reverse proposal: when enabled, the client uses this multiplier for
+# client-to-server UDP packets. Candy clients accept this by default.
+propose_client_udp_multiplier = false
+client_udp_multiplier = 1
+
+[[users]]
+key_id = "change-me"
+secret = "replace-with-at-least-16-random-bytes"
+# Includes negotiated fragmentation and automatic FEC.
+features = ["recommended"]
+
+# Private Transit Hub (T4) is mutually exclusive with ordinary users,
+# sdwan_tun, and sdwan_shared_transit. The primary listen accepts only
+# Cloud-authenticated Device Site tunnels; fabric_listen accepts only Node
+# Grant/NodeProof HUB_FABRIC_V1 connections.
+#
+# [cloud_auth]
+# enabled = true
+# cloud_signing_public_key = "CLOUD_ED25519_PUBLIC_KEY"
+#
+# [sdwan_private_transit]
+# enabled = true
+# route_signing_key_id = "route-key-1"
+# route_signing_public_key = "ROUTE_ED25519_PUBLIC_KEY"
+# snapshot_file = "/var/lib/candy/private/segment.snapshot"
+# projection_files = [
+#   "/var/lib/candy/private/site-a.projection",
+#   "/var/lib/candy/private/site-b.projection",
+# ]
+# fabric_assignment_file = "/var/lib/candy/private/fabric.assignment"
+# dynamic_route_snapshot_file = "/var/lib/candy/private/dynamic.snapshot"
+# node_id = "50505050-5050-5050-5050-505050505050"
+# node_key_id = "51515151-5151-5151-5151-515151515151"
+# node_pool_id = "03030303-0303-0303-0303-030303030303"
+# node_attachment_id = "12121212-1212-1212-1212-121212121212"
+# node_attachment_epoch = 3
+# effective_mtu = 1180
+# fabric_listen = "0.0.0.0:9443"

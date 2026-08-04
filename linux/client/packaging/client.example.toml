@@ -1,0 +1,23 @@
+server = "127.0.0.1:8443"
+server_name = "localhost"
+server_identity = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+# Optional: paste the Base64 value printed after `ech=` by serverd-linux --setup-ech.
+# ech = "BASE64_ECH_CONFIG_LIST"
+key_id = "change-me"
+secret = "change-me-long-random-secret"
+max_connection_age_ms = 86400000
+max_connection_bytes = 1099511627776
+
+[transport]
+profile = "linux"
+
+[[forwards]]
+network = "tcp"
+local = "127.0.0.1:18080"
+target = "127.0.0.1:8080"
+
+[[forwards]]
+network = "udp"
+local = "127.0.0.1:15353"
+target = "127.0.0.1:53"
+udp_mode = "datagram"

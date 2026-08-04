@@ -1,0 +1,11 @@
+# Bootstrap GFWList DNS provider.
+# Updated provider data is stored under /etc/candy/rulesets/gfwlist.domains.
+google.com
+googleapis.com
+googleusercontent.com
+gstatic.com
+youtube.com
+youtube-nocookie.com
+youtu.be
+googlevideo.com
+ytimg.com

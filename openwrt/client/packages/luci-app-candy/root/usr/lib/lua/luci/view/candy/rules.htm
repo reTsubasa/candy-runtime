@@ -1,0 +1,416 @@
+<%+header%>
+
+<h2 name="content"><%:Traffic Policy%></h2>
+<p><%:Define how traffic is matched and whether it goes direct, is rejected, or uses a Candy node group.%></p>
+
+<%
+local xml = require "luci.xml"
+local uci = require "luci.model.uci".cursor()
+local rules = {}
+local groups = { "DIRECT", "REJECT" }
+
+uci:foreach("candy", "rule", function(section)
+	if section.value and section.value ~= "" then
+		rules[#rules + 1] = section.value
+	end
+end)
+
+uci:foreach("candy", "group", function(section)
+	local group_name = section.name or section[".name"]
+	if group_name and group_name ~= "" then
+		groups[#groups + 1] = group_name
+	end
+end)
+
+local rules_text = table.concat(rules, "\n")
+if rules_text == "" then
+	rules_text = "MATCH,Proxy"
+end
+
+local function split_rule(rule)
+	local parts = {}
+	for part in rule:gmatch("[^,]+") do
+		parts[#parts + 1] = part
+	end
+	return parts
+end
+
+local function js_string(value)
+	return string.format("%q", tostring(value or ""))
+end
+%>
+
+<style>
+.candy-rule-grid {
+	display: grid;
+	grid-template-columns: minmax(12em, 16em) minmax(22em, 1fr) minmax(14em, 18em) auto;
+	gap: 1em;
+	align-items: start;
+}
+.candy-rule-field {
+	display: flex;
+	flex-direction: column;
+}
+.candy-rule-field label {
+	display: block;
+	margin-bottom: 0.35em;
+	font-weight: bold;
+}
+.candy-rule-field input[type="text"],
+.candy-rule-field select {
+	width: 100%;
+	height: 2.4em;
+	box-sizing: border-box;
+}
+.candy-rule-actions {
+	display: flex;
+	gap: 0.75em;
+	align-items: center;
+	flex-wrap: wrap;
+	justify-content: flex-start;
+	min-width: 16em;
+	padding-top: 1.85em;
+}
+.candy-rule-error {
+	color: #c62828;
+	margin-top: 0.35em;
+	min-height: 1.4em;
+}
+.candy-rule-mono {
+	width: 100%;
+	min-height: 18em;
+	font-family: monospace;
+}
+.candy-rule-toolbar {
+	display: flex;
+	gap: 0.75em;
+	justify-content: flex-end;
+	flex-wrap: wrap;
+}
+@media (max-width: 900px) {
+	.candy-rule-grid {
+		grid-template-columns: 1fr;
+	}
+	.candy-rule-actions {
+		min-width: 0;
+		padding-top: 0;
+	}
+}
+</style>
+
+<div class="cbi-map">
+	<h3><%:Add rule%></h3>
+	<div class="cbi-section">
+		<div class="candy-rule-grid">
+			<div class="candy-rule-field">
+				<label for="rule_kind"><%:Type%></label>
+				<select id="rule_kind" class="cbi-input-select" onchange="updateCandyRuleBuilder()">
+					<option value="DOMAIN">DOMAIN</option>
+					<option value="DOMAIN-SUFFIX">DOMAIN-SUFFIX</option>
+					<option value="DOMAIN-KEYWORD">DOMAIN-KEYWORD</option>
+					<option value="GEOIP">GEOIP</option>
+					<option value="IP-CIDR">IP-CIDR</option>
+					<option value="IP-CIDR6">IP-CIDR6</option>
+					<option value="SRC-IP-CIDR">SRC-IP-CIDR</option>
+					<option value="SRC-PORT">SRC-PORT</option>
+					<option value="DST-PORT">DST-PORT</option>
+					<option value="PROCESS-NAME">PROCESS-NAME</option>
+					<option value="RULE-SET">RULE-SET</option>
+					<option value="MATCH">MATCH</option>
+				</select>
+			</div>
+			<div class="candy-rule-field" id="rule_value_row">
+				<label for="rule_value"><%:Value%></label>
+				<input id="rule_value" class="cbi-input-text" type="text" placeholder="example.com" />
+				<div id="rule_value_error" class="candy-rule-error"></div>
+			</div>
+			<div class="candy-rule-field">
+				<label for="rule_target"><%:Target%></label>
+				<select id="rule_target" class="cbi-input-select">
+					<% for _, group in ipairs(groups) do %>
+						<option value="<%=xml.pcdata(group)%>"<% if group == "Proxy" then %> selected="selected"<% end %>><%=xml.pcdata(group)%></option>
+					<% end %>
+				</select>
+			</div>
+			<div class="candy-rule-actions">
+				<label><input id="rule_no_resolve" type="checkbox" /> <%:No resolve%></label>
+				<input class="btn cbi-button cbi-button-add" type="button" value="<%:Add rule%>" onclick="appendCandyRule()" />
+			</div>
+		</div>
+	</div>
+</div>
+
+<form method="post" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'rules_import')%>" onsubmit="return validateCandyRulesForSubmit()">
+	<input type="hidden" name="rules" value="<%=xml.pcdata(rules_text)%>" />
+
+	<div class="cbi-map">
+		<h3><%:Rules%></h3>
+		<div class="cbi-section">
+			<table class="table">
+				<tr class="tr table-titles">
+					<th class="th" width="5%">#</th>
+					<th class="th"><%:Type%></th>
+					<th class="th"><%:Value%></th>
+					<th class="th"><%:Target%></th>
+					<th class="th"><%:Option%></th>
+				</tr>
+				<% for index, rule in ipairs(rules) do
+					local parts = split_rule(rule)
+					local kind = parts[1] or ""
+					local value = kind == "MATCH" and "" or (parts[2] or "")
+					local target = kind == "MATCH" and (parts[2] or "") or (parts[3] or "")
+					local option = kind == "MATCH" and (parts[3] or "") or (parts[4] or "")
+				%>
+					<tr class="tr">
+						<td class="td"><%=index%></td>
+						<td class="td"><%=xml.pcdata(kind)%></td>
+						<td class="td"><%=xml.pcdata(value)%></td>
+						<td class="td"><%=xml.pcdata(target)%></td>
+						<td class="td"><%=xml.pcdata(option)%></td>
+					</tr>
+				<% end %>
+				<% if #rules == 0 then %>
+					<tr class="tr">
+						<td class="td" colspan="5"><em><%:No rules configured%></em></td>
+					</tr>
+				<% end %>
+			</table>
+			<textarea id="rules_manual" class="candy-rule-mono" oninput="syncCandyRuleTextareas('rules_manual')"><%=xml.pcdata(rules_text)%></textarea>
+			<div id="rules_manual_error" class="candy-rule-error"></div>
+			<div class="cbi-page-actions candy-rule-toolbar">
+				<input class="btn cbi-button cbi-button-neutral" type="button" value="<%:Copy rules%>" onclick="copyCandyRules()" />
+				<a class="btn cbi-button cbi-button-neutral" href="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'rules_export')%>"><%:Download rules%></a>
+				<input class="btn cbi-button cbi-button-apply" type="submit" value="<%:Save rules%>" />
+			</div>
+		</div>
+	</div>
+</form>
+
+<script type="text/javascript">
+var candyRuleAllowedTargets = {
+	"DIRECT": true,
+	"REJECT": true<% for index = 3, #groups do %>,
+	<%=js_string(groups[index])%>: true<% end %>
+};
+
+function candyRuleTrim(value) {
+	return (value || "").replace(/^\s+|\s+$/g, "");
+}
+
+function candyRuleHiddenInput() {
+	return document.querySelector("input[name='rules']");
+}
+
+function syncCandyRuleTextareas(sourceId) {
+	var source = document.getElementById(sourceId);
+	var hidden = candyRuleHiddenInput();
+
+	if (source && hidden) {
+		hidden.value = source.value;
+	}
+}
+
+function candyRuleTarget(rule) {
+	var parts = rule.split(",");
+	var kind = candyRuleTrim(parts[0]);
+	return candyRuleTrim(parts[kind === "MATCH" ? 1 : 2]);
+}
+
+function validateCandyRulesForSubmit() {
+	var textarea = document.getElementById("rules_manual");
+	var error = document.getElementById("rules_manual_error");
+	var lines = textarea ? textarea.value.split(/\r?\n/) : [];
+	for (var i = 0; i < lines.length; i++) {
+		var rule = candyRuleTrim(lines[i]);
+		var target;
+		if (!rule || rule.charAt(0) === "#") continue;
+		target = candyRuleTarget(rule);
+		if (!candyRuleAllowedTargets[target]) {
+			if (error) error.textContent = "<%:Rule targets must be DIRECT, REJECT, or an existing node group.%>" + " (" + (i + 1) + ")";
+			if (textarea) textarea.focus();
+			return false;
+		}
+	}
+	if (error) error.textContent = "";
+	syncCandyRuleTextareas("rules_manual");
+	return true;
+}
+
+function candyRuleValueMeta(kind) {
+	var meta = {
+		"DOMAIN": ["example.com", "domain"],
+		"DOMAIN-SUFFIX": ["example.com", "domain"],
+		"DOMAIN-KEYWORD": ["google", "keyword"],
+		"GEOIP": ["CN", "geo"],
+		"IP-CIDR": ["203.0.113.0/24", "ipv4-cidr"],
+		"IP-CIDR6": ["2001:db8::/32", "ipv6-cidr"],
+		"SRC-IP-CIDR": ["192.168.1.0/24", "cidr"],
+		"SRC-PORT": ["443", "port"],
+		"DST-PORT": ["443", "port"],
+		"PROCESS-NAME": ["chrome", "text"],
+		"RULE-SET": ["gfwlist", "text"]
+	};
+	return meta[kind] || ["", "text"];
+}
+
+function candyRuleSetError(message) {
+	var error = document.getElementById("rule_value_error");
+	if (error) {
+		error.textContent = message || "";
+	}
+}
+
+function candyRuleIsDomain(value) {
+	return /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(value) && value.indexOf("..") < 0;
+}
+
+function candyRuleIsIpv4Cidr(value) {
+	var match = value.match(/^(\d{1,3})(?:\.(\d{1,3})){3}\/(\d{1,2})$/);
+	var parts;
+	if (!match) {
+		return false;
+	}
+	parts = value.split("/")[0].split(".");
+	for (var i = 0; i < parts.length; i++) {
+		if (Number(parts[i]) > 255) {
+			return false;
+		}
+	}
+	return Number(match[3]) <= 32;
+}
+
+function candyRuleIsIpv6Cidr(value) {
+	var match = value.match(/^([0-9A-Fa-f:]+)\/(\d{1,3})$/);
+	return !!match && value.indexOf(":") >= 0 && Number(match[2]) <= 128;
+}
+
+function candyRuleIsPort(value) {
+	var match = value.match(/^(\d{1,5})(?:-(\d{1,5}))?$/);
+	var start, end;
+	if (!match) {
+		return false;
+	}
+	start = Number(match[1]);
+	end = Number(match[2] || match[1]);
+	return start >= 1 && end <= 65535 && start <= end;
+}
+
+function candyRuleValidateValue(kind, value) {
+	var meta = candyRuleValueMeta(kind);
+	var type = meta[1];
+
+	if (kind === "MATCH") {
+		return "";
+	}
+	if (!value || /,/.test(value)) {
+		return "<%:Invalid rule value%>";
+	}
+	if (type === "domain" && !candyRuleIsDomain(value)) {
+		return "<%:Invalid rule value%>";
+	}
+	if (type === "keyword" && /\s/.test(value)) {
+		return "<%:Invalid rule value%>";
+	}
+	if (type === "geo" && !/^[A-Za-z]{2}$/.test(value)) {
+		return "<%:Invalid rule value%>";
+	}
+	if (type === "ipv4-cidr" && !candyRuleIsIpv4Cidr(value)) {
+		return "<%:Invalid rule value%>";
+	}
+	if (type === "ipv6-cidr" && !candyRuleIsIpv6Cidr(value)) {
+		return "<%:Invalid rule value%>";
+	}
+	if (type === "cidr" && !candyRuleIsIpv4Cidr(value) && !candyRuleIsIpv6Cidr(value)) {
+		return "<%:Invalid rule value%>";
+	}
+	if (type === "port" && !candyRuleIsPort(value)) {
+		return "<%:Invalid rule value%>";
+	}
+	return "";
+}
+
+function updateCandyRuleBuilder() {
+	var kind = document.getElementById("rule_kind").value;
+	var valueRow = document.getElementById("rule_value_row");
+	var valueInput = document.getElementById("rule_value");
+	var noResolve = document.getElementById("rule_no_resolve");
+	var meta = candyRuleValueMeta(kind);
+
+	if (kind === "MATCH") {
+		valueRow.style.display = "none";
+		valueInput.value = "";
+	} else {
+		valueRow.style.display = "";
+		valueInput.placeholder = meta[0];
+	}
+
+	if (noResolve) {
+		noResolve.disabled = !(kind === "GEOIP" || kind === "IP-CIDR" || kind === "IP-CIDR6");
+		if (noResolve.disabled) {
+			noResolve.checked = false;
+		}
+	}
+	candyRuleSetError("");
+}
+
+function buildCandyRule() {
+	var kind = document.getElementById("rule_kind").value;
+	var value = candyRuleTrim(document.getElementById("rule_value").value);
+	var target = document.getElementById("rule_target").value;
+	var noResolve = document.getElementById("rule_no_resolve").checked;
+	var error = candyRuleValidateValue(kind, value);
+	var parts = [kind];
+
+	if (error) {
+		candyRuleSetError(error);
+		document.getElementById("rule_value").focus();
+		return "";
+	}
+
+	if (kind !== "MATCH") {
+		parts.push(value);
+	}
+
+	parts.push(target);
+
+	if (noResolve && (kind === "GEOIP" || kind === "IP-CIDR" || kind === "IP-CIDR6")) {
+		parts.push("no-resolve");
+	}
+
+	return parts.join(",");
+}
+
+function appendCandyRule() {
+	var rule = buildCandyRule();
+	var textarea = document.getElementById("rules_manual");
+	var hidden = candyRuleHiddenInput();
+	var current;
+
+	if (!rule || !textarea || !hidden) {
+		return;
+	}
+
+	current = textarea.value.replace(/^\s+|\s+$/g, "");
+	textarea.value = current ? rule + "\n" + current : rule;
+	hidden.value = textarea.value;
+	textarea.focus();
+}
+
+function copyCandyRules() {
+	var textarea = document.getElementById("rules_manual");
+	if (!textarea) {
+		return;
+	}
+	textarea.focus();
+	textarea.select();
+	if (navigator.clipboard && navigator.clipboard.writeText) {
+		navigator.clipboard.writeText(textarea.value);
+	} else {
+		document.execCommand("copy");
+	}
+}
+
+updateCandyRuleBuilder();
+</script>
+
+<%+footer%>
