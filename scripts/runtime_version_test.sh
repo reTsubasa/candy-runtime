@@ -37,5 +37,10 @@ grep -Fq 'EXPECTED_CORE_API=${CANDY_EXPECTED_CORE_API:-1}' \
   printf '%s\n' "Runtime must declare its supported Core API independently" >&2
   exit 1
 }
+grep -Fq 'EXPECTED_PROCESS_API=${CANDY_EXPECTED_CORE_PROCESS_API:-1}' \
+  "$root/openwrt/client/packages/candy-client/candy-core-manager" || {
+  printf '%s\n' "Runtime must declare its supported Core process API independently" >&2
+  exit 1
+}
 
-printf '%s\n' "Candy Runtime version contract passed: $version (OpenWrt client r$client_revision, LuCI r$luci_revision, Core API 1)"
+printf '%s\n' "Candy Runtime version contract passed: $version (OpenWrt client r$client_revision, LuCI r$luci_revision, Process API 1, Core API 1)"

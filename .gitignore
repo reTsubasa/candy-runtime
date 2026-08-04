@@ -2,5 +2,6 @@
 /.openwrt-sdk-cache/
 /dist/
 /openwrt-sdk/
+/target/
 *.apk
 *.ipk

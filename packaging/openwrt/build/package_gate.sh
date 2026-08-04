@@ -3,6 +3,7 @@ set -eu
 
 sdk=${OPENWRT_SDK:-}
 runtime_bin_dir=${CANDY_RUNTIME_BIN_DIR:-}
+target_arch=${OPENWRT_TARGET_ARCH:-}
 
 if [ -z "$sdk" ]; then
   for candidate in "$PWD/openwrt-sdk" "$PWD/../openwrt-sdk"; do
@@ -18,12 +19,21 @@ if [ -z "$sdk" ] || [ ! -f "$sdk/rules.mk" ] || [ ! -d "$sdk/package" ]; then
   exit 2
 fi
 
-for component in candy-client candy-netd candy-sdwan; do
-  [ -n "$runtime_bin_dir" ] && [ -x "$runtime_bin_dir/$component" ] || {
-    printf '%s\n' "CANDY_RUNTIME_BIN_DIR must contain executable $component" >&2
-    exit 2
-  }
-done
+[ -n "$runtime_bin_dir" ] && [ -x "$runtime_bin_dir/candy-netd" ] || {
+  printf '%s\n' "CANDY_RUNTIME_BIN_DIR must contain runtime-owned executable candy-netd" >&2
+  exit 2
+}
+
+if [ -n "$target_arch" ] && command -v file >/dev/null 2>&1; then
+  netd_file=$(file "$runtime_bin_dir/candy-netd")
+  case "$target_arch:$netd_file" in
+    x86_64:*ELF*x86-64*|aarch64:*ELF*aarch64*|aarch64:*ELF*ARM\ aarch64*|arm:*ELF*ARM*) ;;
+    *)
+      printf '%s\n' "candy-netd does not match OpenWrt target $target_arch: $netd_file" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 openwrt_hostcc=${OPENWRT_HOSTCC:-}
@@ -34,9 +44,12 @@ rm -rf "$pkg_dir"
 mkdir -p "$pkg_dir"
 client_package="$repo_root/openwrt/client/packages/candy-client"
 cp "$client_package/Makefile" "$pkg_dir/Makefile"
+cp "$client_package/candy-client" "$pkg_dir/candy-client"
+cp "$client_package/candy-sdwan" "$pkg_dir/candy-sdwan"
 cp "$client_package/candy.init" "$pkg_dir/candy.init"
 cp "$client_package/candy.config" "$pkg_dir/candy.config"
 cp "$client_package/candy-core-manager" "$pkg_dir/candy-core-manager"
+cp "$client_package/candy-runtime-health-check" "$pkg_dir/candy-runtime-health-check"
 cp -R "$client_package/rulesets" "$pkg_dir/rulesets"
 
 luci_pkg_dir="$sdk/package/luci-app-candy"

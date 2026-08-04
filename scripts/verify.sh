@@ -6,6 +6,8 @@ cd "$root"
 
 scripts/runtime_version_test.sh
 scripts/runtime_layout_test.sh
+linux/server/tests/candy_server_launcher_test.sh
+packaging/linux/server_package_test.sh
 sh -n openwrt/client/packages/candy-client/candy.init
 openwrt/client/tests/init_config_test.sh
 scripts/openwrt_core_manager_test.sh

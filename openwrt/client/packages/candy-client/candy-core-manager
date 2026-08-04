@@ -6,9 +6,10 @@ CORE_ROOT=${CANDY_CORE_ROOT:-/usr/lib/candy/cores}
 CURRENT_LINK=${CANDY_CORE_CURRENT_LINK:-$CORE_ROOT/current}
 PREVIOUS_LINK=${CANDY_CORE_PREVIOUS_LINK:-$CORE_ROOT/previous}
 SERVICE_INIT=${CANDY_SERVICE_INIT:-/etc/init.d/candy}
-CORE_INSPECTOR=${CANDY_CORE_INSPECTOR:-/usr/libexec/candy-runtime-core-inspect}
-SIGNATURE_VERIFIER=${CANDY_CORE_SIGNATURE_VERIFIER:-/usr/libexec/candy-runtime-verify-core}
+SIGNATURE_VERIFIER=${CANDY_CORE_SIGNATURE_VERIFIER:-}
+CORE_SIGNING_KEY=${CANDY_CORE_SIGNING_KEY:-/etc/candy/core-signing-key.pub}
 HEALTH_CHECK=${CANDY_RUNTIME_HEALTH_CHECK:-/usr/libexec/candy-runtime-health-check}
+EXPECTED_PROCESS_API=${CANDY_EXPECTED_CORE_PROCESS_API:-1}
 EXPECTED_CORE_API=${CANDY_EXPECTED_CORE_API:-1}
 MAX_CORE_BYTES=${CANDY_MAX_CORE_BYTES:-134217728}
 MAX_MANIFEST_BYTES=${CANDY_MAX_MANIFEST_BYTES:-262144}
@@ -140,55 +141,87 @@ manifest_size_ok() {
 }
 
 validate_manifest_file() {
-	local manifest="$1" expected_version="$2" schema core_schema api version target_os target_arch library library_sha
+	local manifest="$1" expected_version="$2" schema process_api core_schema api version core_target_os core_target_arch target_os target_arch libc executable executable_sha
 	[ -f "$manifest" ] && manifest_size_ok "$manifest" || invalid_manifest "missing or oversized manifest" || return 1
 	schema=$(manifest_field "$manifest" '@.schema_version')
+	process_api=$(manifest_field "$manifest" '@.process_api_version')
 	core_schema=$(manifest_field "$manifest" '@.core.schema_version')
 	api=$(manifest_field "$manifest" '@.core.core_api_version')
 	version=$(manifest_field "$manifest" '@.core.core_version')
+	core_target_os=$(manifest_field "$manifest" '@.core.target_os')
+	core_target_arch=$(manifest_field "$manifest" '@.core.target_arch')
 	target_os=$(manifest_field "$manifest" '@.artifact.target_os')
 	target_arch=$(manifest_field "$manifest" '@.artifact.target_arch')
-	library=$(manifest_field "$manifest" '@.artifact.library')
-	library_sha=$(manifest_field "$manifest" '@.artifact.library_sha256')
+	libc=$(manifest_field "$manifest" '@.artifact.libc')
+	executable=$(manifest_field "$manifest" '@.artifact.executable')
+	executable_sha=$(manifest_field "$manifest" '@.artifact.executable_sha256')
 	[ "$schema" = 1 ] || invalid_manifest "schema version $schema is not supported" || return 1
+	[ "$process_api" = "$EXPECTED_PROCESS_API" ] || invalid_manifest "Core process API $process_api is not compatible with required API $EXPECTED_PROCESS_API" || return 1
 	[ "$core_schema" = 1 ] || invalid_manifest "Core manifest schema $core_schema is not supported" || return 1
 	[ "$api" = "$EXPECTED_CORE_API" ] || invalid_manifest "Core API $api is not compatible with required API $EXPECTED_CORE_API" || return 1
 	[ "$version" = "$expected_version" ] || invalid_manifest "version $version does not match requested version $expected_version" || return 1
 	[ "$target_os" = linux ] || invalid_manifest "target OS $target_os is not supported" || return 1
+	[ "$core_target_os" = "$target_os" ] || invalid_manifest "Core target OS $core_target_os does not match artifact target OS $target_os" || return 1
+	[ "$core_target_arch" = "$target_arch" ] || invalid_manifest "Core target architecture $core_target_arch does not match artifact target architecture $target_arch" || return 1
+	[ "$libc" = musl ] || invalid_manifest "Core libc $libc is not compatible with OpenWrt" || return 1
 	[ -n "$target_arch" ] || invalid_manifest "target architecture is missing" || return 1
 	case "$(uname -m 2>/dev/null || true):$target_arch" in
 		x86_64:x86_64|amd64:x86_64|aarch64:aarch64|arm64:aarch64|arm*:arm|arm*:armv7|arm*:armv7l) ;;
 		*) invalid_manifest "target architecture $target_arch does not match $(uname -m 2>/dev/null || printf unknown)" || return 1 ;;
 	esac
-	[ "$library" = libcandy_core.so ] || invalid_manifest "Core library path is invalid" || return 1
-	valid_sha256 "$library_sha" || invalid_manifest "Core library SHA-256 is invalid" || return 1
+	[ "$executable" = candy-core ] || invalid_manifest "Core executable path is invalid" || return 1
+	valid_sha256 "$executable_sha" || invalid_manifest "Core executable SHA-256 is invalid" || return 1
+}
+
+verify_manifest_signature() {
+	local manifest="$1" signature="$2"
+	if [ -n "$SIGNATURE_VERIFIER" ]; then
+		[ -x "$SIGNATURE_VERIFIER" ] || return 1
+		"$SIGNATURE_VERIFIER" "$manifest" "$signature"
+		return $?
+	fi
+	command -v usign >/dev/null 2>&1 || return 1
+	[ -f "$CORE_SIGNING_KEY" ] && [ ! -L "$CORE_SIGNING_KEY" ] || return 1
+	usign -V -p "$CORE_SIGNING_KEY" -m "$manifest" -x "$signature"
 }
 
 validate_core_directory() {
-	local directory="$1" expected_version="$2" library="$1/libcandy_core.so" manifest="$1/manifest.json" signature="$1/manifest.sig" info="$1/manifest.runtime.json" expected_library_sha actual_library_sha info_schema info_api info_version
+	local directory="$1" expected_version="$2" executable="$1/candy-core" manifest="$1/manifest.json" signature="$1/manifest.sig" info="$1/manifest.runtime.json" expected_executable_sha actual_executable_sha process_api info_schema info_process_api info_api info_version expected_target_os expected_target_arch info_target_os info_target_arch
 	[ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
 	[ -f "$signature" ] && [ ! -L "$signature" ] || return 1
-	[ -f "$library" ] && [ ! -L "$library" ] || return 1
+	[ -f "$executable" ] && [ -x "$executable" ] && [ ! -L "$executable" ] || return 1
 	validate_manifest_file "$manifest" "$expected_version" || return 1
-	[ -x "$SIGNATURE_VERIFIER" ] || invalid_manifest "Core signature verifier is unavailable" || return 1
-	"$SIGNATURE_VERIFIER" "$manifest" "$signature" || invalid_manifest "Core manifest signature is invalid" || return 1
-	expected_library_sha=$(manifest_field "$manifest" '@.artifact.library_sha256' | tr 'A-F' 'a-f')
-	actual_library_sha=$(sha256sum "$library" 2>/dev/null | awk '{ print tolower($1) }')
-	[ "$actual_library_sha" = "$expected_library_sha" ] || invalid_manifest "Core library SHA-256 mismatch" || return 1
-	[ -x "$CORE_INSPECTOR" ] || invalid_manifest "Core ABI inspector is unavailable" || return 1
+	verify_manifest_signature "$manifest" "$signature" || invalid_manifest "Core manifest signature is invalid" || return 1
+	expected_executable_sha=$(manifest_field "$manifest" '@.artifact.executable_sha256' | tr 'A-F' 'a-f')
+	actual_executable_sha=$(sha256sum "$executable" 2>/dev/null | awk '{ print tolower($1) }')
+	[ "$actual_executable_sha" = "$expected_executable_sha" ] || invalid_manifest "Core executable SHA-256 mismatch" || return 1
+	if command -v timeout >/dev/null 2>&1; then
+		process_api=$(timeout 10 "$executable" runtime-api-version 2>/dev/null) || invalid_manifest "Core process API probe failed" || return 1
+	else
+		process_api=$("$executable" runtime-api-version 2>/dev/null) || invalid_manifest "Core process API probe failed" || return 1
+	fi
+	[ "$process_api" = "$EXPECTED_PROCESS_API" ] || invalid_manifest "Core executable process API $process_api is incompatible" || return 1
 	rm -f "$info"
 	if command -v timeout >/dev/null 2>&1; then
-		timeout 10 "$CORE_INSPECTOR" "$library" > "$info" 2>/dev/null || invalid_manifest "Core ABI inspection failed" || return 1
+		timeout 10 "$executable" core-info > "$info" 2>/dev/null || invalid_manifest "Core process inspection failed" || return 1
 	else
-		"$CORE_INSPECTOR" "$library" > "$info" 2>/dev/null || invalid_manifest "Core ABI inspection failed" || return 1
+		"$executable" core-info > "$info" 2>/dev/null || invalid_manifest "Core process inspection failed" || return 1
 	fi
-	[ -f "$info" ] && manifest_size_ok "$info" || invalid_manifest "Core ABI manifest is missing or oversized" || return 1
+	[ -f "$info" ] && manifest_size_ok "$info" || invalid_manifest "Core process manifest is missing or oversized" || return 1
 	info_schema=$(manifest_field "$info" '@.schema_version')
+	info_process_api=$(manifest_field "$info" '@.process_api_version')
 	info_api=$(manifest_field "$info" '@.core_api_version')
 	info_version=$(manifest_field "$info" '@.core_version')
-	[ "$info_schema" = 1 ] || invalid_manifest "Core ABI returned unsupported manifest schema" || return 1
-	[ "$info_api" = "$EXPECTED_CORE_API" ] || invalid_manifest "Core ABI returned incompatible API" || return 1
-	[ "$info_version" = "$expected_version" ] || invalid_manifest "Core ABI returned a different version" || return 1
+	expected_target_os=$(manifest_field "$manifest" '@.artifact.target_os')
+	expected_target_arch=$(manifest_field "$manifest" '@.artifact.target_arch')
+	info_target_os=$(manifest_field "$info" '@.target_os')
+	info_target_arch=$(manifest_field "$info" '@.target_arch')
+	[ "$info_schema" = 1 ] || invalid_manifest "Core process returned unsupported manifest schema" || return 1
+	[ "$info_process_api" = "$EXPECTED_PROCESS_API" ] || invalid_manifest "Core process returned an incompatible process API" || return 1
+	[ "$info_api" = "$EXPECTED_CORE_API" ] || invalid_manifest "Core process returned incompatible Core API" || return 1
+	[ "$info_version" = "$expected_version" ] || invalid_manifest "Core process returned a different version" || return 1
+	[ "$info_target_os" = "$expected_target_os" ] || invalid_manifest "Core process returned a different target OS" || return 1
+	[ "$info_target_arch" = "$expected_target_arch" ] || invalid_manifest "Core process returned a different target architecture" || return 1
 	rm -f "$info"
 }
 
@@ -196,7 +229,7 @@ managed_core_directory() {
 	local directory="$1" version="$2"
 	validate_manifest_file "$directory/manifest.json" "$version" 2>/dev/null || return 1
 	[ -f "$directory/manifest.sig" ] && [ ! -L "$directory/manifest.sig" ] || return 1
-	[ -f "$directory/libcandy_core.so" ] && [ ! -L "$directory/libcandy_core.so" ] || return 1
+	[ -f "$directory/candy-core" ] && [ -x "$directory/candy-core" ] && [ ! -L "$directory/candy-core" ] || return 1
 }
 
 download_bundle() {
@@ -224,12 +257,12 @@ safe_archive() {
 		{
 			name = $0
 			gsub(/^\.\//, "", name)
-			if (name != "manifest.json" && name != "manifest.sig" && name != "libcandy_core.so") ok = 0
+			if (name != "manifest.json" && name != "manifest.sig" && name != "candy-core") ok = 0
 			seen[name]++
 			count++
 		}
 		END {
-			if (count != 3 || seen["manifest.json"] != 1 || seen["manifest.sig"] != 1 || seen["libcandy_core.so"] != 1) ok = 0
+			if (count != 3 || seen["manifest.json"] != 1 || seen["manifest.sig"] != 1 || seen["candy-core"] != 1) ok = 0
 			exit ok ? 0 : 1
 		}
 	'
@@ -277,7 +310,7 @@ install_core() {
 	fi
 	validate_core_directory "$temporary" "$version" || {
 		rm -rf "$temporary"
-		fail "Core bundle signature, manifest, ABI, architecture, or library is invalid"
+		fail "Core bundle signature, manifest, process API, architecture, or executable is invalid"
 	}
 	mv "$temporary" "$destination" || {
 		rm -rf "$temporary"
@@ -370,7 +403,7 @@ status_json() {
 	local current previous manifest first=1 directory version
 	current=$(link_version "$CURRENT_LINK")
 	previous=$(link_version "$PREVIOUS_LINK")
-	printf '{"schema_version":1,"manager_api_version":1,"required_core_api_version":%s' "$EXPECTED_CORE_API"
+	printf '{"schema_version":1,"manager_api_version":1,"required_core_process_api_version":%s,"required_core_api_version":%s' "$EXPECTED_PROCESS_API" "$EXPECTED_CORE_API"
 	if [ -n "$current" ]; then printf ',"current_version":"%s"' "$current"; else printf ',"current_version":null'; fi
 	if [ -n "$previous" ]; then printf ',"previous_version":"%s"' "$previous"; else printf ',"previous_version":null'; fi
 	manifest="$CORE_ROOT/$current/manifest.json"

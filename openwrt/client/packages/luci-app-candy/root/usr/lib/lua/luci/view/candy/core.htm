@@ -38,6 +38,7 @@ end
 		<table class="table">
 			<tr class="tr"><td class="td left" width="33%"><%:Active version%></td><td id="candy-core-current" class="td left">-</td></tr>
 			<tr class="tr"><td class="td left"><%:Rollback version%></td><td id="candy-core-previous" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Process API%></td><td id="candy-core-process-api" class="td left">-</td></tr>
 			<tr class="tr"><td class="td left"><%:Core API%></td><td id="candy-core-api" class="td left">-</td></tr>
 			<tr class="tr"><td class="td left"><%:Protocol version%></td><td id="candy-core-protocol" class="td left">-</td></tr>
 			<tr class="tr"><td class="td left"><%:Architecture%></td><td id="candy-core-architecture" class="td left">-</td></tr>
@@ -140,6 +141,7 @@ function candyCoreRender(data) {
 	var row, cell, actions, state;
 	candyCoreSetText("candy-core-current", data.current_version);
 	candyCoreSetText("candy-core-previous", data.previous_version);
+	candyCoreSetText("candy-core-process-api", bundle.process_api_version || data.required_core_process_api_version);
 	candyCoreSetText("candy-core-api", manifest.core_api_version || data.required_core_api_version);
 	candyCoreSetText("candy-core-protocol", protocol.major === undefined ? null : protocol.major + "." + protocol.minor);
 	candyCoreSetText("candy-core-architecture", artifact.target_arch);

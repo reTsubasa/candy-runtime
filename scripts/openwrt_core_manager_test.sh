@@ -28,15 +28,21 @@ while [ "$#" -gt 0 ]; do
 done
 case "$expression" in
 	'@.schema_version') key=schema_version ;;
+	'@.process_api_version') key=process_api_version ;;
 	'@.core_api_version') key=core_api_version ;;
 	'@.core_version') key=core_version ;;
+	'@.target_os') key=target_os ;;
+	'@.target_arch') key=target_arch ;;
 	'@.core.schema_version') key=schema_version ;;
 	'@.core.core_api_version') key=core_api_version ;;
 	'@.core.core_version') key=core_version ;;
+	'@.core.target_os') sed -n 's/.*"core":{[^}]*"target_os":"\([^"]*\)".*/\1/p' "$file"; exit ;;
+	'@.core.target_arch') sed -n 's/.*"core":{[^}]*"target_arch":"\([^"]*\)".*/\1/p' "$file"; exit ;;
 	'@.artifact.target_os') key=target_os ;;
 	'@.artifact.target_arch') key=target_arch ;;
-	'@.artifact.library') key=library ;;
-	'@.artifact.library_sha256') key=library_sha256 ;;
+	'@.artifact.libc') key=libc ;;
+	'@.artifact.executable') key=executable ;;
+	'@.artifact.executable_sha256') key=executable_sha256 ;;
 	'@.state') key=state ;;
 	*) exit 1 ;;
 esac
@@ -65,12 +71,6 @@ shift
 exec "$@"
 EOF
 chmod +x "$bin/timeout"
-
-cat > "$bin/core-inspector" <<'EOF'
-#!/bin/sh
-cat "$1"
-EOF
-chmod +x "$bin/core-inspector"
 
 cat > "$bin/core-signature-verifier" <<'EOF'
 #!/bin/sh
@@ -101,16 +101,24 @@ EOF
 chmod +x "$bin/candy-service"
 
 make_bundle() {
-	local version="$1" api="$2" bundle="$3" stage="$tmp/stage-$1" library_sha
+	local version="$1" api="$2" bundle="$3" stage="$tmp/stage-$1" executable_sha
 	rm -rf "$stage"
 	mkdir -p "$stage"
-	printf '%s\n' "{\"schema_version\":1,\"core_api_version\":$api,\"core_version\":\"$version\",\"protocol_version\":{\"major\":0,\"minor\":3},\"features\":[]}" > "$stage/libcandy_core.so"
-	library_sha=$(sha256sum "$stage/libcandy_core.so" | awk '{ print $1 }')
+	cat > "$stage/candy-core" <<EOF
+#!/bin/sh
+case "\${1:-}" in
+	runtime-api-version) printf '%s\n' 1 ;;
+	core-info) printf '%s\n' '{"schema_version":1,"process_api_version":1,"core_api_version":$api,"core_version":"$version","target_os":"linux","target_arch":"$TEST_CORE_ARCH","protocol_version":{"major":0,"minor":3},"features":[]}' ;;
+	*) exit 64 ;;
+esac
+EOF
+	chmod 0755 "$stage/candy-core"
+	executable_sha=$(sha256sum "$stage/candy-core" | awk '{ print $1 }')
 	cat > "$stage/manifest.json" <<EOF
-{"schema_version":1,"core":{"schema_version":1,"core_api_version":$api,"core_version":"$version","protocol_version":{"major":0,"minor":3},"features":[]},"artifact":{"target_os":"linux","target_arch":"$TEST_CORE_ARCH","libc":"test","library":"libcandy_core.so","library_sha256":"$library_sha"}}
+{"schema_version":1,"process_api_version":1,"core":{"schema_version":1,"core_api_version":$api,"core_version":"$version","target_os":"linux","target_arch":"$TEST_CORE_ARCH","protocol_version":{"major":0,"minor":3},"features":[]},"artifact":{"target_os":"linux","target_arch":"$TEST_CORE_ARCH","libc":"musl","executable":"candy-core","executable_sha256":"$executable_sha"}}
 EOF
 	printf '%s\n' trusted-test-signature > "$stage/manifest.sig"
-	tar -czf "$bundle" -C "$stage" manifest.json manifest.sig libcandy_core.so
+	tar -czf "$bundle" -C "$stage" manifest.json manifest.sig candy-core
 }
 
 manager="$root/openwrt/client/packages/candy-client/candy-core-manager"
@@ -119,7 +127,6 @@ export CANDY_CORE_ROOT="$cores"
 export CANDY_CORE_CURRENT_LINK="$cores/current"
 export CANDY_CORE_PREVIOUS_LINK="$cores/previous"
 export CANDY_SERVICE_INIT="$bin/candy-service"
-export CANDY_CORE_INSPECTOR="$bin/core-inspector"
 export CANDY_CORE_SIGNATURE_VERIFIER="$bin/core-signature-verifier"
 export CANDY_RUNTIME_HEALTH_CHECK="$bin/runtime-health-check"
 export CANDY_CORE_LOCK_DIR="$tmp/core-manager.lock"
@@ -197,4 +204,41 @@ fi
 grep -q '"state":"error"' "$CANDY_CORE_OPERATION_FILE"
 
 [ "$(wc -l < "$FAKE_SERVICE_LOG")" -ge 3 ]
-printf '%s\n' "OpenWrt Candy Core bundle manager test passed"
+
+launcher_core="$tmp/launcher-core"
+launcher_log="$tmp/launcher.log"
+cat > "$launcher_core" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CANDY_LAUNCHER_LOG"
+[ "${1:-}" != runtime-api-version ] || printf '%s\n' 1
+EOF
+chmod 0755 "$launcher_core"
+export CANDY_CORE_BIN="$launcher_core"
+export CANDY_LAUNCHER_LOG="$launcher_log"
+sh "$root/openwrt/client/packages/candy-client/candy-client" --config /tmp/client.json --check-config
+sh "$root/openwrt/client/packages/candy-client/candy-sdwan" --config /tmp/sdwan.toml
+grep -Fx 'client --config /tmp/client.json --check-config' "$launcher_log" >/dev/null
+grep -Fx 'client sdwan --config /tmp/sdwan.toml' "$launcher_log" >/dev/null
+[ "$(grep -Fxc runtime-api-version "$launcher_log")" -eq 2 ]
+
+mismatched_core="$tmp/mismatched-core"
+cat > "$mismatched_core" <<'EOF'
+#!/bin/sh
+[ "${1:-}" = runtime-api-version ] && printf '%s\n' 2
+EOF
+chmod 0755 "$mismatched_core"
+if CANDY_CORE_BIN="$mismatched_core" sh "$root/openwrt/client/packages/candy-client/candy-client" --check-config >/dev/null 2>&1; then
+	echo "client launcher accepted an incompatible Core process API" >&2
+	exit 1
+fi
+
+if grep -En 'libcandy_core|CANDY_CORE_SRC|git (clone|checkout)' \
+	"$manager" \
+	"$root/openwrt/client/packages/candy-client/Makefile" \
+	"$root/openwrt/client/packages/candy-client/candy-client" \
+	"$root/openwrt/client/packages/candy-client/candy-sdwan" >/dev/null 2>&1; then
+	echo "OpenWrt Runtime references Core source or the obsolete shared-library artifact" >&2
+	exit 1
+fi
+
+printf '%s\n' "OpenWrt Candy Core process manager and launcher test passed"

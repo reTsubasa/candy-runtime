@@ -19,6 +19,8 @@ FORCE_CONFIG=0
 DRY_RUN=0
 LEGACY_ROOT=/root/candy
 DEFAULT_ARTIFACT_BASE_URL=${CANDY_RELEASE_BASE_URL:-}
+CORE_BINARY=${CANDY_CORE_BINARY:-/opt/candy/cores/current/candy-core}
+EXPECTED_CORE_PROCESS_API=1
 
 usage() {
 	cat <<'EOF'
@@ -28,6 +30,7 @@ Options:
   --artifact-file PATH   Use an already uploaded Candy server artifact.
   --artifact-url URL     Download this exact Candy server artifact.
   --version VERSION      Resolve the artifact URL for a release version.
+  --core-binary PATH     Active private candy-core executable.
   --listen ADDR          Server listen address, default 0.0.0.0:8443.
   --tls-name NAME        Self-signed certificate name, default candy-server.
   --public-host HOST     Override the auto-detected public server address.
@@ -92,6 +95,11 @@ while [ "$#" -gt 0 ]; do
 			[ "$#" -gt 0 ] || die "--version requires a value"
 			VERSION=$1
 			;;
+		--core-binary)
+			shift
+			[ "$#" -gt 0 ] || die "--core-binary requires a path"
+			CORE_BINARY=$1
+			;;
 		--listen)
 			shift
 			[ "$#" -gt 0 ] || die "--listen requires an address"
@@ -133,6 +141,7 @@ if [ "$DRY_RUN" = 1 ]; then
 	log "artifact-file: ${ARTIFACT_FILE:-<download>}"
 	log "artifact-url: ${ARTIFACT_URL:-<resolved from version $VERSION>}"
 	log "install-prefix: $INSTALL_PREFIX"
+	log "core-binary: $CORE_BINARY"
 	log "config: $CONFIG_DIR/server.toml"
 	log "state: $STATE_DIR"
 	log "backup: $BACKUP_DIR"
@@ -147,6 +156,20 @@ case "$(uname -s)" in
 	Linux) ;;
 	*) die "Candy server installer supports Linux only" ;;
 esac
+
+case "$CORE_BINARY" in
+	/*) ;;
+	*) die "--core-binary must be an absolute path: $CORE_BINARY" ;;
+esac
+case "$CORE_BINARY" in
+	*[!A-Za-z0-9_./+-]*) die "--core-binary contains characters unsafe for a systemd Environment value: $CORE_BINARY" ;;
+esac
+[ -f "$CORE_BINARY" ] && [ -x "$CORE_BINARY" ] ||
+	die "active Candy Core is missing or not executable: $CORE_BINARY; install and activate Core before installing Runtime"
+core_process_api=$("$CORE_BINARY" runtime-api-version) ||
+	die "failed to inspect Candy Core process API: $CORE_BINARY runtime-api-version"
+[ "$core_process_api" = "$EXPECTED_CORE_PROCESS_API" ] ||
+	die "incompatible Candy Core process API '$core_process_api'; Runtime requires $EXPECTED_CORE_PROCESS_API"
 
 arch=$(uname -m)
 case "$arch" in
@@ -349,6 +372,7 @@ Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_USER
 WorkingDirectory=$STATE_DIR
+Environment=CANDY_CORE_BINARY=$CORE_BINARY
 ExecStart=$current_link/serverd-linux --config $config_file
 Restart=on-failure
 RestartSec=2s
@@ -422,7 +446,7 @@ EOF
 }
 
 download_artifact
-[ -s "$artifact_path" ] || die "server binary is empty: $artifact_path"
+[ -s "$artifact_path" ] || die "server Runtime launcher is empty: $artifact_path"
 run chmod 0755 "$artifact_path"
 
 create_service_user
@@ -471,7 +495,7 @@ run cp "$artifact_path" "$release_dir/serverd-linux"
 run chmod 0755 "$release_dir/serverd-linux"
 run chown -R root:root "$release_dir"
 if [ -n "$ECH_PUBLIC_NAME" ]; then
-	ech_output=$("$release_dir/serverd-linux" \
+		ech_output=$(CANDY_CORE_BINARY="$CORE_BINARY" "$release_dir/serverd-linux" \
 		--setup-ech "$ECH_PUBLIC_NAME" --ech-directory "$ech_dir") || {
 		rollback
 		die "ECH setup failed"
@@ -495,12 +519,12 @@ fi
 install_unit
 run systemctl daemon-reload
 
-if ! "$release_dir/serverd-linux" --config "$config_file" --check-config; then
+if ! CANDY_CORE_BINARY="$CORE_BINARY" "$release_dir/serverd-linux" --config "$config_file" --check-config; then
 	rollback
 	die "config check failed"
 fi
 run systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
-preflight_output=$("$release_dir/serverd-linux" --config "$config_file" --preflight 2>&1) || {
+preflight_output=$(CANDY_CORE_BINARY="$CORE_BINARY" "$release_dir/serverd-linux" --config "$config_file" --preflight 2>&1) || {
 	printf '%s\n' "$preflight_output" >&2
 	rollback
 	die "preflight failed"

@@ -6,7 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-candy-proto = { path = "../candy-proto" }
 thiserror.workspace = true
 
 [dev-dependencies]

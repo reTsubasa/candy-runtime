@@ -1,0 +1,22 @@
+#!/bin/sh
+
+set -eu
+
+core_bin=${CANDY_CORE_BIN:-/usr/lib/candy/cores/current/candy-core}
+expected_process_api=${CANDY_EXPECTED_CORE_PROCESS_API:-1}
+
+if [ ! -x "$core_bin" ] || [ -L "$core_bin" ]; then
+	printf '%s\n' "Candy Core is not installed or the active Core is invalid: $core_bin" >&2
+	exit 127
+fi
+
+process_api=$("$core_bin" runtime-api-version 2>/dev/null) || {
+	printf '%s\n' "Candy Core process API probe failed: $core_bin" >&2
+	exit 126
+}
+[ "$process_api" = "$expected_process_api" ] || {
+	printf '%s\n' "Candy Core process API $process_api is incompatible with required API $expected_process_api" >&2
+	exit 126
+}
+
+exec "$core_bin" client sdwan "$@"

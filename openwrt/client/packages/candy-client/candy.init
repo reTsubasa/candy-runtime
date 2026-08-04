@@ -44,6 +44,7 @@ CANDY_READY_FILE=${CANDY_READY_FILE:-$RUNTIME_DIR/client.ready}
 CANDY_SERVICE_WAIT_SECONDS=${CANDY_SERVICE_WAIT_SECONDS:-8}
 CANDY_CLIENT_BIN=${CANDY_CLIENT_BIN:-/usr/bin/candy-client}
 CANDY_SDWAN_BIN=${CANDY_SDWAN_BIN:-/usr/bin/candy-sdwan}
+CANDY_CORE_BIN=${CANDY_CORE_BIN:-/usr/lib/candy/cores/current/candy-core}
 CANDY_SDWAN_CONFIG=${CANDY_SDWAN_CONFIG:-/etc/candy/sdwan.toml}
 CANDY_NETD_BIN=${CANDY_NETD_BIN:-/usr/bin/candy-netd}
 CANDY_NETD_SOCKET=${CANDY_NETD_SOCKET:-$RUNTIME_DIR/netd.sock}
@@ -228,6 +229,12 @@ candy_process_running() {
 candy_client_pids() {
 	local pids
 	pids=$(candy_ps | grep -F "$CANDY_CLIENT_BIN --config $RUNTIME_CONFIG" | grep -v grep | awk '{print $1}' 2>/dev/null || true)
+	if [ -z "$pids" ]; then
+		pids=$(candy_ps | grep -F "$CANDY_CORE_BIN client --config $RUNTIME_CONFIG" | grep -v grep | awk '{print $1}' 2>/dev/null || true)
+	fi
+	if [ -z "$pids" ]; then
+		pids=$(candy_ps | grep -F "$CANDY_CORE_BIN client sdwan --config $CANDY_SDWAN_CONFIG" | grep -v grep | awk '{print $1}' 2>/dev/null || true)
+	fi
 	if [ -n "$pids" ]; then
 		printf '%s\n' "$pids"
 		return 0

@@ -4,18 +4,16 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 runtime_bin_dir=${CANDY_RUNTIME_BIN_DIR:-}
 cache_dir=${OPENWRT_SDK_CACHE:-"$repo_root/.openwrt-sdk-cache"}
-image=${OPENWRT_SDK_CONTAINER_IMAGE:-candy-openwrt-sdk-gate:bookworm-v5}
+image=${OPENWRT_SDK_CONTAINER_IMAGE:-candy-openwrt-sdk-gate:bookworm-v6}
 base_image=${OPENWRT_SDK_CONTAINER_BASE_IMAGE:-debian:bookworm}
 no_build=${OPENWRT_SDK_CONTAINER_NO_BUILD:-0}
 download_base=${OPENWRT_DOWNLOAD_BASE:-https://downloads.openwrt.org}
 official_download_base=https://downloads.openwrt.org
 
-for component in candy-client candy-netd candy-sdwan; do
-  [ -n "$runtime_bin_dir" ] && [ -x "$runtime_bin_dir/$component" ] || {
-    printf '%s\n' "CANDY_RUNTIME_BIN_DIR must contain executable $component" >&2
-    exit 2
-  }
-done
+[ -n "$runtime_bin_dir" ] && [ -x "$runtime_bin_dir/candy-netd" ] || {
+  printf '%s\n' "CANDY_RUNTIME_BIN_DIR must contain runtime-owned executable candy-netd" >&2
+  exit 2
+}
 
 usage() {
   printf '%s\n' "usage: $0 ipk|apk [x86_64|ipq40xx-generic|mediatek-filogic|bcm27xx-bcm2711|sdk-url]" >&2
@@ -43,22 +41,27 @@ sdk_path=
 case "$profile_or_url" in
   x86_64|x86-64|x86/64)
     profile=x86_64
+    target_arch=x86_64
     sdk_path="releases/$openwrt_release/targets/x86/64/openwrt-sdk-$openwrt_release-x86-64_gcc-$gcc_version"_musl.Linux-x86_64.tar.zst
     ;;
   mediatek-filogic|mediatek/filogic)
     profile=mediatek-filogic
+    target_arch=aarch64
     sdk_path="releases/$openwrt_release/targets/mediatek/filogic/openwrt-sdk-$openwrt_release-mediatek-filogic_gcc-$gcc_version"_musl.Linux-x86_64.tar.zst
     ;;
   ipq40xx-generic|ipq40xx/generic)
     profile=ipq40xx-generic
+    target_arch=arm
     sdk_path="releases/$openwrt_release/targets/ipq40xx/generic/openwrt-sdk-$openwrt_release-ipq40xx-generic_gcc-$gcc_version"_musl_eabi.Linux-x86_64.tar.zst
     ;;
   bcm27xx-bcm2711|bcm27xx/bcm2711)
     profile=bcm27xx-bcm2711
+    target_arch=aarch64
     sdk_path="releases/$openwrt_release/targets/bcm27xx/bcm2711/openwrt-sdk-$openwrt_release-bcm27xx-bcm2711_gcc-$gcc_version"_musl.Linux-x86_64.tar.zst
     ;;
   http://*|https://*)
     profile=custom
+    target_arch=${OPENWRT_TARGET_ARCH:-}
     sdk_url=$profile_or_url
     ;;
   *)
@@ -163,7 +166,8 @@ SHELL ["/bin/sh", "-eu", "-c"]
 RUN install_deps() { \
       apt-get -o Acquire::Retries=5 update && \
       DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 install -y --fix-missing --no-install-recommends \
-        ca-certificates build-essential curl file gawk git python3 rsync unzip wget zstd; \
+        ca-certificates build-essential curl file gawk git libncurses-dev \
+        python3 python3-distutils rsync unzip wget zstd; \
     }; \
     set_sources() { \
       mirror="$1"; \
@@ -198,6 +202,7 @@ fi
 docker run --rm --platform linux/amd64 \
   -e OPENWRT_SDK=/openwrt-sdk \
   -e OPENWRT_PACKAGE_EXT="$package_ext" \
+  -e OPENWRT_TARGET_ARCH="$target_arch" \
   -e FORCE="${FORCE:-0}" \
   -v "$repo_root:/workspace" \
   -v "$runtime_bin_dir:/runtime-bin:ro" \
@@ -221,6 +226,7 @@ docker run --rm --platform linux/amd64 \
     fi
     cd /tmp/workspace
     OPENWRT_SDK=/tmp/openwrt-sdk OPENWRT_PACKAGE_EXT="$OPENWRT_PACKAGE_EXT" \
+      OPENWRT_TARGET_ARCH="$OPENWRT_TARGET_ARCH" \
       CANDY_RUNTIME_BIN_DIR=/runtime-bin OPENWRT_HOSTCC=/usr/bin/gcc \
       packaging/openwrt/build/package_gate.sh
     case "$OPENWRT_PACKAGE_EXT" in

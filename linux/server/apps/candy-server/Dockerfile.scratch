@@ -1,6 +1,0 @@
-FROM scratch
-COPY serverd-linux /serverd-linux
-VOLUME ["/etc/candy"]
-EXPOSE 8443/udp
-ENTRYPOINT ["/serverd-linux"]
-CMD ["--config", "/etc/candy/server.toml"]

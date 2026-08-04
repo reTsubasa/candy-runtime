@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 
-use candy_proto::varint::{decode_varint, encode_varint};
 use std::cmp::Ordering;
 use thiserror::Error;
 
@@ -707,6 +706,32 @@ fn ensure_frame(input: &[u8]) -> Result<(), NetdProtocolError> {
 
 fn varint(value: u64, out: &mut Vec<u8>) {
     encode_varint(value, out);
+}
+
+fn encode_varint(mut value: u64, out: &mut Vec<u8>) {
+    while value >= 0x80 {
+        out.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn decode_varint(input: &[u8]) -> Result<(u64, usize), ()> {
+    let mut value = 0_u64;
+    for (index, byte) in input.iter().copied().take(10).enumerate() {
+        let payload = u64::from(byte & 0x7f);
+        if index == 9 && payload > 1 {
+            return Err(());
+        }
+        value |= payload << (index * 7);
+        if byte & 0x80 == 0 {
+            if index > 0 && payload == 0 {
+                return Err(());
+            }
+            return Ok((value, index + 1));
+        }
+    }
+    Err(())
 }
 
 struct Reader<'a> {

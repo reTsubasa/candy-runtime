@@ -200,7 +200,7 @@ local function candy_service_async(action)
 end
 
 local function candy_service_running()
-	return run_argv({ "/bin/pidof", "candy-client" })
+	return run_argv({ "/etc/init.d/candy", "running" })
 end
 
 local function candy_service_status(status)

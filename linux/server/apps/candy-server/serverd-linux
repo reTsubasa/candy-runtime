@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+
+readonly_runtime_api=1
+core_root=${CANDY_CORE_ROOT:-/opt/candy/cores}
+core_current=${CANDY_CORE_CURRENT_LINK:-$core_root/current}
+core_candidate=${CANDY_CORE_BINARY:-$core_current/candy-core}
+
+fail() {
+	status=$1
+	shift
+	printf '%s\n' "serverd-linux: $*" >&2
+	exit "$status"
+}
+
+command -v readlink >/dev/null 2>&1 ||
+	fail 69 "cannot resolve the active Candy Core: required command 'readlink' is missing"
+
+if [ ! -e "$core_candidate" ]; then
+	fail 69 "active Candy Core is missing at $core_candidate; install and activate a Core release, or set CANDY_CORE_BINARY to its candy-core executable"
+fi
+if [ ! -f "$core_candidate" ] || [ ! -x "$core_candidate" ]; then
+	fail 69 "active Candy Core is not an executable regular file: $core_candidate"
+fi
+
+core_binary=$(readlink -f "$core_candidate" 2>/dev/null) ||
+	fail 69 "cannot resolve active Candy Core path: $core_candidate"
+[ -n "$core_binary" ] && [ -f "$core_binary" ] && [ -x "$core_binary" ] ||
+	fail 69 "resolved Candy Core is not executable: $core_binary"
+
+launcher_binary=$(readlink -f "$0" 2>/dev/null || true)
+if [ -n "$launcher_binary" ] && [ "$core_binary" = "$launcher_binary" ]; then
+	fail 78 "CANDY_CORE_BINARY points back to the Runtime launcher; select the private candy-core executable instead"
+fi
+
+if core_api=$("$core_binary" runtime-api-version); then
+	:
+else
+	status=$?
+	fail 69 "Candy Core API inspection failed with exit code $status: $core_binary runtime-api-version"
+fi
+if [ "$core_api" != "$readonly_runtime_api" ]; then
+	fail 78 "incompatible Candy Core process API '$core_api' at $core_binary; this Runtime requires process API $readonly_runtime_api"
+fi
+
+export CANDY_RUNTIME_PROCESS_API_VERSION=$readonly_runtime_api
+export CANDY_RUNTIME_ROLE=server
+
+exec "$core_binary" server "$@"

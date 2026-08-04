@@ -1,0 +1,6 @@
+{
+  "schema": "candy-netd-v1",
+  "prepare_request_hex": "01010901010101010101010101010101010101922107d08603a09c016440000a9c09020a01000010010a020000100202c000020a2001c6336414200201010101",
+  "prepared_response_hex": "0101090701",
+  "notes": "Canonical candy-netd v1 two-phase Prepare request and FD-bearing Prepared response."
+}

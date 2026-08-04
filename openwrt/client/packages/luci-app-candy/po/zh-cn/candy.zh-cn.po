@@ -27,6 +27,9 @@ msgstr "DNS 与 GEO 专家设置"
 msgid "Provider updates"
 msgstr "规则数据更新"
 
+msgid "Process API"
+msgstr "进程 API"
+
 msgid "Enable Candy DNS and China routing with sensible defaults. Custom DNS servers are optional."
 msgstr "使用合理默认值启用 Candy DNS 与国内直连；DNS 服务器均可选填。"
 

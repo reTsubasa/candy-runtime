@@ -18,11 +18,14 @@ if grep -E 'cargo|target/.*/release' "$makefile" >/dev/null; then
 	fail "OpenWrt package still compiles or embeds Core"
 fi
 grep -F '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-netd $(1)/usr/bin/candy-netd' "$makefile" >/dev/null || fail "candy-netd is not packaged as a Runtime binary"
-grep -F '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan $(1)/usr/bin/candy-sdwan' "$makefile" >/dev/null || fail "candy-sdwan is not packaged as a Runtime binary"
+grep -F '$(INSTALL_BIN) ./candy-sdwan $(1)/usr/bin/candy-sdwan' "$makefile" >/dev/null || fail "candy-sdwan Runtime launcher is not packaged"
+grep -F 'exec "$core_bin" client sdwan "$@"' "$root/candy-client/candy-sdwan" >/dev/null || fail "candy-sdwan does not use the Core process API"
+grep -F 'runtime-api-version' "$root/candy-client/candy-sdwan" >/dev/null || fail "candy-sdwan does not bootstrap the Core process API"
 if grep -F '/usr/lib/candy/cores/current/candy-' "$makefile" >/dev/null; then
 	fail "Runtime executables are still linked from the Core directory"
 fi
 grep -F 'candy-core-manager' "$makefile" >/dev/null || fail "Core lifecycle manager is not installed"
+grep -F 'candy-runtime-health-check' "$makefile" >/dev/null || fail "Core activation health check is not installed"
 grep -F '+kmod-tun' "$makefile" >/dev/null || fail "TUN kernel dependency is missing"
 grep -F 'config sdwan' "$config" >/dev/null || fail "SD-WAN UCI bootstrap is missing"
 grep -F "option enabled '0'" "$config" >/dev/null || fail "SD-WAN must default off"

@@ -15,12 +15,12 @@ define Package/candy-client
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Candy OpenWrt client runtime
-  DEPENDS:=+libgcc +ca-bundle +uclient-fetch +jsonfilter +kmod-tun +kmod-nft-tproxy +kmod-nf-tproxy
+  DEPENDS:=+libgcc +ca-bundle +uclient-fetch +jsonfilter +usign +kmod-tun +kmod-nft-tproxy +kmod-nf-tproxy
   USERID:=candy-sdwan=789:candy-sdwan=789
 endef
 
 define Package/candy-client/description
-  Candy client Runtime binaries, lifecycle, network policy and Core version management.
+  Candy client Runtime launchers, privileged netd, lifecycle, network policy and signed Core management.
 endef
 
 define Package/candy-client/conffiles
@@ -31,10 +31,8 @@ define Build/Prepare
 	rm -rf $(PKG_BUILD_DIR)
 	mkdir -p $(PKG_BUILD_DIR)
 	[ -n "$(CANDY_RUNTIME_BIN_DIR)" ] || { echo "CANDY_RUNTIME_BIN_DIR is required"; exit 1; }
-	for component in candy-client candy-netd candy-sdwan; do \
-		[ -x "$(CANDY_RUNTIME_BIN_DIR)/$$$$component" ] || { echo "missing Runtime binary: $$$$component"; exit 1; }; \
-		cp "$(CANDY_RUNTIME_BIN_DIR)/$$$$component" "$(PKG_BUILD_DIR)/$$$$component"; \
-	done
+	[ -x "$(CANDY_RUNTIME_BIN_DIR)/candy-netd" ] || { echo "missing Runtime binary: candy-netd"; exit 1; }
+	cp "$(CANDY_RUNTIME_BIN_DIR)/candy-netd" "$(PKG_BUILD_DIR)/candy-netd"
 endef
 
 define Build/Compile
@@ -42,12 +40,13 @@ endef
 
 define Package/candy-client/install
 	$(INSTALL_DIR) $(1)/usr/bin/
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-client $(1)/usr/bin/candy-client
+	$(INSTALL_BIN) ./candy-client $(1)/usr/bin/candy-client
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-netd $(1)/usr/bin/candy-netd
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan $(1)/usr/bin/candy-sdwan
+	$(INSTALL_BIN) ./candy-sdwan $(1)/usr/bin/candy-sdwan
 	ln -sf candy-client $(1)/usr/bin/client-cli
 	$(INSTALL_DIR) $(1)/usr/libexec
 	$(INSTALL_BIN) ./candy-core-manager $(1)/usr/libexec/candy-core-manager
+	$(INSTALL_BIN) ./candy-runtime-health-check $(1)/usr/libexec/candy-runtime-health-check
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./candy.init $(1)/etc/init.d/candy
 	$(SED) 's|^CANDY_VERSION=.*|CANDY_VERSION=$$$${CANDY_VERSION:-$(PKG_VERSION)}|' $(1)/etc/init.d/candy

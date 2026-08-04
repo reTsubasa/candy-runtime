@@ -1,0 +1,19 @@
+#!/bin/sh
+
+set -eu
+
+role=${1:-client}
+ready_file=${CANDY_READY_FILE:-/var/run/candy/client.ready}
+runtime_config=${CANDY_RUNTIME_CONFIG:-/var/run/candy/runtime.json}
+service_init=${CANDY_SERVICE_INIT:-/etc/init.d/candy}
+
+[ "$role" = client ] || exit 64
+[ -x "$service_init" ] && "$service_init" running >/dev/null 2>&1 || exit 1
+[ -s "$runtime_config" ] && [ ! -L "$runtime_config" ] || exit 1
+[ -s "$ready_file" ] && [ ! -L "$ready_file" ] || exit 1
+
+ready_pid=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$ready_file" | head -n 1)
+case "$ready_pid" in
+	''|*[!0-9]*) exit 1 ;;
+esac
+kill -0 "$ready_pid" 2>/dev/null

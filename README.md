@@ -20,7 +20,7 @@ packaging/     跨目录的构建与发布编排
 ## 依赖方向
 
 ```text
-platform role -> runtime adapters -> stable Core ABI -> private Core
+platform role -> runtime adapters -> stable Core process API -> private Core
 ```
 
 Core 不得依赖本仓库。Runtime 不复制 feature bit、FEC 激活条件、协议状态机
@@ -34,12 +34,13 @@ wire 版本和 Core API 版本与 Runtime 版本不要求相等。
 
 Runtime 发布必须记录 Runtime 版本/revision、Core commit/版本/API、wire 版本、
 目标平台/架构和产物 SHA-256。Core 独立更新使用
-[Core ABI v1](shared/contracts/core-abi-v1.md)，不使用 Rust dylib ABI。
+[Core Process API v1](shared/contracts/core-process-api-v1.md)，Runtime 不加载 Rust dylib，
+也不获取或编译 Core 源码。
 
 ## 当前迁移状态
 
 - OpenWrt client 已迁入 `openwrt/client`。
-- Linux client/server、netd 和 SD-WAN 已归位到 Runtime 目录。
-- OpenWrt server 目录已保留，不伪装成已实现；它将复用同一 Server Core ABI。
-- 新 Core 私有仓库地址和固定 commit 提供前，不提交临时相对路径、submodule
-  或可移动 branch 依赖。
+- Linux/OpenWrt role 入口均为 Process API v1 薄启动器；协议实现不在本仓库。
+- `candy-netd` 是 Runtime 唯一的首批原生 Rust 进程，已与 Core crate 完全解耦。
+- OpenWrt server 目录已保留，不伪装成已实现；它将复用同一 Core process API。
+- Core 作为独立签名制品安装和更新；Runtime 构建不检出、链接或复制 Core 源码。
