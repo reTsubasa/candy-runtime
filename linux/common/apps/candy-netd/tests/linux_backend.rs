@@ -10,6 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 #[test]
+#[ignore = "requires an isolated Linux network namespace with CAP_NET_ADMIN"]
 fn real_linux_backend_prepares_commits_and_rolls_back() {
     let state =
         std::env::temp_dir().join(format!("candy-netd-linux-backend-{}", std::process::id()));
