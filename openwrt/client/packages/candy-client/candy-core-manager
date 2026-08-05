@@ -233,10 +233,17 @@ managed_core_directory() {
 }
 
 download_bundle() {
-	local url="$1" destination="$2"
+	local url="$1" destination="$2" source
 	case "$url" in
 		https://*) ;;
-		file://*) [ "${CANDY_CORE_ALLOW_FILE_URL:-0}" = 1 ] || return 1 ;;
+		file://*)
+			[ "${CANDY_CORE_ALLOW_FILE_URL:-0}" = 1 ] || return 1
+			source=${url#file://}
+			case "$source" in /*) ;; *) return 1 ;; esac
+			[ -s "$source" ] && [ -f "$source" ] && [ ! -L "$source" ] || return 1
+			cp "$source" "$destination"
+			return $?
+			;;
 		*) return 1 ;;
 	esac
 	if command -v uclient-fetch >/dev/null 2>&1; then

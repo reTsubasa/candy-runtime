@@ -52,16 +52,8 @@ chmod +x "$bin/jsonfilter"
 
 cat > "$bin/uclient-fetch" <<'EOF'
 #!/bin/sh
-destination=
-url=
-while [ "$#" -gt 0 ]; do
-	case "$1" in
-		-O) destination=$2; shift 2 ;;
-		-q) shift ;;
-		*) url=$1; shift ;;
-	esac
-done
-case "$url" in file://*) cp "${url#file://}" "$destination" ;; *) exit 1 ;; esac
+printf '%s\n' "$*" >> "$FAKE_FETCH_LOG"
+exit 99
 EOF
 chmod +x "$bin/uclient-fetch"
 
@@ -134,6 +126,7 @@ export CANDY_CORE_OPERATION_FILE="$tmp/core-operation.json"
 export CANDY_CORE_ALLOW_FILE_URL=1
 export FAKE_SERVICE_LOG="$tmp/service.log"
 export FAKE_SERVICE_FAIL_ONCE="$tmp/service-fail-once"
+export FAKE_FETCH_LOG="$tmp/fetch.log"
 
 mkdir "$CANDY_CORE_LOCK_DIR"
 printf '%s\n' "$$" > "$CANDY_CORE_LOCK_DIR/pid"
@@ -150,7 +143,39 @@ printf '%s\n' 99999999 > "$CANDY_CORE_LOCK_DIR/pid"
 
 make_bundle 0.4.1 1 "$tmp/core-0.4.1.tar.gz"
 sha_041=$(sha256sum "$tmp/core-0.4.1.tar.gz" | awk '{ print $1 }')
+if CANDY_CORE_ALLOW_FILE_URL=0 "$manager" install 0.4.8 "file://$tmp/core-0.4.1.tar.gz" "$sha_041" >/dev/null 2>&1; then
+	echo "local Core bundle was accepted without explicit opt-in" >&2
+	exit 1
+fi
+if "$manager" install 0.4.8 'file://relative-core.tar.gz' "$sha_041" >/dev/null 2>&1; then
+	echo "relative local Core bundle path was accepted" >&2
+	exit 1
+fi
+ln -s "$tmp/core-0.4.1.tar.gz" "$tmp/core-link.tar.gz"
+if "$manager" install 0.4.8 "file://$tmp/core-link.tar.gz" "$sha_041" >/dev/null 2>&1; then
+	echo "symbolic-link local Core bundle was accepted" >&2
+	exit 1
+fi
+: > "$tmp/empty-core.tar.gz"
+if "$manager" install 0.4.8 "file://$tmp/empty-core.tar.gz" "$sha_041" >/dev/null 2>&1; then
+	echo "empty local Core bundle was accepted" >&2
+	exit 1
+fi
+if "$manager" install 0.4.8 "file://$tmp" "$sha_041" >/dev/null 2>&1; then
+	echo "directory local Core bundle was accepted" >&2
+	exit 1
+fi
+if "$manager" install 0.4.8 'https://example.invalid/core.tar.gz' "$sha_041" >/dev/null 2>&1; then
+	echo "failed HTTPS fetch was accepted" >&2
+	exit 1
+fi
+grep -F 'https://example.invalid/core.tar.gz' "$FAKE_FETCH_LOG" >/dev/null
+rm -f "$FAKE_FETCH_LOG"
 "$manager" install 0.4.1 "file://$tmp/core-0.4.1.tar.gz" "$sha_041" >/dev/null
+[ ! -e "$FAKE_FETCH_LOG" ] || {
+	echo "local Core bundle unexpectedly used the network downloader" >&2
+	exit 1
+}
 "$manager" activate 0.4.1 >/dev/null
 [ "$(readlink "$cores/current")" = 0.4.1 ]
 grep -q '"state":"completed"' "$CANDY_CORE_OPERATION_FILE"

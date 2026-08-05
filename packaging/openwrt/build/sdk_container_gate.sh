@@ -23,16 +23,31 @@ package_ext=${1:-}
 profile_or_url=${2:-x86_64}
 case "$package_ext" in
   ipk)
-    openwrt_release=24.10.7
-    gcc_version=13.3.0
+    default_openwrt_release=24.10.7
+    default_gcc_version=13.3.0
     ;;
   apk)
-    openwrt_release=25.12.5
-    gcc_version=14.3.0
+    default_openwrt_release=25.12.4
+    default_gcc_version=14.3.0
     ;;
   *)
     usage
     exit 1
+    ;;
+esac
+
+openwrt_release=${OPENWRT_RELEASE:-$default_openwrt_release}
+gcc_version=${OPENWRT_GCC_VERSION:-$default_gcc_version}
+case "$openwrt_release" in
+  ''|*[!0-9.]*)
+    printf '%s\n' "OPENWRT_RELEASE must contain only digits and dots, got: $openwrt_release" >&2
+    exit 2
+    ;;
+esac
+case "$gcc_version" in
+  ''|*[!0-9.]*)
+    printf '%s\n' "OPENWRT_GCC_VERSION must contain only digits and dots, got: $gcc_version" >&2
+    exit 2
     ;;
 esac
 
@@ -203,6 +218,10 @@ docker run --rm --platform linux/amd64 \
   -e OPENWRT_SDK=/openwrt-sdk \
   -e OPENWRT_PACKAGE_EXT="$package_ext" \
   -e OPENWRT_TARGET_ARCH="$target_arch" \
+  -e OPENWRT_RELEASE="$openwrt_release" \
+  -e OPENWRT_GCC_VERSION="$gcc_version" \
+  -e OPENWRT_SDK_URL="$sdk_url" \
+  -e OPENWRT_PROFILE="$profile" \
   -e FORCE="${FORCE:-0}" \
   -v "$repo_root:/workspace" \
   -v "$runtime_bin_dir:/runtime-bin:ro" \
@@ -211,6 +230,9 @@ docker run --rm --platform linux/amd64 \
   -w /workspace \
   "$run_image" \
   sh -eu -c '
+    rm -f /dist/candy-client-*.apk /dist/candy-client_*.ipk \
+      /dist/luci-app-candy*.apk /dist/luci-app-candy*.ipk \
+      /dist/BUILD-INFO /dist/SHA256SUMS
     rm -rf /tmp/workspace /tmp/openwrt-sdk
     mkdir -p /tmp/workspace /tmp/openwrt-sdk
     rsync -a --delete \
@@ -238,6 +260,15 @@ docker run --rm --platform linux/amd64 \
     find /tmp/openwrt-sdk/bin/packages -name "luci-app-candy*.$OPENWRT_PACKAGE_EXT" -type f -size +0c -exec cp {} /dist/ \;
     find /dist -name "$artifact_pattern" -type f -size +0c | grep -q .
     find /dist -name "luci-app-candy*.$OPENWRT_PACKAGE_EXT" -type f -size +0c | grep -q .
+    {
+      printf "openwrt_release=%s\n" "$OPENWRT_RELEASE"
+      printf "gcc_version=%s\n" "$OPENWRT_GCC_VERSION"
+      printf "profile=%s\n" "$OPENWRT_PROFILE"
+      printf "package_format=%s\n" "$OPENWRT_PACKAGE_EXT"
+      printf "sdk_url=%s\n" "$OPENWRT_SDK_URL"
+    } > /dist/BUILD-INFO
+    (cd /dist && sha256sum candy-client*.$OPENWRT_PACKAGE_EXT \
+      luci-app-candy*.$OPENWRT_PACKAGE_EXT > SHA256SUMS)
   '
 
-printf '%s\n' "OpenWrt $package_ext package exported: $dist_dir"
+printf '%s\n' "OpenWrt $openwrt_release $package_ext package exported: $dist_dir"

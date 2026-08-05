@@ -22,6 +22,7 @@ scripts/openwrt_core_manager_test.sh
 openwrt/client/tests/luci_package_test.sh
 openwrt/client/tests/sdwan_productization_test.sh
 packaging/openwrt/tests/package_gate_test.sh
+packaging/openwrt/tests/sdk_container_profile_test.sh
 git diff --check
 
 printf '%s\n' "Candy Runtime static verification passed"

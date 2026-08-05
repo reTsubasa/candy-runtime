@@ -39,7 +39,7 @@ jobs:
         run: |
           stage=$(packaging/openwrt/build/build_runtime.sh x86_64-unknown-linux-musl)
           echo "stage=$stage" >> "$GITHUB_OUTPUT"
-      - run: CANDY_RUNTIME_BIN_DIR="${{ steps.runtime.outputs.stage }}" packaging/openwrt/build/sdk_container_gate.sh apk x86_64
+      - run: CANDY_RUNTIME_BIN_DIR="${{ steps.runtime.outputs.stage }}" OPENWRT_RELEASE=25.12.4 OPENWRT_GCC_VERSION=14.3.0 packaging/openwrt/build/sdk_container_gate.sh apk x86_64
       - uses: actions/upload-artifact@v4
         with:
           name: candy-runtime-openwrt-client-x86_64
