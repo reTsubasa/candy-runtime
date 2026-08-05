@@ -90,7 +90,7 @@ jobs:
           - Package format: APK
           EOF
           if gh release view "$staging_tag" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
-            gh release delete "$staging_tag" --repo "$RELEASE_REPOSITORY" --cleanup-tag --yes
+            gh release delete "$staging_tag" --repo "$RELEASE_REPOSITORY" --yes
           fi
           gh release create "$staging_tag" --repo "$RELEASE_REPOSITORY" --draft \
             --title "Incoming Candy Runtime $CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION" \
