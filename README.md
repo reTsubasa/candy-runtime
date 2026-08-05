@@ -37,6 +37,13 @@ Runtime 发布必须记录 Runtime 版本/revision、Core commit/版本/API、wi
 [Core Process API v1](shared/contracts/core-process-api-v1.md)，Runtime 不加载 Rust dylib，
 也不获取或编译 Core 源码。
 
+OpenWrt client 的集中发布由 `release-openwrt-client` 手动 workflow 执行。
+它固定从 `main` 构建、校验 Runtime 版本与包 revision，然后将两个
+APK、`BUILD-INFO`、`SHA256SUMS` 和 `runtime-release-metadata.json`
+上传到 `reTsubasa/candy-release` 的 `runtime-v<version>-r<revision>` Release。
+该 workflow 只使用 `CANDY_RELEASE_TOKEN` 管理 Runtime Release 资产，不更改
+稳定版目录。
+
 ## 当前迁移状态
 
 - OpenWrt client 已迁入 `openwrt/client`。

@@ -1,0 +1,104 @@
+name: release-openwrt-client
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-openwrt-client-0.4.0-r2
+  cancel-in-progress: false
+
+env:
+  CANDY_RELEASE_VERSION: "0.4.0"
+  CANDY_RELEASE_REVISION: "2"
+  OPENWRT_RELEASE: "25.12.4"
+  OPENWRT_GCC_VERSION: "14.3.0"
+  RELEASE_REPOSITORY: reTsubasa/candy-release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Runtime main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Validate Runtime release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = reTsubasa/candy-runtime
+          test "$(tr -d '\r\n' < VERSION)" = "$CANDY_RELEASE_VERSION"
+          test "$(sed -n 's/^PKG_VERSION:=//p' openwrt/client/packages/candy-client/Makefile)" = "$CANDY_RELEASE_VERSION"
+          test "$(sed -n 's/^PKG_VERSION:=//p' openwrt/client/packages/luci-app-candy/Makefile)" = "$CANDY_RELEASE_VERSION"
+          test "$(sed -n 's/^PKG_RELEASE:=//p' openwrt/client/packages/candy-client/Makefile)" = "$CANDY_RELEASE_REVISION"
+          test "$(sed -n 's/^PKG_RELEASE:=//p' openwrt/client/packages/luci-app-candy/Makefile)" = "$CANDY_RELEASE_REVISION"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y musl-tools jq
+
+      - name: Build Runtime executable
+        id: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage=$(packaging/openwrt/build/build_runtime.sh x86_64-unknown-linux-musl)
+          echo "stage=$stage" >> "$GITHUB_OUTPUT"
+
+      - name: Build OpenWrt client APKs
+        env:
+          CANDY_RUNTIME_BIN_DIR: ${{ steps.runtime.outputs.stage }}
+        run: packaging/openwrt/build/sdk_container_gate.sh apk x86_64
+
+      - name: Validate and describe release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_commit=$(git rev-parse HEAD)
+          CANDY_RELEASE_SOURCE_REPOSITORY="$GITHUB_REPOSITORY" \
+            CANDY_RELEASE_SOURCE_COMMIT="$source_commit" \
+            packaging/openwrt/build/prepare_runtime_release.sh dist/openwrt/x86_64/apk
+          test -s "dist/openwrt/x86_64/apk/candy-client-$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION.apk"
+          test -s "dist/openwrt/x86_64/apk/luci-app-candy-$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION.apk"
+          (cd dist/openwrt/x86_64/apk && sha256sum -c SHA256SUMS)
+
+      - name: Create or update centralized Runtime release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CANDY_RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          tag="runtime-v$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION"
+          dist=dist/openwrt/x86_64/apk
+          notes=$(mktemp)
+          cat > "$notes" <<EOF
+          Candy Runtime $CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION
+
+          - Source: $GITHUB_REPOSITORY@$(git rev-parse HEAD)
+          - Target: OpenWrt $OPENWRT_RELEASE x86_64
+          - Package format: APK
+          EOF
+          if gh release view "$tag" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$tag" --repo "$RELEASE_REPOSITORY" \
+              --title "Candy Runtime $CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION" \
+              --notes-file "$notes"
+          else
+            gh release create "$tag" --repo "$RELEASE_REPOSITORY" \
+              --title "Candy Runtime $CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION" \
+              --notes-file "$notes"
+          fi
+          gh release upload "$tag" --repo "$RELEASE_REPOSITORY" --clobber \
+            "$dist/candy-client-$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION.apk" \
+            "$dist/luci-app-candy-$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION.apk" \
+            "$dist/BUILD-INFO" \
+            "$dist/SHA256SUMS" \
+            "$dist/runtime-release-metadata.json"
