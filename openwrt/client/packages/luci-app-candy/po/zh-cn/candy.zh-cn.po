@@ -820,7 +820,7 @@ msgid "Invalid input"
 msgstr "输入无效"
 
 msgid "Not run"
-msgstr "未运行"
+msgstr "尚未运行"
 
 msgid "Unknown"
 msgstr "未知"
@@ -1248,9 +1248,6 @@ msgstr "丢包计数"
 msgid "Last failover"
 msgstr "最近切换"
 
-msgid "Congestion controller"
-msgstr "拥塞控制器"
-
 msgid "Candy BBR preset"
 msgstr "Candy BBR 参数预设"
 
@@ -1268,9 +1265,6 @@ msgstr "拥塞控制器对比测试"
 
 msgid "Start comparison"
 msgstr "开始对比"
-
-msgid "Not run"
-msgstr "尚未运行"
 
 msgid "Test point"
 msgstr "测试点"
@@ -1463,6 +1457,24 @@ msgstr "安装 Runtime"
 
 msgid "Install Core"
 msgstr "安装 Core"
+
+msgid "Downloading and verifying the stable catalog"
+msgstr "正在下载并验证稳定版目录"
+
+msgid "Stable catalog verified"
+msgstr "稳定版目录已验证"
+
+msgid "Downloading and validating Core"
+msgstr "正在下载并校验 Core"
+
+msgid "Core installed; activation remains manual"
+msgstr "Core 已安装，仍需手动启用"
+
+msgid "Downloading and validating Runtime packages"
+msgstr "正在下载并校验 Runtime 软件包"
+
+msgid "Runtime installed and verified"
+msgstr "Runtime 已安装并通过验证"
 
 msgid "Observed in the current connection"
 msgstr "当前连接已观测到运行证据"

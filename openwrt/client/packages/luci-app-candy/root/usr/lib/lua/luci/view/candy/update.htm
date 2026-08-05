@@ -81,7 +81,15 @@ var candyUpdateLabels = {
 	available: <%=js_string(i18n.translate("Update available"))%>,
 	current: <%=js_string(i18n.translate("Current"))%>,
 	installRuntime: <%=js_string(i18n.translate("Install Runtime"))%>,
-	installCore: <%=js_string(i18n.translate("Install Core"))%>
+	installCore: <%=js_string(i18n.translate("Install Core"))%>,
+	operationMessages: {
+		"downloading and verifying the stable catalog": <%=js_string(i18n.translate("Downloading and verifying the stable catalog"))%>,
+		"stable catalog verified": <%=js_string(i18n.translate("Stable catalog verified"))%>,
+		"downloading and validating Core": <%=js_string(i18n.translate("Downloading and validating Core"))%>,
+		"Core installed; activation remains manual": <%=js_string(i18n.translate("Core installed; activation remains manual"))%>,
+		"downloading and validating Runtime packages": <%=js_string(i18n.translate("Downloading and validating Runtime packages"))%>,
+		"Runtime installed and verified": <%=js_string(i18n.translate("Runtime installed and verified"))%>
+	}
 };
 
 function candyUpdateText(value) {
@@ -91,6 +99,10 @@ function candyUpdateText(value) {
 function candyUpdateSet(id, value) {
 	var node = document.getElementById(id);
 	if (node) node.textContent = candyUpdateText(value);
+}
+
+function candyUpdateOperationText(message) {
+	return candyUpdateLabels.operationMessages[message] || message || "";
 }
 
 function candyUpdateCompare(left, right) {
@@ -134,7 +146,7 @@ function candyUpdateRender(data) {
 	candyUpdateSet("candy-update-published", catalog.published_at);
 	candyUpdateSet("candy-update-checked", data.checked_at ? new Date(Number(data.checked_at) * 1000).toLocaleString() : null);
 	candyUpdateSet("candy-update-platform", data.platform ? [data.platform.openwrt_release, data.platform.target, data.platform.arch].join(" / ") : null);
-	if (operationNode) { operationNode.style.display = operation.state || data.error ? "" : "none"; operationNode.className = "candy-update-operation " + (operation.state || "error"); operationNode.textContent = data.error || operation.message || ""; }
+	if (operationNode) { operationNode.style.display = operation.state || data.error ? "" : "none"; operationNode.className = "candy-update-operation " + (operation.state || "error"); operationNode.textContent = data.error || candyUpdateOperationText(operation.message); }
 	candyUpdateRow("candy-update-runtime", [data.runtime_current, runtimeEntry.display_version, runtimeNewer ? candyUpdateLabels.available : candyUpdateLabels.current], runtimeNewer && runtime.latest ? candyUpdateAction(candyUpdateRuntimeUrl, runtime.latest, candyUpdateLabels.installRuntime, busy) : null);
 	candyUpdateRow("candy-update-core", [data.core_current, coreEntry.version, coreEntry.process_api_version], coreNewer && core.latest ? candyUpdateAction(candyUpdateCoreUrl, core.latest, candyUpdateLabels.installCore, busy) : null);
 	var check = document.getElementById("candy-update-check"); if (check) check.disabled = busy;
