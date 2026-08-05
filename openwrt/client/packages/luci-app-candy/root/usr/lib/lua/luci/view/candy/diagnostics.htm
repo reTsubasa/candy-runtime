@@ -110,16 +110,29 @@ end
 .candy-chart svg { display: block; width: 100%; height: 10em; border-bottom: 1px solid #ccc; background: repeating-linear-gradient(to bottom, transparent 0, transparent 24%, rgba(127,127,127,.15) 25%); }
 .candy-chart svg text { fill: #666; font-size: 11px; }
 .candy-metric-lines { white-space: pre-line; line-height: 1.55; }
-.candy-test-actions { display:flex; align-items:center; gap:1em; margin:.75em 0; }
+.candy-test-actions { display:flex; align-items:center; flex-wrap:wrap; gap:.75em 1em; margin:.75em 0; }
+.candy-test-actions label { margin: 0; font-weight: 700; }
+.candy-test-actions select { min-width: 14em; max-width: 100%; }
 @media (max-width: 1000px) { .candy-chart-grid { grid-template-columns: 1fr; } }
 </style>
 
 <div class="cbi-map">
 	<h3><%:Congestion controller comparison%></h3>
 	<div class="cbi-section">
-		<p><%:Runs one bounded 2 MiB download through CUBIC and each Candy BBR preset. It does not change the running configuration.%></p>
-		<div class="candy-test-actions"><button id="candy-congestion-test-start" class="cbi-button cbi-button-action"><%:Start comparison%></button><span id="candy-congestion-test-state"><%:Not run%></span></div>
-		<table class="table"><thead><tr class="tr table-titles"><th class="th"><%:Controller / preset%></th><th class="th"><%:Goodput%></th><th class="th">TTFB</th><th class="th"><%:Total time%></th><th class="th"><%:Data%></th><th class="th"><%:Result%></th></tr></thead><tbody id="candy-congestion-test-results"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table>
+		<p><%:Runs one bounded 100 MiB download through CUBIC and each Candy BBR preset. It does not change the running configuration.%></p>
+		<div class="candy-test-actions">
+			<label for="candy-congestion-test-point"><%:Test point%></label>
+			<select id="candy-congestion-test-point" class="cbi-input-select">
+				<option value="vultr-tokyo"><%:Vultr Tokyo%></option>
+				<option value="linode-singapore"><%:Akamai Linode Singapore%></option>
+				<option value="hetzner-ashburn"><%:Hetzner Ashburn%></option>
+				<option value="ovh-france"><%:OVHcloud France%></option>
+				<option value="serverius-netherlands"><%:Serverius Netherlands%></option>
+			</select>
+			<button id="candy-congestion-test-start" class="cbi-button cbi-button-action"><%:Start comparison%></button>
+			<span id="candy-congestion-test-state"><%:Not run%></span>
+		</div>
+		<table class="table"><thead><tr class="tr table-titles"><th class="th"><%:Test point / controller / preset%></th><th class="th"><%:Goodput%></th><th class="th">TTFB</th><th class="th"><%:Total time%></th><th class="th"><%:Data%></th><th class="th"><%:Result%></th></tr></thead><tbody id="candy-congestion-test-results"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table>
 	</div>
 </div>
 
@@ -205,6 +218,13 @@ var candyDiagnosticsLabels = {
 		"candy-bbr": "Candy BBR",
 		"cubic": "CUBIC"
 	},
+	testPoints: {
+		"vultr-tokyo": <%=js_string(i18n.translate("Vultr Tokyo"))%>,
+		"linode-singapore": <%=js_string(i18n.translate("Akamai Linode Singapore"))%>,
+		"hetzner-ashburn": <%=js_string(i18n.translate("Hetzner Ashburn"))%>,
+		"ovh-france": <%=js_string(i18n.translate("OVHcloud France"))%>,
+		"serverius-netherlands": <%=js_string(i18n.translate("Serverius Netherlands"))%>
+	},
 	rtt: "RTT", rttVariation: <%=js_string(i18n.translate("RTT variation"))%>,
 	goodput: <%=js_string(i18n.translate("Goodput"))%>, loss: <%=js_string(i18n.translate("Loss"))%>,
 	inFlight: <%=js_string(i18n.translate("In flight"))%>, pacing: <%=js_string(i18n.translate("Pacing"))%>, bandwidth: <%=js_string(i18n.translate("Bandwidth estimate"))%>,
@@ -222,12 +242,18 @@ function candyDiagnosticsController(applied, passive) {
 
 function candyCongestionTestLabel(sample) {
 	var presets = { current: "Current 1.50/0.90", "bbr-v1": "BBR v1 1.25/0.75", aggressive: "Aggressive 2.00/0.75" };
-	return sample.controller === "cubic" ? "CUBIC" : "Candy BBR / " + (presets[sample.preset] || candyDiagnosticsText(sample.preset));
+	var point = candyDiagnosticsLabels.testPoints[sample.test_point];
+	var controller = sample.controller === "cubic" ? "CUBIC" : "Candy BBR / " + (presets[sample.preset] || candyDiagnosticsText(sample.preset));
+	return point ? point + " / " + controller : controller;
 }
 function candyCongestionTestRender(data) {
 	var state = document.getElementById("candy-congestion-test-state"), body = document.getElementById("candy-congestion-test-results"), button = document.getElementById("candy-congestion-test-start"), samples = data.result || [];
 	if (!state || !body || !button) return;
 	button.disabled = data.state === "running";
+	if (samples.length && samples[0].test_point) {
+		var point = document.getElementById("candy-congestion-test-point");
+		if (point) point.value = samples[0].test_point;
+	}
 	state.textContent = data.state === "running" ? "Running…" : data.state === "completed" ? "Completed" : data.state === "error" ? (data.message || "Failed") : "Not run";
 	if (!samples.length) return;
 	body.textContent = "";
@@ -243,8 +269,12 @@ function refreshCandyCongestionTest() {
 	xhr.onreadystatechange = function() { if (xhr.readyState !== 4 || xhr.status !== 200) return; try { var data = JSON.parse(xhr.responseText || "{}"); candyCongestionTestRender(data); if (data.state === "running") setTimeout(refreshCandyCongestionTest, 2000); } catch (e) {} }; xhr.send(null);
 }
 function startCandyCongestionTest(event) {
-	event.preventDefault(); var xhr = new XMLHttpRequest(); xhr.open("POST", candyCongestionTestUrl, true);
-	xhr.onreadystatechange = function() { if (xhr.readyState === 4) setTimeout(refreshCandyCongestionTest, 500); }; xhr.send(null);
+	event.preventDefault(); var point = document.getElementById("candy-congestion-test-point"), button = document.getElementById("candy-congestion-test-start"), xhr = new XMLHttpRequest();
+	if (!point || !button) return;
+	button.disabled = true;
+	xhr.open("POST", candyCongestionTestUrl, true);
+	if (xhr.setRequestHeader) xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+	xhr.onreadystatechange = function() { if (xhr.readyState === 4) setTimeout(refreshCandyCongestionTest, 500); }; xhr.send("test_point=" + encodeURIComponent(point.value));
 }
 function candyDiagnosticsBps(value) {
 	var n = Number(value);

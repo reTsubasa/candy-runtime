@@ -114,6 +114,10 @@ assert.ok(source.includes("candy-status-core-version"), "overview must expose th
 assert.ok(source.includes("data.release"), "overview must include the OpenWrt package revision");
 assert.ok(source.includes("manifest.core.features"), "feature cards must come from the active Core manifest");
 assert.ok(source.includes("definition.status_key || definition.id"), "feature runtime evidence must use the Core status mapping");
+assert.ok(source.includes("candy-overview-section"), "overview sections must have explicit vertical spacing");
+for (const featureDetail of ["definition.description", "definition.activation", "candyOverviewFeatureEvidence", "candy-feature-evidence"]) {
+	assert.ok(!source.includes(featureDetail), "overview feature cards must omit detail: " + featureDetail);
+}
 assert.ok(!source.includes("candyOverviewFeatureNames"), "OpenWrt must not maintain a protocol feature catalog");
 assert.ok(!source.includes("effective UDP multiplier is 1"), "OpenWrt must not embed Core activation details");
 assert.ok(!source.includes("LuCI version"), "overview must not duplicate package versions");
@@ -275,6 +279,8 @@ assert.equal(elements.get("candy-protocol-features").style.display, "");
 assert.equal(elements.get("candy-status-features").children.length, 1);
 assert.equal(elements.get("candy-status-features").children[0].children[0].children[0].textContent, "Future feature");
 assert.equal(elements.get("candy-status-features").children[0].className, "candy-feature-card inactive");
+assert.equal(elements.get("candy-status-features").children[0].children.length, 1,
+	"overview feature cards must only render the feature header and status");
 
 context.refreshCandyOverviewStatus();
 requests[3].respond(200, response("restarted", "running", 5));
@@ -314,6 +320,11 @@ assert.ok(source.includes("Per-node passive diagnostics"), "diagnostics must ren
 assert.ok(source.includes("Service resources"), "diagnostics must separate process resources");
 assert.ok(source.includes("candy-diagnostics-nodes"), "diagnostics must expose the node table");
 assert.ok(source.includes("candyDiagnosticsRender"), "diagnostics must own passive refresh rendering");
+for (const testPoint of ["vultr-tokyo", "linode-singapore", "hetzner-ashburn", "ovh-france", "serverius-netherlands"]) {
+	assert.ok(source.includes('value="' + testPoint + '"'), "diagnostics must expose test point: " + testPoint);
+}
+assert.ok(source.includes("100 MiB"), "congestion comparison must use a 100 MiB transfer cap");
+assert.ok(source.includes("test_point="), "congestion comparison must submit the selected test point");
 for (const usefulField of ["Overall performance trends", "Latency quality", "Delivery", "Flight control", "Transport state", "Path"]) {
 	assert.ok(source.includes(usefulField), "diagnostics must retain useful transport field: " + usefulField);
 }
@@ -877,6 +888,9 @@ assert_not_contains "$advanced" '/etc/init.d/carrier'
 
 assert_contains "$controller" '"geo", "update", "cn-ip"'
 assert_contains "$controller" '"dns", "update", "gfwlist"'
+assert_contains "$controller" 'CONGESTION_TEST_POINTS'
+assert_contains "$controller" 'formvalue\("test_point"\)'
+assert_contains "$controller" '"congestion_test", test_point'
 assert_contains "$init" 'provider_update_loop'
 assert_contains "$init" 'CANDY_DNS_LISTEN=.*127\.0\.0\.1:15353'
 assert_contains "$init" 'run_client\(\)'
@@ -894,6 +908,8 @@ assert_contains "$init" 'gfwlist_update_interval_hours'
 assert_contains "$init" 'geo_update_interval_hours'
 assert_contains "$init" 'dns update gfwlist'
 assert_contains "$init" 'geo update cn-ip'
+assert_contains "$init" 'congestion-test --test-point "\$test_point" --samples 1 --max-bytes 104857600 --timeout-ms 60000'
+assert_not_contains "$init" 'congestion-test --samples 1 --max-bytes 2097152'
 if [ -e "$repo_root/luci-app-candy/root/usr/lib/lua/luci/model/cbi/candy/geo.lua" ]; then
 	fail "GEO model must be merged into DNS & GEO"
 fi
@@ -937,7 +953,10 @@ assert_contains "$status" 'candy-feature-card\.unauthorized'
 assert_contains "$status" 'authorized \? "inactive" : "unauthorized"'
 assert_contains "$status" 'Supported, inactive'
 assert_contains "$status" 'Supported, not authorized'
-assert_contains "$status" 'candyOverviewFeatureEvidence'
+assert_not_contains "$status" 'candyOverviewFeatureEvidence'
+assert_not_contains "$status" 'definition\.description'
+assert_not_contains "$status" 'definition\.activation'
+assert_contains "$status" 'candy-overview-section'
 assert_contains "$status" 'manifest && manifest\.core && manifest\.core\.features'
 assert_contains "$status" 'definition\.status_key \|\| definition\.id'
 assert_not_contains "$status" 'candyOverviewFeatureNames'

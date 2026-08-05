@@ -187,11 +187,14 @@ end
 .candy-node-table-scroll .table {
 	min-width: 62em;
 }
+.candy-overview-section {
+	margin-top: 2em;
+}
 .candy-feature-card {
 	border: 2px solid #2e7d32;
 	border-radius: 6px;
 	background: #fff;
-	padding: 1em;
+	padding: 0.8em 1em;
 	min-width: 0;
 }
 .candy-feature-card.active {
@@ -212,7 +215,7 @@ end
 }
 .candy-feature-head {
 	display: flex;
-	align-items: flex-start;
+	align-items: center;
 	justify-content: space-between;
 	gap: 0.75em;
 }
@@ -224,9 +227,6 @@ end
 	font-weight: 700;
 	white-space: nowrap;
 }
-.candy-feature-description { margin: 0.65em 0; line-height: 1.5; }
-.candy-feature-evidence { font-size: 0.9em; color: #555; }
-.candy-feature-card.active .candy-feature-evidence { color: #fff; }
 @media (max-width: 480px) {
 	.candy-feature-grid { grid-template-columns: 1fr; }
 }
@@ -283,12 +283,12 @@ end
 	</div>
 </div>
 
-<div id="candy-protocol-features" class="cbi-map" style="display: none">
+<div id="candy-protocol-features" class="cbi-map candy-overview-section" style="display: none">
 	<h3><%:Protocol features%></h3>
 	<div id="candy-status-features" class="candy-feature-grid"></div>
 </div>
 
-<div id="candy-sdwan-status" class="cbi-map" style="display: none">
+<div id="candy-sdwan-status" class="cbi-map candy-overview-section" style="display: none">
 	<h3><%:SD-WAN status%></h3>
 	<div class="cbi-section">
 		<table class="table">
@@ -305,7 +305,7 @@ end
 	</div>
 </div>
 
-<div class="cbi-map">
+<div class="cbi-map candy-overview-section">
 	<h3><%:Node status%></h3>
 	<div class="cbi-section candy-node-table-scroll">
 		<table class="table">
@@ -475,7 +475,7 @@ function candyOverviewRenderFeatures(manifest, nodes) {
 	var section = document.getElementById("candy-protocol-features");
 	var definitions = (manifest && manifest.core && manifest.core.features) || [];
 	var features = {}, nodeFeatures, nodeIndex;
-	var card, head, name, badge, description, activation, evidence, value, definition, state, supported, authorized, i;
+	var card, head, name, badge, value, definition, state, supported, authorized, i;
 	if (!body) return;
 	for (nodeIndex = 0; nodes && nodeIndex < nodes.length; nodeIndex += 1) {
 		nodeFeatures = ((nodes[nodeIndex].passive || {}).features);
@@ -497,23 +497,8 @@ function candyOverviewRenderFeatures(manifest, nodes) {
 		badge.textContent = state === "active" ? <%=js_string(i18n.translate("Active"))%> :
 			(state === "unsupported" ? <%=js_string(i18n.translate("Unsupported"))%> :
 			(authorized ? <%=js_string(i18n.translate("Supported, inactive"))%> : <%=js_string(i18n.translate("Supported, not authorized"))%>));
-		head.appendChild(name); head.appendChild(badge); card.appendChild(head);
-		description = document.createElement("p"); description.className = "candy-feature-description"; description.textContent = candyOverviewText(definition.description); card.appendChild(description);
-		activation = document.createElement("div"); activation.className = "candy-feature-evidence";
-		activation.textContent = <%=js_string(i18n.translate("Activation"))%> + ": " + candyOverviewText(definition.activation);
-		card.appendChild(activation);
-		evidence = document.createElement("div"); evidence.className = "candy-feature-evidence";
-		evidence.textContent = <%=js_string(i18n.translate("Evidence"))%> + ": " + candyOverviewFeatureEvidence(value, supported, authorized);
-		card.appendChild(evidence); body.appendChild(card);
+		head.appendChild(name); head.appendChild(badge); card.appendChild(head); body.appendChild(card);
 	}
-}
-
-function candyOverviewFeatureEvidence(value, supported, authorized) {
-	var count = Number(value.evidence || 0);
-	if (!supported) return <%=js_string(i18n.translate("This Core build does not implement this capability."))%>;
-	if (!authorized) return <%=js_string(i18n.translate("The current connection did not authorize this capability."))%>;
-	if (value.active === true) return <%=js_string(i18n.translate("Observed in the current connection"))%> + " (" + count + ")";
-	return <%=js_string(i18n.translate("Authorized, but no runtime use has been observed yet."))%> + " (" + count + ")";
 }
 
 function candyOverviewAppendCell(row, value) {

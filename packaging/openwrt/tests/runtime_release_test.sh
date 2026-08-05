@@ -68,7 +68,11 @@ grep -Fq 'OPENWRT_RELEASE: "25.12.4"' "$workflow" || fail "release workflow does
 grep -Fq 'secrets.CANDY_RELEASE_TOKEN' "$workflow" || fail "release workflow does not use CANDY_RELEASE_TOKEN"
 grep -Fq 'reTsubasa/candy-release' "$workflow" || fail "release workflow targets the wrong repository"
 grep -Fq 'gh release upload' "$workflow" || fail "release workflow does not upload release assets"
-grep -Fq -- '--clobber' "$workflow" || fail "release workflow cannot update existing assets"
+grep -Fq -- '--draft' "$workflow" || fail "release workflow does not stage assets in a draft release"
+grep -Fq -- '--draft=false' "$workflow" || fail "release workflow does not publish the completed draft"
+if grep -Fq -- '--clobber' "$workflow"; then
+  fail "release workflow must not overwrite immutable assets"
+fi
 if grep -Eiq 'catalog|stable[-_ ]+(release|index|metadata)' "$workflow"; then
   fail "Runtime release workflow must not modify the stable catalog"
 fi

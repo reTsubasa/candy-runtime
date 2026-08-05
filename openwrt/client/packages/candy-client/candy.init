@@ -929,7 +929,15 @@ write_runtime_status() {
 }
 
 congestion_test() {
-	local temporary rc
+	local test_point temporary rc
+	test_point=${2:-vultr-tokyo}
+	case "$test_point" in
+		vultr-tokyo|linode-singapore|hetzner-ashburn|ovh-france|serverius-netherlands) ;;
+		*)
+			log_error "invalid congestion comparison test point: $test_point"
+			return 1
+			;;
+	esac
 	if ! mkdir "$CONGESTION_TEST_LOCK_DIR" 2>/dev/null; then
 		log_error "congestion comparison already running"
 		return 1
@@ -938,9 +946,9 @@ congestion_test() {
 	printf '%s\n' "$$" > "$CONGESTION_TEST_LOCK_DIR/pid"
 	rotate_log_file "$CONGESTION_TEST_LOG_FILE"
 	temporary=$(atomic_temp_path "$CONGESTION_TEST_RESULT_FILE") || return 1
-	log_msg "starting bounded congestion comparison: CUBIC, current BBR, BBR v1, aggressive BBR"
+	log_msg "starting bounded congestion comparison at $test_point: CUBIC, current BBR, BBR v1, aggressive BBR"
 	"$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format candy-json --platform openwrt \
-		congestion-test --samples 1 --max-bytes 2097152 --timeout-ms 20000 \
+		congestion-test --test-point "$test_point" --samples 1 --max-bytes 104857600 --timeout-ms 60000 \
 		> "$temporary" 2> "$CONGESTION_TEST_LOG_FILE"
 	rc=$?
 	if [ "$rc" -eq 0 ] && [ -s "$temporary" ]; then

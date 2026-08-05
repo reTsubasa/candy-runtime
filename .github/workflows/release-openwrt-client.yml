@@ -70,7 +70,7 @@ jobs:
           test -s "dist/openwrt/x86_64/apk/luci-app-candy-$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION.apk"
           (cd dist/openwrt/x86_64/apk && sha256sum -c SHA256SUMS)
 
-      - name: Create or update centralized Runtime release
+      - name: Publish immutable centralized Runtime release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.CANDY_RELEASE_TOKEN }}
@@ -88,17 +88,16 @@ jobs:
           - Package format: APK
           EOF
           if gh release view "$tag" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
-            gh release edit "$tag" --repo "$RELEASE_REPOSITORY" \
-              --title "Candy Runtime $CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION" \
-              --notes-file "$notes"
-          else
-            gh release create "$tag" --repo "$RELEASE_REPOSITORY" \
-              --title "Candy Runtime $CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION" \
-              --notes-file "$notes"
+            echo "release $tag already exists; published assets are immutable" >&2
+            exit 1
           fi
-          gh release upload "$tag" --repo "$RELEASE_REPOSITORY" --clobber \
+          gh release create "$tag" --repo "$RELEASE_REPOSITORY" --draft \
+            --title "Candy Runtime $CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION" \
+            --notes-file "$notes"
+          gh release upload "$tag" --repo "$RELEASE_REPOSITORY" \
             "$dist/candy-client-$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION.apk" \
             "$dist/luci-app-candy-$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION.apk" \
             "$dist/BUILD-INFO" \
             "$dist/SHA256SUMS" \
             "$dist/runtime-release-metadata.json"
+          gh release edit "$tag" --repo "$RELEASE_REPOSITORY" --draft=false

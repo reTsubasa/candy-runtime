@@ -13,6 +13,13 @@ local CONGESTION_TEST_LOCK_DIR = "/tmp/candy-congestion-test.lock"
 local CONGESTION_TEST_RESULT_FILE = "/tmp/candy-congestion-test.json"
 local CONGESTION_TEST_LOG_FILE = "/tmp/candy-congestion-test.log"
 local MAX_CONGESTION_TEST_BYTES = 262144
+local CONGESTION_TEST_POINTS = {
+	["vultr-tokyo"] = true,
+	["linode-singapore"] = true,
+	["hetzner-ashburn"] = true,
+	["ovh-france"] = true,
+	["serverius-netherlands"] = true
+}
 local CORE_MANAGER = "/usr/libexec/candy-core-manager"
 local MAX_CORE_STATUS_BYTES = 524288
 local process = require "luci.candy.process"
@@ -550,12 +557,19 @@ end
 function action_congestion_test()
 	local fs = require "nixio.fs"
 	local jsonc = require "luci.jsonc"
+	local test_point = trim(luci.http.formvalue("test_point") or "vultr-tokyo")
+	if not CONGESTION_TEST_POINTS[test_point] then
+		luci.http.status(400, "Bad Request")
+		luci.http.prepare_content("application/json")
+		luci.http.write(jsonc.stringify({ accepted = false, message = "invalid test point" }))
+		return
+	end
 	if fs.stat(CONGESTION_TEST_LOCK_DIR) then
 		luci.http.status(409, "Conflict")
 	else
 		fs.unlink(CONGESTION_TEST_RESULT_FILE)
 		fs.unlink(CONGESTION_TEST_LOG_FILE)
-		if not process.run({ "/etc/init.d/candy", "congestion_test" }, { background = true }) then
+		if not process.run({ "/etc/init.d/candy", "congestion_test", test_point }, { background = true }) then
 			luci.http.status(500, "Internal Server Error")
 		end
 	end

@@ -1272,6 +1272,24 @@ msgstr "开始对比"
 msgid "Not run"
 msgstr "尚未运行"
 
+msgid "Test point"
+msgstr "测试点"
+
+msgid "Vultr Tokyo"
+msgstr "Vultr 东京"
+
+msgid "Akamai Linode Singapore"
+msgstr "Akamai Linode 新加坡"
+
+msgid "Hetzner Ashburn"
+msgstr "Hetzner 阿什本"
+
+msgid "OVHcloud France"
+msgstr "OVHcloud 法国"
+
+msgid "Serverius Netherlands"
+msgstr "Serverius 荷兰"
+
 msgid "Candy BBR"
 msgstr "Candy BBR"
 
@@ -1281,11 +1299,14 @@ msgstr "CUBIC"
 msgid "Select the congestion controller explicitly. Changing the controller or BBR preset restarts Candy so new QUIC connections use the selected parameters."
 msgstr "显式选择拥塞控制器。更改控制器或 BBR 预设后 Candy 将重启，使新的 QUIC 连接使用所选参数。"
 
-msgid "Runs one bounded 2 MiB download through CUBIC and each Candy BBR preset. It does not change the running configuration."
-msgstr "分别通过 CUBIC 和每个 Candy BBR 预设运行一次有上限的 2 MiB 下载，不会更改当前运行配置。"
+msgid "Runs one bounded 100 MiB download through CUBIC and each Candy BBR preset. It does not change the running configuration."
+msgstr "分别通过 CUBIC 和每个 Candy BBR 预设运行一次有上限的 100 MiB 下载，不会更改当前运行配置。"
 
 msgid "Controller / preset"
 msgstr "控制器 / 预设"
+
+msgid "Test point / controller / preset"
+msgstr "测试点 / 控制器 / 预设"
 
 msgid "Total time"
 msgstr "总耗时"
