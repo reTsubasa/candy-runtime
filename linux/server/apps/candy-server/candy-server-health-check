@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+
+SERVICE_NAME=${CANDY_SERVER_SERVICE:-candy-server}
+SERVER_CONFIG=${CANDY_SERVER_CONFIG:-/etc/candy/server.toml}
+SYSTEMCTL=${CANDY_SYSTEMCTL:-systemctl}
+WAIT_SECONDS=${CANDY_SERVER_HEALTH_WAIT_SECONDS:-15}
+
+fail() {
+	printf '%s\n' "candy-server-health-check: $*" >&2
+	exit 1
+}
+
+case "$WAIT_SECONDS" in ''|*[!0-9]*) fail "health wait must be a nonnegative integer" ;; esac
+[ -f "$SERVER_CONFIG" ] || fail "server config is missing: $SERVER_CONFIG"
+
+listen=$(awk -F= '
+	$1 ~ /^[[:space:]]*listen[[:space:]]*$/ {
+		value=$2
+		gsub(/^[[:space:]"]+|[[:space:]"]+$/, "", value)
+		print value
+		exit
+	}
+' "$SERVER_CONFIG")
+[ -n "$listen" ] || fail "server config does not define listen"
+port=${listen##*:}
+port=${port%]}
+case "$port" in ''|*[!0-9]*) fail "server listen port is invalid: $listen" ;; esac
+[ "$port" -ge 1 ] && [ "$port" -le 65535 ] || fail "server listen port is out of range: $port"
+
+listener_ready() {
+	if command -v ss >/dev/null 2>&1; then
+		ss -lun | awk -v port="$port" '
+			NR > 1 {
+				address=$5
+				sub(/^.*:/, "", address)
+				if (address == port) found=1
+			}
+			END { exit found ? 0 : 1 }
+		'
+		return
+	fi
+	port_hex=$(printf '%04X' "$port")
+	grep -Eiq "[[:xdigit:]]{8}:$port_hex[[:space:]]" /proc/net/udp /proc/net/udp6 2>/dev/null
+}
+
+attempt=0
+while [ "$attempt" -le "$WAIT_SECONDS" ]; do
+	if "$SYSTEMCTL" is-active --quiet "$SERVICE_NAME" >/dev/null 2>&1 && listener_ready; then
+		exit 0
+	fi
+	[ "$attempt" -lt "$WAIT_SECONDS" ] || break
+	attempt=$((attempt + 1))
+	sleep 1
+done
+
+fail "$SERVICE_NAME did not become active with UDP port $port listening within ${WAIT_SECONDS}s"

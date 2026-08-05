@@ -25,6 +25,8 @@ PATH="$fake_bin:$PATH" CANDY_LINUX_DIST_DIR="$dist" \
 
 stage=$dist/server/x86_64
 [ -x "$stage/usr/local/bin/serverd-linux" ] || fail "server launcher was not staged"
+[ -x "$stage/usr/local/bin/candy-core-manager" ] || fail "Core bundle manager was not staged"
+[ -x "$stage/usr/local/libexec/candy-server-health-check" ] || fail "server health check was not staged"
 [ -f "$stage/etc/candy/server.toml.example" ] || fail "server example config was not staged"
 [ -f "$stage/systemd/candy-server.service" ] || fail "systemd unit was not staged"
 [ -x "$stage/install/install-candy-server.sh" ] || fail "installer was not staged"
@@ -36,7 +38,8 @@ if find "$dist" -type f \( -name 'candy-core' -o -name 'libcandy_core.so' \) | g
 	fail "private Core artifact leaked into Runtime package"
 fi
 if rg -n 'cargo (build|install)|git (clone|fetch)|crates/candy-core' \
-	"$root/packaging/linux/build.sh" "$stage/usr/local/bin/serverd-linux" >/dev/null; then
+	"$root/packaging/linux/build.sh" "$stage/usr/local/bin/serverd-linux" \
+	"$stage/usr/local/bin/candy-core-manager" "$stage/usr/local/libexec/candy-server-health-check" >/dev/null; then
 	fail "server package still builds or fetches Core source"
 fi
 

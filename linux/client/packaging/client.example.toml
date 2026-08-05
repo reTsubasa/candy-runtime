@@ -1,7 +1,8 @@
 server = "127.0.0.1:8443"
 server_name = "localhost"
 server_identity = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-# Optional: paste the Base64 value printed after `ech=` by serverd-linux --setup-ech.
+# Process API v1 does not manage ECH key generation or rotation. Configure this
+# only when an external security workflow provides a valid Base64 ECHConfigList.
 # ech = "BASE64_ECH_CONFIG_LIST"
 key_id = "change-me"
 secret = "change-me-long-random-secret"

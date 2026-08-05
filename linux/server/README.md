@@ -33,3 +33,55 @@ cannot switch Core releases between inspection and execution.
 The Linux Runtime package contains only the launcher, systemd unit, installer,
 and example configuration. Core artifacts are installed and activated by the
 independent Core manager.
+
+## Installing a Core bundle
+
+The packaged `candy-core-manager` consumes the same signed bundle format as
+OpenWrt. It does not download or build Core source:
+
+```text
+candy-core-manager install CORE_VERSION /path/to/core.tar.gz BUNDLE_SHA256
+candy-core-manager activate CORE_VERSION
+candy-core-manager status
+candy-core-manager rollback
+```
+
+Installation verifies the outer SHA-256, the three-file archive layout, the
+publisher signature, manifest and executable SHA-256, target OS/architecture/
+libc, Process API, Core API, and the executable's `core-info` result.
+
+Activation stops a running server before switching `current` and `previous`,
+runs the new Core's server config check and preflight through the Runtime
+launcher, then starts the service. The packaged health check additionally
+requires systemd to report the service active and the configured UDP listen
+port to appear. A validation, startup, or listener-health failure restores both
+pointers and restarts the previous Core.
+
+By default signatures are checked with `usign` and
+`/etc/candy/core-signing-key.pub`. A deployment can provide an equivalent
+executable verifier through `CANDY_CORE_SIGNATURE_VERIFIER`; it receives the
+manifest path followed by the signature path.
+
+The manager requires `jq`, `tar`, `readlink`, and either `sha256sum` or
+`shasum`. Signature verification additionally requires `usign` and the trusted
+public key unless an external verifier is configured.
+
+For a new host, install the Runtime package without enabling the service, use
+the packaged manager to install and activate a Core bundle, then install or
+enable `candy-server.service`. Subsequent Core activation is online-safe: the
+manager coordinates service stop, validation, pointer rollback, and restart.
+
+## Real Core integration gate
+
+The Runtime verification suite includes an optional Linux/amd64 Docker E2E.
+When a real private Core executable is supplied, it starts both Runtime
+launchers, authenticates a client connection, and verifies TCP forwarding:
+
+```text
+CANDY_CORE_BINARY=/absolute/path/to/candy-core scripts/verify.sh
+```
+
+The test skips when no Core or Docker daemon is available. CI release jobs can
+make either condition fatal with `CANDY_CORE_DOCKER_E2E_REQUIRED=1`. The Core
+artifact is copied only into a temporary test directory and is never packaged
+or committed by Runtime.

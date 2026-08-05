@@ -1,0 +1,390 @@
+#!/bin/sh
+set -eu
+
+CORE_ROOT=${CANDY_CORE_ROOT:-/opt/candy/cores}
+CURRENT_LINK=${CANDY_CORE_CURRENT_LINK:-$CORE_ROOT/current}
+PREVIOUS_LINK=${CANDY_CORE_PREVIOUS_LINK:-$CORE_ROOT/previous}
+SIGNATURE_VERIFIER=${CANDY_CORE_SIGNATURE_VERIFIER:-}
+SIGNING_KEY=${CANDY_CORE_SIGNING_KEY:-/etc/candy/core-signing-key.pub}
+EXPECTED_PROCESS_API=${CANDY_EXPECTED_CORE_PROCESS_API:-1}
+EXPECTED_CORE_API=${CANDY_EXPECTED_CORE_API:-1}
+HOST_ARCH=${CANDY_CORE_TARGET_ARCH:-$(uname -m)}
+HOST_LIBC=${CANDY_CORE_TARGET_LIBC:-}
+LAUNCHER=${CANDY_SERVER_LAUNCHER:-/opt/candy/current/serverd-linux}
+SERVER_CONFIG=${CANDY_SERVER_CONFIG:-/etc/candy/server.toml}
+SERVICE_NAME=${CANDY_SERVER_SERVICE:-candy-server}
+SYSTEMCTL=${CANDY_SYSTEMCTL:-systemctl}
+HEALTH_CHECK=${CANDY_SERVER_HEALTH_CHECK:-/usr/local/libexec/candy-server-health-check}
+LOCK_DIR=${CANDY_CORE_LOCK_DIR:-/var/lock/candy-core-manager.lock}
+MAX_BUNDLE_BYTES=${CANDY_MAX_CORE_BUNDLE_BYTES:-268435456}
+MAX_MANIFEST_BYTES=${CANDY_MAX_CORE_MANIFEST_BYTES:-262144}
+
+fail() {
+	printf '%s\n' "candy-core-manager: $*" >&2
+	exit 1
+}
+
+need_command() {
+	command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+valid_version() {
+	printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+.-][0-9A-Za-z][0-9A-Za-z.+-]*)?$'
+}
+
+valid_sha256() {
+	printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{64}$'
+}
+
+sha256_file() {
+	local file
+	file=$1
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$file" | awk '{ print tolower($1) }'
+	elif command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 "$file" | awk '{ print tolower($1) }'
+	else
+		return 1
+	fi
+}
+
+file_size() {
+	local file
+	file=$1
+	wc -c < "$file" 2>/dev/null | tr -d ' '
+}
+
+normalize_arch() {
+	local value
+	value=$1
+	case "$value" in
+		x86_64|amd64) printf '%s\n' x86_64 ;;
+		aarch64|arm64) printf '%s\n' aarch64 ;;
+		armv7l|armv7|armhf) printf '%s\n' armv7 ;;
+		*) printf '%s\n' "$value" ;;
+	esac
+}
+
+detect_libc() {
+	[ -n "$HOST_LIBC" ] && { printf '%s\n' "$HOST_LIBC"; return; }
+	if command -v ldd >/dev/null 2>&1; then
+		if ldd --version 2>&1 | grep -qi musl; then
+			printf '%s\n' musl
+		else
+			printf '%s\n' gnu
+		fi
+	elif find /lib -maxdepth 1 -name 'ld-musl-*.so.1' -type f 2>/dev/null | grep -q .; then
+		printf '%s\n' musl
+	elif command -v getconf >/dev/null 2>&1 && getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
+		printf '%s\n' gnu
+	else
+		return 1
+	fi
+}
+
+version_path() {
+	local version
+	version=$1
+	valid_version "$version" || return 1
+	printf '%s/%s\n' "$CORE_ROOT" "$version"
+}
+
+link_version() {
+	local link target
+	link=$1
+	target=$(readlink "$link" 2>/dev/null || true)
+	[ -n "$target" ] || return 0
+	basename "$target"
+}
+
+atomic_link() {
+	local link version temporary
+	link=$1
+	version=$2
+	temporary=$link.tmp.$$
+	valid_version "$version" || return 1
+	rm -f "$temporary"
+	ln -s "$version" "$temporary" || return 1
+	if mv -fT "$temporary" "$link" 2>/dev/null; then
+		return 0
+	fi
+	rm -f "$link" || return 1
+	mv -f "$temporary" "$link"
+}
+
+restore_link() {
+	local link version
+	link=$1
+	version=$2
+	if [ -n "$version" ]; then
+		atomic_link "$link" "$version"
+	else
+		rm -f "$link"
+	fi
+}
+
+acquire_lock() {
+	local lock_pid
+	mkdir -p "$(dirname -- "$LOCK_DIR")"
+	if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+		lock_pid=$(sed -n '1p' "$LOCK_DIR/pid" 2>/dev/null || true)
+		case "$lock_pid" in ''|*[!0-9]*) fail "another Core operation is running" ;; esac
+		kill -0 "$lock_pid" 2>/dev/null && fail "another Core operation is running"
+		rm -f "$LOCK_DIR/pid"
+		rmdir "$LOCK_DIR" 2>/dev/null || fail "cannot recover stale Core operation lock"
+		mkdir "$LOCK_DIR" || fail "cannot acquire Core operation lock"
+	fi
+	printf '%s\n' "$$" > "$LOCK_DIR/pid"
+	trap 'rm -f "$LOCK_DIR/pid" 2>/dev/null || true; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT HUP INT TERM
+}
+
+manifest_value() {
+	local manifest expression
+	manifest=$1
+	expression=$2
+	jq -er "$expression" "$manifest" 2>/dev/null
+}
+
+manifest_size_ok() {
+	local manifest size
+	manifest=$1
+	size=$(file_size "$manifest") || return 1
+	case "$size" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$size" -gt 0 ] && [ "$size" -le "$MAX_MANIFEST_BYTES" ]
+}
+
+verify_signature() {
+	local manifest signature
+	manifest=$1
+	signature=$2
+	if [ -n "$SIGNATURE_VERIFIER" ]; then
+		[ -x "$SIGNATURE_VERIFIER" ] || return 1
+		"$SIGNATURE_VERIFIER" "$manifest" "$signature"
+		return
+	fi
+	command -v usign >/dev/null 2>&1 || return 1
+	[ -f "$SIGNING_KEY" ] && [ ! -L "$SIGNING_KEY" ] || return 1
+	usign -V -p "$SIGNING_KEY" -m "$manifest" -x "$signature"
+}
+
+validate_manifest() {
+	local manifest expected_version artifact_arch
+	manifest=$1
+	expected_version=$2
+	[ -f "$manifest" ] && [ ! -L "$manifest" ] && manifest_size_ok "$manifest" || return 1
+	[ "$(manifest_value "$manifest" '.schema_version')" = 1 ] || return 1
+	[ "$(manifest_value "$manifest" '.process_api_version')" = "$EXPECTED_PROCESS_API" ] || return 1
+	[ "$(manifest_value "$manifest" '.core.schema_version')" = 1 ] || return 1
+	[ "$(manifest_value "$manifest" '.core.core_api_version')" = "$EXPECTED_CORE_API" ] || return 1
+	[ "$(manifest_value "$manifest" '.core.core_version')" = "$expected_version" ] || return 1
+	[ "$(manifest_value "$manifest" '.core.target_os')" = linux ] || return 1
+	artifact_arch=$(manifest_value "$manifest" '.artifact.target_arch') || return 1
+	[ "$(manifest_value "$manifest" '.core.target_arch')" = "$artifact_arch" ] || return 1
+	[ "$(normalize_arch "$artifact_arch")" = "$(normalize_arch "$HOST_ARCH")" ] || return 1
+	[ "$(manifest_value "$manifest" '.artifact.target_os')" = linux ] || return 1
+	[ "$(manifest_value "$manifest" '.artifact.libc')" = "$(detect_libc)" ] || return 1
+	[ "$(manifest_value "$manifest" '.artifact.executable')" = candy-core ] || return 1
+	valid_sha256 "$(manifest_value "$manifest" '.artifact.executable_sha256')" || return 1
+}
+
+run_bounded() {
+	if command -v timeout >/dev/null 2>&1; then
+		timeout 15 "$@"
+	else
+		"$@"
+	fi
+}
+
+validate_core_directory() {
+	local directory version manifest signature executable info expected_sha actual_sha process_api manifest_protocol_major manifest_protocol_minor info_protocol_major info_protocol_minor
+	directory=$1
+	version=$2
+	manifest=$directory/manifest.json
+	signature=$directory/manifest.sig
+	executable=$directory/candy-core
+	info=$directory/.core-info.$$
+	[ -f "$signature" ] && [ ! -L "$signature" ] || return 1
+	[ -f "$executable" ] && [ -x "$executable" ] && [ ! -L "$executable" ] || return 1
+	validate_manifest "$manifest" "$version" || return 1
+	verify_signature "$manifest" "$signature" || return 1
+	expected_sha=$(manifest_value "$manifest" '.artifact.executable_sha256' | tr 'A-F' 'a-f') || return 1
+	actual_sha=$(sha256_file "$executable") || return 1
+	[ "$actual_sha" = "$expected_sha" ] || return 1
+	process_api=$(run_bounded "$executable" runtime-api-version 2>/dev/null) || return 1
+	[ "$process_api" = "$EXPECTED_PROCESS_API" ] || return 1
+	rm -f "$info"
+	run_bounded "$executable" core-info > "$info" 2>/dev/null || { rm -f "$info"; return 1; }
+	manifest_size_ok "$info" || { rm -f "$info"; return 1; }
+	[ "$(manifest_value "$info" '.schema_version')" = 1 ] || { rm -f "$info"; return 1; }
+	[ "$(manifest_value "$info" '.process_api_version')" = "$EXPECTED_PROCESS_API" ] || { rm -f "$info"; return 1; }
+	[ "$(manifest_value "$info" '.core_api_version')" = "$EXPECTED_CORE_API" ] || { rm -f "$info"; return 1; }
+	[ "$(manifest_value "$info" '.core_version')" = "$version" ] || { rm -f "$info"; return 1; }
+	[ "$(manifest_value "$info" '.target_os')" = linux ] || { rm -f "$info"; return 1; }
+	[ "$(normalize_arch "$(manifest_value "$info" '.target_arch')")" = "$(normalize_arch "$HOST_ARCH")" ] || { rm -f "$info"; return 1; }
+	manifest_protocol_major=$(manifest_value "$manifest" '.core.protocol_version.major') || { rm -f "$info"; return 1; }
+	manifest_protocol_minor=$(manifest_value "$manifest" '.core.protocol_version.minor') || { rm -f "$info"; return 1; }
+	info_protocol_major=$(manifest_value "$info" '.protocol_version.major') || { rm -f "$info"; return 1; }
+	info_protocol_minor=$(manifest_value "$info" '.protocol_version.minor') || { rm -f "$info"; return 1; }
+	[ "$info_protocol_major:$info_protocol_minor" = "$manifest_protocol_major:$manifest_protocol_minor" ] || { rm -f "$info"; return 1; }
+	rm -f "$info"
+}
+
+safe_archive() {
+	local archive
+	archive=$1
+	tar -tvzf "$archive" 2>/dev/null | awk '
+		BEGIN { ok = 1; count = 0 }
+		{
+			if (substr($1, 1, 1) != "-") ok = 0
+			name = $NF
+			gsub(/^\.\//, "", name)
+			if (name != "manifest.json" && name != "manifest.sig" && name != "candy-core") ok = 0
+			seen[name]++
+			count++
+		}
+		END {
+			if (count != 3 || seen["manifest.json"] != 1 || seen["manifest.sig"] != 1 || seen["candy-core"] != 1) ok = 0
+			exit ok ? 0 : 1
+		}'
+}
+
+install_core() {
+	local version bundle expected_bundle_sha destination size actual_bundle_sha temporary archive
+	version=$1
+	bundle=$2
+	expected_bundle_sha=$3
+	valid_version "$version" || fail "invalid Core version: $version"
+	valid_sha256 "$expected_bundle_sha" || fail "invalid Core bundle SHA-256"
+	[ -f "$bundle" ] && [ ! -L "$bundle" ] || fail "Core bundle is not a regular file: $bundle"
+	destination=$(version_path "$version") || fail "invalid Core version"
+	[ ! -e "$destination" ] || fail "Core $version is already installed"
+	size=$(file_size "$bundle") || fail "cannot read Core bundle size"
+	case "$size" in ''|*[!0-9]*) fail "invalid Core bundle size" ;; esac
+	[ "$size" -gt 0 ] && [ "$size" -le "$MAX_BUNDLE_BYTES" ] || fail "Core bundle exceeds the size limit"
+	mkdir -p "$CORE_ROOT"
+	[ ! -L "$CORE_ROOT" ] || fail "Core root must not be a symbolic link"
+	temporary=$CORE_ROOT/.install-$version-$$
+	archive=$temporary/core.tar.gz
+	rm -rf "$temporary"
+	mkdir -m 0700 "$temporary"
+	cp "$bundle" "$archive" || { rm -rf "$temporary"; fail "cannot stage Core bundle"; }
+	actual_bundle_sha=$(sha256_file "$archive") || { rm -rf "$temporary"; fail "no SHA-256 implementation is available"; }
+	[ "$actual_bundle_sha" = "$(printf '%s' "$expected_bundle_sha" | tr 'A-F' 'a-f')" ] || { rm -rf "$temporary"; fail "Core bundle SHA-256 mismatch"; }
+	safe_archive "$archive" || { rm -rf "$temporary"; fail "Core bundle contains unsafe paths or unexpected files"; }
+	tar -xzf "$archive" -C "$temporary" || { rm -rf "$temporary"; fail "Core bundle extraction failed"; }
+	rm -f "$archive"
+	if find "$temporary" ! -type f ! -type d -print | grep -q .; then
+		rm -rf "$temporary"
+		fail "Core bundle contains unsupported file types"
+	fi
+	chmod 0755 "$temporary" "$temporary/candy-core"
+	chmod 0644 "$temporary/manifest.json" "$temporary/manifest.sig"
+	validate_core_directory "$temporary" "$version" || {
+		rm -rf "$temporary"
+		fail "Core signature, manifest, executable, target, or process API validation failed"
+	}
+	mv "$temporary" "$destination" || { rm -rf "$temporary"; fail "cannot publish Core $version"; }
+	printf '%s\n' "installed Core $version"
+}
+
+service_active() {
+	"$SYSTEMCTL" is-active --quiet "$SERVICE_NAME" >/dev/null 2>&1
+}
+
+validate_server_role() {
+	local directory
+	directory=$1
+	[ -x "$LAUNCHER" ] || fail "server Runtime launcher is missing: $LAUNCHER"
+	[ -f "$SERVER_CONFIG" ] || fail "server config is missing: $SERVER_CONFIG"
+	CANDY_CORE_BINARY="$directory/candy-core" "$LAUNCHER" --config "$SERVER_CONFIG" --check-config >/dev/null || return 1
+	CANDY_CORE_BINARY="$directory/candy-core" "$LAUNCHER" --config "$SERVER_CONFIG" --preflight >/dev/null || return 1
+}
+
+activate_core() {
+	local version directory old old_previous was_active
+	version=$1
+	directory=$(version_path "$version") || fail "invalid Core version"
+	[ -d "$directory" ] || fail "Core $version is not installed"
+	validate_core_directory "$directory" "$version" || fail "installed Core $version failed validation"
+	old=$(link_version "$CURRENT_LINK")
+	old_previous=$(link_version "$PREVIOUS_LINK")
+	[ "$old" != "$version" ] || { printf '%s\n' "Core $version is already active"; return; }
+	was_active=0
+	service_active && was_active=1
+	[ "$was_active" = 0 ] || "$SYSTEMCTL" stop "$SERVICE_NAME" || fail "cannot stop $SERVICE_NAME"
+	if [ -n "$old" ] && ! atomic_link "$PREVIOUS_LINK" "$old"; then
+		[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		fail "cannot preserve previous Core"
+	fi
+	atomic_link "$CURRENT_LINK" "$version" || {
+		restore_link "$PREVIOUS_LINK" "$old_previous" || true
+		[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		fail "cannot activate Core $version"
+	}
+	if ! validate_server_role "$directory"; then
+		restore_link "$CURRENT_LINK" "$old" || true
+		restore_link "$PREVIOUS_LINK" "$old_previous" || true
+		[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		fail "Core $version failed server config/preflight; previous Core restored"
+	fi
+	if [ "$was_active" = 1 ]; then
+		if ! "$SYSTEMCTL" start "$SERVICE_NAME" || ! service_active || [ ! -x "$HEALTH_CHECK" ] || ! "$HEALTH_CHECK"; then
+			"$SYSTEMCTL" stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+			restore_link "$CURRENT_LINK" "$old" || true
+			restore_link "$PREVIOUS_LINK" "$old_previous" || true
+			"$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+			fail "Core $version failed service startup; previous Core restored"
+		fi
+	fi
+	printf '%s\n' "activated Core $version"
+}
+
+rollback_core() {
+	local current previous
+	current=$(link_version "$CURRENT_LINK")
+	previous=$(link_version "$PREVIOUS_LINK")
+	[ -n "$previous" ] || fail "no previous Core is available"
+	activate_core "$previous"
+	[ -z "$current" ] || atomic_link "$PREVIOUS_LINK" "$current" || fail "cannot preserve replaced Core as rollback version"
+}
+
+status_core() {
+	local current previous
+	current=$(link_version "$CURRENT_LINK")
+	previous=$(link_version "$PREVIOUS_LINK")
+	jq -n \
+		--arg current "$current" \
+		--arg previous "$previous" \
+		--argjson process_api "$EXPECTED_PROCESS_API" \
+		--argjson core_api "$EXPECTED_CORE_API" \
+		'{schema_version:1,manager_api_version:1,required_core_process_api_version:$process_api,required_core_api_version:$core_api,current_version:(if $current == "" then null else $current end),previous_version:(if $previous == "" then null else $previous end)}'
+}
+
+need_command jq
+need_command tar
+need_command readlink
+need_command cp
+
+command=${1:-status}
+case "$command" in
+	status)
+		[ "$#" -eq 1 ] || fail "usage: $0 status"
+		status_core
+		;;
+	install)
+		[ "$#" -eq 4 ] || fail "usage: $0 install VERSION BUNDLE_FILE SHA256"
+		acquire_lock
+		install_core "$2" "$3" "$4"
+		;;
+	activate)
+		[ "$#" -eq 2 ] || fail "usage: $0 activate VERSION"
+		acquire_lock
+		activate_core "$2"
+		;;
+	rollback)
+		[ "$#" -eq 1 ] || fail "usage: $0 rollback"
+		acquire_lock
+		rollback_core
+		;;
+	*) fail "unknown command: $command" ;;
+esac

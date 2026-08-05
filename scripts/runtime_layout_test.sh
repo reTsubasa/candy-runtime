@@ -25,6 +25,8 @@ for runtime_source in \
   linux/client/apps/candy-client/candy-client \
   linux/client/apps/candy-sdwan/candy-sdwan \
   linux/server/apps/candy-server/serverd-linux \
+  linux/server/apps/candy-server/candy-core-manager \
+  linux/server/apps/candy-server/candy-server-health-check \
   linux/common/apps/candy-netd/Cargo.toml \
   linux/common/crates/candy-netd-client/Cargo.toml \
   linux/common/crates/candy-netd-proto/Cargo.toml \

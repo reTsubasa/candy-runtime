@@ -4,9 +4,17 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
+# CANDY_CORE_BINARY belongs only to the optional real-Core E2E. Keep it from
+# overriding the fake Core selected explicitly by deterministic launcher tests.
+docker_e2e_core_binary=${CANDY_CORE_BINARY:-}
+unset CANDY_CORE_BINARY
+
 scripts/runtime_version_test.sh
 scripts/runtime_layout_test.sh
 linux/server/tests/candy_server_launcher_test.sh
+linux/server/tests/candy_core_manager_test.sh
+linux/server/tests/candy_server_health_check_test.sh
+CANDY_CORE_BINARY="$docker_e2e_core_binary" linux/server/tests/candy_core_docker_e2e.sh
 packaging/linux/server_package_test.sh
 sh -n openwrt/client/packages/candy-client/candy.init
 openwrt/client/tests/init_config_test.sh

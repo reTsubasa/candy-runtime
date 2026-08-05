@@ -11,7 +11,6 @@ SERVICE_USER=candy
 LISTEN_ADDR=0.0.0.0:8443
 TLS_NAME=candy-server
 PUBLIC_HOST=
-ECH_PUBLIC_NAME=
 ARTIFACT_FILE=
 ARTIFACT_URL=
 VERSION=latest
@@ -34,7 +33,6 @@ Options:
   --listen ADDR          Server listen address, default 0.0.0.0:8443.
   --tls-name NAME        Self-signed certificate name, default candy-server.
   --public-host HOST     Override the auto-detected public server address.
-  --ech-public-name NAME Enable ECH and manage its key ring automatically.
   --force-config         Regenerate /etc/candy/server.toml.
   --dry-run              Print planned actions without changing the host.
   -h, --help             Show this help.
@@ -115,11 +113,6 @@ while [ "$#" -gt 0 ]; do
 			[ "$#" -gt 0 ] || die "--public-host requires a host or IP address"
 			PUBLIC_HOST=$1
 			;;
-		--ech-public-name)
-			shift
-			[ "$#" -gt 0 ] || die "--ech-public-name requires a DNS name"
-			ECH_PUBLIC_NAME=$1
-			;;
 		--force-config)
 			FORCE_CONFIG=1
 			;;
@@ -148,7 +141,6 @@ if [ "$DRY_RUN" = 1 ]; then
 	log "listen: $LISTEN_ADDR"
 	log "tls-name: $TLS_NAME"
 	log "public-host: ${PUBLIC_HOST:-<auto-detect>}"
-	log "ech-public-name: ${ECH_PUBLIC_NAME:-<disabled>}"
 	exit 0
 fi
 
@@ -195,7 +187,6 @@ release_dir=$INSTALL_PREFIX/releases/$release_id
 current_link=$INSTALL_PREFIX/current
 config_file=$CONFIG_DIR/server.toml
 tls_dir=$STATE_DIR/tls
-ech_dir=$STATE_DIR/ech
 cert_file=/var/lib/candy/tls/server.crt
 key_file=/var/lib/candy/tls/server.key
 previous_current=
@@ -286,15 +277,10 @@ random_secret() {
 
 write_default_config() {
 	secret=$(random_secret)
-	ech_config=
-	if [ -n "$ECH_PUBLIC_NAME" ]; then
-		ech_config=$(printf '\n[ech]\ndirectory = "%s"\n' "$ech_dir")
-	fi
 	cat >"$config_file" <<EOF
 listen = "$LISTEN_ADDR"
 cert_pem = "$cert_file"
 key_pem = "$key_file"
-$ech_config
 
 [port_hopping]
 ports = []
@@ -494,28 +480,6 @@ run mkdir -p "$release_dir"
 run cp "$artifact_path" "$release_dir/serverd-linux"
 run chmod 0755 "$release_dir/serverd-linux"
 run chown -R root:root "$release_dir"
-if [ -n "$ECH_PUBLIC_NAME" ]; then
-		ech_output=$(CANDY_CORE_BINARY="$CORE_BINARY" "$release_dir/serverd-linux" \
-		--setup-ech "$ECH_PUBLIC_NAME" --ech-directory "$ech_dir") || {
-		rollback
-		die "ECH setup failed"
-	}
-	run chown -R "$SERVICE_USER:$SERVICE_USER" "$ech_dir"
-	if grep -Eq '^[[:space:]]*\[ech\][[:space:]]*$' "$config_file"; then
-		grep -F "directory = \"$ech_dir\"" "$config_file" >/dev/null || {
-			rollback
-			die "existing [ech] configuration does not use $ech_dir"
-		}
-	else
-		if [ "$config_changed" = 0 ]; then
-			config_backup=$BACKUP_DIR/server.toml.$release_id
-			run cp "$config_file" "$config_backup"
-			config_changed=1
-		fi
-		printf '\n[ech]\ndirectory = "%s"\n' "$ech_dir" >>"$config_file"
-	fi
-	printf '%s\n' "$ech_output"
-fi
 install_unit
 run systemctl daemon-reload
 

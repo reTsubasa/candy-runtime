@@ -15,15 +15,21 @@ case "$target" in
 esac
 
 launcher=$repo_root/linux/server/apps/candy-server/serverd-linux
+core_manager=$repo_root/linux/server/apps/candy-server/candy-core-manager
+health_check=$repo_root/linux/server/apps/candy-server/candy-server-health-check
 stage=$dist_root/server/$artifact_arch
 [ -f "$launcher" ] || {
 	printf '%s\n' "Linux server Runtime launcher is missing: $launcher" >&2
 	exit 1
 }
 sh -n "$launcher"
+sh -n "$core_manager"
+sh -n "$health_check"
 
-mkdir -p "$stage/usr/local/bin" "$stage/etc/candy" "$stage/systemd" "$stage/install"
+mkdir -p "$stage/usr/local/bin" "$stage/usr/local/libexec" "$stage/etc/candy" "$stage/systemd" "$stage/install"
 install -m 0755 "$launcher" "$stage/usr/local/bin/serverd-linux"
+install -m 0755 "$core_manager" "$stage/usr/local/bin/candy-core-manager"
+install -m 0755 "$health_check" "$stage/usr/local/libexec/candy-server-health-check"
 install -m 0644 "$repo_root/linux/server/docker/server.example.toml" \
 	"$stage/etc/candy/server.toml.example"
 install -m 0644 "$repo_root/linux/server/packaging/candy-server.service" \

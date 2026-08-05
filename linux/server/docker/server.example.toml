@@ -7,10 +7,8 @@ listen = "0.0.0.0:8443"
 cert_pem = "/etc/carrier/server.crt"
 key_pem = "/etc/carrier/server.key"
 
-# Optional ECH key ring. Mount this directory read-only after running
-# `serverd-linux --setup-ech PUBLIC_NAME --ech-directory ./ech` once.
-# [ech]
-# directory = "/etc/carrier/ech"
+# Process API v1 does not manage ECH key generation or rotation. The base
+# Runtime therefore leaves ECH disabled instead of creating key material.
 
 # Optional keyed port hopping. Keep empty to listen only on the primary port.
 [port_hopping]
