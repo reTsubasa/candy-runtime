@@ -12,6 +12,14 @@ fail() {
 	exit 1
 }
 
+file_mode() {
+	if stat -c '%a' "$1" >/dev/null 2>&1; then
+		stat -c '%a' "$1"
+	else
+		stat -f '%Lp' "$1"
+	fi
+}
+
 case "$(uname -m)" in
 	x86_64|amd64) host_arch=x86_64 ;;
 	aarch64|arm64) host_arch=aarch64 ;;
@@ -117,8 +125,8 @@ bundle_1=$tmp/core-1.0.0.tar.gz
 make_bundle 1.0.0 1 1 "$host_arch" 0 "$bundle_1"
 sha_1=$(sha256sum "$bundle_1" | awk '{ print $1 }')
 "$manager" install 1.0.0 "$bundle_1" "$sha_1" >/dev/null
-[ "$(stat -f '%Lp' "$cores/1.0.0" 2>/dev/null || stat -c '%a' "$cores/1.0.0")" = 755 ] || fail "installed Core directory is not service-readable"
-[ "$(stat -f '%Lp' "$cores/1.0.0/candy-core" 2>/dev/null || stat -c '%a' "$cores/1.0.0/candy-core")" = 755 ] || fail "installed Core executable mode is invalid"
+[ "$(file_mode "$cores/1.0.0")" = 755 ] || fail "installed Core directory is not service-readable"
+[ "$(file_mode "$cores/1.0.0/candy-core")" = 755 ] || fail "installed Core executable mode is invalid"
 "$manager" activate 1.0.0 >/dev/null
 [ "$(readlink "$cores/current")" = 1.0.0 ] || fail "first Core was not activated"
 grep -F -- '--check-config' "$role_log" >/dev/null || fail "activation skipped server config validation"
