@@ -40,9 +40,9 @@ Runtime 发布必须记录 Runtime 版本/revision、Core commit/版本/API、wi
 OpenWrt client 的集中发布由 `release-openwrt-client` 手动 workflow 执行。
 它固定从 `main` 构建、校验 Runtime 版本与包 revision，然后将两个
 APK、`BUILD-INFO`、`SHA256SUMS` 和 `runtime-release-metadata.json`
-上传到 `reTsubasa/candy-release` 的 `runtime-v<version>-r<revision>` Release。
-该 workflow 只使用 `CANDY_RELEASE_TOKEN` 管理 Runtime Release 资产，不更改
-稳定版目录。
+上传到 `reTsubasa/candy-release` 的 `runtime-v<version>-r<revision>`
+draft Release，然后发送 `candy-artifact-ready` 事件。中央发布 Action 负责验证、
+发布 Release 并更新签名稳定版目录；Runtime 源仓库不直接修改目录。
 
 ## 当前迁移状态
 

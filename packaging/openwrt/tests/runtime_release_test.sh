@@ -69,7 +69,12 @@ grep -Fq 'secrets.CANDY_RELEASE_TOKEN' "$workflow" || fail "release workflow doe
 grep -Fq 'reTsubasa/candy-release' "$workflow" || fail "release workflow targets the wrong repository"
 grep -Fq 'gh release upload' "$workflow" || fail "release workflow does not upload release assets"
 grep -Fq -- '--draft' "$workflow" || fail "release workflow does not stage assets in a draft release"
-grep -Fq -- '--draft=false' "$workflow" || fail "release workflow does not publish the completed draft"
+grep -Fq 'incoming-$tag' "$workflow" || fail "release workflow does not isolate incoming assets"
+grep -Fq 'candy-artifact-ready' "$workflow" || fail "release workflow does not request central finalization"
+grep -Fq 'repos/$RELEASE_REPOSITORY/dispatches' "$workflow" || fail "release workflow dispatches to the wrong repository"
+if grep -Fq -- '--draft=false' "$workflow"; then
+  fail "Runtime source workflow must not publish the draft itself"
+fi
 if grep -Fq -- '--clobber' "$workflow"; then
   fail "release workflow must not overwrite immutable assets"
 fi

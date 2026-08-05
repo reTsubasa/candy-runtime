@@ -70,7 +70,7 @@ jobs:
           test -s "dist/openwrt/x86_64/apk/luci-app-candy-$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION.apk"
           (cd dist/openwrt/x86_64/apk && sha256sum -c SHA256SUMS)
 
-      - name: Publish immutable centralized Runtime release
+      - name: Stage Runtime release and request central finalization
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.CANDY_RELEASE_TOKEN }}
@@ -78,6 +78,7 @@ jobs:
           set -euo pipefail
           test -n "$GH_TOKEN"
           tag="runtime-v$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION"
+          staging_tag="incoming-$tag"
           dist=dist/openwrt/x86_64/apk
           notes=$(mktemp)
           cat > "$notes" <<EOF
@@ -87,17 +88,17 @@ jobs:
           - Target: OpenWrt $OPENWRT_RELEASE x86_64
           - Package format: APK
           EOF
-          if gh release view "$tag" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $tag already exists; published assets are immutable" >&2
-            exit 1
+          if gh release view "$staging_tag" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$staging_tag" --repo "$RELEASE_REPOSITORY" --cleanup-tag --yes
           fi
-          gh release create "$tag" --repo "$RELEASE_REPOSITORY" --draft \
-            --title "Candy Runtime $CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION" \
+          gh release create "$staging_tag" --repo "$RELEASE_REPOSITORY" --draft \
+            --title "Incoming Candy Runtime $CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION" \
             --notes-file "$notes"
-          gh release upload "$tag" --repo "$RELEASE_REPOSITORY" \
+          gh release upload "$staging_tag" --repo "$RELEASE_REPOSITORY" \
             "$dist/candy-client-$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION.apk" \
             "$dist/luci-app-candy-$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION.apk" \
             "$dist/BUILD-INFO" \
             "$dist/SHA256SUMS" \
             "$dist/runtime-release-metadata.json"
-          gh release edit "$tag" --repo "$RELEASE_REPOSITORY" --draft=false
+          jq -n --arg tag "$staging_tag" '{event_type:"candy-artifact-ready",client_payload:{release_kind:"runtime",staging_tag:$tag}}' | \
+            gh api --method POST "repos/$RELEASE_REPOSITORY/dispatches" --input -
