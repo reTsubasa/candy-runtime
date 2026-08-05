@@ -62,6 +62,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sudo chown -R "$(id -u):$(id -g)" dist/openwrt/x86_64/apk
           source_commit=$(git rev-parse HEAD)
           CANDY_RELEASE_SOURCE_REPOSITORY="$GITHUB_REPOSITORY" \
             CANDY_RELEASE_SOURCE_COMMIT="$source_commit" \
