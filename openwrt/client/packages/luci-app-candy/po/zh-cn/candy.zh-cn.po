@@ -1407,6 +1407,63 @@ msgstr "当前核心构建未实现此特性。"
 msgid "The current connection did not authorize this capability."
 msgstr "当前连接未授权此特性。"
 
+msgid "Updates"
+msgstr "更新"
+
+msgid "Candy only installs releases listed by the signed stable catalog. Update checks and installations are manual."
+msgstr "Candy 只安装已签名稳定目录中列出的版本，检查与安装均需手动触发。"
+
+msgid "Stable catalog"
+msgstr "稳定版目录"
+
+msgid "Signature status"
+msgstr "签名状态"
+
+msgid "Catalog sequence"
+msgstr "目录序列号"
+
+msgid "Published at"
+msgstr "发布时间"
+
+msgid "Last checked"
+msgstr "上次检查"
+
+msgid "Platform"
+msgstr "平台"
+
+msgid "Check for updates"
+msgstr "检查更新"
+
+msgid "Runtime updates"
+msgstr "Runtime 更新"
+
+msgid "Installed"
+msgstr "已安装"
+
+msgid "Available"
+msgstr "可用版本"
+
+msgid "Core updates"
+msgstr "Core 更新"
+
+msgid "A downloaded Core is installed but never activated automatically. Review it on the Core page before activation."
+msgstr "下载的 Core 只会安装，不会自动启用。请在 Core 页面检查后再手动启用。"
+
+msgid "Verified"
+msgstr "已验证"
+
+msgid "Not checked"
+msgstr "未检查"
+
+msgid "Update available"
+msgstr "有可用更新"
+
+msgid "Install Runtime"
+msgstr "安装 Runtime"
+
+msgid "Install Core"
+msgstr "安装 Core"
+
 msgid "Observed in the current connection"
 msgstr "当前连接已观测到运行证据"
 

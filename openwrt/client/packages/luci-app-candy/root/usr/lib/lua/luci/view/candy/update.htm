@@ -1,0 +1,158 @@
+<%+header%>
+
+<%
+local i18n = require "luci.i18n"
+local xml = require "luci.xml"
+local auth_token = luci.dispatcher.context.authsession or ""
+local function js_string(value)
+	return string.format("%q", tostring(value or ""))
+end
+%>
+
+<h2 name="content"><%:Updates%></h2>
+<p><%:Candy only installs releases listed by the signed stable catalog. Update checks and installations are manual.%></p>
+
+<style>
+.candy-update-toolbar { display: flex; flex-wrap: wrap; gap: .6em; align-items: center; }
+.candy-update-toolbar form { margin: 0; }
+.candy-update-operation { border-left: 4px solid #777; padding: .7em 1em; margin-bottom: 1em; }
+.candy-update-operation.running { border-color: #d7a51d; }
+.candy-update-operation.completed { border-color: #2e7d32; }
+.candy-update-operation.error { border-color: #c62828; }
+.candy-update-state { display: inline-block; border: 1px solid currentColor; border-radius: 4px; padding: .15em .45em; }
+.candy-update-state.available { color: #2e7d32; }
+.candy-update-state.current { color: #666; }
+.candy-update-table-scroll { overflow-x: auto; }
+.candy-update-table-scroll .table { min-width: 46em; }
+.candy-update-note { color: #666; margin-top: .7em; }
+</style>
+
+<div id="candy-update-operation" class="candy-update-operation" style="display:none"></div>
+
+<div class="cbi-map">
+	<h3><%:Stable catalog%></h3>
+	<div class="cbi-section">
+		<table class="table">
+			<tr class="tr"><td class="td left" width="32%"><%:Signature status%></td><td id="candy-update-catalog-valid" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Catalog sequence%></td><td id="candy-update-sequence" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Published at%></td><td id="candy-update-published" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Last checked%></td><td id="candy-update-checked" class="td left">-</td></tr>
+			<tr class="tr"><td class="td left"><%:Platform%></td><td id="candy-update-platform" class="td left">-</td></tr>
+		</table>
+		<div class="candy-update-toolbar">
+			<form method="post" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'update_check')%>">
+				<input type="hidden" name="token" value="<%=xml.pcdata(auth_token)%>" />
+				<button id="candy-update-check" class="cbi-button cbi-button-action" type="submit"><%:Check for updates%></button>
+			</form>
+		</div>
+	</div>
+</div>
+
+<div class="cbi-map">
+	<h3><%:Runtime updates%></h3>
+	<div class="cbi-section candy-update-table-scroll">
+		<table class="table">
+			<thead><tr class="tr table-titles"><th class="th"><%:Installed%></th><th class="th"><%:Available%></th><th class="th"><%:State%></th><th class="th"><%:Actions%></th></tr></thead>
+			<tbody id="candy-update-runtime"><tr class="tr"><td class="td" colspan="4">-</td></tr></tbody>
+		</table>
+	</div>
+</div>
+
+<div class="cbi-map">
+	<h3><%:Core updates%></h3>
+	<div class="cbi-section candy-update-table-scroll">
+		<table class="table">
+			<thead><tr class="tr table-titles"><th class="th"><%:Active%></th><th class="th"><%:Available%></th><th class="th"><%:Process API%></th><th class="th"><%:Actions%></th></tr></thead>
+			<tbody id="candy-update-core"><tr class="tr"><td class="td" colspan="4">-</td></tr></tbody>
+		</table>
+		<p class="candy-update-note"><%:A downloaded Core is installed but never activated automatically. Review it on the Core page before activation.%></p>
+	</div>
+</div>
+
+<script type="text/javascript">
+var candyUpdateStatusUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'update_status')%>";
+var candyUpdateRuntimeUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'update_install_runtime')%>";
+var candyUpdateCoreUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'update_install_core')%>";
+var candyUpdateToken = <%=js_string(auth_token)%>;
+var candyUpdateTimer = null;
+var candyUpdateLabels = {
+	valid: <%=js_string(i18n.translate("Verified"))%>,
+	invalid: <%=js_string(i18n.translate("Not checked"))%>,
+	available: <%=js_string(i18n.translate("Update available"))%>,
+	current: <%=js_string(i18n.translate("Current"))%>,
+	installRuntime: <%=js_string(i18n.translate("Install Runtime"))%>,
+	installCore: <%=js_string(i18n.translate("Install Core"))%>
+};
+
+function candyUpdateText(value) {
+	return value === null || value === undefined || value === "" ? "-" : String(value);
+}
+
+function candyUpdateSet(id, value) {
+	var node = document.getElementById(id);
+	if (node) node.textContent = candyUpdateText(value);
+}
+
+function candyUpdateCompare(left, right) {
+	if (left && !right) return 1;
+	var a = String(left || "").match(/^(\d+)\.(\d+)\.(\d+)(?:-r(\d+))?$/);
+	var b = String(right || "").match(/^(\d+)\.(\d+)\.(\d+)(?:-r(\d+))?$/);
+	if (!a || !b) return 0;
+	for (var i = 1; i <= 4; i++) {
+		var av = Number(a[i] || 0), bv = Number(b[i] || 0);
+		if (av !== bv) return av > bv ? 1 : -1;
+	}
+	return 0;
+}
+
+function candyUpdateAction(url, versionKey, label, disabled) {
+	var form = document.createElement("form"), token = document.createElement("input"), key = document.createElement("input"), button = document.createElement("button");
+	form.method = "post"; form.action = url;
+	token.type = "hidden"; token.name = "token"; token.value = candyUpdateToken;
+	key.type = "hidden"; key.name = "version_key"; key.value = versionKey;
+	button.type = "submit"; button.className = "cbi-button cbi-button-apply"; button.textContent = label; button.disabled = disabled;
+	form.appendChild(token); form.appendChild(key); form.appendChild(button);
+	return form;
+}
+
+function candyUpdateRow(bodyId, values, action) {
+	var body = document.getElementById(bodyId), row, cell;
+	if (!body) return;
+	body.textContent = ""; row = document.createElement("tr"); row.className = "tr";
+	values.forEach(function(value) { cell = document.createElement("td"); cell.className = "td"; cell.textContent = candyUpdateText(value); row.appendChild(cell); });
+	cell = document.createElement("td"); cell.className = "td candy-update-toolbar"; if (action) cell.appendChild(action); row.appendChild(cell); body.appendChild(row);
+}
+
+function candyUpdateRender(data) {
+	var catalog = data.catalog || {}, runtime = catalog.runtime || {}, core = catalog.core || {};
+	var runtimeEntry = (runtime.releases || {})[runtime.latest] || {}, coreEntry = (core.releases || {})[core.latest] || {};
+	var operation = data.operation || {}, busy = operation.state === "running", operationNode = document.getElementById("candy-update-operation");
+	var runtimeNewer = candyUpdateCompare(runtimeEntry.display_version, data.runtime_current) > 0;
+	var coreNewer = candyUpdateCompare(coreEntry.version, data.core_current) > 0;
+	candyUpdateSet("candy-update-catalog-valid", data.catalog_valid ? candyUpdateLabels.valid : candyUpdateLabels.invalid);
+	candyUpdateSet("candy-update-sequence", catalog.sequence);
+	candyUpdateSet("candy-update-published", catalog.published_at);
+	candyUpdateSet("candy-update-checked", data.checked_at ? new Date(Number(data.checked_at) * 1000).toLocaleString() : null);
+	candyUpdateSet("candy-update-platform", data.platform ? [data.platform.openwrt_release, data.platform.target, data.platform.arch].join(" / ") : null);
+	if (operationNode) { operationNode.style.display = operation.state || data.error ? "" : "none"; operationNode.className = "candy-update-operation " + (operation.state || "error"); operationNode.textContent = data.error || operation.message || ""; }
+	candyUpdateRow("candy-update-runtime", [data.runtime_current, runtimeEntry.display_version, runtimeNewer ? candyUpdateLabels.available : candyUpdateLabels.current], runtimeNewer && runtime.latest ? candyUpdateAction(candyUpdateRuntimeUrl, runtime.latest, candyUpdateLabels.installRuntime, busy) : null);
+	candyUpdateRow("candy-update-core", [data.core_current, coreEntry.version, coreEntry.process_api_version], coreNewer && core.latest ? candyUpdateAction(candyUpdateCoreUrl, core.latest, candyUpdateLabels.installCore, busy) : null);
+	var check = document.getElementById("candy-update-check"); if (check) check.disabled = busy;
+}
+
+function refreshCandyUpdateStatus() {
+	var xhr = new XMLHttpRequest();
+	if (candyUpdateTimer !== null) { clearTimeout(candyUpdateTimer); candyUpdateTimer = null; }
+	xhr.open("GET", candyUpdateStatusUrl + "?_=" + Date.now(), true);
+	xhr.onreadystatechange = function() {
+		if (xhr.readyState !== 4) return;
+		if (xhr.status === 200) { try { candyUpdateRender(JSON.parse(xhr.responseText || "{}")); } catch (e) {} }
+		candyUpdateTimer = setTimeout(refreshCandyUpdateStatus, 2000);
+	};
+	xhr.send(null);
+}
+
+refreshCandyUpdateStatus();
+</script>
+
+<%+footer%>

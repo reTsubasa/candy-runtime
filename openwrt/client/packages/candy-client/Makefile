@@ -4,7 +4,7 @@ PKG_NAME:=candy-client
 PKG_VERSION:=0.4.0
 # OpenWrt requires a package revision. This is internal metadata, not part of
 # the Candy product version shown to users.
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 CANDY_RUNTIME_BIN_DIR?=
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
@@ -46,7 +46,10 @@ define Package/candy-client/install
 	ln -sf candy-client $(1)/usr/bin/client-cli
 	$(INSTALL_DIR) $(1)/usr/libexec
 	$(INSTALL_BIN) ./candy-core-manager $(1)/usr/libexec/candy-core-manager
+	$(INSTALL_BIN) ./candy-update-manager $(1)/usr/libexec/candy-update-manager
 	$(INSTALL_BIN) ./candy-runtime-health-check $(1)/usr/libexec/candy-runtime-health-check
+	$(SED) 's|^RUNTIME_VERSION=.*|RUNTIME_VERSION=$$$${CANDY_RUNTIME_VERSION:-$(PKG_VERSION)}|' $(1)/usr/libexec/candy-update-manager
+	$(SED) 's|^RUNTIME_RELEASE=.*|RUNTIME_RELEASE=$$$${CANDY_RUNTIME_RELEASE:-$(PKG_RELEASE)}|' $(1)/usr/libexec/candy-update-manager
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./candy.init $(1)/etc/init.d/candy
 	$(SED) 's|^CANDY_VERSION=.*|CANDY_VERSION=$$$${CANDY_VERSION:-$(PKG_VERSION)}|' $(1)/etc/init.d/candy
@@ -56,6 +59,8 @@ define Package/candy-client/install
 	$(INSTALL_DIR) $(1)/usr/share/candy/rulesets
 	$(INSTALL_DATA) ./rulesets/cn-ip.cidr $(1)/usr/share/candy/rulesets/cn-ip.cidr
 	$(INSTALL_DATA) ./rulesets/gfwlist.domains $(1)/usr/share/candy/rulesets/gfwlist.domains
+	$(INSTALL_DIR) $(1)/usr/share/candy/keys
+	$(INSTALL_DATA) ./catalog-release.pub $(1)/usr/share/candy/keys/catalog-release.pub
 endef
 
 define Package/candy-client/postinst
@@ -72,8 +77,8 @@ if [ -f /etc/init.d/candy.apk-new ]; then
 	chmod 0755 /etc/init.d/candy
 	rm -f /etc/init.d/candy.apk-new
 fi
-mkdir -p /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache
-chmod 0700 /var/lib/candy /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache
+mkdir -p /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache /var/lib/candy/update
+chmod 0700 /var/lib/candy /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache /var/lib/candy/update
 exit 0
 endef
 

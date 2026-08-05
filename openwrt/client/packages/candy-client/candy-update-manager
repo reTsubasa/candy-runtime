@@ -1,0 +1,534 @@
+#!/bin/sh
+
+set -u
+
+CATALOG_URL=https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json
+CATALOG_SIGNATURE_URL=https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json.sig
+CATALOG_KEY=${CANDY_UPDATE_CATALOG_KEY:-/usr/share/candy/keys/catalog-release.pub}
+STATE_ROOT=${CANDY_UPDATE_STATE_ROOT:-/var/lib/candy/update}
+CATALOG_FILE=$STATE_ROOT/stable.json
+CATALOG_SIGNATURE=$STATE_ROOT/stable.json.sig
+SEQUENCE_FILE=$STATE_ROOT/sequence
+CATALOG_HASH_FILE=$STATE_ROOT/catalog.sha256
+CHECKED_AT_FILE=$STATE_ROOT/checked-at
+OPERATION_FILE=${CANDY_UPDATE_OPERATION_FILE:-/tmp/candy-update-operation.json}
+LOCK_DIR=${CANDY_UPDATE_LOCK_DIR:-/var/lock/candy-update-manager.lock}
+CORE_MANAGER=${CANDY_CORE_MANAGER:-/usr/libexec/candy-core-manager}
+SERVICE_INIT=${CANDY_UPDATE_SERVICE_INIT:-/etc/init.d/candy}
+HEALTH_CHECK=${CANDY_UPDATE_HEALTH_CHECK:-/usr/libexec/candy-runtime-health-check}
+CONFIG_FILE=${CANDY_UPDATE_CONFIG_FILE:-/etc/config/candy}
+HEALTH_WAIT_SECONDS=${CANDY_UPDATE_HEALTH_WAIT_SECONDS:-20}
+RUNTIME_VERSION=${CANDY_RUNTIME_VERSION:-0.4.0}
+RUNTIME_RELEASE=${CANDY_RUNTIME_RELEASE:-2}
+SUPPORTED_OPENWRT_RELEASE=25.12.4
+SUPPORTED_TARGET=x86/64
+SUPPORTED_ARCH=x86_64
+RUNTIME_TARGET_KEY=openwrt_25_12_4_x86_64
+CORE_TARGET_KEY=linux_musl_x86_64
+MAX_CATALOG_BYTES=${CANDY_UPDATE_MAX_CATALOG_BYTES:-524288}
+MAX_SIGNATURE_BYTES=${CANDY_UPDATE_MAX_SIGNATURE_BYTES:-4096}
+MAX_RUNTIME_PACKAGE_BYTES=${CANDY_UPDATE_MAX_RUNTIME_PACKAGE_BYTES:-16777216}
+MAX_CORE_BYTES=${CANDY_UPDATE_MAX_CORE_BYTES:-134217728}
+OPERATION_ACTION=
+OPERATION_VERSION=
+TEMPORARY=
+
+json_string() {
+	printf '"'
+	printf '%s' "$1" | awk '
+		NR > 1 { printf "\\n" }
+		{
+			gsub(/\\/, "\\\\")
+			gsub(/"/, "\\\"")
+			gsub(/\t/, "\\t")
+			gsub(/\r/, "\\r")
+			printf "%s", $0
+		}
+	'
+	printf '"'
+}
+
+atomic_write() {
+	local destination="$1" value="$2" temporary
+	temporary="$destination.tmp.$$"
+	printf '%s\n' "$value" > "$temporary" || return 1
+	chmod 0600 "$temporary" || { rm -f "$temporary"; return 1; }
+	mv -f "$temporary" "$destination"
+}
+
+write_operation() {
+	local state="$1" message="$2" temporary
+	[ -n "$OPERATION_ACTION" ] || return 0
+	temporary="$OPERATION_FILE.tmp.$$"
+	mkdir -p "$(dirname "$OPERATION_FILE")" || return 0
+	{
+		printf '{"state":'; json_string "$state"
+		printf ',"action":'; json_string "$OPERATION_ACTION"
+		printf ',"version_key":'; json_string "$OPERATION_VERSION"
+		printf ',"message":'; json_string "$message"
+		printf ',"updated_at":%s}\n' "$(date +%s 2>/dev/null || printf 0)"
+	} > "$temporary" && chmod 0600 "$temporary" && mv -f "$temporary" "$OPERATION_FILE"
+}
+
+log_update() {
+	command -v logger >/dev/null 2>&1 && logger -t candy -- "Update manager: $*"
+}
+
+fail() {
+	write_operation error "$*" || true
+	log_update "error: $*"
+	printf '%s\n' "$*" >&2
+	exit 1
+}
+
+cleanup() {
+	[ -n "$TEMPORARY" ] && [ -d "$TEMPORARY" ] && rm -rf "$TEMPORARY"
+	if [ -f "$LOCK_DIR/pid" ] && [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
+		rm -f "$LOCK_DIR/pid" 2>/dev/null || true
+		rmdir "$LOCK_DIR" 2>/dev/null || true
+	fi
+}
+
+acquire_lock() {
+	local lock_pid
+	mkdir -p "$(dirname "$LOCK_DIR")" || return 1
+	if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+		lock_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+		case "$lock_pid" in ''|*[!0-9]*) return 1 ;; esac
+		kill -0 "$lock_pid" 2>/dev/null && return 1
+		rm -f "$LOCK_DIR/pid" 2>/dev/null || return 1
+		rmdir "$LOCK_DIR" 2>/dev/null || return 1
+		mkdir "$LOCK_DIR" 2>/dev/null || return 1
+	fi
+	printf '%s\n' "$$" > "$LOCK_DIR/pid" || return 1
+	trap cleanup EXIT HUP INT TERM
+}
+
+regular_bounded_file() {
+	local path="$1" maximum="$2" size
+	[ -f "$path" ] && [ ! -L "$path" ] || return 1
+	size=$(wc -c < "$path" 2>/dev/null | tr -d ' ' || printf 0)
+	case "$size" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$size" -gt 0 ] && [ "$size" -le "$maximum" ]
+}
+
+valid_unsigned_integer() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -le 2147483647 ] 2>/dev/null
+}
+
+valid_version() {
+	printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+.-][0-9A-Za-z][0-9A-Za-z.+-]*)?$'
+}
+
+valid_version_key() {
+	printf '%s' "$1" | grep -Eq '^v[0-9A-Za-z_]+$'
+}
+
+valid_sha256() {
+	printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{64}$'
+}
+
+catalog_field() {
+	jsonfilter -i "$1" -e "$2" 2>/dev/null || true
+}
+
+runtime_entry_field() {
+	catalog_field "$1" "@.runtime.releases.$2.$3"
+}
+
+core_entry_field() {
+	catalog_field "$1" "@.core.releases.$2.$3"
+}
+
+platform_release() {
+	if [ "${CANDY_UPDATE_TEST_PLATFORM:-0}" = 1 ]; then
+		printf '%s\n' "${CANDY_UPDATE_TEST_OPENWRT_RELEASE:-}"
+		return
+	fi
+	sed -n "s/^DISTRIB_RELEASE='\([^']*\)'/\1/p" /etc/openwrt_release 2>/dev/null | head -1
+}
+
+platform_target() {
+	if [ "${CANDY_UPDATE_TEST_PLATFORM:-0}" = 1 ]; then
+		printf '%s\n' "${CANDY_UPDATE_TEST_TARGET:-}"
+		return
+	fi
+	sed -n "s/^DISTRIB_TARGET='\([^']*\)'/\1/p" /etc/openwrt_release 2>/dev/null | head -1
+}
+
+platform_arch() {
+	if [ "${CANDY_UPDATE_TEST_PLATFORM:-0}" = 1 ]; then
+		printf '%s\n' "${CANDY_UPDATE_TEST_ARCH:-}"
+		return
+	fi
+	uname -m 2>/dev/null || true
+}
+
+require_supported_platform() {
+	local release target arch
+	release=$(platform_release)
+	target=$(platform_target)
+	arch=$(platform_arch)
+	[ "$release" = "$SUPPORTED_OPENWRT_RELEASE" ] || return 1
+	[ "$target" = "$SUPPORTED_TARGET" ] || return 1
+	case "$arch" in x86_64|amd64) ;; *) return 1 ;; esac
+}
+
+fetch_https() {
+	local url="$1" destination="$2"
+	case "$url" in https://*) ;; *) return 1 ;; esac
+	if command -v uclient-fetch >/dev/null 2>&1; then
+		uclient-fetch -q -O "$destination" "$url"
+	elif command -v wget >/dev/null 2>&1; then
+		wget -q -O "$destination" "$url"
+	elif command -v curl >/dev/null 2>&1; then
+		curl -fsSL --proto '=https' --max-time 180 -o "$destination" "$url"
+	else
+		return 1
+	fi
+}
+
+verify_catalog_signature() {
+	local catalog="$1" signature="$2"
+	regular_bounded_file "$catalog" "$MAX_CATALOG_BYTES" || return 1
+	regular_bounded_file "$signature" "$MAX_SIGNATURE_BYTES" || return 1
+	[ -f "$CATALOG_KEY" ] && [ ! -L "$CATALOG_KEY" ] || return 1
+	command -v usign >/dev/null 2>&1 || return 1
+	usign -q -V -p "$CATALOG_KEY" -m "$catalog" -x "$signature"
+}
+
+expected_runtime_key() {
+	local version="$1" revision="$2" normalized
+	normalized=$(printf '%s' "$version" | tr '.+-' '___')
+	printf 'v%s_r%s\n' "$normalized" "$revision"
+}
+
+expected_core_key() {
+	local normalized
+	normalized=$(printf '%s' "$1" | tr '.+-' '___')
+	printf 'v%s\n' "$normalized"
+}
+
+validate_runtime_entry() {
+	local catalog="$1" key="$2" version revision display release target arch format client_url client_sha client_size luci_url luci_sha luci_size expected_tag
+	valid_version_key "$key" || return 1
+	version=$(runtime_entry_field "$catalog" "$key" version)
+	revision=$(runtime_entry_field "$catalog" "$key" revision)
+	display=$(runtime_entry_field "$catalog" "$key" display_version)
+	valid_version "$version" && valid_unsigned_integer "$revision" && [ "$revision" -gt 0 ] || return 1
+	[ "$key" = "$(expected_runtime_key "$version" "$revision")" ] || return 1
+	[ "$display" = "$version-r$revision" ] || return 1
+	release=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.openwrt_release")
+	target=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.target")
+	arch=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.arch")
+	format=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.package_format")
+	[ "$release" = "$SUPPORTED_OPENWRT_RELEASE" ] && [ "$target" = "$SUPPORTED_TARGET" ] && [ "$arch" = "$SUPPORTED_ARCH" ] && [ "$format" = apk ] || return 1
+	client_url=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.candy_client.url")
+	client_sha=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.candy_client.sha256")
+	client_size=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.candy_client.size")
+	luci_url=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.luci_app_candy.url")
+	luci_sha=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.luci_app_candy.sha256")
+	luci_size=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.luci_app_candy.size")
+	expected_tag="https://github.com/reTsubasa/candy-release/releases/download/runtime-v$version-r$revision"
+	[ "$client_url" = "$expected_tag/candy-client-$display.apk" ] || return 1
+	[ "$luci_url" = "$expected_tag/luci-app-candy-$display.apk" ] || return 1
+	valid_sha256 "$client_sha" && valid_sha256 "$luci_sha" || return 1
+	valid_unsigned_integer "$client_size" && [ "$client_size" -gt 0 ] && [ "$client_size" -le "$MAX_RUNTIME_PACKAGE_BYTES" ] || return 1
+	valid_unsigned_integer "$luci_size" && [ "$luci_size" -gt 0 ] && [ "$luci_size" -le "$MAX_RUNTIME_PACKAGE_BYTES" ] || return 1
+}
+
+validate_core_entry() {
+	local catalog="$1" key="$2" version process_api core_api target os libc arch url sha size expected_url
+	valid_version_key "$key" || return 1
+	version=$(core_entry_field "$catalog" "$key" version)
+	valid_version "$version" && [ "$key" = "$(expected_core_key "$version")" ] || return 1
+	process_api=$(core_entry_field "$catalog" "$key" process_api_version)
+	core_api=$(core_entry_field "$catalog" "$key" core_api_version)
+	[ "$process_api" = 1 ] && [ "$core_api" = 1 ] || return 1
+	target=$(core_entry_field "$catalog" "$key" "targets.$CORE_TARGET_KEY.target")
+	os=$(core_entry_field "$catalog" "$key" "targets.$CORE_TARGET_KEY.os")
+	libc=$(core_entry_field "$catalog" "$key" "targets.$CORE_TARGET_KEY.libc")
+	arch=$(core_entry_field "$catalog" "$key" "targets.$CORE_TARGET_KEY.arch")
+	[ "$target" = x86_64-unknown-linux-musl ] && [ "$os" = linux ] && [ "$libc" = musl ] && [ "$arch" = x86_64 ] || return 1
+	url=$(core_entry_field "$catalog" "$key" "targets.$CORE_TARGET_KEY.url")
+	sha=$(core_entry_field "$catalog" "$key" "targets.$CORE_TARGET_KEY.sha256")
+	size=$(core_entry_field "$catalog" "$key" "targets.$CORE_TARGET_KEY.size")
+	expected_url="https://github.com/reTsubasa/candy-release/releases/download/core-v$version/candy-core-$version-x86_64-unknown-linux-musl.tar.gz"
+	[ "$url" = "$expected_url" ] || return 1
+	valid_sha256 "$sha" || return 1
+	valid_unsigned_integer "$size" && [ "$size" -gt 0 ] && [ "$size" -le "$MAX_CORE_BYTES" ] || return 1
+}
+
+validate_catalog() {
+	local catalog="$1" schema sequence channel runtime_latest core_latest
+	schema=$(catalog_field "$catalog" '@.schema_version')
+	sequence=$(catalog_field "$catalog" '@.sequence')
+	channel=$(catalog_field "$catalog" '@.channel')
+	[ "$schema" = 1 ] && valid_unsigned_integer "$sequence" && [ "$sequence" -gt 0 ] && [ "$channel" = stable ] || return 1
+	[ -n "$(catalog_field "$catalog" '@.published_at')" ] || return 1
+	runtime_latest=$(catalog_field "$catalog" '@.runtime.latest')
+	core_latest=$(catalog_field "$catalog" '@.core.latest')
+	validate_runtime_entry "$catalog" "$runtime_latest" || return 1
+	validate_core_entry "$catalog" "$core_latest" || return 1
+}
+
+cached_catalog_valid() {
+	local sequence recorded
+	verify_catalog_signature "$CATALOG_FILE" "$CATALOG_SIGNATURE" || return 1
+	validate_catalog "$CATALOG_FILE" || return 1
+	sequence=$(catalog_field "$CATALOG_FILE" '@.sequence')
+	recorded=$(cat "$SEQUENCE_FILE" 2>/dev/null || true)
+	[ "$sequence" = "$recorded" ] && valid_unsigned_integer "$recorded"
+}
+
+check_catalog() {
+	local downloaded_catalog downloaded_signature new_sequence old_sequence old_hash new_hash checked_at
+	require_supported_platform || fail "this Runtime package does not support the current OpenWrt platform"
+	[ -f "$CATALOG_KEY" ] && [ ! -L "$CATALOG_KEY" ] || fail "catalog signing key is unavailable"
+	mkdir -p "$STATE_ROOT" || fail "cannot create update state directory"
+	[ ! -L "$STATE_ROOT" ] || fail "update state directory must not be a symbolic link"
+	chmod 0700 "$STATE_ROOT" || fail "cannot protect update state directory"
+	TEMPORARY="$STATE_ROOT/.check-$$"
+	mkdir -m 0700 "$TEMPORARY" || fail "cannot create catalog staging directory"
+	downloaded_catalog=$TEMPORARY/stable.json
+	downloaded_signature=$TEMPORARY/stable.json.sig
+	fetch_https "$CATALOG_URL" "$downloaded_catalog" || fail "catalog download failed"
+	fetch_https "$CATALOG_SIGNATURE_URL" "$downloaded_signature" || fail "catalog signature download failed"
+	verify_catalog_signature "$downloaded_catalog" "$downloaded_signature" || fail "catalog signature is invalid"
+	validate_catalog "$downloaded_catalog" || fail "catalog schema or platform entries are invalid"
+	new_sequence=$(catalog_field "$downloaded_catalog" '@.sequence')
+	if [ -e "$SEQUENCE_FILE" ]; then
+		[ -f "$SEQUENCE_FILE" ] && [ ! -L "$SEQUENCE_FILE" ] || fail "stored catalog sequence file is unsafe"
+		old_sequence=$(cat "$SEQUENCE_FILE" 2>/dev/null || true)
+	else
+		old_sequence=0
+	fi
+	valid_unsigned_integer "$old_sequence" || fail "stored catalog sequence is invalid"
+	[ "$new_sequence" -ge "$old_sequence" ] || fail "catalog sequence rollback was rejected"
+	new_hash=$(sha256sum "$downloaded_catalog" | awk '{ print tolower($1) }')
+	if [ "$new_sequence" = "$old_sequence" ] && [ "$old_sequence" -gt 0 ]; then
+		[ -f "$CATALOG_HASH_FILE" ] && [ ! -L "$CATALOG_HASH_FILE" ] || fail "stored catalog hash is unavailable or unsafe"
+		old_hash=$(cat "$CATALOG_HASH_FILE" 2>/dev/null || true)
+		[ "$new_hash" = "$old_hash" ] || fail "catalog content changed without a sequence increase"
+	fi
+	chmod 0600 "$downloaded_catalog" "$downloaded_signature" || fail "cannot protect catalog files"
+	mv -f "$downloaded_catalog" "$CATALOG_FILE" || fail "cannot store catalog"
+	mv -f "$downloaded_signature" "$CATALOG_SIGNATURE" || fail "cannot store catalog signature"
+	atomic_write "$SEQUENCE_FILE" "$new_sequence" || fail "cannot store catalog sequence"
+	atomic_write "$CATALOG_HASH_FILE" "$new_hash" || fail "cannot store catalog hash"
+	checked_at=$(date +%s 2>/dev/null || printf 0)
+	atomic_write "$CHECKED_AT_FILE" "$checked_at" || fail "cannot store catalog check time"
+	log_update "accepted stable catalog sequence $new_sequence"
+	printf '%s\n' "catalog sequence $new_sequence accepted"
+}
+
+verify_download() {
+	local path="$1" expected_size="$2" expected_sha="$3" maximum="$4" size actual_sha
+	regular_bounded_file "$path" "$maximum" || return 1
+	size=$(wc -c < "$path" 2>/dev/null | tr -d ' ' || printf 0)
+	[ "$size" = "$expected_size" ] || return 1
+	actual_sha=$(sha256sum "$path" | awk '{ print tolower($1) }')
+	[ "$actual_sha" = "$(printf '%s' "$expected_sha" | tr 'A-F' 'a-f')" ]
+}
+
+install_core() {
+	local key="$1" version url sha size archive current
+	require_supported_platform || fail "this Runtime package does not support the current OpenWrt platform"
+	cached_catalog_valid || fail "no valid checked catalog is available"
+	validate_core_entry "$CATALOG_FILE" "$key" || fail "requested Core release is invalid or incompatible"
+	version=$(core_entry_field "$CATALOG_FILE" "$key" version)
+	[ -x "$CORE_MANAGER" ] || fail "Core manager is unavailable"
+	current=$("$CORE_MANAGER" status 2>/dev/null | jsonfilter -e '@.current_version' 2>/dev/null || true)
+	[ -z "$current" ] || version_is_newer "$version" "$current" || fail "Core downgrade or reinstall was rejected"
+	url=$(core_entry_field "$CATALOG_FILE" "$key" "targets.$CORE_TARGET_KEY.url")
+	sha=$(core_entry_field "$CATALOG_FILE" "$key" "targets.$CORE_TARGET_KEY.sha256")
+	size=$(core_entry_field "$CATALOG_FILE" "$key" "targets.$CORE_TARGET_KEY.size")
+	TEMPORARY="$STATE_ROOT/.core-$$"
+	mkdir -m 0700 "$TEMPORARY" || fail "cannot create Core staging directory"
+	archive=$TEMPORARY/core.tar.gz
+	fetch_https "$url" "$archive" || fail "Core download failed"
+	verify_download "$archive" "$size" "$sha" "$MAX_CORE_BYTES" || fail "Core download size or SHA-256 is invalid"
+	CANDY_CORE_ALLOW_FILE_URL=1 "$CORE_MANAGER" install "$version" "file://$archive" "$sha" || fail "Core installation failed"
+	log_update "installed Core $version without activation"
+	printf '%s\n' "Core $version installed; activation remains manual"
+}
+
+apk_metadata_matches() {
+	local package="$1" expected_name="$2" expected_version="$3" expected_arch="$4" metadata="$5" name version arch
+	apk adbdump "$package" > "$metadata" 2>/dev/null || return 1
+	regular_bounded_file "$metadata" 524288 || return 1
+	name=$(sed -n 's/^  name: //p' "$metadata" | head -1)
+	version=$(sed -n 's/^  version: //p' "$metadata" | head -1)
+	arch=$(sed -n 's/^  arch: //p' "$metadata" | head -1)
+	[ "$name" = "$expected_name" ] && [ "$version" = "$expected_version" ] && [ "$arch" = "$expected_arch" ]
+}
+
+version_is_newer() {
+	[ "$(apk version -t "$1" "$2" 2>/dev/null || true)" = '>' ]
+}
+
+download_runtime_pair() {
+	local catalog="$1" key="$2" directory="$3" version revision display client_url client_sha client_size luci_url luci_sha luci_size client_package luci_package
+	validate_runtime_entry "$catalog" "$key" || return 1
+	version=$(runtime_entry_field "$catalog" "$key" version)
+	revision=$(runtime_entry_field "$catalog" "$key" revision)
+	display=$(runtime_entry_field "$catalog" "$key" display_version)
+	client_url=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.candy_client.url")
+	client_sha=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.candy_client.sha256")
+	client_size=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.candy_client.size")
+	luci_url=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.luci_app_candy.url")
+	luci_sha=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.luci_app_candy.sha256")
+	luci_size=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.luci_app_candy.size")
+	mkdir -m 0700 "$directory" || return 1
+	client_package=$directory/candy-client-$display.apk
+	luci_package=$directory/luci-app-candy-$display.apk
+	fetch_https "$client_url" "$client_package" || return 1
+	fetch_https "$luci_url" "$luci_package" || return 1
+	verify_download "$client_package" "$client_size" "$client_sha" "$MAX_RUNTIME_PACKAGE_BYTES" || return 1
+	verify_download "$luci_package" "$luci_size" "$luci_sha" "$MAX_RUNTIME_PACKAGE_BYTES" || return 1
+	apk_metadata_matches "$client_package" candy-client "$display" x86_64 "$directory/client.metadata" || return 1
+	apk_metadata_matches "$luci_package" luci-app-candy "$display" noarch "$directory/luci.metadata" || return 1
+}
+
+restore_config() {
+	local backup="$1"
+	[ -f "$backup" ] || return 0
+	cp "$backup" "$CONFIG_FILE" || return 1
+	chmod 0600 "$CONFIG_FILE" 2>/dev/null || true
+}
+
+restore_service_state() {
+	local was_enabled="$1" was_running="$2"
+	if [ "$was_enabled" = 1 ]; then
+		"$SERVICE_INIT" enable >/dev/null 2>&1 || return 1
+	else
+		"$SERVICE_INIT" disable >/dev/null 2>&1 || return 1
+	fi
+	if [ "$was_running" = 1 ]; then
+		"$SERVICE_INIT" start >/dev/null 2>&1 || return 1
+	else
+		"$SERVICE_INIT" stop >/dev/null 2>&1 || true
+	fi
+}
+
+runtime_healthy() {
+	local waited=0
+	[ -x "$HEALTH_CHECK" ] || return 1
+	while [ "$waited" -lt "$HEALTH_WAIT_SECONDS" ]; do
+		"$HEALTH_CHECK" client >/dev/null 2>&1 && return 0
+		sleep 1
+		waited=$((waited + 1))
+	done
+	return 1
+}
+
+install_runtime() {
+	local key="$1" version revision display current_key current_display target_dir rollback_dir client_package luci_package old_client old_luci config_backup was_enabled=0 was_running=0
+	require_supported_platform || fail "this Runtime package does not support the current OpenWrt platform"
+	cached_catalog_valid || fail "no valid checked catalog is available"
+	validate_runtime_entry "$CATALOG_FILE" "$key" || fail "requested Runtime release is invalid or incompatible"
+	version=$(runtime_entry_field "$CATALOG_FILE" "$key" version)
+	revision=$(runtime_entry_field "$CATALOG_FILE" "$key" revision)
+	display=$(runtime_entry_field "$CATALOG_FILE" "$key" display_version)
+	version_is_newer "$display" "$RUNTIME_VERSION-r$RUNTIME_RELEASE" || fail "Runtime downgrade or reinstall was rejected"
+	current_key=$(expected_runtime_key "$RUNTIME_VERSION" "$RUNTIME_RELEASE")
+	validate_runtime_entry "$CATALOG_FILE" "$current_key" || fail "current Runtime release is absent from the signed catalog; rollback cannot be guaranteed"
+	current_display=$(runtime_entry_field "$CATALOG_FILE" "$current_key" display_version)
+	TEMPORARY="$STATE_ROOT/.runtime-$$"
+	mkdir -m 0700 "$TEMPORARY" || fail "cannot create Runtime staging directory"
+	target_dir=$TEMPORARY/target
+	rollback_dir=$TEMPORARY/rollback
+	download_runtime_pair "$CATALOG_FILE" "$key" "$target_dir" || fail "target Runtime packages failed validation"
+	download_runtime_pair "$CATALOG_FILE" "$current_key" "$rollback_dir" || fail "current Runtime rollback packages failed validation"
+	client_package=$target_dir/candy-client-$display.apk
+	luci_package=$target_dir/luci-app-candy-$display.apk
+	old_client=$rollback_dir/candy-client-$current_display.apk
+	old_luci=$rollback_dir/luci-app-candy-$current_display.apk
+	config_backup=$TEMPORARY/candy.config
+	if [ -e "$CONFIG_FILE" ]; then
+		[ -f "$CONFIG_FILE" ] && [ ! -L "$CONFIG_FILE" ] || fail "Candy configuration is not a regular file"
+		cp "$CONFIG_FILE" "$config_backup" || fail "cannot back up Candy configuration"
+		chmod 0600 "$config_backup" || fail "cannot protect Candy configuration backup"
+	fi
+	[ -x "$SERVICE_INIT" ] || fail "Candy service controller is unavailable"
+	"$SERVICE_INIT" enabled >/dev/null 2>&1 && was_enabled=1
+	"$SERVICE_INIT" running >/dev/null 2>&1 && was_running=1
+	"$SERVICE_INIT" stop >/dev/null 2>&1 || fail "cannot stop Candy before Runtime update"
+	"$SERVICE_INIT" disable >/dev/null 2>&1 || fail "cannot disable Candy during Runtime update"
+	if ! apk add --allow-untrusted "$client_package" "$luci_package"; then
+		apk add --allow-untrusted --force-old-apk "$old_client" "$old_luci" >/dev/null 2>&1 || true
+		restore_config "$config_backup" || true
+		restore_service_state "$was_enabled" "$was_running" || true
+		fail "Runtime APK transaction failed; previous packages were restored"
+	fi
+	restore_config "$config_backup" || fail "Runtime installed but Candy configuration could not be restored"
+	restore_service_state "$was_enabled" "$was_running" || fail "Runtime installed but Candy service state could not be restored"
+	if [ "$was_running" = 1 ] && ! runtime_healthy; then
+		"$SERVICE_INIT" stop >/dev/null 2>&1 || true
+		apk add --allow-untrusted --force-old-apk "$old_client" "$old_luci" >/dev/null 2>&1 || fail "Runtime health check failed and rollback package installation also failed"
+		restore_config "$config_backup" || fail "Runtime rollback could not restore Candy configuration"
+		restore_service_state "$was_enabled" "$was_running" || fail "Runtime rollback could not restore Candy service state"
+		runtime_healthy || fail "Runtime update and rollback health checks both failed"
+		fail "Runtime $display failed its health check and was rolled back to $current_display"
+	fi
+	log_update "installed Runtime $display with verified rollback packages"
+	printf '%s\n' "Runtime $display installed and verified"
+}
+
+status_json() {
+	local release target arch checked_at core_current= catalog_valid=0
+	release=$(platform_release)
+	target=$(platform_target)
+	arch=$(platform_arch)
+	checked_at=$(cat "$CHECKED_AT_FILE" 2>/dev/null || printf 0)
+	case "$checked_at" in ''|*[!0-9]*) checked_at=0 ;; esac
+	if cached_catalog_valid; then catalog_valid=1; fi
+	if [ -x "$CORE_MANAGER" ]; then
+		core_current=$("$CORE_MANAGER" status 2>/dev/null | jsonfilter -e '@.current_version' 2>/dev/null || true)
+	fi
+	printf '{"schema_version":1,"manager_api_version":1,"catalog_url":'; json_string "$CATALOG_URL"
+	printf ',"catalog_valid":'; [ "$catalog_valid" = 1 ] && printf true || printf false
+	printf ',"checked_at":%s,"platform":{"openwrt_release":' "${checked_at:-0}"; json_string "$release"
+	printf ',"target":'; json_string "$target"
+	printf ',"arch":'; json_string "$arch"
+	printf '},"runtime_current":'; json_string "$RUNTIME_VERSION-r$RUNTIME_RELEASE"
+	printf ',"core_current":'; if [ -n "$core_current" ]; then json_string "$core_current"; else printf null; fi
+	printf ',"operation":'
+	if regular_bounded_file "$OPERATION_FILE" 65536 && [ -n "$(jsonfilter -i "$OPERATION_FILE" -e '@.state' 2>/dev/null || true)" ]; then cat "$OPERATION_FILE"; else printf null; fi
+	printf ',"catalog":'
+	if [ "$catalog_valid" = 1 ]; then cat "$CATALOG_FILE"; else printf null; fi
+	printf '}\n'
+}
+
+command=${1:-status}
+case "$command" in
+	status)
+		[ "$#" -eq 1 ] || fail "usage: $0 status"
+		status_json
+		;;
+	check)
+		[ "$#" -eq 1 ] || fail "usage: $0 check"
+		acquire_lock || fail "another update operation is running"
+		OPERATION_ACTION=check; write_operation running "downloading and verifying the stable catalog"
+		check_catalog
+		write_operation completed "stable catalog verified"
+		;;
+	install-core)
+		[ "$#" -eq 2 ] || fail "usage: $0 install-core VERSION_KEY"
+		valid_version_key "$2" || fail "invalid Core version key"
+		acquire_lock || fail "another update operation is running"
+		OPERATION_ACTION=install-core; OPERATION_VERSION=$2; write_operation running "downloading and validating Core"
+		install_core "$2"
+		write_operation completed "Core installed; activation remains manual"
+		;;
+	install-runtime)
+		[ "$#" -eq 2 ] || fail "usage: $0 install-runtime VERSION_KEY"
+		valid_version_key "$2" || fail "invalid Runtime version key"
+		acquire_lock || fail "another update operation is running"
+		OPERATION_ACTION=install-runtime; OPERATION_VERSION=$2; write_operation running "downloading and validating Runtime packages"
+		install_runtime "$2"
+		write_operation completed "Runtime installed and verified"
+		;;
+	*) fail "unknown update manager command" ;;
+esac
