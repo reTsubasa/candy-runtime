@@ -50,7 +50,7 @@ jobs:
           targets: x86_64-unknown-linux-musl
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y musl-tools jq
+        run: sudo apt-get update && sudo apt-get install -y musl-tools jq ripgrep lua5.4
 
       - name: Run full Runtime verification
         run: scripts/verify.sh
