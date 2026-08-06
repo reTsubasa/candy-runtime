@@ -47,7 +47,11 @@ esac
 printf '%s' "$active_sha256" | grep -Eq '^[0-9a-f]{64}$' || exit 1
 command -v sha256sum >/dev/null 2>&1 || exit 1
 runtime_sha256=$(sha256sum "$runtime_config" | awk '{ print tolower($1) }')
-[ "$active_sha256" = "$runtime_sha256" ] || exit 1
+# Startup generation reports Core's semantic snapshot fingerprint. Reloaded
+# generations report the raw candidate file SHA-256 and can be bound exactly.
+if [ "$generation" -gt 1 ]; then
+	[ "$active_sha256" = "$runtime_sha256" ] || exit 1
+fi
 
 now_ms=$(( $(date +%s) * 1000 ))
 [ "$updated_unix_ms" -le $((now_ms + future_tolerance_ms)) ] || exit 1

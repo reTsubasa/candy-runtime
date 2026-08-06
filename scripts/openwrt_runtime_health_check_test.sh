@@ -78,6 +78,9 @@ run_health() {
 }
 
 run_health || fail "valid local runtime health contract was rejected"
+printf '{"schema_version":2,"generation":1,"config_sha256":"%064d","updated_unix_ms":%s}\n' 0 "$now_ms" > "$passive_status"
+run_health || fail "valid startup semantic fingerprint was rejected"
+printf '{"schema_version":2,"generation":7,"config_sha256":"%s","updated_unix_ms":%s}\n' "$runtime_sha" "$now_ms" > "$passive_status"
 printf '{"schema_version":2,"generation":7,"config_sha256":"%s","updated_unix_ms":1}\n' "$runtime_sha" > "$passive_status"
 if run_health; then
 	fail "stale Core heartbeat was accepted"
