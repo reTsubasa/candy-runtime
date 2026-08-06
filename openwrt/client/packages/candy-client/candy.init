@@ -1187,7 +1187,7 @@ write_runtime_status() {
 }
 
 congestion_test() {
-	local test_point temporary rc help
+	local test_point temporary rc help core_bin
 	test_point=${2:-vultr-tokyo}
 	case "$test_point" in
 		vultr-tokyo|linode-singapore|hetzner-ashburn|ovh-france|serverius-netherlands) ;;
@@ -1204,19 +1204,32 @@ congestion_test() {
 	printf '%s\n' "$$" > "$CONGESTION_TEST_LOCK_DIR/pid"
 	rotate_log_file "$CONGESTION_TEST_LOG_FILE"
 	temporary=$(atomic_temp_path "$CONGESTION_TEST_RESULT_FILE") || return 1
-	help=$("$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format candy-json --platform openwrt \
+	# Resolve the active Core once so capability probing and execution cannot
+	# cross an update symlink switch and use different CLI versions.
+	core_bin=${CANDY_CORE_BIN:-/usr/lib/candy/cores/current/candy-core}
+	if command -v readlink >/dev/null 2>&1; then
+		core_bin=$(readlink -f "$core_bin" 2>/dev/null || printf '%s' "$core_bin")
+	fi
+	if [ ! -x "$core_bin" ]; then
+		printf '%s\n' "Active Candy Core is unavailable: $core_bin" > "$CONGESTION_TEST_LOG_FILE"
+		rm -f "$temporary"
+		return 127
+	fi
+	help=$(CANDY_CORE_BIN="$core_bin" "$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format candy-json --platform openwrt \
 		congestion-test --help 2>&1) || {
 		printf '%s\n' "Active Candy Core does not support congestion comparison; update Core to 0.3.5 or newer." > "$CONGESTION_TEST_LOG_FILE"
+		printf '%s\n' "$help" >> "$CONGESTION_TEST_LOG_FILE"
 		rm -f "$temporary"
 		return 126
 	}
 	printf '%s' "$help" | grep -Fq -- '--test-point' || {
 		printf '%s\n' "Active Candy Core is too old for selectable congestion test points; update Core to 0.3.5 or newer." > "$CONGESTION_TEST_LOG_FILE"
+		printf '%s\n' "$help" >> "$CONGESTION_TEST_LOG_FILE"
 		rm -f "$temporary"
 		return 126
 	}
 	log_msg "starting bounded congestion comparison at $test_point: CUBIC, current BBR, BBR v1, aggressive BBR"
-	"$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format candy-json --platform openwrt \
+	CANDY_CORE_BIN="$core_bin" "$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format candy-json --platform openwrt \
 		congestion-test --test-point "$test_point" --samples 1 --max-bytes 104857600 --timeout-ms 60000 \
 		> "$temporary" 2> "$CONGESTION_TEST_LOG_FILE"
 	rc=$?
