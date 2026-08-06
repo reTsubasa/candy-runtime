@@ -4,6 +4,10 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../packages" && pwd)
 runtime_dir=$(mktemp -d)
 trap 'rm -rf "$runtime_dir"' EXIT
+CANDY_MIN_CN_IP_ENTRIES=1
+CANDY_MIN_CN_IPV4_ENTRIES=1
+CANDY_MIN_CN_IPV6_ENTRIES=0
+CANDY_MIN_GFWLIST_ENTRIES=1
 
 fail() {
   printf '%s\n' "openwrt_candy_init_config_test: $*" >&2
@@ -82,7 +86,7 @@ config_get() {
     backup:server) value='198.51.100.20:18443' ;;
     backup:server_name) value='backup.example.test' ;;
     backup:server_pin) value='sha256:1111111111111111111111111111111111111111111111111111111111111111' ;;
-    backup:auth) value='backup-secret' ;;
+    backup:auth) value='backup-secret-long' ;;
     Proxy:type) value='load-balance' ;;
     Fast:type) value='url-test' ;;
     Fast:url_test_url) value='http://www.gstatic.com/generate_204' ;;
@@ -155,6 +159,12 @@ fw4() { printf '%s\n' "fw4 $*" >> "$runtime_dir/fw.log"; }
 service() { printf '%s\n' "service $*" >> "$runtime_dir/fw.log"; }
 ip() {
   printf '%s\n' "ip $*" >> "$runtime_dir/fw.log"
+  if [ "$1" = rule ] && [ "$2" = show ]; then
+    return 0
+  fi
+  if [ "$1" = route ] && [ "$2" = show ]; then
+    return 0
+  fi
   case "$1 $2 $3 $5" in
     "rule del fwmark table")
       count_file="$runtime_dir/ip-rule-del-count-$4"
@@ -166,9 +176,10 @@ ip() {
       return 1
       ;;
   esac
+  return 0
 }
 command() {
-  if [ "$1" = "-v" ] && { [ "$2" = iptables ] || [ "$2" = iptables-save ]; }; then
+  if [ "$1" = "-v" ] && { [ "$2" = iptables ] || [ "$2" = iptables-save ] || [ "$2" = ip ]; }; then
     return 0
   fi
   if [ "$1" = "-v" ] && [ "$2" = ping ]; then
@@ -198,10 +209,20 @@ for direct_write in \
   fi
 done
 grep -F 'CANDY_READY_FILE=' "$init_source" >/dev/null || fail "missing readiness file"
-grep -F 'logger -t candy -- "$*"' "$init_source" >/dev/null || fail "service lifecycle logs are not forwarded to syslog"
+grep -F 'logger -t candy -- "level=$level event=$event pid=$$ $*"' "$init_source" >/dev/null || fail "structured service lifecycle logs are not forwarded to syslog"
 grep -F 'rotate_log_file "$LOG_FILE"' "$init_source" >/dev/null || fail "service log is not bounded by rotation"
 ! grep -F ': > "$LOG_FILE"' "$init_source" >/dev/null || fail "service log is erased during start"
+grep -F 'rotate_log_file "$TRAFFIC_LOG_FILE" 2097152 5' "$init_source" >/dev/null || fail "traffic log does not retain bounded history"
+! grep -F ': > "$TRAFFIC_LOG_FILE"' "$init_source" >/dev/null || fail "traffic history is erased during start"
+grep -F '>>"$update_log" 2>&1' "$init_source" >/dev/null || fail "provider update history is overwritten"
 grep -F 'service_failed()' "$init_source" >/dev/null || fail "missing procd service failure log hook"
+grep -F 'rejected PROCESS-NAME because OpenWrt transparent routing has no trustworthy process identity' "$init_source" >/dev/null || fail "unsupported PROCESS-NAME rules are not rejected"
+grep -F 'CANDY_CONFIG_RULE_ERROR' "$init_source" >/dev/null || fail "rule validation errors do not abort runtime config generation"
+grep -F 'scheduling immediate fail-open' "$init_source" >/dev/null || fail "client crash supervisor does not schedule fail-open"
+grep -F '! write_lock_process_identity "$CANDY_SERVICE_LOCK_DIR" "$$"' "$init_source" >/dev/null || fail "service lifecycle lock accepts missing process identity"
+grep -F '! write_lock_process_identity "$NETWORK_APPLY_LOCK_DIR" "$$"' "$init_source" >/dev/null || fail "network policy lock accepts missing process identity"
+! sed -n '/^with_service_lifecycle_lock()/,/^}/p' "$init_source" | grep -F 'rm -rf' >/dev/null || fail "service lifecycle lock uses recursive deletion"
+grep -F 'Never infer ownership from the configured/default mark' "$init_source" >/dev/null || fail "firewall cleanup can delete an unowned policy mark"
 grep -F 'log_msg "restart completed"' "$init_source" >/dev/null || fail "restart completion is not logged"
 grep -F 'wait_for_current_readiness()' "$init_source" >/dev/null || fail "missing readiness wait"
 grep -F 'service_started()' "$init_source" >/dev/null || fail "missing post-procd readiness hook"
@@ -222,14 +243,16 @@ done
 grep -F 'procd_set_param command "$CANDY_INIT_SELF" run_client' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'procd_set_param user root' "$repo_root/candy-client/candy.init" >/dev/null || fail "Candy client does not retain the privileges required for transparent routing and QUIC socket buffers"
 provider_updater_block=$(sed -n '/^start_provider_updater()/,/^}/p' "$repo_root/candy-client/candy.init")
-if printf '%s\n' "$provider_updater_block" | grep -F 'procd_set_param respawn' >/dev/null; then
-  fail "provider updater must not respawn after its normal one-shot update exit"
-fi
+printf '%s\n' "$provider_updater_block" | grep -F 'procd_set_param respawn 3600 10 5' >/dev/null ||
+  fail "provider updater is not supervised after an unexpected scheduler exit"
+provider_loop_block=$(sed -n '/^provider_update_loop()/,/^}/p' "$repo_root/candy-client/candy.init")
+! printf '%s\n' "$provider_loop_block" | grep -F 'exit 0' >/dev/null ||
+  fail "provider updater exits permanently after its first successful update"
 grep -F 'migrate_reserved_dns_forward' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'forward local listen conflicts with reserved Candy DNS listener' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'CANDY_FAST_STATUS_ACTION' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'case "${action:-${1:-}}" in' "$repo_root/candy-client/candy.init" >/dev/null
-grep -F 'status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|congestion_test|run_client|run_sdwan|run_netd)' "$repo_root/candy-client/candy.init" >/dev/null
+grep -F 'status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|fail_open|health_watchdog|congestion_test|run_client|run_sdwan|run_netd)' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F -- '--control-socket-path "$CANDY_CONTROL_SOCKET"' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F -- '--active "$RUNTIME_CONFIG"' "$repo_root/candy-client/candy.init" >/dev/null || fail "runtime reload does not request atomic active-config promotion"
 grep -F 'reload_service()' "$repo_root/candy-client/candy.init" >/dev/null
@@ -251,19 +274,29 @@ grep -F 'procd_kill candy >/dev/null 2>&1 || true' "$repo_root/candy-client/cand
 ! grep -F "procd_kill candy '*'" "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'CANDY_NETWORK_CLEANUP_STATE="$cleanup_state" network_cleanup' "$repo_root/candy-client/candy.init" >/dev/null
 ! grep -F 'CANDY_NETWORK_CLEANUP_STATE=stopped network_cleanup' "$repo_root/candy-client/candy.init" >/dev/null
+sed -n '/^reload_runtime_locked()/,/^}/p' "$repo_root/candy-client/candy.init" | grep -F 'if ! apply_firewall; then' >/dev/null || fail "runtime reload does not refresh firewall policy"
 sed -n '/^reload_runtime_locked()/,/^}/p' "$repo_root/candy-client/candy.init" | grep -F 'if ! apply_dns; then' >/dev/null || fail "runtime reload does not refresh dnsmasq policy"
-sed -n '/^reload_runtime_locked()/,/^}/p' "$repo_root/candy-client/candy.init" | grep -F 'apply_firewall' >/dev/null && fail "runtime reload unexpectedly applies firewall policy"
+grep -F 'chown root:root /var/lib/candy' "$repo_root/candy-client/candy.init" >/dev/null || fail "netd journal parent is not retained by root"
+grep -F 'chown -R candy-sdwan:candy-sdwan "$CANDY_EPOCH_DIRECTORY"' "$repo_root/candy-client/candy.init" >/dev/null || fail "SD-WAN epoch directory is not delegated narrowly"
+grep -F -- '--probe-socket "$CANDY_NETD_SOCKET"' "$repo_root/candy-client/candy.init" >/dev/null || fail "netd readiness does not perform a live socket probe"
 grep -F 'verify_promoted_runtime_candidate "$candidate_sha"' "$repo_root/candy-client/candy.init" >/dev/null || fail "successful reload does not verify daemon promotion"
 grep -F 'config_load candy 2>/dev/null || true' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'procd_set_param env CANDY_TRAFFIC_LOG="$TRAFFIC_LOG_FILE" CANDY_TRAFFIC_LOG_CONTROL="$TRAFFIC_LOG_CONTROL_FILE" CANDY_READY_FILE="$CANDY_READY_FILE"' "$repo_root/candy-client/candy.init" >/dev/null
-test "$(grep -Fc 'procd_set_param respawn 3600 10 5' "$repo_root/candy-client/candy.init")" -eq 2 ||
+test "$(grep -Fc 'procd_set_param respawn 3600 10 5' "$repo_root/candy-client/candy.init")" -eq 3 ||
   fail "long-running Candy procd instances must stop after a bounded crash loop"
 ! grep -F 'procd_set_param respawn 3600 10 0' "$repo_root/candy-client/candy.init" >/dev/null ||
   fail "Candy procd instances still retry forever"
 grep -F 'procd_add_reload_trigger "candy"' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'logread 2>/dev/null | grep -i candy' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F -- '--check-config' "$repo_root/candy-client/candy.init" >/dev/null
+grep -F "option enabled '0'" "$repo_root/candy-client/candy.config" >/dev/null || fail "bootstrap node must default disabled"
+grep -F 'validate_node_profile_placeholders' "$repo_root/candy-client/candy.init" >/dev/null || fail "placeholder node validation is missing"
 . "$repo_root/candy-client/candy.init"
+TEST_CANDY_PROC_ROOT=$runtime_dir/proc
+CANDY_PROC_ROOT=$TEST_CANDY_PROC_ROOT
+mkdir -p "$CANDY_PROC_ROOT/$$" "$CANDY_PROC_ROOT/sys/kernel/random"
+printf '%s\n' test-boot-id > "$CANDY_PROC_ROOT/sys/kernel/random/boot_id"
+printf '%s\n' "$$ (candy-test) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345" > "$CANDY_PROC_ROOT/$$/stat"
 DNSMASQ_RESTART_LOG=$runtime_dir/dnsmasq-restart.log
 restart_dnsmasq() {
   printf '%s\n' restart >> "$DNSMASQ_RESTART_LOG"
@@ -323,13 +356,54 @@ chmod +x "$CANDY_CLIENT_BIN"
 export CANDY_CLIENT_CALLS=$runtime_dir/candy-client.calls
 touch "$CANDY_CLIENT_CALLS"
 CANDY_PASSIVE_STATUS_FILE=$RUNTIME_DIR/passive-status.json
+
+test_placeholder_node_rejected() {
+  ! validate_node_profile_placeholders sample '127.0.0.1:8443' localhost sample 'sha256:replace-me' 'change-me-long-random-secret' ||
+    fail "enabled placeholder node was accepted"
+}
+
+test_placeholder_node_rejected
+
+(
+  provider_fallback_dir=$(mktemp -d)
+  RUNTIME_DIR=$provider_fallback_dir/run/candy
+  GEO_ETC_RULESETS_DIR=$provider_fallback_dir/etc/candy/rulesets
+  GEO_SHARE_RULESETS_DIR=$provider_fallback_dir/usr/share/candy/rulesets
+  GEO_RUNTIME_RULESETS_DIR=$RUNTIME_DIR/rulesets
+  DNS_ETC_RULESETS_DIR=$GEO_ETC_RULESETS_DIR
+  DNS_SHARE_RULESETS_DIR=$GEO_SHARE_RULESETS_DIR
+  DNS_RUNTIME_RULESETS_DIR=$RUNTIME_DIR/rulesets
+  LOG_FILE=$provider_fallback_dir/candy.log
+  CANDY_MIN_CN_IP_ENTRIES=2
+  CANDY_MIN_CN_IPV4_ENTRIES=1
+  CANDY_MIN_CN_IPV6_ENTRIES=1
+  CANDY_MIN_GFWLIST_ENTRIES=2
+  mkdir -p "$GEO_ETC_RULESETS_DIR" "$GEO_SHARE_RULESETS_DIR"
+  printf '%s\n' '1.0.1.0/24' > "$GEO_ETC_RULESETS_DIR/cn-ip.cidr"
+  printf '%s\n' '1.0.1.0/24' '2409:8000::/20' > "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr"
+  printf '%s\n' 'google.com' > "$DNS_ETC_RULESETS_DIR/gfwlist.domains"
+  printf '%s\n' 'google.com' 'youtube.com' > "$DNS_SHARE_RULESETS_DIR/gfwlist.domains"
+
+  refresh_runtime_geo_provider
+  refresh_runtime_gfwlist_provider
+
+  cmp -s "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr" "$GEO_RUNTIME_RULESETS_DIR/cn-ip.cidr" ||
+    fail "incomplete local China IP provider did not fall back to packaged bootstrap"
+  cmp -s "$DNS_SHARE_RULESETS_DIR/gfwlist.domains" "$DNS_RUNTIME_RULESETS_DIR/gfwlist.domains" ||
+    fail "incomplete local GFWList provider did not fall back to packaged bootstrap"
+  [ "$GEO_LAST_ERROR" = "invalid local provider ignored; using packaged bootstrap" ]
+  [ "$GFWLIST_LAST_ERROR" = "invalid local provider ignored; using packaged bootstrap" ]
+  grep -q 'provider=cn-ip source=local result=rejected' "$LOG_FILE"
+  grep -q 'provider=gfwlist source=local result=rejected' "$LOG_FILE"
+)
+
 generate_config
 
 test -f "$RUNTIME_CONFIG"
 test "$(stat -c %a "$RUNTIME_CONFIG" 2>/dev/null || stat -f %Lp "$RUNTIME_CONFIG")" = 600
 grep -q '"name":"candy-openwrt"' "$RUNTIME_CONFIG"
 grep -q '"mode":"rule"' "$RUNTIME_CONFIG"
-grep -q '"runtime_mode":"fallback"' "$RUNTIME_CONFIG"
+! grep -q '"runtime_mode"' "$RUNTIME_CONFIG"
 ! grep -q '"selected_group"' "$RUNTIME_CONFIG"
 ! grep -q '"selected_node"' "$RUNTIME_CONFIG"
 grep -Fq '"dns":{"remote":true,"mode":"smart","cache":{"enabled":true,"max_entries":64' "$RUNTIME_CONFIG"
@@ -354,7 +428,7 @@ grep -q '"pin":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef012
 ! grep -q '"server_pin"' "$RUNTIME_CONFIG"
 grep -q '"auth":"node-secret-with-\\"quote\\"-and-\\\\slash"' "$RUNTIME_CONFIG"
 grep -Fq '"port_hopping":{"ports":[10443,20443],"interval_seconds":120}' "$RUNTIME_CONFIG"
-grep -q '"type":"round-robin"' "$RUNTIME_CONFIG"
+grep -q '"type":"load-balance"' "$RUNTIME_CONFIG"
 grep -q '"nodes":\["Hong Kong 1","Backup"\]' "$RUNTIME_CONFIG"
 grep -Fq '"name":"Fast","type":"url-test","nodes":["Backup","Hong Kong 1"],"url_test":{"url":"http://www.gstatic.com/generate_204","interval_seconds":60,"timeout_ms":3000,"validity_seconds":180,"tolerance_ms":20}' "$RUNTIME_CONFIG"
 grep -q '"IP-CIDR,10.0.0.0/8,DIRECT,no-resolve"' "$RUNTIME_CONFIG"
@@ -494,7 +568,7 @@ config_get() {
     backup:server) value='198.51.100.20:18443' ;;
     backup:server_name) value='backup.example.test' ;;
     backup:server_pin) value='sha256:1111111111111111111111111111111111111111111111111111111111111111' ;;
-    backup:auth) value='backup-secret' ;;
+    backup:auth) value='backup-secret-long' ;;
     Proxy:type) value='select' ;;
     rule_match:value) value='MATCH,Proxy' ;;
   esac
@@ -529,7 +603,7 @@ command() {
   if [ "$1" = "-v" ] && [ "$2" = iptables ]; then
     return 1
   fi
-  if [ "$1" = "-v" ] && { [ "$2" = nft ] || [ "$2" = fw4 ]; }; then
+  if [ "$1" = "-v" ] && { [ "$2" = nft ] || [ "$2" = fw4 ] || [ "$2" = ip ]; }; then
     return 0
   fi
   if [ "$1" = "-v" ] && [ "$2" = service ]; then
@@ -577,6 +651,7 @@ config_get() {
     client:dns_remote) value='0' ;;
     client:filter_aaaa) value='1' ;;
     client:dns_capture_lan) value='1' ;;
+    backup:enabled) value='0' ;;
     rule_google:value) value='DOMAIN-SUFFIX,example.com,Proxy' ;;
     rule_baidu:value) value='DOMAIN-SUFFIX,baidu.com,DIRECT' ;;
     rule_match:value) value='MATCH,Proxy' ;;
@@ -627,6 +702,7 @@ config_get() {
     client:dns_remote) value='0' ;;
     client:filter_aaaa) value='0' ;;
     client:dns_capture_lan) value='1' ;;
+    backup:enabled) value='0' ;;
     rule_match:value) value='MATCH,Proxy' ;;
   esac
   eval "$var=\$value"
@@ -636,6 +712,31 @@ apply_dns
 ! grep -q 'filter-AAAA' "$runtime_dir/dnsmasq.test.d/candy.conf"
 grep -q '^server=/google.com/127.0.0.1#15353$' "$runtime_dir/dnsmasq.test.d/candy.conf"
 ! grep -q '^no-resolv$' "$runtime_dir/dnsmasq.test.d/candy.conf"
+
+config_get() {
+  var=$1
+  section=$2
+  option=$3
+  default=${4:-}
+  value=$default
+  case "$section:$option" in
+    client:dns_remote) value='0' ;;
+    client:dns_split) value='0' ;;
+    client:filter_aaaa) value='0' ;;
+    client:dns_capture_lan) value='1' ;;
+    backup:enabled) value='0' ;;
+    rule_google:value) value='DOMAIN-SUFFIX,example.com,Proxy' ;;
+    rule_baidu:value) value='DOMAIN-SUFFIX,baidu.com,DIRECT' ;;
+    rule_match:value) value='MATCH,Proxy' ;;
+  esac
+  eval "$var=\$value"
+}
+
+apply_dns
+! grep -q '^server=/google.com/127.0.0.1#15353$' "$runtime_dir/dnsmasq.test.d/candy.conf"
+! grep -q '^server=/github.com/127.0.0.1#15353$' "$runtime_dir/dnsmasq.test.d/candy.conf"
+grep -q '^server=/example.com/127.0.0.1#15353$' "$runtime_dir/dnsmasq.test.d/candy.conf"
+! grep -q '^server=/baidu.com/127.0.0.1#15353$' "$runtime_dir/dnsmasq.test.d/candy.conf"
 
 config_get() {
   var=$1
@@ -673,7 +774,8 @@ config_get() {
     hk-1:server) value='104.243.28.153:18443' ;;
     hk-1:server_name) value='node.example.test' ;;
     hk-1:server_pin) value='sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789' ;;
-    hk-1:auth) value='node-secret' ;;
+    hk-1:auth) value='node-secret-long-value' ;;
+    backup:enabled) value='0' ;;
     Proxy:type) value='select' ;;
     rule_match:value) value='MATCH,Proxy' ;;
   esac
@@ -701,7 +803,8 @@ printf '%s\n' '1.0.1.0/24' > "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr"
 printf '%s\n' 'google.com' > "$DNS_SHARE_RULESETS_DIR/gfwlist.domains"
 printf '%s\n' "conf-dir=$runtime_dir/dnsmasq.test.d" > "$runtime_dir/dnsmasq.conf.test"
 generate_config
-grep -q '"runtime_mode":"performance"' "$RUNTIME_CONFIG"
+! grep -q '"runtime_mode"' "$RUNTIME_CONFIG"
+[ "$(runtime_mode_value)" = performance ]
 grep -Fq '"udp_redundancy":{"client_multiplier":3,"server_multiplier":3}' "$RUNTIME_CONFIG"
 grep -Fq '"transparent_udp":[{"local":"0.0.0.0:12346"}]' "$RUNTIME_CONFIG"
 apply_firewall
@@ -727,6 +830,15 @@ grep -q 'udp dport 443 counter tproxy to :12346 meta mark set 100 accept' "$FW4_
 
   ip() {
     printf '%s\n' "ip $*" >> "$runtime_dir/fw.log"
+    if [ "$1" = rule ] && [ "$2" = show ]; then
+      if [ ! -f "$runtime_dir/ip-rule-del-count-100" ]; then
+        printf '%s\n' '100: from all fwmark 0x64 lookup 100'
+      fi
+      return 0
+    fi
+    if [ "$1" = route ] && [ "$2" = show ]; then
+      return 0
+    fi
     case "$1 $2 $3 $5" in
       "rule del fwmark table")
         count_file="$runtime_dir/ip-rule-del-count-$4"
@@ -765,7 +877,7 @@ grep -q 'udp dport 443 counter tproxy to :12346 meta mark set 100 accept' "$FW4_
 
   persist_applied_firewall_state iptables 12346 100
   command() {
-    [ "$1" = -v ] && [ "$2" = iptables ]
+    [ "$1" = -v ] && { [ "$2" = iptables ] || [ "$2" = ip ]; }
   }
   cleanup_firewall
   grep -Fq 'iptables -t mangle -D PREROUTING -i br-lan -p udp --dport 443 -j TPROXY --on-port 12346 --tproxy-mark 100/100' "$runtime_dir/fw.log"
@@ -777,16 +889,63 @@ grep -q 'udp dport 443 counter tproxy to :12346 meta mark set 100 accept' "$FW4_
   persist_applied_firewall_state fw4 12346 100
   command() {
     if [ "$1" = -v ] && [ "$2" = iptables ]; then return 1; fi
-    [ "$1" = -v ] && { [ "$2" = fw4 ] || [ "$2" = nft ]; }
+    [ "$1" = -v ] && { [ "$2" = fw4 ] || [ "$2" = nft ] || [ "$2" = ip ]; }
   }
   apply_firewall
-  grep -Fq 'ip rule del fwmark 100 table 100' "$runtime_dir/fw.log"
   grep -Fq 'ip rule add fwmark 200 table 200' "$runtime_dir/fw.log"
   test "$(grep -Fc 'fw4 reload' "$runtime_dir/fw.log")" -eq 1
   grep -Fx 'backend=fw4' "$CANDY_FIREWALL_STATE_FILE" >/dev/null
   grep -Fx 'transparent_udp_port=22346' "$CANDY_FIREWALL_STATE_FILE" >/dev/null
   grep -Fx 'tproxy_mark=200' "$CANDY_FIREWALL_STATE_FILE" >/dev/null
   firewall_restart_can_skip_cleanup
+)
+
+(
+  ownership_dir=$(mktemp -d)
+  RUNTIME_DIR=$ownership_dir/run/candy
+  CANDY_FIREWALL_STATE_FILE=$RUNTIME_DIR/firewall.state
+  FW4_INCLUDE_DIR=$ownership_dir/nftables.d
+  FW4_INCLUDE=$FW4_INCLUDE_DIR/90-candy.nft
+  LOG_FILE=$ownership_dir/candy.log
+  mkdir -p "$RUNTIME_DIR" "$FW4_INCLUDE_DIR"
+  : > "$ownership_dir/fw.log"
+  ip() { printf '%s\n' "ip $*" >> "$ownership_dir/fw.log"; return 0; }
+  iptables() { printf '%s\n' "iptables $*" >> "$ownership_dir/fw.log"; return 1; }
+  command() {
+    [ "$1" = -v ] && { [ "$2" = iptables ] || [ "$2" = ip ]; }
+  }
+  config_load() { return 0; }
+  config_get() { eval "$1=\${4:-}"; }
+  config_get_bool() { eval "$1=\${4:-0}"; }
+  config_foreach() { return 0; }
+  cleanup_firewall || true
+  ! grep -F 'ip rule del fwmark' "$ownership_dir/fw.log" >/dev/null || fail "cleanup deleted an unowned policy rule"
+)
+
+(
+  crash_dir=$(mktemp -d)
+  RUNTIME_DIR=$crash_dir/run/candy
+  CANDY_READY_FILE=$RUNTIME_DIR/client.ready
+  CANDY_PASSIVE_STATUS_FILE=$RUNTIME_DIR/passive-status.json
+  CANDY_CLIENT_BIN=$crash_dir/candy-client
+  LOG_FILE=$crash_dir/candy.log
+  mkdir -p "$RUNTIME_DIR"
+  printf '%s\n' '#!/bin/sh' 'exit 42' > "$CANDY_CLIENT_BIN"
+  chmod 0755 "$CANDY_CLIENT_BIN"
+  config_load() { return 0; }
+  config_get() {
+    case "$2:$3" in
+      client:congestion) eval "$1=\${4:-candy-bbr}" ;;
+      client:candy_bbr_preset) eval "$1=\${4:-current}" ;;
+      *) eval "$1=\${4:-}" ;;
+    esac
+  }
+  config_get_bool() { config_get "$@"; }
+  run_detached_direct_command() { printf '%s %s\n' "$1" "${2:-}" > "$crash_dir/fail-open"; }
+  if run_client; then
+    fail "abnormal Candy client exit was reported as success"
+  fi
+  grep -F 'fail_open core_exit:42' "$crash_dir/fail-open" >/dev/null || fail "abnormal Candy client exit did not schedule fail-open"
 )
 
 (
@@ -961,7 +1120,8 @@ config_get() {
     hk-1:server) value='104.243.28.153:18443' ;;
     hk-1:server_name) value='node.example.test' ;;
     hk-1:server_pin) value='sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789' ;;
-    hk-1:auth) value='node-secret' ;;
+    hk-1:auth) value='node-secret-long-value' ;;
+    backup:enabled) value='0' ;;
     Proxy:type) value='select' ;;
     good_forward:network) value='tcp' ;;
     good_forward:local) value='127.0.0.1:18080' ;;
@@ -1039,6 +1199,9 @@ grep -q "option type 'fallback'" "$CONFIG_FILE"
 grep -q "option runtime_mode 'fallback'" "$CONFIG_FILE"
 grep -q "option udp_client_multiplier '1'" "$CONFIG_FILE"
 grep -q "option udp_server_multiplier '1'" "$CONFIG_FILE"
+grep -q "option gfwlist_auto_update '1'" "$CONFIG_FILE"
+grep -q "option geo_update_url 'https://gaoyifan.github.io/china-operator-ip/china46.txt'" "$CONFIG_FILE"
+grep -q "option geo_auto_update '1'" "$CONFIG_FILE"
 grep -q "config node 'legacy'" "$CONFIG_FILE"
 grep -q "option auth 'legacy-node-secret'" "$CONFIG_FILE"
 grep -q "option redirect_tcp '1'" "$CONFIG_FILE"
@@ -1224,6 +1387,69 @@ if CANDY_NETWORK_LOCK_WAIT_SECONDS=0 with_network_apply_lock apply apply_after_w
 fi
 rm -rf "$NETWORK_APPLY_LOCK_DIR"
 
+service_identity_dir=$(mktemp -d)
+CANDY_PROC_ROOT=$service_identity_dir/proc
+CANDY_SERVICE_LOCK_DIR=$service_identity_dir/service.lock
+CANDY_SERVICE_LOCK_WAIT_SECONDS=0
+mkdir -p "$CANDY_PROC_ROOT/$$" "$CANDY_PROC_ROOT/sys/kernel/random" "$CANDY_SERVICE_LOCK_DIR"
+printf '%s\n' test-boot-id > "$CANDY_PROC_ROOT/sys/kernel/random/boot_id"
+printf '%s\n' "$$ (candy-test) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345" > "$CANDY_PROC_ROOT/$$/stat"
+printf '%s\n' "$$" > "$CANDY_SERVICE_LOCK_DIR/pid"
+printf '%s\n' 99999 > "$CANDY_SERVICE_LOCK_DIR/starttime"
+printf '%s\n' test-boot-id > "$CANDY_SERVICE_LOCK_DIR/boot_id"
+service_lock_action() {
+  printf '%s\n' acquired > "$service_identity_dir/result"
+}
+with_service_lifecycle_lock service_lock_action
+grep -q '^acquired$' "$service_identity_dir/result" || fail "PID-reused service lifecycle lock was not recovered"
+test ! -e "$CANDY_SERVICE_LOCK_DIR" || fail "service lifecycle lock survived successful action"
+
+identity_failure_dir=$(mktemp -d)
+CANDY_PROC_ROOT=$identity_failure_dir/proc
+CANDY_SERVICE_LOCK_DIR=$identity_failure_dir/service.lock
+mkdir -p "$CANDY_PROC_ROOT/$$"
+printf '%s\n' "$$ (candy-test) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345" > "$CANDY_PROC_ROOT/$$/stat"
+if with_service_lifecycle_lock service_lock_action; then
+  fail "service lifecycle lock succeeded without a boot identity"
+fi
+test ! -e "$CANDY_SERVICE_LOCK_DIR" || fail "failed identity acquisition left a stale service lock"
+CANDY_PROC_ROOT=$TEST_CANDY_PROC_ROOT
+
+network_identity_failure_dir=$(mktemp -d)
+CANDY_PROC_ROOT=$network_identity_failure_dir/proc
+NETWORK_APPLY_LOCK_DIR=$network_identity_failure_dir/network.lock
+mkdir -p "$CANDY_PROC_ROOT/$$"
+printf '%s\n' "$$ (candy-test) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345" > "$CANDY_PROC_ROOT/$$/stat"
+if CANDY_NETWORK_LOCK_WAIT_SECONDS=0 with_network_apply_lock apply apply_after_wait; then
+  fail "network policy lock succeeded without a boot identity"
+fi
+test ! -e "$NETWORK_APPLY_LOCK_DIR" || fail "failed network identity acquisition left a stale lock"
+CANDY_PROC_ROOT=$TEST_CANDY_PROC_ROOT
+
+(
+  reused_pid_dir=$(mktemp -d)
+  CANDY_PROC_ROOT=$reused_pid_dir/proc
+  NETWORK_APPLY_LOCK_DIR=$reused_pid_dir/network.lock
+  LOG_FILE=$reused_pid_dir/candy.log
+  mkdir -p "$CANDY_PROC_ROOT/4242" "$CANDY_PROC_ROOT/sys/kernel/random" "$NETWORK_APPLY_LOCK_DIR"
+  printf '%s\n' test-boot-id > "$CANDY_PROC_ROOT/sys/kernel/random/boot_id"
+  printf '%s\n' '4242 (unrelated) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345' > "$CANDY_PROC_ROOT/4242/stat"
+  printf '%s\n' 4242 > "$NETWORK_APPLY_LOCK_DIR/pid"
+  printf '%s\n' 99999 > "$NETWORK_APPLY_LOCK_DIR/starttime"
+  printf '%s\n' test-boot-id > "$NETWORK_APPLY_LOCK_DIR/boot_id"
+  kill() {
+    printf '%s\n' "$*" >> "$reused_pid_dir/signals"
+    return 0
+  }
+  if stop_network_policy_worker_for_fail_open; then
+    fail "fail-open trusted a PID-reused network policy lock"
+  fi
+  ! grep -Eq -- '-TERM|-KILL' "$reused_pid_dir/signals" || fail "fail-open signaled an unrelated PID-reuse process"
+)
+
+grep -F 'chmod 0711 "$lock_parent"' "$repo_root/candy-client/candy.init" >/dev/null ||
+  fail "network lock acquisition can revoke SD-WAN traversal of /var/lib/candy"
+
 rollback_dir=$(mktemp -d)
 LOG_FILE=$rollback_dir/candy.log
 apply_firewall() {
@@ -1376,5 +1602,71 @@ for early_stage in disabled generate validate stale-process; do
     fi
   )
 done
+
+(
+  strict_fw_dir=$(mktemp -d)
+	. "$repo_root/candy-client/candy.init"
+  RUNTIME_DIR=$strict_fw_dir/run/candy
+  CANDY_FIREWALL_STATE_FILE=$RUNTIME_DIR/firewall.state
+  LOG_FILE=$strict_fw_dir/candy.log
+  mkdir -p "$RUNTIME_DIR"
+  : > "$LOG_FILE"
+  config_load() { return 0; }
+  config_foreach() { return 0; }
+  config_get_bool() {
+    case "$2:$3" in
+      client:auto_firewall|client:dns_capture_lan) eval "$1=1" ;;
+      *) eval "$1=\${4:-0}" ;;
+    esac
+  }
+  config_get() {
+    case "$2:$3" in
+      client:runtime_mode) eval "$1=fallback" ;;
+      *) eval "$1=\${4:-}" ;;
+    esac
+  }
+  ip() { return 1; }
+  iptables() {
+    case "$*" in
+      '-t nat -A PREROUTING -p tcp -j CANDY') return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+  command() {
+    [ "$1" = -v ] && { [ "$2" = iptables ] || [ "$2" = ip ]; }
+  }
+  if apply_firewall; then
+    fail "iptables critical command failure was swallowed"
+  fi
+  test ! -e "$CANDY_FIREWALL_STATE_FILE" || fail "failed iptables apply persisted success state"
+)
+
+(
+  fault_dir=$(mktemp -d)
+	. "$repo_root/candy-client/candy.init"
+  RUNTIME_DIR=$fault_dir/run/candy
+  LOG_FILE=$fault_dir/candy.log
+  CANDY_LIFECYCLE_FILE=$fault_dir/candy.lifecycle
+  CANDY_FAULT_STATE_FILE=$fault_dir/runtime-fault.json
+  CANDY_INIT_SELF=$fault_dir/candy-init
+  mkdir -p "$RUNTIME_DIR"
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "$CANDY_INIT_SELF"
+  chmod +x "$CANDY_INIT_SELF"
+  : > "$LOG_FILE"
+  config_load() { return 0; }
+  candy_client_pids() { return 0; }
+  wait_for_candy_client_exit() { return 0; }
+  network_cleanup() { return 0; }
+  fail_open_locked test_failure client
+  grep -Fq '"reason":"test_failure"' "$CANDY_FAULT_STATE_FILE" || fail "fail-open did not persist its reason"
+  grep -Fq '"cleanup":"completed"' "$CANDY_FAULT_STATE_FILE" || fail "successful fail-open was not persisted"
+
+  network_cleanup() { return 1; }
+  if fail_open_locked cleanup_failure client; then
+    fail "incomplete fail-open cleanup reported success"
+  fi
+  grep -Fq '"cleanup":"failed"' "$CANDY_FAULT_STATE_FILE" || fail "incomplete fail-open cleanup was hidden"
+  grep -Fq 'event=fail_open' "$LOG_FILE" || fail "fail-open lifecycle context was not logged"
+)
 
 printf '%s\n' "OpenWrt Candy init config generation test passed"

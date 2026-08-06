@@ -203,6 +203,8 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 rollback() {
+	set +e
+	rollback_failed=0
 	log "rollback: restoring previous Candy server state"
 	run systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
 	if [ -n "$previous_current" ] && [ -e "$previous_current" ]; then
@@ -225,8 +227,10 @@ rollback() {
 	fi
 	run systemctl daemon-reload
 	if [ "$previous_service_active" = 1 ]; then
-		run systemctl start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		run systemctl start "$SERVICE_NAME" >/dev/null 2>&1 || rollback_failed=1
 	fi
+	set -e
+	[ "$rollback_failed" = 0 ]
 }
 
 download_artifact() {
@@ -291,7 +295,7 @@ secret = "$secret"
 features = ["recommended"]
 EOF
 	chmod 0640 "$config_file"
-	chown root:"$SERVICE_USER" "$config_file" 2>/dev/null || true
+	run chown root:"$SERVICE_USER" "$config_file"
 }
 
 validate_config_policy() {
@@ -343,7 +347,7 @@ ensure_tls() {
 		-addext "subjectAltName=DNS:$TLS_NAME" >/dev/null 2>&1
 	run chmod 0600 "$key_file"
 	run chmod 0644 "$cert_file"
-	run chown "$SERVICE_USER:$SERVICE_USER" "$cert_file" "$key_file" 2>/dev/null || true
+	run chown "$SERVICE_USER:$SERVICE_USER" "$cert_file" "$key_file"
 }
 
 install_unit() {
@@ -437,7 +441,7 @@ run chmod 0755 "$artifact_path"
 
 create_service_user
 run mkdir -p "$INSTALL_PREFIX/releases" "$CONFIG_DIR" "$tls_dir" "$STATE_DIR/candy-data" "$BACKUP_DIR"
-run chown "$SERVICE_USER:$SERVICE_USER" "$STATE_DIR" "$STATE_DIR/candy-data" "$tls_dir" 2>/dev/null || true
+run chown "$SERVICE_USER:$SERVICE_USER" "$STATE_DIR" "$STATE_DIR/candy-data" "$tls_dir"
 
 if [ -L "$current_link" ]; then
 	previous_current=$(readlink "$current_link")
@@ -499,9 +503,23 @@ if ! run systemctl enable --now "$SERVICE_NAME"; then
 	rollback
 	die "failed to start $SERVICE_NAME"
 fi
-run systemctl is-active "$SERVICE_NAME" >/dev/null
-restarts=$(systemctl show "$SERVICE_NAME" -p NRestarts --value)
-[ "${restarts:-0}" -eq 0 ] || die "$SERVICE_NAME restarted during verification: NRestarts=$restarts"
-verify_udp_listener || die "Candy server UDP listen socket not found"
+verification_error=
+if ! run systemctl is-active "$SERVICE_NAME" >/dev/null; then
+	verification_error="$SERVICE_NAME is not active after startup"
+else
+	restarts=$(systemctl show "$SERVICE_NAME" -p NRestarts --value 2>/dev/null) || verification_error="failed to read $SERVICE_NAME restart count"
+	if [ -z "$verification_error" ] && [ "${restarts:-0}" -ne 0 ]; then
+		verification_error="$SERVICE_NAME restarted during verification: NRestarts=$restarts"
+	fi
+	if [ -z "$verification_error" ] && ! verify_udp_listener; then
+		verification_error="Candy server UDP listen socket not found"
+	fi
+fi
+if [ -n "$verification_error" ]; then
+	if ! rollback; then
+		die "$verification_error; rollback also failed to restore the previous service"
+	fi
+	die "$verification_error; previous service state restored"
+fi
 journalctl -u "$SERVICE_NAME" -n 20 --no-pager >/dev/null || true
 print_client_output

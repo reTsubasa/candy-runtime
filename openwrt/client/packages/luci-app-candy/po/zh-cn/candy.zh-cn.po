@@ -261,6 +261,9 @@ msgstr "导出诊断包"
 msgid "Fallback order"
 msgstr "故障切换顺序"
 
+msgid "Manual selection"
+msgstr "手动选择"
+
 msgid "Fallback mode"
 msgstr "自动回退模式"
 
@@ -1314,8 +1317,8 @@ msgstr "结果"
 msgid "Expert DNS, provider, congestion-control, and transparent proxy controls."
 msgstr "DNS、规则源、拥塞控制和透明代理的专家设置。"
 
-msgid "Choose one of four explicit congestion profiles. Saving a change restarts Candy so new QUIC connections use the selected parameters."
-msgstr "选择四种明确的拥塞配置之一。保存更改后 Candy 将重启，使新的 QUIC 连接使用所选参数。"
+msgid "Choose one of three Candy BBR profiles. Saving a change restarts Candy so new QUIC connections use the selected parameters."
+msgstr "选择三个 Candy BBR 配置之一。保存更改后 Candy 将重启，使新的 QUIC 连接使用所选参数。"
 
 msgid "Congestion profile"
 msgstr "拥塞配置"
@@ -1458,6 +1461,12 @@ msgstr "安装 Runtime"
 msgid "Install Core"
 msgstr "安装 Core"
 
+msgid "Review Core"
+msgstr "查看 Core"
+
+msgid "Installed locally"
+msgstr "本机已安装"
+
 msgid "Downloading and verifying the stable catalog"
 msgstr "正在下载并验证稳定版目录"
 
@@ -1481,3 +1490,99 @@ msgstr "当前连接已观测到运行证据"
 
 msgid "Authorized, but no runtime use has been observed yet."
 msgstr "已授权，但尚未观测到运行证据。"
+
+msgid "Candy has stopped and normal network routing is active."
+msgstr "Candy 已停止，网络已恢复为普通路由。"
+
+msgid "Open Diagnostics for the recorded reason and cleanup result."
+msgstr "请打开诊断页面查看故障原因和网络清理结果。"
+
+msgid "View diagnostics"
+msgstr "查看诊断"
+
+msgid "Network protection"
+msgstr "网络保护"
+
+msgid "Applying"
+msgstr "正在接管"
+
+msgid "Restoring normal routing"
+msgstr "正在恢复普通路由"
+
+msgid "Normal routing"
+msgstr "普通路由"
+
+msgid "Failure recovery"
+msgstr "故障恢复"
+
+msgid "Recovery state"
+msgstr "恢复状态"
+
+msgid "Failure reason"
+msgstr "故障原因"
+
+msgid "Network cleanup"
+msgstr "网络清理"
+
+msgid "Recovery detail"
+msgstr "恢复详情"
+
+msgid "No active failure"
+msgstr "没有活动故障"
+
+msgid "Bootstrap providers"
+msgstr "Bootstrap 数据源"
+
+msgid "China IP ranges"
+msgstr "中国 IP 网段"
+
+msgid "GFWList domains"
+msgstr "GFWList 域名"
+
+msgid "Ready"
+msgstr "可用"
+
+msgid "Error"
+msgstr "错误"
+
+msgid "Unavailable"
+msgstr "不可用"
+
+msgid "entries"
+msgstr "条"
+
+msgid "Runtime mode"
+msgstr "运行模式"
+
+msgid "Stable: compatibility first"
+msgstr "稳定：优先兼容性"
+
+msgid "Fallback: balanced reliability"
+msgstr "回落：均衡可靠性"
+
+msgid "Performance: UDP throughput first"
+msgstr "性能：优先 UDP 吞吐"
+
+msgid "This is the authoritative network policy. Candy never silently changes to a weaker mode; choose a different mode explicitly when the current path is unsuitable."
+msgstr "这是实际生效的网络策略。Candy 不会静默切换到更弱的模式；当前链路不适合时请明确选择其他模式。"
+
+msgid "Controlled by Runtime mode. Performance mode enables UDP TProxy; Stable and Fallback modes keep compatibility first."
+msgstr "由运行模式统一控制。性能模式启用 UDP TProxy，稳定和回落模式优先保证兼容性。"
+
+msgid "Controlled by Runtime mode. This prevents unstable browser QUIC traffic from making the network appear unavailable."
+msgstr "由运行模式统一控制，用于避免不稳定的浏览器 QUIC 流量让网络看起来像完全不可用。"
+
+msgid "Network mode"
+msgstr "网络模式"
+
+msgid "Compatibility first"
+msgstr "优先兼容性"
+
+msgid "Balanced reliability"
+msgstr "均衡可靠性"
+
+msgid "UDP throughput first"
+msgstr "优先 UDP 吞吐"
+
+msgid "Choose the behavior that best matches your connection. Candy will not silently switch to a weaker mode."
+msgstr "请选择最适合当前网络的模式。Candy 不会静默切换到更弱的模式。"

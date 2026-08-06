@@ -3,7 +3,7 @@ local process = require "luci.candy.process"
 
 local BOOTSTRAP_RESOLVERS_DEFAULT = "system,223.5.5.5:53"
 local GFWLIST_DEFAULT_URL = "https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt"
-local GEO_DEFAULT_URL = "https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt"
+local GEO_DEFAULT_URL = "https://gaoyifan.github.io/china-operator-ip/china46.txt"
 
 m = Map("candy", translate("Advanced"), translate("Expert DNS, provider, congestion-control, and transparent proxy controls."))
 
@@ -70,7 +70,7 @@ o.default = GFWLIST_DEFAULT_URL
 o.rmempty = false
 
 o = s:option(Flag, "gfwlist_auto_update", translate("Auto update GFWList"))
-o.default = "0"
+o.default = "1"
 o.rmempty = false
 
 o = s:option(Value, "gfwlist_update_interval_hours", translate("GFWList update interval (hours)"))
@@ -83,7 +83,7 @@ o.default = GEO_DEFAULT_URL
 o.rmempty = false
 
 o = s:option(Flag, "geo_auto_update", translate("Auto update China IP provider"))
-o.default = "0"
+o.default = "1"
 o.rmempty = false
 
 o = s:option(Value, "geo_update_interval_hours", translate("China IP update interval (hours)"))
@@ -92,37 +92,31 @@ o.default = "24"
 o.rmempty = false
 
 s = m:section(NamedSection, "client", "candy", translate("Transport and TProxy"))
-s.description = translate("Choose one of four explicit congestion profiles. Saving a change restarts Candy so new QUIC connections use the selected parameters.")
+s.description = translate("Choose one of three Candy BBR profiles. Saving a change restarts Candy so new QUIC connections use the selected parameters.")
 s.addremove = false
 s.anonymous = true
 
 o = s:option(ListValue, "congestion_profile", translate("Congestion profile"))
-o:value("cubic", translate("CUBIC"))
 o:value("current", translate("Candy BBR - current (1.50 / 0.90, default)"))
 o:value("bbr-v1", translate("Candy BBR - BBR v1 (1.25 / 0.75)"))
 o:value("aggressive", translate("Candy BBR - aggressive (2.00 / 0.75)"))
 o.default = "current"
 o.rmempty = false
 function o.cfgvalue(self, section)
-	local congestion = self.map.uci:get("candy", section, "congestion") or "candy-bbr"
-	if congestion == "cubic" then return "cubic" end
 	local preset = self.map.uci:get("candy", section, "candy_bbr_preset") or "current"
 	if preset == "bbr-v1" or preset == "aggressive" then return preset end
 	return "current"
 end
 function o.write(self, section, value)
-	if value == "cubic" then
-		self.map.uci:set("candy", section, "congestion", "cubic")
-		self.map.uci:set("candy", section, "candy_bbr_preset", "current")
-	else
-		self.map.uci:set("candy", section, "congestion", "candy-bbr")
-		self.map.uci:set("candy", section, "candy_bbr_preset", value)
-	end
+	self.map.uci:set("candy", section, "congestion", "candy-bbr")
+	self.map.uci:set("candy", section, "candy_bbr_preset", value)
 end
 
 o = s:option(Flag, "redirect_udp", translate("Proxy LAN UDP/443 with TProxy"))
 o.default = "0"
 o.rmempty = false
+o.readonly = true
+o.description = translate("Controlled by Runtime mode. Performance mode enables UDP TProxy; Stable and Fallback modes keep compatibility first.")
 
 o = s:option(Value, "transparent_udp_port", translate("Transparent UDP listen port"))
 o.datatype = "port"
@@ -132,6 +126,8 @@ o.rmempty = false
 o = s:option(Flag, "block_quic", translate("Block LAN UDP/443"))
 o.default = "1"
 o.rmempty = false
+o.readonly = true
+o.description = translate("Controlled by Runtime mode. This prevents unstable browser QUIC traffic from making the network appear unavailable.")
 
 o = s:option(Value, "tproxy_mark", translate("TProxy routing mark"))
 o.datatype = "uinteger"

@@ -124,47 +124,6 @@ pub trait NetworkController {
     fn retained_owner(&self) -> Option<LeaseOwner>;
 }
 
-#[derive(Debug, Default)]
-pub struct NoopNetworkController;
-
-impl NetworkController for NoopNetworkController {
-    fn prepare(
-        &mut self,
-        _owner: LeaseOwner,
-        _declaration: PrepareDeclaration,
-    ) -> Result<(), NetworkError> {
-        Ok(())
-    }
-
-    fn commit(&mut self, _owner: LeaseOwner) -> Result<(), NetworkError> {
-        Ok(())
-    }
-
-    fn rollback(&mut self, _owner: LeaseOwner) -> Result<(), NetworkError> {
-        Ok(())
-    }
-
-    fn renew_lease(&mut self, _owner: LeaseOwner) -> Result<(), NetworkError> {
-        Ok(())
-    }
-
-    fn update_mtu(&mut self, _owner: LeaseOwner, _effective_mtu: u16) -> Result<(), NetworkError> {
-        Err(NetworkError::InvalidTransition)
-    }
-
-    fn recover_orphan(
-        &mut self,
-        _owner_is_alive: bool,
-        _now_mono_ms: u64,
-    ) -> Result<bool, NetworkError> {
-        Ok(false)
-    }
-
-    fn retained_owner(&self) -> Option<LeaseOwner> {
-        None
-    }
-}
-
 pub struct NetworkTransaction<B, J> {
     backend: B,
     journal: J,

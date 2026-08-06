@@ -34,18 +34,25 @@ grep -F "option mode 'sdwan_tun'" "$config" >/dev/null || fail "SD-WAN mode is n
 if grep -Eiq 'option[[:space:]]+(cidr|route|hub_candidate|attachment_epoch|route_generation)' "$config"; then
 	fail "UCI exposes signed route or attachment authority"
 fi
+if grep -Eq 'option[[:space:]]+effective_mtu' "$config"; then
+	fail "UCI exposes an unsigned MTU override that the signed SD-WAN policy does not consume"
+fi
 grep -F 'procd_open_instance sdwan-netd' "$init" >/dev/null || fail "netd procd instance is missing"
 grep -F 'run_sdwan' "$init" >/dev/null || fail "unprivileged SD-WAN supervisor is missing"
 grep -F 'procd_set_param user candy-sdwan' "$init" >/dev/null || fail "SD-WAN supervisor is not unprivileged"
 grep -F 'wait_for_sdwan_netd' "$init" >/dev/null || fail "client start does not wait for netd"
 grep -F 'CANDY_SDWAN_CONFIG=${CANDY_SDWAN_CONFIG:-/etc/candy/sdwan.toml}' "$init" >/dev/null || fail "signed SD-WAN config path is not explicit"
-grep -F 'exec "$CANDY_SDWAN_BIN" --config "$CANDY_SDWAN_CONFIG"' "$init" >/dev/null || fail "SD-WAN CLI contract is stale"
+grep -F '"$CANDY_SDWAN_BIN" --config "$CANDY_SDWAN_CONFIG" &' "$init" >/dev/null || fail "SD-WAN CLI contract is stale"
 grep -F 'sdwan_uid=$(id -u candy-sdwan' "$init" >/dev/null || fail "netd caller UID is not dedicated"
 grep -F -- '--allowed-uid "$sdwan_uid"' "$init" >/dev/null || fail "netd caller UID is not passed"
 if grep -F -- '--client-args' "$init" >/dev/null || grep -F -- '--netd-socket' "$init" >/dev/null; then
 	fail "legacy SD-WAN supervisor arguments remain"
 fi
-grep -F 'chmod 0700 /var/lib/candy "$CANDY_EPOCH_DIRECTORY"' "$init" >/dev/null || fail "durable state is not private"
+grep -F 'chown root:root /var/lib/candy' "$init" >/dev/null || fail "netd journal parent is not root-owned"
+grep -F 'chmod 0770 "$RUNTIME_DIR"' "$init" >/dev/null || fail "SD-WAN application runtime is not writable by its dedicated user"
+grep -F 'chmod 0750 "$CANDY_NETD_RUNTIME_DIR"' "$init" >/dev/null || fail "netd socket parent permits replacement by the SD-WAN caller"
+grep -F 'chmod 0711 /var/lib/candy' "$init" >/dev/null || fail "durable root does not permit traversal to delegated state"
+grep -F 'chmod 0700 "$CANDY_EPOCH_DIRECTORY"' "$init" >/dev/null || fail "delegated epoch state is not private"
 if grep -E 'nft[^\n]*(add|create)[^\n]*(candy_sdwan_|table)' "$init"; then
 	fail "shell lifecycle duplicates production netd nft ownership"
 fi

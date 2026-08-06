@@ -1,4 +1,6 @@
-use candy_netd::{NetdService, PeerCredentials, PlatformError, TunFactory};
+use candy_netd::{
+    NetdService, NetworkController, NetworkError, PeerCredentials, PlatformError, TunFactory,
+};
 use candy_netd_client::{recv_response, send_request};
 use candy_netd_proto::{
     ErrorCode, FirewallPolicy, Ipv4Prefix, LeaseOwner, NetdOperation, NetdRequest,
@@ -12,6 +14,52 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
+
+struct ShutdownNetwork {
+    owner: Option<LeaseOwner>,
+    rollbacks: Arc<AtomicUsize>,
+}
+
+impl NetworkController for ShutdownNetwork {
+    fn prepare(
+        &mut self,
+        _owner: LeaseOwner,
+        _declaration: PrepareDeclaration,
+    ) -> Result<(), NetworkError> {
+        Ok(())
+    }
+
+    fn commit(&mut self, _owner: LeaseOwner) -> Result<(), NetworkError> {
+        Ok(())
+    }
+
+    fn rollback(&mut self, owner: LeaseOwner) -> Result<(), NetworkError> {
+        assert_eq!(self.owner, Some(owner));
+        self.rollbacks.fetch_add(1, Ordering::SeqCst);
+        self.owner = None;
+        Ok(())
+    }
+
+    fn renew_lease(&mut self, _owner: LeaseOwner) -> Result<(), NetworkError> {
+        Ok(())
+    }
+
+    fn update_mtu(&mut self, _owner: LeaseOwner, _effective_mtu: u16) -> Result<(), NetworkError> {
+        Ok(())
+    }
+
+    fn recover_orphan(
+        &mut self,
+        _owner_is_alive: bool,
+        _now_mono_ms: u64,
+    ) -> Result<bool, NetworkError> {
+        Ok(false)
+    }
+
+    fn retained_owner(&self) -> Option<LeaseOwner> {
+        self.owner
+    }
+}
 
 struct FakeTunFactory(Arc<AtomicUsize>);
 
@@ -53,8 +101,8 @@ fn declaration() -> PrepareDeclaration {
     }
 }
 
-fn exchange(
-    service: &mut NetdService<FakeTunFactory>,
+fn exchange<N: NetworkController>(
+    service: &mut NetdService<FakeTunFactory, N>,
     request: &NetdRequest,
     peer: PeerCredentials,
 ) -> (ResponseBody, bool) {
@@ -69,7 +117,15 @@ fn exchange(
 #[test]
 fn authenticated_owner_runs_two_phase_lifecycle_and_gets_one_tun_fd() {
     let creates = Arc::new(AtomicUsize::new(0));
-    let mut service = NetdService::new(1000, 1001, FakeTunFactory(creates.clone()));
+    let mut service = NetdService::with_network(
+        1000,
+        1001,
+        FakeTunFactory(creates.clone()),
+        ShutdownNetwork {
+            owner: None,
+            rollbacks: Arc::new(AtomicUsize::new(0)),
+        },
+    );
     let peer = PeerCredentials {
         pid: 4242,
         uid: 1000,
@@ -106,7 +162,15 @@ fn authenticated_owner_runs_two_phase_lifecycle_and_gets_one_tun_fd() {
 #[test]
 fn peer_identity_must_match_configuration_and_request_owner() {
     let creates = Arc::new(AtomicUsize::new(0));
-    let mut service = NetdService::new(1000, 1001, FakeTunFactory(creates.clone()));
+    let mut service = NetdService::with_network(
+        1000,
+        1001,
+        FakeTunFactory(creates.clone()),
+        ShutdownNetwork {
+            owner: None,
+            rollbacks: Arc::new(AtomicUsize::new(0)),
+        },
+    );
     let request = NetdRequest {
         request_id: 3,
         owner: owner(),
@@ -122,4 +186,24 @@ fn peer_identity_must_match_configuration_and_request_owner() {
         (ResponseBody::Error(ErrorCode::UnauthorizedPeer), false)
     );
     assert_eq!(creates.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn shutdown_rolls_back_the_retained_network_owner() {
+    let rollbacks = Arc::new(AtomicUsize::new(0));
+    let network = ShutdownNetwork {
+        owner: Some(owner()),
+        rollbacks: Arc::clone(&rollbacks),
+    };
+    let mut service = NetdService::with_network(
+        1000,
+        1001,
+        FakeTunFactory(Arc::new(AtomicUsize::new(0))),
+        network,
+    );
+
+    assert!(service.shutdown().unwrap());
+    assert_eq!(rollbacks.load(Ordering::SeqCst), 1);
+    assert!(!service.shutdown().unwrap());
+    assert_eq!(rollbacks.load(Ordering::SeqCst), 1);
 }

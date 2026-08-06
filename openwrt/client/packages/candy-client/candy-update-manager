@@ -477,7 +477,7 @@ install_runtime() {
 }
 
 status_json() {
-	local release target arch checked_at core_current= catalog_valid=0
+	local release target arch checked_at core_current= core_status= catalog_valid=0
 	release=$(platform_release)
 	target=$(platform_target)
 	arch=$(platform_arch)
@@ -486,6 +486,12 @@ status_json() {
 	if cached_catalog_valid; then catalog_valid=1; fi
 	if [ -x "$CORE_MANAGER" ]; then
 		core_current=$("$CORE_MANAGER" status 2>/dev/null | jsonfilter -e '@.current_version' 2>/dev/null || true)
+		core_status=$("$CORE_MANAGER" status 2>/dev/null || true)
+		[ "${#core_status}" -le 524288 ] || core_status=
+		case "$core_status" in
+			*'"schema_version":1'*) ;;
+			*) core_status= ;;
+		esac
 	fi
 	printf '{"schema_version":1,"manager_api_version":1,"catalog_url":'; json_string "$CATALOG_URL"
 	printf ',"catalog_valid":'; [ "$catalog_valid" = 1 ] && printf true || printf false
@@ -494,6 +500,7 @@ status_json() {
 	printf ',"arch":'; json_string "$arch"
 	printf '},"runtime_current":'; json_string "$RUNTIME_VERSION-r$RUNTIME_RELEASE"
 	printf ',"core_current":'; if [ -n "$core_current" ]; then json_string "$core_current"; else printf null; fi
+	printf ',"core":'; if [ -n "$core_status" ]; then printf '%s' "$core_status"; else printf null; fi
 	printf ',"operation":'
 	if regular_bounded_file "$OPERATION_FILE" 65536 && [ -n "$(jsonfilter -i "$OPERATION_FILE" -e '@.state' 2>/dev/null || true)" ]; then cat "$OPERATION_FILE"; else printf null; fi
 	printf ',"catalog":'

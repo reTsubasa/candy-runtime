@@ -20,6 +20,7 @@ sh -n openwrt/client/packages/candy-client/candy.init
 openwrt/client/tests/init_config_test.sh
 scripts/openwrt_core_manager_test.sh
 scripts/openwrt_update_manager_test.sh
+scripts/openwrt_runtime_health_check_test.sh
 openwrt/client/tests/luci_package_test.sh
 openwrt/client/tests/update_luci_test.sh
 openwrt/client/tests/sdwan_productization_test.sh

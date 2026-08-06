@@ -2,17 +2,22 @@ name: release-openwrt-client
 
 on:
   workflow_dispatch:
+    inputs:
+      source_commit:
+        description: "Immutable Runtime commit to build (40 or 64 hex characters)"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-openwrt-client-0.4.0-r2
+  group: release-openwrt-client-0.4.0-r5
   cancel-in-progress: false
 
 env:
   CANDY_RELEASE_VERSION: "0.4.0"
-  CANDY_RELEASE_REVISION: "2"
+          CANDY_RELEASE_REVISION: "5"
   OPENWRT_RELEASE: "25.12.4"
   OPENWRT_GCC_VERSION: "14.3.0"
   RELEASE_REPOSITORY: reTsubasa/candy-release
@@ -21,17 +26,19 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out Runtime main
+      - name: Check out immutable Runtime commit
         uses: actions/checkout@v4
         with:
-          ref: main
-          fetch-depth: 1
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
 
       - name: Validate Runtime release version
         shell: bash
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = reTsubasa/candy-runtime
+          printf '%s' '${{ inputs.source_commit }}' | grep -Eq '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$'
+          test "$(git rev-parse HEAD)" = "$(git rev-parse '${{ inputs.source_commit }}')"
           test "$(tr -d '\r\n' < VERSION)" = "$CANDY_RELEASE_VERSION"
           test "$(sed -n 's/^PKG_VERSION:=//p' openwrt/client/packages/candy-client/Makefile)" = "$CANDY_RELEASE_VERSION"
           test "$(sed -n 's/^PKG_VERSION:=//p' openwrt/client/packages/luci-app-candy/Makefile)" = "$CANDY_RELEASE_VERSION"
@@ -44,6 +51,9 @@ jobs:
 
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y musl-tools jq
+
+      - name: Run full Runtime verification
+        run: scripts/verify.sh
 
       - name: Build Runtime executable
         id: runtime

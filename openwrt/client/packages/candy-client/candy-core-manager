@@ -276,11 +276,18 @@ safe_archive() {
 }
 
 install_core() {
-	local version="$1" url="$2" expected_sha="$3" temporary archive destination size actual_sha
+	local version="$1" url="$2" expected_sha="$3" temporary archive destination size actual_sha current previous backup existing=0
 	valid_version "$version" || fail "invalid Core version"
 	valid_sha256 "$expected_sha" || fail "invalid Core SHA-256"
 	destination=$(version_path "$version") || fail "invalid Core version"
-	[ ! -e "$destination" ] || fail "Core $version is already installed"
+	if [ -e "$destination" ]; then
+		[ -d "$destination" ] && [ ! -L "$destination" ] || fail "Core $version has an unsafe existing path"
+		current=$(link_version "$CURRENT_LINK")
+		previous=$(link_version "$PREVIOUS_LINK")
+		[ "$version" != "$current" ] || fail "Core $version is active and cannot be replaced"
+		[ "$version" != "$previous" ] || fail "Core $version is the rollback Core and cannot be replaced"
+		existing=1
+	fi
 	mkdir -p "$CORE_ROOT" || fail "cannot create Core directory"
 	[ ! -L "$CORE_ROOT" ] || fail "Core root must not be a symbolic link"
 	temporary="$CORE_ROOT/.install-$version-$$"
@@ -319,6 +326,22 @@ install_core() {
 		rm -rf "$temporary"
 		fail "Core bundle signature, manifest, process API, architecture, or executable is invalid"
 	}
+	if [ "$existing" = 1 ]; then
+		backup="$CORE_ROOT/.replace-$version-$$"
+		mv "$destination" "$backup" || {
+			rm -rf "$temporary"
+			fail "cannot stage replacement for Core $version"
+		}
+		if ! mv "$temporary" "$destination"; then
+			mv "$backup" "$destination" 2>/dev/null || true
+			rm -rf "$temporary"
+			fail "cannot install replacement Core bundle"
+		fi
+		rm -rf "$backup"
+		log_manager "replaced inactive version $version"
+		printf '%s\n' "replaced inactive Core $version"
+		return 0
+	fi
 	mv "$temporary" "$destination" || {
 		rm -rf "$temporary"
 		fail "cannot install Core bundle"

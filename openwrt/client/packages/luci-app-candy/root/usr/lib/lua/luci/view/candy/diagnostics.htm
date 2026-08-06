@@ -8,20 +8,31 @@ local fs = require "nixio.fs"
 local i18n = require "luci.i18n"
 local xml = require "luci.xml"
 local status = jsonc.parse(fs.readfile("/tmp/candy.nodes") or "") or {}
-local nodes = status.nodes or {}
+if type(status) ~= "table" then status = {} end
+local fault = status.fault or {}
+local geo = status.geo or {}
+local gfwlist = status.gfwlist or {}
+if type(fault) ~= "table" then fault = {} end
+if type(geo) ~= "table" then geo = {} end
+if type(gfwlist) ~= "table" then gfwlist = {} end
+local nodes = type(status.nodes) == "table" and status.nodes or {}
 local runtime = status.runtime or {}
+if type(runtime) ~= "table" then runtime = {} end
 local runtime_performance = runtime.performance or {}
+if type(runtime_performance) ~= "table" then runtime_performance = {} end
 local legacy_passive = runtime_performance.passive
 local process_status = status.process or {}
+if type(process_status) ~= "table" then process_status = {} end
 
 if #nodes == 0 and type(legacy_passive) == "table" then
 	nodes = {{ id = "-", name = "-", state = "-", passive = legacy_passive }}
 end
 
 local legacy_local = type(legacy_passive) == "table" and (legacy_passive["local"] or {}) or {}
+if type(legacy_local) ~= "table" then legacy_local = {} end
 local process_cpu = process_status.cpu_percent or legacy_local.process_cpu_percent
 local process_rss = process_status.resident_memory_bytes or legacy_local.resident_memory_bytes
-local socket_buffers = process_status.socket_buffers or {}
+local socket_buffers = type(process_status.socket_buffers) == "table" and process_status.socket_buffers or {}
 
 local function js_string(value)
 	return string.format("%q", tostring(value or ""))
@@ -30,6 +41,13 @@ end
 local function text_label(value)
 	if value == nil or value == "" then return "-" end
 	return tostring(value)
+end
+
+local function provider_state(provider)
+	if type(provider) ~= "table" then return i18n.translate("Unavailable") end
+	if provider.last_error and provider.last_error ~= "" then return i18n.translate("Error") end
+	if tonumber(provider.entry_count or 0) > 0 then return i18n.translate("Ready") end
+	return i18n.translate("Unavailable")
 end
 
 local congestion_mode_labels = {
@@ -113,6 +131,8 @@ end
 .candy-test-actions { display:flex; align-items:center; flex-wrap:wrap; gap:.75em 1em; margin:.75em 0; }
 .candy-test-actions label { margin: 0; font-weight: 700; }
 .candy-test-actions select { min-width: 14em; max-width: 100%; }
+.candy-diagnostics-alert { border-left: 4px solid #c62828; background: #fff4f4; padding: .8em 1em; }
+.candy-diagnostics-alert strong { display: block; margin-bottom: .35em; }
 @media (max-width: 1000px) { .candy-chart-grid { grid-template-columns: 1fr; } }
 </style>
 
@@ -139,6 +159,18 @@ end
 <div class="cbi-map">
 	<h3><%:Service resources%></h3>
 	<div class="cbi-section">
+		<h4><%:Failure recovery%></h4>
+		<table class="table">
+			<tr class="tr"><td class="td left" width="33%"><%:Recovery state%></td><td id="candy-diagnostics-fault-state" class="td left"><%=xml.pcdata(text_label(fault.state))%></td></tr>
+			<tr class="tr"><td class="td left"><%:Failure reason%></td><td id="candy-diagnostics-fault-reason" class="td left"><%=xml.pcdata(text_label(fault.reason))%></td></tr>
+			<tr class="tr"><td class="td left"><%:Network cleanup%></td><td id="candy-diagnostics-fault-cleanup" class="td left"><%=xml.pcdata(text_label(fault.cleanup))%></td></tr>
+			<tr class="tr"><td class="td left"><%:Recovery detail%></td><td id="candy-diagnostics-fault-detail" class="td left"><%=xml.pcdata(text_label(fault.detail))%></td></tr>
+		</table>
+		<h4><%:Bootstrap providers%></h4>
+		<table class="table">
+			<tr class="tr"><td class="td left" width="33%"><%:China IP ranges%></td><td id="candy-diagnostics-geo-state" class="td left"><%=xml.pcdata(provider_state(geo) .. " / " .. tostring(geo.entry_count or 0) .. " " .. i18n.translate("entries"))%></td></tr>
+			<tr class="tr"><td class="td left"><%:GFWList domains%></td><td id="candy-diagnostics-gfwlist-state" class="td left"><%=xml.pcdata(provider_state(gfwlist) .. " / " .. tostring(gfwlist.entry_count or 0) .. " " .. i18n.translate("entries"))%></td></tr>
+		</table>
 		<table class="table">
 			<tr class="tr"><td class="td left" width="33%"><%:Process CPU%></td><td id="candy-diagnostics-process-cpu" class="td left"><%=xml.pcdata(process_cpu ~= nil and tostring(process_cpu) .. " %" or "-")%></td></tr>
 			<tr class="tr"><td class="td left"><%:Resident memory%></td><td id="candy-diagnostics-process-rss" class="td left"><%=xml.pcdata(bytes_label(process_rss))%></td></tr>
@@ -191,6 +223,7 @@ end
 var candyDiagnosticsStatusUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'status_json')%>";
 var candyCongestionTestUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'congestion_test')%>";
 var candyCongestionTestStatusUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'congestion_test_status')%>";
+var candyCsrfToken = <%=js_string(luci.dispatcher.context.authsession)%>;
 var candyCongestionTestLoaded = false;
 var candyDiagnosticsRequestGeneration = 0;
 var candyDiagnosticsActiveRequest = null;
@@ -199,6 +232,11 @@ var candyDiagnosticsHistory = { throughput: [], latency: [] };
 var candyDiagnosticsColors = ["#1976d2", "#2e7d32", "#ef6c00", "#8e24aa", "#00838f", "#c62828", "#6d4c41", "#455a64"];
 var candyDiagnosticsLabels = {
 	noNodes: <%=js_string(i18n.translate("No node diagnostics available"))%>,
+	noFault: <%=js_string(i18n.translate("No active failure"))%>,
+	providerReady: <%=js_string(i18n.translate("Ready"))%>,
+	providerError: <%=js_string(i18n.translate("Error"))%>,
+	providerUnavailable: <%=js_string(i18n.translate("Unavailable"))%>,
+	entries: <%=js_string(i18n.translate("entries"))%>,
 	congestionModes: {
 		"startup": <%=js_string(i18n.translate("Startup acceleration"))%>,
 		"drain": <%=js_string(i18n.translate("Queue drain"))%>,
@@ -274,7 +312,7 @@ function startCandyCongestionTest(event) {
 	button.disabled = true;
 	xhr.open("POST", candyCongestionTestUrl, true);
 	if (xhr.setRequestHeader) xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-	xhr.onreadystatechange = function() { if (xhr.readyState === 4) setTimeout(refreshCandyCongestionTest, 500); }; xhr.send("test_point=" + encodeURIComponent(point.value));
+	xhr.onreadystatechange = function() { if (xhr.readyState === 4) setTimeout(refreshCandyCongestionTest, 500); }; xhr.send("token=" + encodeURIComponent(candyCsrfToken) + "&test_point=" + encodeURIComponent(point.value));
 }
 function candyDiagnosticsBps(value) {
 	var n = Number(value);
@@ -292,6 +330,19 @@ function candyDiagnosticsBytes(value) {
 	return String(n) + " B";
 }
 function candyDiagnosticsSetText(id, value) { var element = document.getElementById(id); if (element) element.textContent = value; }
+function candyDiagnosticsProviderText(provider) {
+	provider = provider || {};
+	var entries = Number(provider.entry_count);
+	var state = provider.last_error ? candyDiagnosticsLabels.providerError : (isFinite(entries) && entries > 0 ? candyDiagnosticsLabels.providerReady : candyDiagnosticsLabels.providerUnavailable);
+	return state + " / " + (isFinite(entries) ? String(entries) : "0") + " " + candyDiagnosticsLabels.entries;
+}
+function candyDiagnosticsRenderRecovery(fault) {
+	fault = fault || {};
+	candyDiagnosticsSetText("candy-diagnostics-fault-state", fault.state || candyDiagnosticsLabels.noFault);
+	candyDiagnosticsSetText("candy-diagnostics-fault-reason", fault.reason || "-");
+	candyDiagnosticsSetText("candy-diagnostics-fault-cleanup", fault.cleanup || "-");
+	candyDiagnosticsSetText("candy-diagnostics-fault-detail", fault.detail || "-");
+}
 function candyDiagnosticsAppendCell(row, value) { var cell = document.createElement("td"); cell.className = "td"; cell.textContent = value; row.appendChild(cell); }
 function candyDiagnosticsFirstDefined(values) {
 	for (var i = 0; i < values.length; i++) if (values[i] !== null && values[i] !== undefined) return values[i];
@@ -342,9 +393,13 @@ function candyDiagnosticsUpdateCharts(nodes) {
 }
 
 function candyDiagnosticsRender(data) {
+	data = data || {};
 	var runtime = data.runtime || {}, performance = runtime.performance || {}, legacy = performance.passive;
 	var processStatus = data.process || {}, socketBuffers = processStatus.socket_buffers || {}, legacyLocal = legacy && legacy.local || {};
 	var nodes = data.nodes || [], body = document.getElementById("candy-diagnostics-nodes"), row, cell, text;
+	candyDiagnosticsRenderRecovery(data.fault);
+	candyDiagnosticsSetText("candy-diagnostics-geo-state", candyDiagnosticsProviderText(data.geo));
+	candyDiagnosticsSetText("candy-diagnostics-gfwlist-state", candyDiagnosticsProviderText(data.gfwlist));
 	if (!nodes.length && legacy) nodes = [{ id: "-", name: "-", state: "-", passive: legacy }];
 	candyDiagnosticsUpdateCharts(nodes);
 	var cpu = candyDiagnosticsFirstDefined([processStatus.cpu_percent, legacyLocal.process_cpu_percent]);

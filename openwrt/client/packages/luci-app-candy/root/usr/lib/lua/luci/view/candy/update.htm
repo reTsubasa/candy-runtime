@@ -65,6 +65,7 @@ end
 			<thead><tr class="tr table-titles"><th class="th"><%:Active%></th><th class="th"><%:Available%></th><th class="th"><%:Process API%></th><th class="th"><%:Actions%></th></tr></thead>
 			<tbody id="candy-update-core"><tr class="tr"><td class="td" colspan="4">-</td></tr></tbody>
 		</table>
+		<p id="candy-update-core-installed" class="candy-update-note"></p>
 		<p class="candy-update-note"><%:A downloaded Core is installed but never activated automatically. Review it on the Core page before activation.%></p>
 	</div>
 </div>
@@ -73,6 +74,7 @@ end
 var candyUpdateStatusUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'update_status')%>";
 var candyUpdateRuntimeUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'update_install_runtime')%>";
 var candyUpdateCoreUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'update_install_core')%>";
+var candyUpdateCorePageUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core')%>";
 var candyUpdateToken = <%=js_string(auth_token)%>;
 var candyUpdateTimer = null;
 var candyUpdateLabels = {
@@ -82,6 +84,10 @@ var candyUpdateLabels = {
 	current: <%=js_string(i18n.translate("Current"))%>,
 	installRuntime: <%=js_string(i18n.translate("Install Runtime"))%>,
 	installCore: <%=js_string(i18n.translate("Install Core"))%>,
+	reviewCore: <%=js_string(i18n.translate("Review Core"))%>,
+	installedLocally: <%=js_string(i18n.translate("Installed locally"))%>,
+	active: <%=js_string(i18n.translate("Active"))%>,
+	inactive: <%=js_string(i18n.translate("Inactive"))%>,
 	operationMessages: {
 		"downloading and verifying the stable catalog": <%=js_string(i18n.translate("Downloading and verifying the stable catalog"))%>,
 		"stable catalog verified": <%=js_string(i18n.translate("Stable catalog verified"))%>,
@@ -127,6 +133,14 @@ function candyUpdateAction(url, versionKey, label, disabled) {
 	return form;
 }
 
+function candyUpdateLink(url, label) {
+	var link = document.createElement("a");
+	link.className = "cbi-button cbi-button-action";
+	link.href = url;
+	link.textContent = label;
+	return link;
+}
+
 function candyUpdateRow(bodyId, values, action) {
 	var body = document.getElementById(bodyId), row, cell;
 	if (!body) return;
@@ -138,9 +152,16 @@ function candyUpdateRow(bodyId, values, action) {
 function candyUpdateRender(data) {
 	var catalog = data.catalog || {}, runtime = catalog.runtime || {}, core = catalog.core || {};
 	var runtimeEntry = (runtime.releases || {})[runtime.latest] || {}, coreEntry = (core.releases || {})[core.latest] || {};
+	var installedCores = (data.core && data.core.installed) || [], installedCore = null, installedLabel = [];
 	var operation = data.operation || {}, busy = operation.state === "running", operationNode = document.getElementById("candy-update-operation");
 	var runtimeNewer = candyUpdateCompare(runtimeEntry.display_version, data.runtime_current) > 0;
 	var coreNewer = candyUpdateCompare(coreEntry.version, data.core_current) > 0;
+	installedCores.forEach(function(item) {
+		if (!item || !item.version) return;
+		installedLabel.push(String(item.version) + " (" + (item.active ? candyUpdateLabels.active : candyUpdateLabels.inactive) + ")");
+		if (String(item.version) === String(coreEntry.version)) installedCore = item;
+	});
+	candyUpdateSet("candy-update-core-installed", installedLabel.length ? candyUpdateLabels.installedLocally + ": " + installedLabel.join(", ") : null);
 	candyUpdateSet("candy-update-catalog-valid", data.catalog_valid ? candyUpdateLabels.valid : candyUpdateLabels.invalid);
 	candyUpdateSet("candy-update-sequence", catalog.sequence);
 	candyUpdateSet("candy-update-published", catalog.published_at);
@@ -148,7 +169,10 @@ function candyUpdateRender(data) {
 	candyUpdateSet("candy-update-platform", data.platform ? [data.platform.openwrt_release, data.platform.target, data.platform.arch].join(" / ") : null);
 	if (operationNode) { operationNode.style.display = operation.state || data.error ? "" : "none"; operationNode.className = "candy-update-operation " + (operation.state || "error"); operationNode.textContent = data.error || candyUpdateOperationText(operation.message); }
 	candyUpdateRow("candy-update-runtime", [data.runtime_current, runtimeEntry.display_version, runtimeNewer ? candyUpdateLabels.available : candyUpdateLabels.current], runtimeNewer && runtime.latest ? candyUpdateAction(candyUpdateRuntimeUrl, runtime.latest, candyUpdateLabels.installRuntime, busy) : null);
-	candyUpdateRow("candy-update-core", [data.core_current, coreEntry.version, coreEntry.process_api_version], coreNewer && core.latest ? candyUpdateAction(candyUpdateCoreUrl, core.latest, candyUpdateLabels.installCore, busy) : null);
+	var coreAction = null;
+	if (coreNewer && core.latest && !installedCore) coreAction = candyUpdateAction(candyUpdateCoreUrl, core.latest, candyUpdateLabels.installCore, busy);
+	else if (coreNewer && installedCore && !installedCore.active) coreAction = candyUpdateLink(candyUpdateCorePageUrl, candyUpdateLabels.reviewCore);
+	candyUpdateRow("candy-update-core", [data.core_current, coreEntry.version, coreEntry.process_api_version], coreAction);
 	var check = document.getElementById("candy-update-check"); if (check) check.disabled = busy;
 }
 

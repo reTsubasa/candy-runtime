@@ -5,15 +5,50 @@ set -eu
 role=${1:-client}
 ready_file=${CANDY_READY_FILE:-/var/run/candy/client.ready}
 runtime_config=${CANDY_RUNTIME_CONFIG:-/var/run/candy/runtime.json}
+passive_status=${CANDY_PASSIVE_STATUS_FILE:-/var/run/candy/passive-status.json}
+control_socket=${CANDY_CONTROL_SOCKET:-/var/run/candy/control.sock}
 service_init=${CANDY_SERVICE_INIT:-/etc/init.d/candy}
+proc_root=${CANDY_PROC_ROOT:-/proc}
+max_heartbeat_age_ms=${CANDY_HEALTH_MAX_HEARTBEAT_AGE_MS:-15000}
+future_tolerance_ms=${CANDY_HEALTH_FUTURE_TOLERANCE_MS:-60000}
+expected_executable=${CANDY_CORE_EXECUTABLE_NAME:-candy-core}
 
 [ "$role" = client ] || exit 64
+case "$max_heartbeat_age_ms:$future_tolerance_ms" in
+	*[!0-9:]*|0:*|*:0) exit 64 ;;
+esac
 [ -x "$service_init" ] && "$service_init" running >/dev/null 2>&1 || exit 1
 [ -s "$runtime_config" ] && [ ! -L "$runtime_config" ] || exit 1
 [ -s "$ready_file" ] && [ ! -L "$ready_file" ] || exit 1
+[ -s "$passive_status" ] && [ ! -L "$passive_status" ] || exit 1
+[ -S "$control_socket" ] && [ ! -L "$control_socket" ] || exit 1
+[ "$(wc -c < "$passive_status" | tr -d ' ')" -le 1048576 ] || exit 1
+command -v jsonfilter >/dev/null 2>&1 || exit 1
 
 ready_pid=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$ready_file" | head -n 1)
 case "$ready_pid" in
 	''|*[!0-9]*) exit 1 ;;
 esac
-kill -0 "$ready_pid" 2>/dev/null
+kill -0 "$ready_pid" 2>/dev/null || exit 1
+[ -r "$proc_root/$ready_pid/cmdline" ] && [ -L "$proc_root/$ready_pid/exe" ] || exit 1
+executable=$(readlink "$proc_root/$ready_pid/exe" 2>/dev/null || true)
+[ "${executable##*/}" = "$expected_executable" ] || exit 1
+cmdline=$(tr '\000' ' ' < "$proc_root/$ready_pid/cmdline")
+case " $cmdline " in *" client "*) ;; *) exit 1 ;; esac
+case " $cmdline " in *" --config $runtime_config "*) ;; *) exit 1 ;; esac
+grep -Eq '"listeners":[[:space:]]*\[[[:space:]]*"' "$ready_file" || exit 1
+
+updated_unix_ms=$(jsonfilter -i "$passive_status" -e '@.updated_unix_ms' 2>/dev/null || true)
+generation=$(jsonfilter -i "$passive_status" -e '@.generation' 2>/dev/null || true)
+active_sha256=$(jsonfilter -i "$passive_status" -e '@.config_sha256' 2>/dev/null || true)
+case "$updated_unix_ms:$generation" in
+	*[!0-9:]*|0:*|*:0) exit 1 ;;
+esac
+printf '%s' "$active_sha256" | grep -Eq '^[0-9a-f]{64}$' || exit 1
+command -v sha256sum >/dev/null 2>&1 || exit 1
+runtime_sha256=$(sha256sum "$runtime_config" | awk '{ print tolower($1) }')
+[ "$active_sha256" = "$runtime_sha256" ] || exit 1
+
+now_ms=$(( $(date +%s) * 1000 ))
+[ "$updated_unix_ms" -le $((now_ms + future_tolerance_ms)) ] || exit 1
+[ "$updated_unix_ms" -ge $((now_ms - max_heartbeat_age_ms)) ] || exit 1

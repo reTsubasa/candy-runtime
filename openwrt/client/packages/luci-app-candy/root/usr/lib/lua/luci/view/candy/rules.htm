@@ -114,7 +114,6 @@ end
 					<option value="SRC-IP-CIDR">SRC-IP-CIDR</option>
 					<option value="SRC-PORT">SRC-PORT</option>
 					<option value="DST-PORT">DST-PORT</option>
-					<option value="PROCESS-NAME">PROCESS-NAME</option>
 					<option value="RULE-SET">RULE-SET</option>
 					<option value="MATCH">MATCH</option>
 				</select>
@@ -141,6 +140,7 @@ end
 </div>
 
 <form method="post" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'rules_import')%>" onsubmit="return validateCandyRulesForSubmit()">
+	<input type="hidden" name="token" value="<%=luci.dispatcher.context.authsession%>" />
 	<input type="hidden" name="rules" value="<%=xml.pcdata(rules_text)%>" />
 
 	<div class="cbi-map">
@@ -247,7 +247,6 @@ function candyRuleValueMeta(kind) {
 		"SRC-IP-CIDR": ["192.168.1.0/24", "cidr"],
 		"SRC-PORT": ["443", "port"],
 		"DST-PORT": ["443", "port"],
-		"PROCESS-NAME": ["chrome", "text"],
 		"RULE-SET": ["gfwlist", "text"]
 	};
 	return meta[kind] || ["", "text"];

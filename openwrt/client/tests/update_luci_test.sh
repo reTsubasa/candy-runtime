@@ -17,6 +17,10 @@ grep -F '{ UPDATE_MANAGER, "install-runtime", version_key }' "$controller" >/dev
 ! grep -Eq 'formvalue\("(url|sha256|path)"\)' "$controller"
 grep -F 'candy-update-runtime' "$view" >/dev/null
 grep -F 'candy-update-core' "$view" >/dev/null
+grep -F 'candy-update-core-installed' "$view" >/dev/null
+grep -F 'data.core && data.core.installed' "$view" >/dev/null
+grep -F 'installedCore && !installedCore.active' "$view" >/dev/null
+grep -F 'Review Core' "$view" "$po" >/dev/null
 grep -F 'setTimeout(refreshCandyUpdateStatus, 2000)' "$view" >/dev/null
 grep -F 'never activated automatically' "$view" >/dev/null
 grep -F 'Update checks and installations are manual' "$view" >/dev/null

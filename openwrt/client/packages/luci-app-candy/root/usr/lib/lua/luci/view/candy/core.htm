@@ -20,14 +20,6 @@ end
 .candy-core-operation.error { border-color: #c62828; }
 .candy-core-table-scroll { overflow-x: auto; }
 .candy-core-table-scroll .table { min-width: 46em; }
-.candy-core-install-grid { display: grid; grid-template-columns: minmax(10em, .7fr) minmax(18em, 2fr); gap: .75em 1em; align-items: center; }
-.candy-core-install-grid label { font-weight: 600; }
-.candy-core-install-grid input { width: 100%; box-sizing: border-box; }
-.candy-core-install-submit { grid-column: 2; }
-@media (max-width: 700px) {
-	.candy-core-install-grid { grid-template-columns: 1fr; }
-	.candy-core-install-submit { grid-column: 1; }
-}
 </style>
 
 <div id="candy-core-operation" class="candy-core-operation" style="display:none"></div>
@@ -49,22 +41,6 @@ end
 				<button id="candy-core-rollback" class="cbi-button cbi-button-action" type="submit"><%:Rollback%></button>
 			</form>
 		</div>
-	</div>
-</div>
-
-<div class="cbi-map">
-	<h3><%:Install Core bundle%></h3>
-	<div class="cbi-section">
-		<form method="post" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core_install')%>" class="candy-core-install-grid">
-			<input type="hidden" name="token" value="<%=xml.pcdata(auth_token)%>" />
-			<label for="candy-core-install-version"><%:Version%></label>
-			<input id="candy-core-install-version" class="cbi-input-text" type="text" name="version" required pattern="[0-9]+\.[0-9]+\.[0-9]+([+.-][0-9A-Za-z][0-9A-Za-z.+-]*)?" />
-			<label for="candy-core-install-url"><%:Bundle URL%></label>
-			<input id="candy-core-install-url" class="cbi-input-text" type="url" name="url" required pattern="https://.*" />
-			<label for="candy-core-install-sha"><%:SHA-256%></label>
-			<input id="candy-core-install-sha" class="cbi-input-text" type="text" name="sha256" required minlength="64" maxlength="64" pattern="[0-9A-Fa-f]{64}" />
-			<div class="candy-core-install-submit"><button id="candy-core-install-submit" class="cbi-button cbi-button-apply" type="submit"><%:Install%></button></div>
-		</form>
 	</div>
 </div>
 
@@ -134,7 +110,6 @@ function candyCoreRender(data) {
 	var operation = data.operation || {};
 	var operationNode = document.getElementById("candy-core-operation");
 	var rollbackButton = document.getElementById("candy-core-rollback");
-	var installButton = document.getElementById("candy-core-install-submit");
 	var body = document.getElementById("candy-core-installed");
 	var installed = data.installed || [];
 	var busy = operation.state === "running";
@@ -146,7 +121,6 @@ function candyCoreRender(data) {
 	candyCoreSetText("candy-core-protocol", protocol.major === undefined ? null : protocol.major + "." + protocol.minor);
 	candyCoreSetText("candy-core-architecture", artifact.target_arch);
 	if (rollbackButton) rollbackButton.disabled = !data.previous_version || busy;
-	if (installButton) installButton.disabled = busy;
 	if (operationNode) {
 		operationNode.style.display = operation.state || data.error ? "" : "none";
 		operationNode.className = "candy-core-operation " + (operation.state || "error");

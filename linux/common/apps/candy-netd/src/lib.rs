@@ -12,15 +12,14 @@ pub use linux::LinuxNetworkBackend;
 pub use linux::{LinuxNetworkPlan, CANDY_POLICY_PRIORITY_MIN};
 pub use network::{
     restore_sysctl_value, NetworkBackend, NetworkController, NetworkError, NetworkJournal,
-    NetworkTransaction, NoopNetworkController, SysctlChange, SysctlKey, TransactionPhase,
-    TransactionRecord,
+    NetworkTransaction, SysctlChange, SysctlKey, TransactionPhase, TransactionRecord,
 };
 
 use std::fs;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use candy_netd_client::{recv_request, send_response, IpcError};
@@ -39,7 +38,50 @@ pub enum SocketSecurityError {
     Io(#[from] std::io::Error),
 }
 
-pub fn bind_private_socket(path: &Path) -> Result<UnixListener, SocketSecurityError> {
+pub struct PrivateUnixListener {
+    listener: UnixListener,
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl PrivateUnixListener {
+    pub fn set_nonblocking(&self, nonblocking: bool) -> std::io::Result<()> {
+        self.listener.set_nonblocking(nonblocking)
+    }
+
+    pub fn accept(&self) -> std::io::Result<(UnixStream, std::os::unix::net::SocketAddr)> {
+        self.listener.accept()
+    }
+}
+
+impl Drop for PrivateUnixListener {
+    fn drop(&mut self) {
+        let Ok(metadata) = fs::symlink_metadata(&self.path) else {
+            return;
+        };
+        if metadata.file_type().is_socket()
+            && metadata.dev() == self.device
+            && metadata.ino() == self.inode
+        {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+pub fn bind_private_socket(path: &Path) -> Result<PrivateUnixListener, SocketSecurityError> {
+    bind_private_socket_owned(
+        path,
+        nix::unistd::geteuid().as_raw(),
+        nix::unistd::getegid().as_raw(),
+    )
+}
+
+fn bind_private_socket_owned(
+    path: &Path,
+    socket_uid: u32,
+    socket_gid: u32,
+) -> Result<PrivateUnixListener, SocketSecurityError> {
     let parent = path.parent().ok_or(SocketSecurityError::UnsafeParent)?;
     let parent_metadata =
         fs::symlink_metadata(parent).map_err(|_| SocketSecurityError::UnsafeParent)?;
@@ -51,7 +93,35 @@ pub fn bind_private_socket(path: &Path) -> Result<UnixListener, SocketSecurityEr
         return Err(SocketSecurityError::UnsafeParent);
     }
     match fs::symlink_metadata(path) {
-        Ok(_) => return Err(SocketSecurityError::ExistingPath),
+        Ok(metadata) => {
+            if !metadata.file_type().is_socket()
+                || metadata.uid() != socket_uid
+                || metadata.gid() != socket_gid
+                || metadata.permissions().mode() & 0o177 != 0
+            {
+                return Err(SocketSecurityError::ExistingPath);
+            }
+            match UnixStream::connect(path) {
+                Ok(_) => return Err(SocketSecurityError::ExistingPath),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
+                    ) => {}
+                Err(error) => return Err(SocketSecurityError::Io(error)),
+            }
+            let current = fs::symlink_metadata(path)?;
+            if !current.file_type().is_socket()
+                || current.dev() != metadata.dev()
+                || current.ino() != metadata.ino()
+                || current.uid() != socket_uid
+                || current.gid() != socket_gid
+                || current.permissions().mode() & 0o177 != 0
+            {
+                return Err(SocketSecurityError::ExistingPath);
+            }
+            fs::remove_file(path)?;
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(SocketSecurityError::Io(error)),
     }
@@ -60,21 +130,34 @@ pub fn bind_private_socket(path: &Path) -> Result<UnixListener, SocketSecurityEr
         let _ = fs::remove_file(path);
         return Err(SocketSecurityError::Io(error));
     }
-    let socket_metadata = fs::symlink_metadata(path)?;
+    let socket_metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            drop(listener);
+            let _ = fs::remove_file(path);
+            return Err(SocketSecurityError::Io(error));
+        }
+    };
     if socket_metadata.file_type().is_symlink() || !socket_metadata.file_type().is_socket() {
         drop(listener);
         let _ = fs::remove_file(path);
         return Err(SocketSecurityError::ExistingPath);
     }
-    Ok(listener)
+    let socket_metadata = fs::symlink_metadata(path)?;
+    Ok(PrivateUnixListener {
+        listener,
+        path: path.to_path_buf(),
+        device: socket_metadata.dev(),
+        inode: socket_metadata.ino(),
+    })
 }
 
 pub fn bind_private_socket_for(
     path: &Path,
     owner_uid: u32,
     owner_gid: u32,
-) -> Result<UnixListener, SocketSecurityError> {
-    let listener = bind_private_socket(path)?;
+) -> Result<PrivateUnixListener, SocketSecurityError> {
+    let listener = bind_private_socket_owned(path, owner_uid, owner_gid)?;
     if let Err(error) = nix::unistd::chown(
         path,
         Some(nix::unistd::Uid::from_raw(owner_uid)),
@@ -187,7 +270,7 @@ pub enum ServiceError {
     Network(#[from] NetworkError),
 }
 
-pub struct NetdService<T = SystemTunFactory, N = NoopNetworkController> {
+pub struct NetdService<T, N> {
     allowed_uid: u32,
     allowed_gid: u32,
     session: NetdSession,
@@ -196,18 +279,6 @@ pub struct NetdService<T = SystemTunFactory, N = NoopNetworkController> {
     owner_pidfd: Option<(u32, OwnedFd)>,
     tun_factory: T,
     network: N,
-}
-
-impl NetdService<SystemTunFactory> {
-    pub fn system(allowed_uid: u32, allowed_gid: u32) -> Self {
-        Self::new(allowed_uid, allowed_gid, SystemTunFactory)
-    }
-}
-
-impl<T: TunFactory> NetdService<T, NoopNetworkController> {
-    pub fn new(allowed_uid: u32, allowed_gid: u32, tun_factory: T) -> Self {
-        Self::with_network(allowed_uid, allowed_gid, tun_factory, NoopNetworkController)
-    }
 }
 
 impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
@@ -242,6 +313,22 @@ impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
         Ok(recovered)
     }
 
+    pub fn shutdown(&mut self) -> Result<bool, ServiceError> {
+        let Some(owner) = self.network.retained_owner() else {
+            return Ok(false);
+        };
+        self.network
+            .rollback(owner)
+            .map_err(ServiceError::Network)?;
+        self.tun = None;
+        #[cfg(target_os = "linux")]
+        {
+            self.owner_pidfd = None;
+        }
+        self.session = NetdSession::new();
+        Ok(true)
+    }
+
     pub fn serve_once(&mut self, stream: &UnixStream) -> Result<(), ServiceError> {
         let peer = peer_credentials(stream)?;
         self.serve_authenticated_once(stream, peer)
@@ -253,7 +340,26 @@ impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
         peer: PeerCredentials,
     ) -> Result<(), ServiceError> {
         let request = recv_request(stream)?;
+        let request_id = request.request_id;
+        let generation = request.owner.generation;
+        let operation = match &request.operation {
+            NetdOperation::Prepare(_) => "prepare",
+            NetdOperation::Commit => "commit",
+            NetdOperation::Rollback => "rollback",
+            NetdOperation::Status => "status",
+            NetdOperation::LeaseRenew => "lease_renew",
+            NetdOperation::MtuUpdate { .. } => "mtu_update",
+        };
         let (response, descriptor) = self.process(request, peer)?;
+        match &response.body {
+            ResponseBody::Error(code) => eprintln!(
+                "level=warn component=candy-netd event=request_rejected request_id={request_id} generation={generation} operation={operation} code={code:?}"
+            ),
+            _ if !matches!(operation, "status" | "lease_renew") => eprintln!(
+                "level=info component=candy-netd event=request_completed request_id={request_id} generation={generation} operation={operation}"
+            ),
+            _ => {}
+        }
         send_response(
             stream,
             &response,

@@ -76,7 +76,7 @@ chmod 0755 "$bin/usign"
 cat > "$bin/candy-core-manager" <<'EOF'
 #!/bin/sh
 case "$1" in
-	status) printf '%s\n' '{"schema_version":1,"current_version":"0.3.4"}' ;;
+	status) printf '%s\n' '{"schema_version":1,"current_version":"0.3.4","installed":[{"version":"0.3.4","active":true,"rollback":false,"managed":true},{"version":"0.3.5","active":false,"rollback":false,"managed":false}]}' ;;
 	install)
 		printf '%s\n' "$*" >> "$FAKE_CORE_LOG"
 		case "$3" in file:///*) [ -f "${3#file://}" ] ;; *) exit 1 ;; esac
@@ -207,6 +207,12 @@ make_catalog 1 3 0.3.5
 [ "$(stat -c '%a' "$state" 2>/dev/null || stat -f '%Lp' "$state")" = 700 ]
 grep -Fx 'https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json' "$FAKE_FETCH_LOG" >/dev/null
 grep -q '"catalog_valid":true' <<EOF
+$("$manager" status)
+EOF
+grep -q '"core":{"schema_version":1' <<EOF
+$("$manager" status)
+EOF
+grep -q '"version":"0.3.5"' <<EOF
 $("$manager" status)
 EOF
 

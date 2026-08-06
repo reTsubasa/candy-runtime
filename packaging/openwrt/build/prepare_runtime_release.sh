@@ -33,10 +33,30 @@ sha256_file() {
   fi
 }
 
+validate_product_payload() {
+  config=$repo_root/openwrt/client/packages/candy-client/candy.config
+  init=$repo_root/openwrt/client/packages/candy-client/candy.init
+  rulesets=$repo_root/openwrt/client/packages/candy-client/rulesets
+  ruleset_verifier=$repo_root/packaging/openwrt/build/verify_bootstrap_rulesets.sh
+  [ -x "$ruleset_verifier" ] || fail "ruleset verifier is missing or not executable"
+  awk '
+    /^config node / { in_node=1; next }
+    /^config / { in_node=0 }
+    in_node && /option enabled '\''1'\''/ { exit 1 }
+  ' "$config" || fail "default configuration contains an enabled node"
+  ! grep -Eq "option (server|server_name|server_pin|auth) '(127\\.0\\.0\\.1(:[0-9]+)?|localhost|[^']*(change-me|replace-me)[^']*)'" "$config" ||
+    fail "default configuration contains a deployable placeholder credential or endpoint"
+  "$ruleset_verifier" "$rulesets" >/dev/null || fail "bootstrap ruleset verification failed"
+  grep -F 'fail_open_locked()' "$init" >/dev/null || fail "OpenWrt init has no fail-open implementation"
+  grep -F 'CANDY_SERVICE_LOCK_DIR=${CANDY_SERVICE_LOCK_DIR:-/var/lib/candy/service.lock}' "$init" >/dev/null ||
+    fail "service lifecycle lock is not root-owned"
+}
+
 [ -n "$dist_dir" ] || fail "usage: $0 DIST_DIR"
 [ -d "$dist_dir" ] || fail "distribution directory is missing: $dist_dir"
 command -v jq >/dev/null 2>&1 || fail "jq is required"
 [ -f "$dist_dir/BUILD-INFO" ] || fail "BUILD-INFO is missing"
+validate_product_payload
 
 runtime_version=$(tr -d '\r\n' < "$repo_root/VERSION")
 client_manifest=$repo_root/openwrt/client/packages/candy-client/Makefile

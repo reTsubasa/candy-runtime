@@ -201,6 +201,8 @@ sha_042=$(sha256sum "$tmp/core-0.4.2.tar.gz" | awk '{ print $1 }')
 make_bundle 0.4.3 1 "$tmp/core-0.4.3.tar.gz"
 sha_043=$(sha256sum "$tmp/core-0.4.3.tar.gz" | awk '{ print $1 }')
 "$manager" install 0.4.3 "file://$tmp/core-0.4.3.tar.gz" "$sha_043" >/dev/null
+"$manager" install 0.4.3 "file://$tmp/core-0.4.3.tar.gz" "$sha_043" > "$tmp/replaced.out"
+grep -F 'replaced inactive Core 0.4.3' "$tmp/replaced.out" >/dev/null
 "$manager" remove 0.4.3 >/dev/null
 [ ! -e "$cores/0.4.3" ]
 

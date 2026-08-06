@@ -238,22 +238,14 @@ function o.validate(self, value, section)
 end
 
 o = s:option(ListValue, "type", translate("Algorithm"))
+o:value("select", translate("Manual selection"))
 o:value("round-robin", translate("Round robin"))
+o:value("load-balance", translate("Load balance"))
 o:value("consistent-hash", translate("Consistent hash"))
 o:value("url-test", translate("Lowest latency"))
 o:value("fallback", translate("Fallback order"))
-o.default = "round-robin"
+o.default = "select"
 o.rmempty = false
-function o.cfgvalue(self, section)
-	local value = ListValue.cfgvalue(self, section)
-	if value == "select" then
-		return "fallback"
-	end
-	if value == "load-balance" then
-		return "round-robin"
-	end
-	return value
-end
 
 function m.on_after_commit(self)
 	if process.run({ "/etc/init.d/candy", "status" }) then

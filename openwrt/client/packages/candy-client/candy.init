@@ -3,19 +3,21 @@
 START=95
 STOP=10
 USE_PROCD=1
-EXTRA_COMMANDS="provider_update_once provider_update_loop network_apply network_cleanup reload_runtime restart_queued congestion_test run_client run_sdwan run_netd"
+EXTRA_COMMANDS="provider_update_once provider_update_loop network_apply network_cleanup reload_runtime restart_queued fail_open health_watchdog congestion_test run_client run_sdwan run_netd"
 EXTRA_HELP="	provider_update_once	Run due provider auto updates once
 	provider_update_loop	Run provider auto update scheduler loop
 	network_apply	Apply firewall and DNS policy in background
 	network_cleanup	Clean firewall and DNS policy in background
 	reload_runtime	Validate and apply the current Candy configuration
 	restart_queued	Restart Candy with lifecycle serialization
+	fail_open	Stop Candy and remove owned network steering after a fatal failure
+	health_watchdog	Monitor local Core liveness and fail open after repeated faults
 	congestion_test	Run a bounded CUBIC/BBR comparison without changing configuration
 	run_client	Run candy-client after listener preflight
 	run_netd	Run the privileged SD-WAN network helper"
 
 case "${action:-${1:-}}" in
-status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|congestion_test|run_client|run_sdwan|run_netd)
+status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|fail_open|health_watchdog|congestion_test|run_client|run_sdwan|run_netd)
 		CANDY_FAST_STATUS_ACTION="${action:-$1}"
 		EXTRA_COMMANDS="$EXTRA_COMMANDS status running"
 		USE_PROCD=
@@ -33,22 +35,28 @@ LOG_FILE=/tmp/candy.log
 TRAFFIC_LOG_FILE=${TRAFFIC_LOG_FILE:-/tmp/candy-traffic.log}
 NODE_STATUS_FILE=/tmp/candy.nodes
 STATUS_PROBE_LOCK_DIR=${STATUS_PROBE_LOCK_DIR:-/tmp/candy-status-probe.lock}
-NETWORK_APPLY_LOCK_DIR=${NETWORK_APPLY_LOCK_DIR:-/tmp/candy-network-apply.lock}
 CANDY_LIFECYCLE_FILE=${CANDY_LIFECYCLE_FILE:-/tmp/candy.lifecycle}
+CANDY_FAULT_STATE_FILE=${CANDY_FAULT_STATE_FILE:-/var/lib/candy/runtime-fault.json}
 CANDY_DNS_LISTEN=${CANDY_DNS_LISTEN:-127.0.0.1:15353}
 CANDY_LISTENER_WAIT_SECONDS=${CANDY_LISTENER_WAIT_SECONDS:-8}
-CANDY_SERVICE_LOCK_DIR=${CANDY_SERVICE_LOCK_DIR:-/tmp/candy-service.lock}
 CANDY_SERVICE_LOCK_WAIT_SECONDS=${CANDY_SERVICE_LOCK_WAIT_SECONDS:-30}
 CANDY_LIFECYCLE_TTL_SECONDS=${CANDY_LIFECYCLE_TTL_SECONDS:-10}
 CANDY_READY_FILE=${CANDY_READY_FILE:-$RUNTIME_DIR/client.ready}
 CANDY_SERVICE_WAIT_SECONDS=${CANDY_SERVICE_WAIT_SECONDS:-8}
 CANDY_CLIENT_BIN=${CANDY_CLIENT_BIN:-/usr/bin/candy-client}
+CANDY_RUNTIME_HEALTH_CHECK=${CANDY_RUNTIME_HEALTH_CHECK:-/usr/libexec/candy-runtime-health-check}
+CANDY_HEALTH_CHECK_INTERVAL_SECONDS=${CANDY_HEALTH_CHECK_INTERVAL_SECONDS:-5}
+CANDY_HEALTH_CHECK_FAILURE_THRESHOLD=${CANDY_HEALTH_CHECK_FAILURE_THRESHOLD:-3}
+CANDY_HEALTH_CHECK_START_GRACE_SECONDS=${CANDY_HEALTH_CHECK_START_GRACE_SECONDS:-15}
 CANDY_SDWAN_BIN=${CANDY_SDWAN_BIN:-/usr/bin/candy-sdwan}
 CANDY_CORE_BIN=${CANDY_CORE_BIN:-/usr/lib/candy/cores/current/candy-core}
 CANDY_SDWAN_CONFIG=${CANDY_SDWAN_CONFIG:-/etc/candy/sdwan.toml}
 CANDY_NETD_BIN=${CANDY_NETD_BIN:-/usr/bin/candy-netd}
-CANDY_NETD_SOCKET=${CANDY_NETD_SOCKET:-$RUNTIME_DIR/netd.sock}
+CANDY_NETD_RUNTIME_DIR=${CANDY_NETD_RUNTIME_DIR:-/var/run/candy-netd}
+CANDY_NETD_SOCKET=${CANDY_NETD_SOCKET:-$CANDY_NETD_RUNTIME_DIR/netd.sock}
 CANDY_NETD_JOURNAL=${CANDY_NETD_JOURNAL:-/var/lib/candy/netd.journal}
+NETWORK_APPLY_LOCK_DIR=${NETWORK_APPLY_LOCK_DIR:-/var/lib/candy/network-apply.lock}
+CANDY_SERVICE_LOCK_DIR=${CANDY_SERVICE_LOCK_DIR:-/var/lib/candy/service.lock}
 CANDY_EPOCH_DIRECTORY=${CANDY_EPOCH_DIRECTORY:-/var/lib/candy/epochs}
 CANDY_SDWAN_STATUS_FILE=${CANDY_SDWAN_STATUS_FILE:-$RUNTIME_DIR/sdwan-status.json}
 CANDY_VERSION=${CANDY_VERSION:-0.4.0}
@@ -65,6 +73,10 @@ GEO_RUNTIME_RULESETS_DIR=${GEO_RUNTIME_RULESETS_DIR:-$RUNTIME_DIR/rulesets}
 DNS_ETC_RULESETS_DIR=${DNS_ETC_RULESETS_DIR:-/etc/candy/rulesets}
 DNS_SHARE_RULESETS_DIR=${DNS_SHARE_RULESETS_DIR:-/usr/share/candy/rulesets}
 DNS_RUNTIME_RULESETS_DIR=${DNS_RUNTIME_RULESETS_DIR:-$RUNTIME_DIR/rulesets}
+CANDY_MIN_CN_IP_ENTRIES=${CANDY_MIN_CN_IP_ENTRIES:-5000}
+CANDY_MIN_CN_IPV4_ENTRIES=${CANDY_MIN_CN_IPV4_ENTRIES:-4000}
+CANDY_MIN_CN_IPV6_ENTRIES=${CANDY_MIN_CN_IPV6_ENTRIES:-1500}
+CANDY_MIN_GFWLIST_ENTRIES=${CANDY_MIN_GFWLIST_ENTRIES:-4000}
 DNS_TRACE_LOG_FILE=${DNS_TRACE_LOG_FILE:-/tmp/candy-dns-trace.log}
 NETWORK_CHECK_LOG_FILE=${NETWORK_CHECK_LOG_FILE:-/tmp/candy-network-check.log}
 CONGESTION_TEST_LOCK_DIR=${CONGESTION_TEST_LOCK_DIR:-/tmp/candy-congestion-test.lock}
@@ -78,24 +90,54 @@ if [ -n "${CANDY_DIRECT_COMMAND:-}" ] && [ -f /lib/functions.sh ]; then
 	. /lib/functions.sh
 fi
 
-log_msg() {
+log_event() {
+	local level="$1" event="$2"
+	shift 2
+	case "$level" in debug|info|warn|error) ;; *) level=info ;; esac
+	if [ "$level" = debug ] && [ "${CANDY_LOG_LEVEL:-info}" != debug ]; then
+		return 0
+	fi
 	mkdir -p "$(dirname "$LOG_FILE")"
-	printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"
+	if mkdir "$LOG_FILE.rotate.lock" 2>/dev/null; then
+		rotate_log_file "$LOG_FILE" 1048576 5
+		rmdir "$LOG_FILE.rotate.lock" 2>/dev/null || true
+	fi
+	printf '%s level=%s event=%s pid=%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$event" "$$" "$*" >> "$LOG_FILE"
 	if command -v logger >/dev/null 2>&1; then
-		logger -t candy -- "$*"
+		logger -t candy -- "level=$level event=$event pid=$$ $*"
 	fi
 }
 
+log_msg() {
+	log_event info general "$*"
+}
+
+log_warn() {
+	log_event warn general "$*"
+}
+
 log_error() {
-	log_msg "ERROR: $*"
+	log_event error general "$*"
+}
+
+log_debug() {
+	log_event debug general "$*"
 }
 
 rotate_log_file() {
-	local path="$1" max_bytes="${2:-262144}" size
+	local path="$1" max_bytes="${2:-1048576}" generations="${3:-5}" size index
 	[ -f "$path" ] || return 0
 	size=$(wc -c < "$path" 2>/dev/null || printf 0)
 	case "$size" in ''|*[!0-9]*) return 0 ;; esac
-	[ "$size" -le "$max_bytes" ] || mv -f "$path" "$path.1"
+	[ "$size" -le "$max_bytes" ] && return 0
+	case "$generations" in ''|*[!0-9]*|0) generations=1 ;; esac
+	rm -f "$path.$generations"
+	index=$((generations - 1))
+	while [ "$index" -ge 1 ]; do
+		[ ! -f "$path.$index" ] || mv -f "$path.$index" "$path.$((index + 1))"
+		index=$((index - 1))
+	done
+	mv -f "$path" "$path.1"
 }
 
 log_traffic_msg() {
@@ -183,6 +225,29 @@ write_lifecycle_state() {
 	atomic_commit_file "$temporary" "$CANDY_LIFECYCLE_FILE"
 }
 
+write_fault_state() {
+	local reason="$1" cleanup="$2" detail="$3" temporary
+	mkdir -p "$(dirname "$CANDY_FAULT_STATE_FILE")" || return 1
+	temporary=$(atomic_temp_path "$CANDY_FAULT_STATE_FILE") || return 1
+	{
+		printf '{"schema_version":1,"state":"active","reason":'
+		json_string "$reason"
+		printf ',"cleanup":'
+		json_string "$cleanup"
+		printf ',"detail":'
+		json_string "$detail"
+		printf ',"updated_at":%s}\n' "$(date +%s 2>/dev/null || printf 0)"
+	} > "$temporary" || {
+		rm -f "$temporary"
+		return 1
+	}
+	atomic_commit_file "$temporary" "$CANDY_FAULT_STATE_FILE" 0600
+}
+
+clear_fault_state() {
+	rm -f "$CANDY_FAULT_STATE_FILE"
+}
+
 json_number_or_null() {
 	case "$1" in
 		''|*[!0-9]*) printf 'null' ;;
@@ -245,6 +310,33 @@ candy_client_pids() {
 wait_for_candy_client_exit() {
 	local wait_seconds="${1:-$CANDY_SERVICE_WAIT_SECONDS}" waited=0
 	while [ -n "$(candy_client_pids)" ]; do
+		[ "$waited" -lt "$wait_seconds" ] || return 1
+		waited=$((waited + 1))
+		sleep 1
+	done
+	return 0
+}
+
+stop_candy_clients_for_fail_open() {
+	local pids
+	if wait_for_candy_client_exit 2; then
+		return 0
+	fi
+	pids=$(candy_client_pids)
+	[ -n "$pids" ] || return 0
+	kill -TERM $pids 2>/dev/null || true
+	if wait_for_candy_client_exit 2; then
+		return 0
+	fi
+	pids=$(candy_client_pids)
+	[ -n "$pids" ] || return 0
+	kill -KILL $pids 2>/dev/null || true
+	wait_for_candy_client_exit 2
+}
+
+wait_for_netd_exit() {
+	local waited=0 wait_seconds="${1:-3}"
+	while run_with_timeout 1 "$CANDY_NETD_BIN" --probe-socket "$CANDY_NETD_SOCKET" >/dev/null 2>&1; do
 		[ "$waited" -lt "$wait_seconds" ] || return 1
 		waited=$((waited + 1))
 		sleep 1
@@ -331,7 +423,7 @@ migrate_reserved_dns_forward() {
 }
 
 run_client() {
-	local congestion candy_bbr_preset automatic_bbr_fallback
+	local congestion candy_bbr_preset child rc stopping=0
 	if ! ensure_no_existing_candy_client_before_start; then
 		log_msg "run_client skipped; listeners still owned by stale candy-client"
 		exit 1
@@ -340,19 +432,74 @@ run_client() {
 	rm -f "$CANDY_GENERATION_FILE"
 	config_load candy
 	config_get congestion client congestion candy-bbr
-	case "$congestion" in candy-bbr|cubic) ;; *) congestion=candy-bbr ;; esac
+	case "$congestion" in
+		candy-bbr) ;;
+		cubic) log_error "CUBIC is diagnostic-only; Candy runtime is fixed to candy-bbr"; exit 1 ;;
+		*) log_error "rejected unknown congestion controller: $congestion"; exit 1 ;;
+	esac
 	config_get candy_bbr_preset client candy_bbr_preset current
-	case "$candy_bbr_preset" in current|bbr-v1|aggressive) ;; *) candy_bbr_preset=current ;; esac
-	config_get_bool automatic_bbr_fallback client automatic_bbr_fallback 0
+	case "$candy_bbr_preset" in current|bbr-v1|aggressive) ;; *) log_error "rejected unknown Candy BBR preset: $candy_bbr_preset"; exit 1 ;; esac
 	set -- "$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format candy-json --platform openwrt \
 		--congestion "$congestion" --candy-bbr-preset "$candy_bbr_preset" \
 		--passive-status-path "$CANDY_PASSIVE_STATUS_FILE" --control-socket-path "$CANDY_CONTROL_SOCKET"
-	[ "$automatic_bbr_fallback" -eq 1 ] && set -- "$@" --automatic-bbr-fallback
-	exec "$@"
+	# Keep a supervisor around the Core process.  Any unexpected exit, including
+	# an erroneous zero exit, is terminal and must remove steering before procd
+	# can leave the device in a half-running state. TERM/INT are normal stop
+	# paths and must not trigger fail-open a second time.
+	trap 'stopping=1; [ -z "${child:-}" ] || kill -TERM "$child" 2>/dev/null || true' TERM INT
+	"$@" &
+	child=$!
+	wait "$child"
+	rc=$?
+	trap - TERM INT
+	if [ "$stopping" -eq 0 ]; then
+		log_event error core_exit "exit=$rc; scheduling immediate fail-open"
+		run_detached_direct_command fail_open "core_exit:$rc"
+	fi
+	return "$rc"
 }
 
 run_sdwan() {
-	exec "$CANDY_SDWAN_BIN" --config "$CANDY_SDWAN_CONFIG"
+	local child rc stopping=0
+	trap 'stopping=1; [ -z "${child:-}" ] || kill -TERM "$child" 2>/dev/null || true' TERM INT
+	"$CANDY_SDWAN_BIN" --config "$CANDY_SDWAN_CONFIG" &
+	child=$!
+	wait "$child"
+	rc=$?
+	trap - TERM INT
+	if [ "$stopping" -eq 0 ]; then
+		log_event error sdwan_exit "exit=$rc; scheduling immediate fail-open"
+		run_detached_direct_command fail_open "sdwan_exit:$rc"
+	fi
+	return "$rc"
+}
+
+health_watchdog() {
+	local failures=0
+	trap 'exit 0' TERM INT
+	sleep "$CANDY_HEALTH_CHECK_START_GRACE_SECONDS"
+	while :; do
+		if CANDY_READY_FILE="$CANDY_READY_FILE" \
+			CANDY_RUNTIME_CONFIG="$RUNTIME_CONFIG" \
+			CANDY_PASSIVE_STATUS_FILE="$CANDY_PASSIVE_STATUS_FILE" \
+			CANDY_CONTROL_SOCKET="$CANDY_CONTROL_SOCKET" \
+			CANDY_SERVICE_INIT="$CANDY_INIT_SELF" \
+			"$CANDY_RUNTIME_HEALTH_CHECK" client >/dev/null 2>&1; then
+			if [ "$failures" -gt 0 ]; then
+				log_event info health_recovered "consecutive_failures=$failures"
+			fi
+			failures=0
+		else
+			failures=$((failures + 1))
+			log_event warn health_failed "consecutive_failures=$failures threshold=$CANDY_HEALTH_CHECK_FAILURE_THRESHOLD"
+			if [ "$failures" -ge "$CANDY_HEALTH_CHECK_FAILURE_THRESHOLD" ]; then
+				log_event error health_terminal "reason=local-runtime-unresponsive; scheduling fail-open"
+				run_detached_direct_command fail_open local_runtime_unresponsive
+				return 1
+			fi
+		fi
+		sleep "$CANDY_HEALTH_CHECK_INTERVAL_SECONDS"
+	done
 }
 
 sdwan_enabled() {
@@ -366,12 +513,20 @@ prepare_sdwan_state() {
 	config_get CANDY_NETD_SOCKET sdwan netd_socket "$CANDY_NETD_SOCKET"
 	config_get CANDY_NETD_JOURNAL sdwan netd_journal "$CANDY_NETD_JOURNAL"
 	config_get CANDY_EPOCH_DIRECTORY sdwan epoch_directory "$CANDY_EPOCH_DIRECTORY"
-	case "$CANDY_NETD_SOCKET" in /var/run/candy/*) ;; *) return 1 ;; esac
+	# Migrate the former default away from the application-writable runtime directory.
+	[ "$CANDY_NETD_SOCKET" != "$RUNTIME_DIR/netd.sock" ] || CANDY_NETD_SOCKET="$CANDY_NETD_RUNTIME_DIR/netd.sock"
+	case "$CANDY_NETD_SOCKET" in "$CANDY_NETD_RUNTIME_DIR"/*) ;; *) return 1 ;; esac
 	case "$CANDY_NETD_JOURNAL" in /var/lib/candy/*) ;; *) return 1 ;; esac
 	case "$CANDY_EPOCH_DIRECTORY" in /var/lib/candy/*) ;; *) return 1 ;; esac
-	mkdir -p "$RUNTIME_DIR" /var/lib/candy "$CANDY_EPOCH_DIRECTORY" || return 1
-	chmod 0700 /var/lib/candy "$CANDY_EPOCH_DIRECTORY" || return 1
-	chown -R candy-sdwan:candy-sdwan /var/lib/candy "$CANDY_EPOCH_DIRECTORY" 2>/dev/null || return 1
+	mkdir -p "$RUNTIME_DIR" "$CANDY_NETD_RUNTIME_DIR" /var/lib/candy "$CANDY_EPOCH_DIRECTORY" || return 1
+	chown root:candy-sdwan "$RUNTIME_DIR" 2>/dev/null || return 1
+	chmod 0770 "$RUNTIME_DIR" || return 1
+	chown root:candy-sdwan "$CANDY_NETD_RUNTIME_DIR" 2>/dev/null || return 1
+	chmod 0750 "$CANDY_NETD_RUNTIME_DIR" || return 1
+	chown root:root /var/lib/candy 2>/dev/null || return 1
+	chmod 0711 /var/lib/candy || return 1
+	chmod 0700 "$CANDY_EPOCH_DIRECTORY" || return 1
+	chown -R candy-sdwan:candy-sdwan "$CANDY_EPOCH_DIRECTORY" 2>/dev/null || return 1
 }
 
 run_netd() {
@@ -411,37 +566,57 @@ start_sdwan_netd() {
 wait_for_sdwan_netd() {
 	local waited=0
 	sdwan_enabled || return 0
-	while [ ! -S "$CANDY_NETD_SOCKET" ]; do
+	while ! run_with_timeout 2 "$CANDY_NETD_BIN" --probe-socket "$CANDY_NETD_SOCKET" >/dev/null 2>&1; do
 		[ "$waited" -lt "$CANDY_LISTENER_WAIT_SECONDS" ] || return 1
 		waited=$((waited + 1))
 		sleep 1
 	done
 }
 
+cleanup_service_lifecycle_lock() {
+	rm -f "$CANDY_SERVICE_LOCK_DIR/pid" "$CANDY_SERVICE_LOCK_DIR/starttime" "$CANDY_SERVICE_LOCK_DIR/boot_id" 2>/dev/null || true
+	rmdir "$CANDY_SERVICE_LOCK_DIR" 2>/dev/null || true
+}
+
 with_service_lifecycle_lock() {
-	local waited=0 lock_pid rc
+	local waited=0 lock_pid rc invalid_lock_seen=0
 	while ! mkdir "$CANDY_SERVICE_LOCK_DIR" 2>/dev/null; do
 		lock_pid=$(cat "$CANDY_SERVICE_LOCK_DIR/pid" 2>/dev/null || true)
 		case "$lock_pid" in
-			''|*[!0-9]*) ;;
+			''|*[!0-9]*)
+				if [ "$invalid_lock_seen" -eq 1 ]; then
+					cleanup_service_lifecycle_lock
+					invalid_lock_seen=0
+					continue
+				fi
+				invalid_lock_seen=1
+				;;
 			*)
-				if ! kill -0 "$lock_pid" 2>/dev/null; then
-					rm -rf "$CANDY_SERVICE_LOCK_DIR" 2>/dev/null || true
+				invalid_lock_seen=0
+				if ! kill -0 "$lock_pid" 2>/dev/null || { [ -s "$CANDY_SERVICE_LOCK_DIR/starttime" ] && ! lock_process_identity_matches "$CANDY_SERVICE_LOCK_DIR" "$lock_pid"; }; then
+					cleanup_service_lifecycle_lock
 					continue
 				fi
 				;;
 		esac
 		if [ "$waited" -ge "$CANDY_SERVICE_LOCK_WAIT_SECONDS" ]; then
-			log_msg "service lifecycle action skipped; another lifecycle action is running"
-			return 0
+			log_warn "service lifecycle action failed; another lifecycle action is still running"
+			return 1
 		fi
 		waited=$((waited + 1))
 		sleep 1
 	done
-	printf '%s\n' "$$" > "$CANDY_SERVICE_LOCK_DIR/pid"
+	if ! chmod 0700 "$CANDY_SERVICE_LOCK_DIR" 2>/dev/null ||
+		! printf '%s\n' "$$" > "$CANDY_SERVICE_LOCK_DIR/pid" ||
+		! write_lock_process_identity "$CANDY_SERVICE_LOCK_DIR" "$$"; then
+		cleanup_service_lifecycle_lock
+		return 1
+	fi
+	trap 'cleanup_service_lifecycle_lock' EXIT INT TERM
 	"$@"
 	rc=$?
-	rm -rf "$CANDY_SERVICE_LOCK_DIR" 2>/dev/null || true
+	cleanup_service_lifecycle_lock
+	trap - EXIT INT TERM
 	return "$rc"
 }
 
@@ -554,18 +729,59 @@ write_dns_status() {
 }
 
 geo_provider_entry_count() {
-	local path="$1"
-	[ -f "$path" ] || {
+	local path="$1" counts
+	counts=$(geo_provider_counts "$path" 2>/dev/null) || {
 		printf '0\n'
 		return 0
 	}
-	sed 's/#.*//' "$path" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' '
+	printf '%s\n' "${counts%% *}"
+}
+
+geo_provider_counts() {
+	local path="$1"
+	[ -s "$path" ] && [ ! -L "$path" ] || return 1
+	awk '
+	function invalid() { failed=1; exit }
+	{
+		sub(/#.*/, "")
+		gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+		if ($0 == "" || seen[$0]++) next
+		slash = index($0, "/")
+		if (!slash || index(substr($0, slash + 1), "/")) invalid()
+		address = substr($0, 1, slash - 1)
+		prefix = substr($0, slash + 1)
+		if (prefix !~ /^[0-9]+$/) invalid()
+		if (index(address, ":")) {
+			if (address !~ /^[0-9A-Fa-f:]+$/ || prefix + 0 > 128) invalid()
+			v6++
+		} else {
+			if (address !~ /^[0-9.]+$/ || prefix + 0 > 32) invalid()
+			count = split(address, octets, ".")
+			if (count != 4) invalid()
+			for (i = 1; i <= 4; i++) if (octets[i] !~ /^[0-9]+$/ || octets[i] + 0 > 255) invalid()
+			v4++
+		}
+	}
+	END { if (failed || v4 + v6 == 0) exit 1; printf "%d %d %d\n", v4 + v6, v4, v6 }
+	' "$path"
+}
+
+geo_provider_valid() {
+	local path="$1" counts total rest ipv4 ipv6
+	counts=$(geo_provider_counts "$path" 2>/dev/null) || return 1
+	total=${counts%% *}
+	rest=${counts#* }
+	ipv4=${rest%% *}
+	ipv6=${rest#* }
+	[ "$total" -ge "$CANDY_MIN_CN_IP_ENTRIES" ] &&
+		[ "$ipv4" -ge "$CANDY_MIN_CN_IPV4_ENTRIES" ] &&
+		[ "$ipv6" -ge "$CANDY_MIN_CN_IPV6_ENTRIES" ]
 }
 
 geo_provider_source_path() {
-	if [ -s "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" ]; then
+	if geo_provider_valid "$GEO_ETC_RULESETS_DIR/cn-ip.cidr"; then
 		printf '%s\n' "$GEO_ETC_RULESETS_DIR/cn-ip.cidr"
-	elif [ -s "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr" ]; then
+	elif geo_provider_valid "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr"; then
 		printf '%s\n' "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr"
 	fi
 }
@@ -603,7 +819,7 @@ write_nft_cidr_set() {
 }
 
 refresh_runtime_geo_provider() {
-	local bypass_china_ip source_path runtime_path
+	local bypass_china_ip source_path runtime_path rejected_local=0
 	config_get_bool bypass_china_ip client bypass_china_ip 1
 	GEO_ACTIVE_PATH=
 	GEO_LAST_ERROR=
@@ -611,12 +827,17 @@ refresh_runtime_geo_provider() {
 	if [ "$bypass_china_ip" -ne 1 ]; then
 		return 0
 	fi
+	if [ -e "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" ] && ! geo_provider_valid "$GEO_ETC_RULESETS_DIR/cn-ip.cidr"; then
+		rejected_local=1
+		log_event warn provider_validation "provider=cn-ip source=local result=rejected reason=invalid-or-incomplete"
+	fi
 	source_path=$(geo_provider_source_path)
 	runtime_path="$GEO_RUNTIME_PROVIDER_PATH"
 	mkdir -p "$GEO_RUNTIME_RULESETS_DIR"
 	if [ -n "$source_path" ]; then
 		if atomic_copy_file "$source_path" "$runtime_path"; then
 			GEO_ACTIVE_PATH="$runtime_path"
+			[ "$rejected_local" -eq 0 ] || GEO_LAST_ERROR="invalid local provider ignored; using packaged bootstrap"
 		else
 			GEO_LAST_ERROR="failed to copy provider"
 		fi
@@ -656,33 +877,62 @@ write_geo_status() {
 }
 
 domain_provider_entry_count() {
-	local path="$1"
-	[ -f "$path" ] || {
+	local path="$1" count
+	count=$(domain_provider_count "$path" 2>/dev/null) || {
 		printf '0\n'
 		return 0
 	}
-	sed 's/#.*//' "$path" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' '
+	printf '%s\n' "$count"
+}
+
+domain_provider_count() {
+	local path="$1"
+	[ -s "$path" ] && [ ! -L "$path" ] || return 1
+	awk '
+	function invalid() { failed=1; exit }
+	{
+		sub(/#.*/, "")
+		gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+		if ($0 == "" || seen[$0]++) next
+		if (length($0) > 253 || $0 !~ /^([a-z0-9][a-z0-9-]*\.)*[a-z0-9][a-z0-9-]*$/) invalid()
+		labels = split($0, label, ".")
+		for (i = 1; i <= labels; i++) if (length(label[i]) > 63 || label[i] ~ /-$/) invalid()
+		count++
+	}
+	END { if (failed || count == 0) exit 1; print count }
+	' "$path"
+}
+
+domain_provider_valid() {
+	local count
+	count=$(domain_provider_count "$1" 2>/dev/null) || return 1
+	[ "$count" -ge "$CANDY_MIN_GFWLIST_ENTRIES" ]
 }
 
 gfwlist_provider_source_path() {
-	if [ -s "$DNS_ETC_RULESETS_DIR/gfwlist.domains" ]; then
+	if domain_provider_valid "$DNS_ETC_RULESETS_DIR/gfwlist.domains"; then
 		printf '%s\n' "$DNS_ETC_RULESETS_DIR/gfwlist.domains"
-	elif [ -s "$DNS_SHARE_RULESETS_DIR/gfwlist.domains" ]; then
+	elif domain_provider_valid "$DNS_SHARE_RULESETS_DIR/gfwlist.domains"; then
 		printf '%s\n' "$DNS_SHARE_RULESETS_DIR/gfwlist.domains"
 	fi
 }
 
 refresh_runtime_gfwlist_provider() {
-	local source_path runtime_path
+	local source_path runtime_path rejected_local=0
 	GFWLIST_ACTIVE_PATH=
 	GFWLIST_LAST_ERROR=
 	GFWLIST_RUNTIME_PROVIDER_PATH="$DNS_RUNTIME_RULESETS_DIR/gfwlist.domains"
+	if [ -e "$DNS_ETC_RULESETS_DIR/gfwlist.domains" ] && ! domain_provider_valid "$DNS_ETC_RULESETS_DIR/gfwlist.domains"; then
+		rejected_local=1
+		log_event warn provider_validation "provider=gfwlist source=local result=rejected reason=invalid-or-incomplete"
+	fi
 	source_path=$(gfwlist_provider_source_path)
 	runtime_path="$GFWLIST_RUNTIME_PROVIDER_PATH"
 	mkdir -p "$DNS_RUNTIME_RULESETS_DIR"
 	if [ -n "$source_path" ]; then
 		if atomic_copy_file "$source_path" "$runtime_path"; then
 			GFWLIST_ACTIVE_PATH="$runtime_path"
+			[ "$rejected_local" -eq 0 ] || GFWLIST_LAST_ERROR="invalid local provider ignored; using packaged bootstrap"
 		else
 			GFWLIST_LAST_ERROR="failed to copy gfwlist provider"
 		fi
@@ -758,45 +1008,47 @@ provider_url_allowed() {
 }
 
 run_geo_provider_update() {
-	local url="$1"
+	local url="$1" update_log=/tmp/candy-geo-update.log
 	provider_url_allowed "$url" || return 1
 	mkdir -p "$GEO_ETC_RULESETS_DIR"
-	"$CANDY_CLIENT_BIN" geo update cn-ip --url "$url" --output "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" >/tmp/candy-geo-update.log 2>&1
+	rotate_log_file "$update_log" 262144 3
+	"$CANDY_CLIENT_BIN" geo update cn-ip --url "$url" --output "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" >>"$update_log" 2>&1
 }
 
 run_gfwlist_provider_update() {
-	local url="$1"
+	local url="$1" update_log=/tmp/candy-gfwlist-update.log
 	provider_url_allowed "$url" || return 1
 	mkdir -p "$DNS_ETC_RULESETS_DIR"
-	"$CANDY_CLIENT_BIN" dns update gfwlist --url "$url" --output "$DNS_ETC_RULESETS_DIR/gfwlist.domains" >/tmp/candy-gfwlist-update.log 2>&1
+	rotate_log_file "$update_log" 262144 3
+	"$CANDY_CLIENT_BIN" dns update gfwlist --url "$url" --output "$DNS_ETC_RULESETS_DIR/gfwlist.domains" >>"$update_log" 2>&1
 }
 
 provider_update_once() {
 	config_load candy
 	local geo_auto gfwlist_auto geo_interval gfwlist_interval geo_url gfwlist_url updated=0
 	PROVIDER_UPDATED=0
-	config_get_bool geo_auto client geo_auto_update 0
-	config_get_bool gfwlist_auto client gfwlist_auto_update 0
+	config_get_bool geo_auto client geo_auto_update 1
+	config_get_bool gfwlist_auto client gfwlist_auto_update 1
 	geo_interval=$(provider_update_interval_hours geo_update_interval_hours)
 	gfwlist_interval=$(provider_update_interval_hours gfwlist_update_interval_hours)
-	config_get geo_url client geo_update_url 'https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt'
+	config_get geo_url client geo_update_url 'https://gaoyifan.github.io/china-operator-ip/china46.txt'
 	config_get gfwlist_url client gfwlist_update_url 'https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt'
 
-	if [ "$geo_auto" -eq 1 ] && provider_update_due "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" "$geo_interval"; then
+	if [ "$geo_auto" -eq 1 ] && { ! geo_provider_valid "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" || provider_update_due "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" "$geo_interval"; }; then
 		if run_geo_provider_update "$geo_url"; then
-			log_msg "auto updated China IP provider"
+			log_event info provider_update "provider=cn-ip result=success"
 			updated=1
 		else
-			log_msg "auto update failed for China IP provider"
+			log_event warn provider_update "provider=cn-ip result=failed retained=last-known-good"
 		fi
 	fi
 
-	if [ "$gfwlist_auto" -eq 1 ] && provider_update_due "$DNS_ETC_RULESETS_DIR/gfwlist.domains" "$gfwlist_interval"; then
+	if [ "$gfwlist_auto" -eq 1 ] && { ! domain_provider_valid "$DNS_ETC_RULESETS_DIR/gfwlist.domains" || provider_update_due "$DNS_ETC_RULESETS_DIR/gfwlist.domains" "$gfwlist_interval"; }; then
 		if run_gfwlist_provider_update "$gfwlist_url"; then
-			log_msg "auto updated GFWList provider"
+			log_event info provider_update "provider=gfwlist result=success"
 			updated=1
 		else
-			log_msg "auto update failed for GFWList provider"
+			log_event warn provider_update "provider=gfwlist result=failed retained=last-known-good"
 		fi
 	fi
 
@@ -808,8 +1060,8 @@ provider_update_once() {
 
 provider_update_sleep_seconds() {
 	local geo_auto gfwlist_auto geo_interval gfwlist_interval interval=24
-	config_get_bool geo_auto client geo_auto_update 0
-	config_get_bool gfwlist_auto client gfwlist_auto_update 0
+	config_get_bool geo_auto client geo_auto_update 1
+	config_get_bool gfwlist_auto client gfwlist_auto_update 1
 	if [ "$geo_auto" -eq 1 ]; then
 		geo_interval=$(provider_update_interval_hours geo_update_interval_hours)
 		interval="$geo_interval"
@@ -820,7 +1072,9 @@ provider_update_sleep_seconds() {
 			interval="$gfwlist_interval"
 		fi
 	fi
-	printf '%s\n' $((interval * 3600))
+	interval=$((interval * 3600))
+	[ "$interval" -le 900 ] || interval=900
+	printf '%s\n' "$interval"
 }
 
 provider_update_loop() {
@@ -828,8 +1082,9 @@ provider_update_loop() {
 		provider_update_once
 		if [ "${PROVIDER_UPDATED:-0}" -eq 1 ]; then
 			log_msg "reloading candy service after provider auto update"
-			(sleep 1; "$CANDY_INIT_SELF" reload_runtime >/dev/null 2>&1) &
-			exit 0
+			if ! "$CANDY_INIT_SELF" reload_runtime >/dev/null 2>&1; then
+				log_event error provider_reload "validated provider update could not be activated"
+			fi
 		fi
 		sleep "$(provider_update_sleep_seconds)"
 	done
@@ -840,7 +1095,7 @@ runtime_mode_value() {
 	config_get runtime_mode client runtime_mode fallback
 	case "$runtime_mode" in
 		fallback|performance|stable) printf '%s\n' "$runtime_mode" ;;
-		*) printf '%s\n' fallback ;;
+		*) log_error "rejected unknown runtime mode: $runtime_mode"; return 1 ;;
 	esac
 }
 
@@ -849,7 +1104,7 @@ udp_redundancy_multiplier_value() {
 	config_get value client "$option" 1
 	case "$value" in
 		1|2|3) printf '%s\n' "$value" ;;
-		*) printf '%s\n' 1 ;;
+		*) log_error "rejected invalid UDP redundancy multiplier for $option: $value"; return 1 ;;
 	esac
 }
 
@@ -900,7 +1155,10 @@ write_runtime_status() {
 	case "$congestion" in candy-bbr|cubic) ;; *) congestion=candy-bbr ;; esac
 	config_get candy_bbr_preset client candy_bbr_preset current
 	case "$candy_bbr_preset" in current|bbr-v1|aggressive) ;; *) candy_bbr_preset=current ;; esac
-	config_get_bool automatic_bbr_fallback client automatic_bbr_fallback 0
+	# OpenWrt keeps the explicitly selected congestion controller. Runtime
+	# switching to CUBIC is intentionally unsupported because a congested ISP
+	# path is not repaired by changing algorithms without comparative evidence.
+	automatic_bbr_fallback=0
 	printf '"runtime":{"mode":'
 	json_string "$runtime_mode"
 	printf ',"performance":{"mode":'
@@ -1063,7 +1321,7 @@ append_group_node() {
 	config_get_bool enabled "$node" enabled 1
 	config_get node_server "$node" server
 	[ "$enabled" -eq 1 ] || return 0
-	[ -n "$node_server" ] || return 0
+	[ -n "$node_server" ] || { log_error "group=$group_name references enabled node without server: $node"; CANDY_CONFIG_NODE_ERROR=1; return 0; }
 	config_get node_name "$node" name "$node"
 	if [ "$GROUP_FIRST_NODE" -eq 0 ]; then
 		printf ','
@@ -1074,13 +1332,55 @@ append_group_node() {
 
 append_port_hopping_port() {
 	local port="$1"
-	case "$port" in ''|*[!0-9]*) return 0 ;; esac
-	[ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 0
+	case "$port" in ''|*[!0-9]*) log_error "node=$NODE_SECTION rejected invalid port hopping port: $port"; CANDY_CONFIG_NODE_ERROR=1; return 0 ;; esac
+	[ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { log_error "node=$NODE_SECTION rejected out-of-range port hopping port: $port"; CANDY_CONFIG_NODE_ERROR=1; return 0; }
 	if [ "$PORT_HOPPING_FIRST" -eq 0 ]; then
 		printf ','
 	fi
 	printf '%s' "$port"
 	PORT_HOPPING_FIRST=0
+}
+
+is_placeholder_node_value() {
+	local value
+	value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+	case "$value" in
+		''|*change-me*|*replace-me*|test|test-secret) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+validate_node_profile_placeholders() {
+	local node_name="$1" server="$2" server_name="$3" key_id="$4" server_pin="$5" auth="$6" host normalized
+	host=$(server_host "$server")
+	case "$host" in
+		127.0.0.1|localhost|0.0.0.0|::1|\[::\])
+			log_error "node=$node_name rejected placeholder server endpoint"
+			return 1
+			;;
+	esac
+	case "$(printf '%s' "$server_name" | tr '[:upper:]' '[:lower:]')" in
+		localhost) log_error "node=$node_name rejected placeholder server_name"; return 1 ;;
+	esac
+	if is_placeholder_node_value "$key_id" || is_placeholder_node_value "$auth" || [ "${#auth}" -lt 16 ]; then
+		log_error "node=$node_name rejected placeholder identity or credential"
+		return 1
+	fi
+	normalized=${server_pin#sha256:}
+	case "$normalized" in
+		replace-me|REPLACE_WITH_64_HEX_SHA256) log_error "node=$node_name rejected placeholder certificate pin"; return 1 ;;
+	esac
+	if [ -n "$normalized" ] && [ -z "$(printf '%s' "$normalized" | tr -d '0')" ]; then
+		log_error "node=$node_name rejected zero certificate pin"
+		return 1
+	fi
+	case "$normalized" in
+		0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef)
+			log_error "node=$node_name rejected test certificate pin"
+			return 1
+			;;
+	esac
+	return 0
 }
 
 write_group() {
@@ -1089,10 +1389,8 @@ write_group() {
 	config_get group_name "$group_id" name "$group_id"
 	config_get type "$group_id" type fallback
 	case "$type" in
-		select) type=fallback ;;
-		load-balance) type=round-robin ;;
-		round-robin|consistent-hash|fallback|url-test) ;;
-		*) type=fallback ;;
+		select|load-balance|round-robin|consistent-hash|fallback|url-test) ;;
+		*) log_error "group=$group_name rejected unknown algorithm"; CANDY_CONFIG_GROUP_ERROR=1; return 0 ;;
 	esac
 	if [ "$FIRST_GROUP" -eq 0 ]; then
 		printf ','
@@ -1110,13 +1408,13 @@ write_group() {
 		config_get interval "$group_id" url_test_interval_seconds 60
 		config_get timeout "$group_id" url_test_timeout_ms 3000
 		config_get tolerance "$group_id" url_test_tolerance_ms 20
-		case "$url" in http://?*|https://?*) ;; *) url='http://www.gstatic.com/generate_204' ;; esac
-		case "$interval" in ''|*[!0-9]*) interval=60 ;; esac
-		case "$timeout" in ''|*[!0-9]*) timeout=3000 ;; esac
-		case "$tolerance" in ''|*[!0-9]*) tolerance=20 ;; esac
-		[ "$interval" -ge 10 ] && [ "$interval" -le 3600 ] || interval=60
-		[ "$timeout" -ge 100 ] && [ "$timeout" -le 30000 ] || timeout=3000
-		[ "$tolerance" -le 1000 ] || tolerance=20
+		case "$url" in http://?*|https://?*) ;; *) log_error "group=$group_name rejected invalid URL-test URL: $url"; CANDY_CONFIG_GROUP_ERROR=1; return 0 ;; esac
+		case "$interval" in ''|*[!0-9]*) log_error "group=$group_name rejected invalid URL-test interval: $interval"; CANDY_CONFIG_GROUP_ERROR=1; return 0 ;; esac
+		case "$timeout" in ''|*[!0-9]*) log_error "group=$group_name rejected invalid URL-test timeout: $timeout"; CANDY_CONFIG_GROUP_ERROR=1; return 0 ;; esac
+		case "$tolerance" in ''|*[!0-9]*) log_error "group=$group_name rejected invalid URL-test tolerance: $tolerance"; CANDY_CONFIG_GROUP_ERROR=1; return 0 ;; esac
+		[ "$interval" -ge 10 ] && [ "$interval" -le 3600 ] || { log_error "group=$group_name rejected URL-test interval outside 10..3600: $interval"; CANDY_CONFIG_GROUP_ERROR=1; return 0; }
+		[ "$timeout" -ge 100 ] && [ "$timeout" -le 30000 ] || { log_error "group=$group_name rejected URL-test timeout outside 100..30000: $timeout"; CANDY_CONFIG_GROUP_ERROR=1; return 0; }
+		[ "$tolerance" -le 1000 ] || { log_error "group=$group_name rejected URL-test tolerance above 1000: $tolerance"; CANDY_CONFIG_GROUP_ERROR=1; return 0; }
 		printf ',"url_test":{"url":'
 		json_string "$url"
 		printf ',"interval_seconds":%s,"timeout_ms":%s,"validity_seconds":%s,"tolerance_ms":%s}' "$interval" "$timeout" "$validity" "$tolerance"
@@ -1131,12 +1429,17 @@ write_node_profile() {
 	config_get_bool enabled "$section" enabled 1
 	config_get server "$section" server
 	[ "$enabled" -eq 1 ] || return 0
-	[ -n "$server" ] || return 0
+	[ -n "$server" ] || { log_error "node=$section is enabled but has no server"; CANDY_CONFIG_NODE_ERROR=1; return 0; }
 	config_get node_name "$section" name "$section"
 	config_get key_id "$section" key_id "$node_name"
 	config_get server_name "$section" server_name "$node_name"
 	config_get server_pin "$section" server_pin
 	config_get auth "$section" auth
+	NODE_SECTION=$section
+	if ! validate_node_profile_placeholders "$node_name" "$server" "$server_name" "$key_id" "$server_pin" "$auth"; then
+		CANDY_CONFIG_PLACEHOLDER_ERROR=1
+		return 0
+	fi
 	if [ "$FIRST_NODE" -eq 0 ]; then
 		printf ','
 	fi
@@ -1153,8 +1456,8 @@ write_node_profile() {
 	printf ',"pin":'
 	json_string "$server_pin"
 	config_get port_hopping_interval "$section" port_hopping_interval_seconds 300
-	case "$port_hopping_interval" in ''|*[!0-9]*) port_hopping_interval=300 ;; esac
-	[ "$port_hopping_interval" -ge 30 ] && [ "$port_hopping_interval" -le 86400 ] || port_hopping_interval=300
+	case "$port_hopping_interval" in ''|*[!0-9]*) log_error "node=$node_name rejected invalid port hopping interval: $port_hopping_interval"; CANDY_CONFIG_NODE_ERROR=1; return 0 ;; esac
+	[ "$port_hopping_interval" -ge 30 ] && [ "$port_hopping_interval" -le 86400 ] || { log_error "node=$node_name rejected port hopping interval outside 30..86400: $port_hopping_interval"; CANDY_CONFIG_NODE_ERROR=1; return 0; }
 	printf ',"port_hopping":{"ports":['
 	PORT_HOPPING_FIRST=1
 	config_list_foreach "$section" port_hopping_port append_port_hopping_port
@@ -1165,9 +1468,15 @@ write_node_profile() {
 
 write_rule() {
 	local section="$1"
-	local value
+	local value kind
 	config_get value "$section" value
 	[ -n "$value" ] || return 0
+	kind=$(printf '%s' "$value" | awk -F, '{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print toupper($1) }')
+	if [ "$kind" = PROCESS-NAME ]; then
+		log_error "rule=$section rejected PROCESS-NAME because OpenWrt transparent routing has no trustworthy process identity"
+		CANDY_CONFIG_RULE_ERROR=1
+		return 0
+	fi
 	write_rule_value "$value"
 }
 
@@ -1255,6 +1564,10 @@ generate_config() {
 	config_get_bool bypass_china_ip client bypass_china_ip 1
 	config_get transparent_tcp_port client transparent_tcp_port 12345
 	config_get transparent_udp_port client transparent_udp_port 12346
+	CANDY_CONFIG_PLACEHOLDER_ERROR=0
+	CANDY_CONFIG_GROUP_ERROR=0
+	CANDY_CONFIG_NODE_ERROR=0
+	CANDY_CONFIG_RULE_ERROR=0
 
 	refresh_runtime_geo_provider
 	refresh_runtime_gfwlist_provider
@@ -1270,8 +1583,6 @@ generate_config() {
 		printf '"name":"candy-openwrt"'
 		printf ',"mode":'
 		json_string "$mode"
-		printf ',"runtime_mode":'
-		json_string "$runtime_mode"
 		printf ',"dns":{"remote":'
 		json_bool "$dns_remote"
 		printf ',"mode":'
@@ -1349,6 +1660,11 @@ generate_config() {
 		rm -f "$temporary"
 		return 1
 	}
+	if [ "${CANDY_CONFIG_PLACEHOLDER_ERROR:-0}" -eq 1 ] || [ "${CANDY_CONFIG_GROUP_ERROR:-0}" -eq 1 ] || [ "${CANDY_CONFIG_NODE_ERROR:-0}" -eq 1 ] || [ "${CANDY_CONFIG_RULE_ERROR:-0}" -eq 1 ]; then
+		rm -f "$temporary"
+		log_error "runtime config generation rejected invalid product configuration"
+		return 1
+	fi
 	atomic_commit_file "$temporary" "$RUNTIME_CONFIG" 0600 || return 1
 	log_msg "generated runtime config $RUNTIME_CONFIG"
 	[ "${CANDY_GENERATE_SKIP_STATUS:-0}" -eq 1 ] || refresh_node_status_fast "starting"
@@ -1462,19 +1778,69 @@ persist_applied_firewall_state() {
 }
 
 cleanup_tproxy_policy() {
-	local tproxy_mark="$1" deleted_rules=0
-	while ip rule del fwmark "$tproxy_mark" table "$tproxy_mark" 2>/dev/null; do
+	local tproxy_mark="$1" deleted_rules=0 rule_output route_output mark_hex rule_pattern
+	command -v ip >/dev/null 2>&1 || return 1
+	case "$tproxy_mark" in ''|*[!0-9]*) return 1 ;; esac
+	mark_hex=$(printf '%x' "$tproxy_mark") || return 1
+	rule_pattern="fwmark[[:space:]]+(0x)?(${tproxy_mark}|${mark_hex})[[:space:]].*(lookup|table)[[:space:]]+${tproxy_mark}([[:space:]]|$)"
+	if ! rule_output=$(ip rule show 2>/dev/null); then
+		log_error "failed to inspect TPROXY policy rules mark=$tproxy_mark"
+		return 1
+	fi
+	while printf '%s\n' "$rule_output" | grep -Eq "$rule_pattern"; do
+		if ! ip rule del fwmark "$tproxy_mark" table "$tproxy_mark" 2>/dev/null; then
+			log_error "failed to delete TPROXY policy rule mark=$tproxy_mark"
+			return 1
+		fi
 		deleted_rules=$((deleted_rules + 1))
-		[ "$deleted_rules" -lt 32 ] || break
+		if [ "$deleted_rules" -ge 32 ]; then
+			log_error "too many duplicate TPROXY policy rules mark=$tproxy_mark"
+			return 1
+		fi
+		if ! rule_output=$(ip rule show 2>/dev/null); then
+			log_error "failed to verify TPROXY policy rules mark=$tproxy_mark"
+			return 1
+		fi
 	done
-	ip route del local 0.0.0.0/0 dev lo table "$tproxy_mark" 2>/dev/null || true
+	if printf '%s\n' "$rule_output" | grep -Eq "$rule_pattern"; then
+		log_error "TPROXY policy rule remains after cleanup mark=$tproxy_mark"
+		return 1
+	fi
+	if ! route_output=$(ip route show table "$tproxy_mark" 2>/dev/null); then
+		log_error "failed to inspect TPROXY local route table=$tproxy_mark"
+		return 1
+	fi
+	if printf '%s\n' "$route_output" | grep -Fq 'local 0.0.0.0/0 dev lo'; then
+		if ! ip route del local 0.0.0.0/0 dev lo table "$tproxy_mark" 2>/dev/null; then
+			log_error "failed to delete TPROXY local route table=$tproxy_mark"
+			return 1
+		fi
+		if ! route_output=$(ip route show table "$tproxy_mark" 2>/dev/null); then
+			log_error "failed to verify TPROXY local route table=$tproxy_mark"
+			return 1
+		fi
+		if printf '%s\n' "$route_output" | grep -Fq 'local 0.0.0.0/0 dev lo'; then
+			log_error "TPROXY local route remains after cleanup table=$tproxy_mark"
+			return 1
+		fi
+	fi
 }
 
 apply_tproxy_policy() {
 	local tproxy_mark="$1"
-	cleanup_tproxy_policy "$tproxy_mark"
-	ip rule add fwmark "$tproxy_mark" table "$tproxy_mark" 2>/dev/null || true
-	ip route add local 0.0.0.0/0 dev lo table "$tproxy_mark" 2>/dev/null || true
+	command -v ip >/dev/null 2>&1 || return 1
+	cleanup_tproxy_policy "$tproxy_mark" || return 1
+	if ! ip rule add fwmark "$tproxy_mark" table "$tproxy_mark" 2>/dev/null; then
+		log_error "failed to install TPROXY policy rule mark=$tproxy_mark"
+		return 1
+	fi
+	if ! ip route add local 0.0.0.0/0 dev lo table "$tproxy_mark" 2>/dev/null; then
+		if ! ip rule del fwmark "$tproxy_mark" table "$tproxy_mark" 2>/dev/null; then
+			log_error "failed to undo TPROXY policy rule after local route failure mark=$tproxy_mark"
+		fi
+		log_error "failed to install TPROXY local route table=$tproxy_mark"
+		return 1
+	fi
 }
 
 dnsmasq_conf_dir() {
@@ -1627,15 +1993,18 @@ cleanup_dns() {
 	if [ "$had_config" -eq 1 ]; then
 		restart_dnsmasq || rc=1
 	fi
-	config_load candy 2>/dev/null || rc=1
-	refresh_node_status_fast "standby" || rc=1
+	# Status is diagnostic only; a malformed/missing UCI file must not turn a
+	# successfully removed DNS policy into a reported network-cleanup failure.
+	config_load candy 2>/dev/null || log_warn "Candy UCI config unavailable while recording DNS standby status"
+	refresh_node_status_fast "standby" || log_warn "could not record DNS standby status after cleanup"
 	return "$rc"
 }
 
 apply_dns() {
 	config_load candy || return 1
-	local dns_remote filter_aaaa dns_port dir wrote_config=0 temporary destination policy_changed=1
+	local dns_remote dns_split filter_aaaa dns_port dir wrote_config=0 temporary destination policy_changed=1
 	config_get_bool dns_remote client dns_remote 0
+	config_get_bool dns_split client dns_split 1
 	config_get_bool filter_aaaa client filter_aaaa 1
 	dns_port=15353
 	dir=$(dnsmasq_conf_dir 2>/dev/null || true)
@@ -1659,7 +2028,9 @@ apply_dns() {
 			printf 'server=127.0.0.1#%s\n' "$dns_port"
 			wrote_config=1
 		else
-			write_gfwlist_remote_dns_servers
+			if [ "$dns_split" -eq 1 ]; then
+				write_gfwlist_remote_dns_servers
+			fi
 			config_foreach write_rule_remote_dns_server rule
 			if [ "$DNS_WROTE_REMOTE_DOMAIN" -eq 1 ]; then
 				wrote_config=1
@@ -1682,6 +2053,40 @@ apply_dns() {
 	[ "${CANDY_SUPPRESS_STATUS_REFRESH:-0}" -eq 1 ] || refresh_node_status_fast "standby"
 }
 
+iptables_delete_owned_rule() {
+	local table="$1" chain="$2" probe_rc
+	shift 2
+	if [ "$table" = filter ]; then
+		iptables -L "$chain" -n >/dev/null 2>&1
+	else
+		iptables -t "$table" -L "$chain" -n >/dev/null 2>&1
+	fi
+	probe_rc=$?
+	case "$probe_rc" in
+		0) ;;
+		1) return 0 ;;
+		*) return 1 ;;
+	esac
+	if [ "$table" = filter ]; then
+		iptables -C "$chain" "$@" 2>/dev/null
+	else
+		iptables -t "$table" -C "$chain" "$@" 2>/dev/null
+	fi
+	probe_rc=$?
+	case "$probe_rc" in
+		0)
+			if [ "$table" = filter ]; then
+				iptables -D "$chain" "$@" 2>/dev/null || return 1
+			else
+				iptables -t "$table" -D "$chain" "$@" 2>/dev/null || return 1
+			fi
+			return 0
+			;;
+		1) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
 cleanup_firewall() {
 	local backend transparent_udp_port tproxy_mark chain rc=0
 	if load_applied_firewall_state; then
@@ -1689,9 +2094,11 @@ cleanup_firewall() {
 		transparent_udp_port="$APPLIED_TRANSPARENT_UDP_PORT"
 		tproxy_mark="$APPLIED_TPROXY_MARK"
 	else
-		config_load candy || return 1
-		config_get transparent_udp_port client transparent_udp_port 12346
-		config_get tproxy_mark client tproxy_mark 100
+		# Never infer ownership from the configured/default mark.  A device may
+		# legitimately use table 100 for another service; only a durable Candy
+		# state record authorizes deleting policy-routing entries.
+		transparent_udp_port=
+		tproxy_mark=
 		if command -v iptables >/dev/null 2>&1; then
 			backend=iptables
 		elif command -v fw4 >/dev/null 2>&1 && command -v nft >/dev/null 2>&1; then
@@ -1700,16 +2107,27 @@ cleanup_firewall() {
 			backend=none
 		fi
 	fi
-	cleanup_tproxy_policy "$tproxy_mark" || rc=1
+	if [ -n "$tproxy_mark" ] && ! cleanup_tproxy_policy "$tproxy_mark"; then
+		rc=1
+	fi
 
 	if [ "$backend" = iptables ] && command -v iptables >/dev/null 2>&1; then
-		iptables -t nat -D PREROUTING -p tcp -j CANDY 2>/dev/null || true
-		iptables -t mangle -D PREROUTING -i br-lan -p udp --dport 443 -j TPROXY --on-port "$transparent_udp_port" --tproxy-mark "$tproxy_mark/$tproxy_mark" 2>/dev/null || true
-		iptables -D FORWARD -i br-lan -p udp --dport 443 -j REJECT 2>/dev/null || true
-		iptables -t nat -D PREROUTING -i br-lan -p udp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null || true
-		iptables -t nat -D PREROUTING -i br-lan -p tcp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null || true
-		iptables -t nat -F CANDY 2>/dev/null || true
-		iptables -t nat -X CANDY 2>/dev/null || true
+		iptables_delete_owned_rule nat PREROUTING -p tcp -j CANDY || rc=1
+		if [ -n "$transparent_udp_port" ] && [ -n "$tproxy_mark" ]; then
+			iptables_delete_owned_rule mangle PREROUTING -i br-lan -p udp --dport 443 -j TPROXY --on-port "$transparent_udp_port" --tproxy-mark "$tproxy_mark/$tproxy_mark" || rc=1
+		fi
+		iptables_delete_owned_rule filter FORWARD -i br-lan -p udp --dport 443 -j REJECT || rc=1
+		iptables_delete_owned_rule nat PREROUTING -i br-lan -p udp --dport 53 -j REDIRECT --to-ports 53 || rc=1
+		iptables_delete_owned_rule nat PREROUTING -i br-lan -p tcp --dport 53 -j REDIRECT --to-ports 53 || rc=1
+		iptables -t nat -L CANDY >/dev/null 2>&1
+		case "$?" in
+			0)
+				iptables -t nat -F CANDY 2>/dev/null || rc=1
+				iptables -t nat -X CANDY 2>/dev/null || rc=1
+				;;
+			1) ;;
+			*) rc=1 ;;
+		esac
 	elif [ "$backend" = iptables ]; then
 		log_msg "iptables firewall cleanup unavailable"
 		rc=1
@@ -1822,33 +2240,34 @@ apply_firewall() {
 
 	if command -v iptables >/dev/null 2>&1; then
 		cleanup_firewall || return 1
-		iptables -t nat -N CANDY 2>/dev/null || true
-		iptables -t nat -F CANDY
+		iptables -t nat -N CANDY 2>/dev/null || {
+			log_error "failed to create iptables CANDY chain"
+			return 1
+		}
+		iptables -t nat -F CANDY || return 1
 		for bypass_host in $bypass_ipv4_hosts; do
-			iptables -t nat -A CANDY -d "$bypass_host" -j RETURN
+			iptables -t nat -A CANDY -d "$bypass_host" -j RETURN || return 1
 		done
-		iptables -t nat -A CANDY -d 0.0.0.0/8 -j RETURN
-		iptables -t nat -A CANDY -d 10.0.0.0/8 -j RETURN
-		iptables -t nat -A CANDY -d 127.0.0.0/8 -j RETURN
-		iptables -t nat -A CANDY -d 169.254.0.0/16 -j RETURN
-		iptables -t nat -A CANDY -d 172.16.0.0/12 -j RETURN
-		iptables -t nat -A CANDY -d 192.168.0.0/16 -j RETURN
-		iptables -t nat -A CANDY -d 224.0.0.0/4 -j RETURN
-		iptables -t nat -A CANDY -d 240.0.0.0/4 -j RETURN
+		for bypass_host in 0.0.0.0/8 10.0.0.0/8 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4; do
+			iptables -t nat -A CANDY -d "$bypass_host" -j RETURN || return 1
+		done
 		if [ "$redirect_tcp" -eq 1 ]; then
-			iptables -t nat -A CANDY -p tcp -j REDIRECT --to-ports "$transparent_tcp_port"
-			iptables -t nat -A PREROUTING -p tcp -j CANDY
+			iptables -t nat -A CANDY -p tcp -j REDIRECT --to-ports "$transparent_tcp_port" || return 1
+			iptables -t nat -A PREROUTING -p tcp -j CANDY || return 1
 		fi
 		if [ "$block_quic" -eq 1 ]; then
 			iptables -D FORWARD -i br-lan -p udp --dport 443 -j REJECT 2>/dev/null || true
-			iptables -A FORWARD -i br-lan -p udp --dport 443 -j REJECT
+			iptables -A FORWARD -i br-lan -p udp --dport 443 -j REJECT || return 1
 		elif [ "$redirect_udp" -eq 1 ]; then
-			apply_tproxy_policy "$tproxy_mark"
-			iptables -t mangle -A PREROUTING -i br-lan -p udp --dport 443 -j TPROXY --on-port "$transparent_udp_port" --tproxy-mark "$tproxy_mark/$tproxy_mark"
+			# Record the mark before mutating policy routing so a power loss or
+			# process crash cannot leave an unowned TPROXY route behind.
+			persist_applied_firewall_state iptables "$transparent_udp_port" "$tproxy_mark" || return 1
+			apply_tproxy_policy "$tproxy_mark" || return 1
+			iptables -t mangle -A PREROUTING -i br-lan -p udp --dport 443 -j TPROXY --on-port "$transparent_udp_port" --tproxy-mark "$tproxy_mark/$tproxy_mark" || return 1
 		fi
 		if [ "$dns_capture_lan" -eq 1 ]; then
-			iptables -t nat -A PREROUTING -i br-lan -p udp --dport 53 -j REDIRECT --to-ports 53
-			iptables -t nat -A PREROUTING -i br-lan -p tcp --dport 53 -j REDIRECT --to-ports 53
+			iptables -t nat -A PREROUTING -i br-lan -p udp --dport 53 -j REDIRECT --to-ports 53 || return 1
+			iptables -t nat -A PREROUTING -i br-lan -p tcp --dport 53 -j REDIRECT --to-ports 53 || return 1
 		fi
 		persist_applied_firewall_state iptables "$transparent_udp_port" "$tproxy_mark" || return 1
 		log_msg "applied iptables firewall rules"
@@ -1859,13 +2278,14 @@ apply_firewall() {
 			else
 				previous_tproxy_mark="$APPLIED_TPROXY_MARK"
 			fi
-		else
-			cleanup_tproxy_policy "$tproxy_mark"
 		fi
 		if [ "$redirect_udp" -eq 1 ] && [ "$block_quic" -ne 1 ]; then
-			apply_tproxy_policy "$tproxy_mark"
+			# Persist ownership before installing the policy rule.  The fail-open
+			# path can then recover even if fw4 reload or process startup is cut off.
+			persist_applied_firewall_state fw4 "$transparent_udp_port" "$tproxy_mark" || return 1
+			apply_tproxy_policy "$tproxy_mark" || return 1
 		fi
-		write_fw4_include "$redirect_tcp" "$dns_capture_lan" "$block_quic" "$redirect_udp" "$transparent_tcp_port" "$transparent_udp_port" "$bypass_ipv4_hosts" "$bypass_ipv6_hosts" "$tproxy_mark"
+		write_fw4_include "$redirect_tcp" "$dns_capture_lan" "$block_quic" "$redirect_udp" "$transparent_tcp_port" "$transparent_udp_port" "$bypass_ipv4_hosts" "$bypass_ipv6_hosts" "$tproxy_mark" || return 1
 		if run_with_timeout 8 fw4 check >/dev/null 2>&1; then
 			if run_with_timeout 12 fw4 reload >/dev/null 2>&1; then
 				log_msg "applied fw4 nftables firewall rules"
@@ -1969,16 +2389,16 @@ migrate_legacy_config() {
 		printf "\toption dns_capture_lan '1'\n"
 		printf "\toption filter_aaaa '1'\n"
 		printf "\toption gfwlist_update_url 'https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt'\n"
-		printf "\toption gfwlist_auto_update '0'\n"
+		printf "\toption gfwlist_auto_update '1'\n"
 		printf "\toption gfwlist_update_interval_hours '24'\n"
 		printf "\toption bypass_china_ip '1'\n"
-		printf "\toption geo_update_url 'https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt'\n"
-		printf "\toption geo_auto_update '0'\n"
+		printf "\toption geo_update_url 'https://gaoyifan.github.io/china-operator-ip/china46.txt'\n"
+		printf "\toption geo_auto_update '1'\n"
 		printf "\toption geo_update_interval_hours '24'\n"
 		printf "\toption auto_firewall '%s'\n" "${auto_firewall:-0}"
 		printf "\toption redirect_tcp '%s'\n" "${redirect_tcp:-0}"
 		printf "\toption redirect_udp '%s'\n" "${redirect_udp:-0}"
-		printf "\toption block_quic '%s'\n" "${block_quic:-1}"
+		printf "\toption block_quic '%s'\n" "${block_quic:-0}"
 		printf "\toption transparent_tcp_port '%s'\n" "${transparent_tcp_port:-12345}"
 		printf "\toption transparent_udp_port '%s'\n" "${transparent_udp_port:-12346}"
 		printf "\toption tproxy_mark '%s'\n\n" "${tproxy_mark:-100}"
@@ -2104,31 +2524,81 @@ validate_runtime_config() {
 
 start_provider_updater() {
 	local geo_auto gfwlist_auto
-	config_get_bool geo_auto client geo_auto_update 0
-	config_get_bool gfwlist_auto client gfwlist_auto_update 0
+	config_get_bool geo_auto client geo_auto_update 1
+	config_get_bool gfwlist_auto client gfwlist_auto_update 1
 	if [ "$geo_auto" -ne 1 ] && [ "$gfwlist_auto" -ne 1 ]; then
 		return 0
 	fi
 	procd_open_instance provider-updater
 	procd_set_param command /etc/init.d/candy provider_update_loop
+	procd_set_param respawn 3600 10 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
 	log_msg "provider auto updater enabled"
 }
 
+process_starttime() {
+	local pid="$1" proc_root="${CANDY_PROC_ROOT:-/proc}"
+	[ -r "$proc_root/$pid/stat" ] || return 1
+	sed 's/^.*) //' "$proc_root/$pid/stat" | awk '{ print $20 }'
+}
+
+current_boot_id() {
+	local proc_root="${CANDY_PROC_ROOT:-/proc}"
+	[ -r "$proc_root/sys/kernel/random/boot_id" ] || return 1
+	tr -d '\r\n' < "$proc_root/sys/kernel/random/boot_id"
+}
+
+write_lock_process_identity() {
+	local directory="$1" pid="$2" starttime boot_id
+	starttime=$(process_starttime "$pid" 2>/dev/null || true)
+	boot_id=$(current_boot_id 2>/dev/null || true)
+	[ -n "$starttime" ] && [ -n "$boot_id" ] || return 1
+	printf '%s\n' "$starttime" > "$directory/starttime" || return 1
+	printf '%s\n' "$boot_id" > "$directory/boot_id" || return 1
+}
+
+lock_process_identity_matches() {
+	local directory="$1" pid="$2" expected_starttime expected_boot_id actual_starttime actual_boot_id
+	expected_starttime=$(cat "$directory/starttime" 2>/dev/null || true)
+	expected_boot_id=$(cat "$directory/boot_id" 2>/dev/null || true)
+	actual_starttime=$(process_starttime "$pid" 2>/dev/null || true)
+	actual_boot_id=$(current_boot_id 2>/dev/null || true)
+	[ -n "$expected_starttime" ] && [ -n "$expected_boot_id" ] &&
+		[ "$expected_starttime" = "$actual_starttime" ] && [ "$expected_boot_id" = "$actual_boot_id" ]
+}
+
 with_network_apply_lock() {
 	local action="$1" waited=0 wait_seconds="${CANDY_NETWORK_LOCK_WAIT_SECONDS:-0}"
 	shift
+	local lock_parent
+	lock_parent=${NETWORK_APPLY_LOCK_DIR%/*}
+	[ "$lock_parent" = "$NETWORK_APPLY_LOCK_DIR" ] && lock_parent=/var/lib/candy
+	mkdir -p "$lock_parent" 2>/dev/null || return 1
+	case "$lock_parent" in
+		/var/lib/candy) chmod 0711 "$lock_parent" 2>/dev/null || return 1 ;;
+		*) chmod 0700 "$lock_parent" 2>/dev/null || return 1 ;;
+	esac
 	while ! mkdir "$NETWORK_APPLY_LOCK_DIR" 2>/dev/null; do
+		if command -v stat >/dev/null 2>&1; then
+			local lock_owner lock_mode
+			lock_owner=$(stat -c '%u' "$NETWORK_APPLY_LOCK_DIR" 2>/dev/null || true)
+			lock_mode=$(stat -c '%a' "$NETWORK_APPLY_LOCK_DIR" 2>/dev/null || true)
+			case "$lock_owner:$lock_mode" in
+				0:700|0:750|0:755) ;;
+				*) log_error "network policy lock is not root-owned and trusted"; return 1 ;;
+			esac
+		fi
 		if [ -f "$NETWORK_APPLY_LOCK_DIR/pid" ]; then
 			local lock_pid
 			lock_pid=$(cat "$NETWORK_APPLY_LOCK_DIR/pid" 2>/dev/null || true)
 			case "$lock_pid" in
 				''|*[!0-9]*) ;;
 				*)
-					if ! kill -0 "$lock_pid" 2>/dev/null; then
-						rm -rf "$NETWORK_APPLY_LOCK_DIR" 2>/dev/null || true
+					if ! kill -0 "$lock_pid" 2>/dev/null || { [ -s "$NETWORK_APPLY_LOCK_DIR/starttime" ] && ! lock_process_identity_matches "$NETWORK_APPLY_LOCK_DIR" "$lock_pid"; }; then
+						rm -f "$NETWORK_APPLY_LOCK_DIR/pid" "$NETWORK_APPLY_LOCK_DIR/action" "$NETWORK_APPLY_LOCK_DIR/starttime" "$NETWORK_APPLY_LOCK_DIR/boot_id" 2>/dev/null || true
+						rmdir "$NETWORK_APPLY_LOCK_DIR" 2>/dev/null || true
 						continue
 					fi
 					;;
@@ -2141,12 +2611,19 @@ with_network_apply_lock() {
 		waited=$((waited + 1))
 		sleep 1
 	done
-	printf '%s\n' "$$" > "$NETWORK_APPLY_LOCK_DIR/pid" 2>/dev/null || true
-	printf '%s\n' "$action" > "$NETWORK_APPLY_LOCK_DIR/action" 2>/dev/null || true
-	trap 'rm -rf "$NETWORK_APPLY_LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+	if ! chmod 0700 "$NETWORK_APPLY_LOCK_DIR" 2>/dev/null ||
+		! printf '%s\n' "$$" > "$NETWORK_APPLY_LOCK_DIR/pid" ||
+		! printf '%s\n' "$action" > "$NETWORK_APPLY_LOCK_DIR/action" ||
+		! write_lock_process_identity "$NETWORK_APPLY_LOCK_DIR" "$$"; then
+		rm -f "$NETWORK_APPLY_LOCK_DIR/pid" "$NETWORK_APPLY_LOCK_DIR/action" "$NETWORK_APPLY_LOCK_DIR/starttime" "$NETWORK_APPLY_LOCK_DIR/boot_id" 2>/dev/null || true
+		rmdir "$NETWORK_APPLY_LOCK_DIR" 2>/dev/null || true
+		return 1
+	fi
+	trap 'rm -f "$NETWORK_APPLY_LOCK_DIR/pid" "$NETWORK_APPLY_LOCK_DIR/action" "$NETWORK_APPLY_LOCK_DIR/starttime" "$NETWORK_APPLY_LOCK_DIR/boot_id" 2>/dev/null || true; rmdir "$NETWORK_APPLY_LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
 	"$@"
 	local rc=$?
-	rm -rf "$NETWORK_APPLY_LOCK_DIR" 2>/dev/null || true
+	rm -f "$NETWORK_APPLY_LOCK_DIR/pid" "$NETWORK_APPLY_LOCK_DIR/action" "$NETWORK_APPLY_LOCK_DIR/starttime" "$NETWORK_APPLY_LOCK_DIR/boot_id" 2>/dev/null || true
+	rmdir "$NETWORK_APPLY_LOCK_DIR" 2>/dev/null || true
 	trap - EXIT INT TERM
 	return "$rc"
 }
@@ -2187,7 +2664,7 @@ cleanup_network_policy_now() {
 	log_msg "cleaning network policy"
 	cleanup_firewall || rc=1
 	cleanup_dns || rc=1
-	refresh_node_status_fast "$state" || rc=1
+	refresh_node_status_fast "$state" || log_warn "could not record network policy state=$state after cleanup"
 	if [ "$rc" -eq 0 ]; then
 		log_msg "network policy cleaned"
 	else
@@ -2202,6 +2679,46 @@ network_apply() {
 
 network_cleanup() {
 	CANDY_NETWORK_LOCK_WAIT_SECONDS="${CANDY_NETWORK_LOCK_WAIT_SECONDS:-30}" with_network_apply_lock cleanup cleanup_network_policy_now
+}
+
+stop_network_policy_worker_for_fail_open() {
+	local lock_pid waited=0
+	[ -d "$NETWORK_APPLY_LOCK_DIR" ] || return 0
+	lock_pid=$(cat "$NETWORK_APPLY_LOCK_DIR/pid" 2>/dev/null || true)
+	case "$lock_pid" in
+		''|*[!0-9]*)
+			log_error "fail-open found a network policy lock without a valid owner"
+			return 1
+		;;
+	esac
+	if [ "$lock_pid" -eq "$$" ]; then
+		log_error "fail-open cannot recover a network policy lock owned by itself"
+		return 1
+	fi
+	if kill -0 "$lock_pid" 2>/dev/null; then
+		if ! lock_process_identity_matches "$NETWORK_APPLY_LOCK_DIR" "$lock_pid"; then
+			log_error "refusing to signal network policy lock pid=$lock_pid because its process identity does not match"
+			return 1
+		fi
+		log_event warn fail_open "stopping network policy worker pid=$lock_pid before cleanup"
+		kill -TERM "$lock_pid" 2>/dev/null || true
+		while kill -0 "$lock_pid" 2>/dev/null; do
+			[ "$waited" -lt 3 ] || break
+			sleep 1
+			waited=$((waited + 1))
+		done
+		if kill -0 "$lock_pid" 2>/dev/null; then
+			log_error "network policy worker pid=$lock_pid ignored TERM; forcing termination"
+			kill -KILL "$lock_pid" 2>/dev/null || true
+			sleep 1
+		fi
+	fi
+	if kill -0 "$lock_pid" 2>/dev/null; then
+		log_error "network policy worker pid=$lock_pid is still alive"
+		return 1
+	fi
+	rm -f "$NETWORK_APPLY_LOCK_DIR/pid" "$NETWORK_APPLY_LOCK_DIR/action" "$NETWORK_APPLY_LOCK_DIR/starttime" "$NETWORK_APPLY_LOCK_DIR/boot_id" 2>/dev/null || true
+	rmdir "$NETWORK_APPLY_LOCK_DIR" 2>/dev/null || true
 }
 
 schedule_network_policy_apply() {
@@ -2302,7 +2819,7 @@ start_service() {
 	clear_passive_status
 	write_lifecycle_state start starting
 	rotate_log_file "$LOG_FILE"
-	: > "$TRAFFIC_LOG_FILE"
+	rotate_log_file "$TRAFFIC_LOG_FILE" 2097152 5
 	log_msg "start requested"
 	migrate_legacy_config
 	migrate_candy_node_rule_targets
@@ -2356,6 +2873,14 @@ start_service() {
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
+	if ! sdwan_enabled; then
+		procd_open_instance watchdog
+		procd_set_param command "$CANDY_INIT_SELF" health_watchdog
+		procd_set_param user root
+		procd_set_param stdout 1
+		procd_set_param stderr 1
+		procd_close_instance
+	fi
 	CANDY_START_PHASE=submitted
 	start_provider_updater
 }
@@ -2392,6 +2917,7 @@ service_started() {
 	refresh_node_status_fast "running"
 	log_msg "candy service submitted to procd"
 	write_lifecycle_state start running
+	clear_fault_state || log_warn "started successfully but failed to clear persistent fault state"
 	CANDY_START_PHASE=running
 }
 
@@ -2466,8 +2992,104 @@ stop() {
 }
 
 service_failed() {
-	log_error "procd reported a Candy service instance failure"
+	local instance="${1:-unknown}"
+	case "$instance" in
+		provider-updater)
+			log_event error procd_failure "instance=$instance provider scheduler stopped after bounded retries; traffic runtime remains active"
+			return 0
+			;;
+	esac
+	log_event error procd_failure "instance=$instance procd reported terminal service failure; scheduling fail-open"
 	write_lifecycle_state start failed || true
+	write_fault_state "procd_service_failed" pending "instance=$instance" || log_error "failed to persist procd failure state"
+	if ! "$CANDY_INIT_SELF" disable >/dev/null 2>&1; then
+		log_error "terminal failure handler could not disable Candy autostart"
+		write_fault_state "procd_service_failed" failed "instance=$instance; autostart disable failed" || true
+	fi
+	run_detached_direct_command fail_open "$instance"
+}
+
+fail_open_locked() {
+	local reason="${1:-runtime_failure}" instance="${2:-unknown}" pids cleanup=completed rc=0 netd_stopped=1
+	log_event warn fail_open "reason=$reason instance=$instance stopping service and removing owned steering"
+	write_lifecycle_state fail_open stopping || rc=1
+	if [ -f /lib/functions/procd.sh ]; then
+		. /lib/functions/procd.sh
+		procd_kill candy >/dev/null 2>&1 || true
+	fi
+	if ! stop_candy_clients_for_fail_open; then
+		log_error "fail-open could not stop Candy client processes"
+		cleanup=failed
+		rc=1
+	fi
+	if [ -n "$(candy_client_pids)" ]; then
+		log_error "fail-open verified Candy client processes are still running"
+		cleanup=failed
+		rc=1
+	fi
+	if ! wait_for_netd_exit 3; then
+		log_error "fail-open could not confirm candy-netd exit before orphan recovery"
+		cleanup=failed
+		rc=1
+		netd_stopped=0
+	fi
+	if [ -s "$CANDY_NETD_JOURNAL" ]; then
+		if [ "$netd_stopped" -ne 1 ] || ! run_with_timeout 15 "$CANDY_NETD_BIN" --recover --journal "$CANDY_NETD_JOURNAL" >/dev/null 2>&1; then
+			log_error "netd retained an active network journal and orphan recovery failed"
+			cleanup=failed
+			rc=1
+		fi
+	fi
+	if ! stop_network_policy_worker_for_fail_open; then
+		cleanup=failed
+		rc=1
+	fi
+	config_load candy 2>/dev/null || log_warn "Candy UCI config unavailable during fail-open cleanup; using owned state records"
+	if ! CANDY_NETWORK_CLEANUP_STATE=down network_cleanup; then
+		cleanup=failed
+		rc=1
+	fi
+	if [ -s "$CANDY_NETD_JOURNAL" ]; then
+		log_error "netd network journal is still present after fail-open orphan recovery"
+		cleanup=failed
+		rc=1
+	fi
+	if ! "$CANDY_INIT_SELF" disable >/dev/null 2>&1; then
+		log_error "fail-open could not disable Candy autostart"
+		rc=1
+	fi
+	[ "$rc" -eq 0 ] || cleanup=failed
+	if [ "$rc" -eq 0 ]; then
+		if ! write_lifecycle_state fail_open failed || ! write_fault_state "$reason" completed "instance=$instance; service disabled"; then
+			rc=1
+			cleanup=failed
+			write_fault_state "$reason" failed "instance=$instance; cleanup completed but persistent state write failed" || true
+			log_event error fail_open "reason=$reason instance=$instance cleanup=failed persistent fault state could not be completed"
+		else
+			log_event error fail_open "reason=$reason instance=$instance cleanup=completed service disabled after terminal failure"
+		fi
+	else
+		write_fault_state "$reason" "$cleanup" "instance=$instance; manual network cleanup required" || true
+		log_event error fail_open "reason=$reason instance=$instance cleanup=$cleanup service disabled; manual cleanup required"
+	fi
+	return "$rc"
+}
+
+fail_open() {
+	local argument="${1:-unknown}" reason=procd_service_failed instance
+	if [ -n "${2:-}" ]; then
+		reason="$1"
+		instance="$2"
+	else
+		instance="$argument"
+		case "$argument" in
+			*:* )
+				reason=${argument%%:*}
+				instance=${argument#*:}
+				;;
+		esac
+	fi
+	with_service_lifecycle_lock fail_open_locked "$reason" "$instance"
 }
 
 restart_queued_locked() {
@@ -2596,19 +3218,38 @@ reload_runtime_locked() {
 	error_code=$(printf '%s' "$ack_json" | jsonfilter -e '@.error_code' 2>/dev/null || true)
 	applied_generation=$(printf '%s' "$ack_json" | jsonfilter -e '@.generation' 2>/dev/null || true)
 	if [ "$ok" = true ] || [ "$ok" = 1 ]; then
-		verify_promoted_runtime_candidate "$candidate_sha" || return 1
+		if ! verify_promoted_runtime_candidate "$candidate_sha"; then
+			log_error "runtime was ACKed but candidate promotion verification failed; entering fail-open"
+			fail_open_locked runtime_reload_promotion_failed reload || true
+			return 1
+		fi
 		case "$applied_generation" in
 			''|*[!0-9]*)
-				log_msg "runtime reload protocol error: ACK generation is invalid"
+				log_error "runtime reload protocol error: ACK generation is invalid; entering fail-open"
+				fail_open_locked runtime_reload_generation_invalid reload || true
 				return 1
 				;;
-			*) persist_runtime_generation "$applied_generation" || return 1 ;;
+			*)
+				if ! persist_runtime_generation "$applied_generation"; then
+					log_error "runtime was ACKed but generation persistence failed; entering fail-open"
+					fail_open_locked runtime_reload_generation_persist_failed reload || true
+					return 1
+				fi
+				;;
 		esac
 		CANDY_SUPPRESS_STATUS_REFRESH=1
+		if ! apply_firewall; then
+			CANDY_SUPPRESS_STATUS_REFRESH=0
+			log_error "runtime configuration applied, but firewall refresh failed; entering fail-open"
+			rollback_network_policy_apply || log_error "runtime reload firewall failure cleanup incomplete"
+			fail_open_locked runtime_reload_firewall_failed reload || true
+			return 1
+		fi
 		if ! apply_dns; then
 			CANDY_SUPPRESS_STATUS_REFRESH=0
-			log_msg "runtime configuration applied, but dnsmasq policy refresh failed"
-			refresh_node_status_fast "running" || true
+			log_error "runtime configuration applied, but dnsmasq policy refresh failed; entering fail-open"
+			rollback_network_policy_apply || log_error "runtime reload DNS failure cleanup incomplete"
+			fail_open_locked runtime_reload_dns_failed reload || true
 			return 1
 		fi
 		CANDY_SUPPRESS_STATUS_REFRESH=0
@@ -2656,6 +3297,10 @@ case "${CANDY_DIRECT_COMMAND:-}" in
 		;;
 	network_cleanup)
 		CANDY_NETWORK_CLEANUP_STATE="${CANDY_DIRECT_STATE:-standby}" network_cleanup
+		exit $?
+		;;
+	fail_open)
+		fail_open "${CANDY_DIRECT_STATE:-unknown}"
 		exit $?
 		;;
 esac

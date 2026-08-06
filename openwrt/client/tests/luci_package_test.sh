@@ -63,10 +63,23 @@ advanced=luci-app-candy/root/usr/lib/lua/luci/model/cbi/candy/advanced.lua
 rules=luci-app-candy/root/usr/lib/lua/luci/view/candy/rules.htm
 status=luci-app-candy/root/usr/lib/lua/luci/view/candy/status.htm
 core_view=luci-app-candy/root/usr/lib/lua/luci/view/candy/core.htm
+update_view=luci-app-candy/root/usr/lib/lua/luci/view/candy/update.htm
 diagnostics=luci-app-candy/root/usr/lib/lua/luci/view/candy/diagnostics.htm
 dns_tunnel_status=luci-app-candy/root/usr/lib/lua/luci/view/candy/dns_tunnel_status.htm
 logs=luci-app-candy/root/usr/lib/lua/luci/view/candy/log.htm
 
+assert_file "candy-client/rulesets/cn-ip.cidr"
+assert_file "candy-client/rulesets/gfwlist.domains"
+assert_file "candy-client/rulesets/PROVENANCE.md"
+assert_file "candy-client/rulesets/SHA256SUMS"
+"$repo_root/../../../packaging/openwrt/build/verify_bootstrap_rulesets.sh" "$repo_root/candy-client/rulesets" >/dev/null ||
+	fail "bootstrap ruleset validation failed"
+assert_contains "$client_makefile" 'rulesets/PROVENANCE\.md'
+assert_contains "$client_makefile" 'rulesets/SHA256SUMS'
+assert_contains "$config" "geo_update_url 'https://gaoyifan\.github\.io/china-operator-ip/china46\.txt'"
+assert_contains "$config" "geo_auto_update '1'"
+assert_contains "$config" "gfwlist_auto_update '1'"
+assert_contains "$config" "block_quic '0'"
 assert_contains "$config" "^config node 'hk_1'$"
 assert_contains "$config" "^[[:space:]]*list node 'hk_1'$"
 assert_not_contains "$config" "^config[[:space:]][^[:space:]]+[[:space:]]+'[^']*-[^']*'$"
@@ -75,7 +88,7 @@ assert_contains "$controller" 'process\.capture\(\{ CORE_MANAGER, "status" \}, \
 
 lua_syntax_file=$(mktemp)
 trap 'rm -f "$lua_syntax_file"' EXIT HUP INT TERM
-node - "$repo_root" "$lua_syntax_file" "$status" "$diagnostics" "$core_view" <<'EOF'
+node - "$repo_root" "$lua_syntax_file" "$status" "$diagnostics" "$core_view" "$update_view" <<'EOF'
 const fs = require("node:fs");
 
 const root = process.argv[2];
@@ -473,14 +486,14 @@ assert.equal(elements.get("candy-diagnostics-process-rss").textContent, "-");
 assert.equal(timers.length, 1, "only one diagnostics follow-up refresh timer may be scheduled");
 EOF
 
-for file in "$makefile" "$config" "$init" "$po" "$po2lmo_c" "$po2lmo_lmo" "$po2lmo_h" "$process_helper" "$controller" "$nodes" "$dns" "$advanced" "$rules" "$status" "$core_view" "$diagnostics" "$dns_tunnel_status" "$logs"; do
+for file in "$makefile" "$config" "$init" "$po" "$po2lmo_c" "$po2lmo_lmo" "$po2lmo_h" "$process_helper" "$controller" "$nodes" "$dns" "$advanced" "$rules" "$status" "$core_view" "$update_view" "$diagnostics" "$dns_tunnel_status" "$logs"; do
 	assert_file "$file"
 done
 
 assert_contains "$process_helper" 'nixio\.fork\(\)'
 assert_contains "$process_helper" 'nixio\.exec'
 assert_contains "$process_helper" 'nixio\.pipe\(\)'
-assert_contains "$process_helper" 'nixio\.open\([^,]+, "w", "rw-------"\)'
+assert_contains "$process_helper" 'nixio\.open\([^,]+, output_mode, "rw-------"\)'
 assert_not_contains "$process_helper" '/tmp/candy-luci-process'
 assert_contains "candy-client/Makefile" '^define Package/candy-client/conffiles$'
 assert_contains "candy-client/Makefile" '^/etc/config/candy$'
@@ -494,8 +507,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=2$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=2$'
+assert_contains "$makefile" '^PKG_RELEASE:=5$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=5$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'
@@ -707,7 +720,7 @@ assert_not_contains "$controller" '\{"admin", "services", "candy", "client"\}'
 assert_contains "$controller" 'action_rules_import'
 assert_contains "$controller" 'action_rules_export'
 assert_contains "$controller" 'action_status_json'
-for action in core_status core_install core_activate core_rollback core_remove; do
+for action in core_status core_activate core_rollback core_remove; do
 	assert_contains "$controller" "action_$action"
 done
 assert_contains "$controller" 'status\.core = read_core_status\(\)'
@@ -716,6 +729,8 @@ assert_not_contains "$controller" 'pidof.*candy-client'
 assert_not_contains "$status" 'pidof.*candy-client'
 assert_contains "$controller" 'REQUEST_METHOD.*POST'
 assert_contains "$controller" 'action_runtime_mode'
+assert_contains "$controller" 'udp_client_multiplier'
+assert_contains "$controller" 'udp_server_multiplier'
 assert_contains "$controller" 'action_geo_update'
 assert_contains "$controller" 'action_gfwlist_update'
 assert_not_contains "$controller" 'action_link_probe'
@@ -799,15 +814,11 @@ assert_contains "$nodes" 'unique_section_id\("group"\)'
 assert_contains "$nodes" 'self\.map:set\(id, nil, self\.sectiontype\)'
 assert_contains "$nodes" 'self\.map:set\(id, "type", "round-robin"\)'
 assert_contains "$nodes" 's:option\(Value, "name", translate\("Group name"\)\)'
-for algorithm in round-robin consistent-hash fallback url-test; do
+for algorithm in select load-balance round-robin consistent-hash fallback url-test; do
 	assert_contains "$nodes" "o:value\(\"$algorithm\""
 done
-assert_contains "$nodes" 'value == "select"'
-assert_contains "$nodes" 'return "fallback"'
-assert_contains "$nodes" 'value == "load-balance"'
-assert_contains "$nodes" 'return "round-robin"'
-assert_not_contains "$nodes" 'o:value\("select"'
-assert_not_contains "$nodes" 'o:value\("load-balance"'
+assert_not_contains "$nodes" 'value == "select"'
+assert_not_contains "$nodes" 'value == "load-balance"'
 assert_not_contains "$nodes" 'self\.map:set\(id, "name", id\)'
 assert_not_contains "$nodes" 'self\.map:set\(id, "key_id", id\)'
 assert_not_contains "$nodes" 's:option\(DummyValue, "__policy_name"'
@@ -878,6 +889,10 @@ for field in redirect_udp transparent_udp_port block_quic tproxy_mark filter_aaa
 	assert_contains "$advanced" "\"$field\""
 done
 assert_contains "$advanced" 'translate\("Transport and TProxy"\)'
+assert_contains "$advanced" '"congestion_profile"'
+assert_not_contains "$advanced" 'value\("cubic"'
+assert_not_contains "$advanced" 'set\("candy", section, "congestion", "cubic"\)'
+assert_contains "$advanced" 'set\("candy", section, "congestion", "candy-bbr"\)'
 assert_contains "$advanced" 'translate\("DNS and GEO expert settings"\)'
 assert_contains "$advanced" 'translate\("Provider updates"\)'
 assert_not_contains "$advanced" 'translate\("Weak-link performance"\)'
@@ -888,6 +903,9 @@ assert_not_contains "$advanced" '/etc/init.d/carrier'
 
 assert_contains "$controller" '"geo", "update", "cn-ip"'
 assert_contains "$controller" '"dns", "update", "gfwlist"'
+assert_contains "$controller" 'output = "/tmp/candy-geo-update\.log", append = true'
+assert_contains "$controller" 'output = "/tmp/candy-gfwlist-update\.log", append = true'
+assert_contains "$process_helper" 'options\.append and "a" or "w"'
 assert_contains "$controller" 'CONGESTION_TEST_POINTS'
 assert_contains "$controller" 'formvalue\("test_point"\)'
 assert_contains "$controller" '"congestion_test", test_point'
@@ -950,6 +968,13 @@ assert_contains "$status" 'candy-overview-actions'
 assert_contains "$status" 'candy-feature-grid'
 assert_contains "$status" 'candy-feature-card\.active'
 assert_contains "$status" 'candy-feature-card\.unauthorized'
+assert_contains "$status" 'grid-template-columns: minmax\(0, 1fr\) auto'
+assert_contains "$status" 'align-items: start'
+assert_contains "$status" 'min-height: 2\.5em'
+assert_contains "$status" 'candy-feature-badge\.active'
+assert_contains "$status" 'badge\.className = "candy-feature-badge " \+ state'
+assert_contains "$status" 'candy-feature-card\.active \{ border-color: #b8ddc3; background: #f4fbf6; \}'
+assert_contains "$status" 'candy-feature-card\.active::before \{ background: #238636; \}'
 assert_contains "$status" 'authorized \? "inactive" : "unauthorized"'
 assert_contains "$status" 'Supported, inactive'
 assert_contains "$status" 'Supported, not authorized'
@@ -989,7 +1014,10 @@ assert_not_contains "$status" 'node\.last_error'
 assert_not_contains "$status" 'status\.dns'
 
 assert_contains "$core_view" 'core_status'
-assert_contains "$core_view" 'core_install'
+assert_not_contains "$core_view" 'core_install'
+assert_not_contains "$core_view" 'Install Core bundle'
+assert_not_contains "$core_view" 'Bundle URL'
+assert_not_contains "$core_view" 'candy-core-install-submit'
 assert_contains "$core_view" 'core_activate'
 assert_contains "$core_view" 'core_rollback'
 assert_contains "$core_view" 'core_remove'
@@ -997,6 +1025,11 @@ assert_contains "$core_view" 'current_manifest'
 assert_contains "$core_view" 'process_api_version'
 assert_contains "$core_view" 'protocol_version'
 assert_contains "$core_view" 'target_arch'
+assert_contains "$update_view" 'data\.core && data\.core\.installed'
+assert_contains "$update_view" 'candy-update-core-installed'
+assert_contains "$update_view" 'candyUpdateCorePageUrl'
+assert_contains "$update_view" 'installedCore && !installedCore\.active'
+assert_contains "$update_view" 'candyUpdateLink'
 assert_not_contains "$status" 'status\.diagnostics'
 assert_not_contains "$status" 'runtime_mode'
 assert_contains "$status" 'status\.version'
@@ -1161,7 +1194,13 @@ assert_contains "$logs" 'System service events'
 assert_contains "$logs" 'No traffic decisions since this log page was opened'
 assert_contains "$logs" 'traffic_log_active'
 assert_contains "$logs" 'candy_traffic_log'
-assert_contains "$logs" 'Date\.now\(\)'
+assert_contains "$logs" 'LOG_HISTORY_GENERATIONS = 5'
+assert_contains "$logs" 'read_log_history'
+assert_contains "$logs" 'LOG_READ_LIMIT = 128 \* 1024'
+assert_contains "$logs" 'base .. "." .. generation'
+assert_contains "$logs" 'xhr\.open\("POST"'
+assert_contains "$logs" 'encodeURIComponent\(csrfToken\)'
+assert_not_contains "$logs" 'writefile\("/tmp/candy-traffic\.log", ""\)'
 assert_contains "$logs" 'Cache-Control'
 assert_contains "$logs" 'candy-log-section \+ \.candy-log-section'
 assert_contains "$logs" '/tmp/candy\.log'
@@ -1211,9 +1250,11 @@ assert_contains "$rules" 'function validateCandyRulesForSubmit'
 assert_contains "$rules" 'candyRuleAllowedTargets'
 assert_contains "$rules" 'Rule targets must be DIRECT, REJECT, or an existing node group\.'
 assert_contains "$rules" 'function copyCandyRules'
-for kind in DOMAIN DOMAIN-SUFFIX DOMAIN-KEYWORD GEOIP IP-CIDR IP-CIDR6 SRC-IP-CIDR SRC-PORT DST-PORT PROCESS-NAME RULE-SET MATCH; do
+for kind in DOMAIN DOMAIN-SUFFIX DOMAIN-KEYWORD GEOIP IP-CIDR IP-CIDR6 SRC-IP-CIDR SRC-PORT DST-PORT RULE-SET MATCH; do
 	assert_contains "$rules" "value=\"$kind\""
 done
+assert_not_contains "$rules" 'PROCESS-NAME'
+assert_not_contains "$controller" 'PROCESS-NAME'
 assert_contains "$rules" 'rules_export'
 assert_contains "$rules" 'rules_import'
 assert_contains "$rules" '<%:Copy rules%>'
@@ -1237,13 +1278,17 @@ luci = {
 		init = { enabled = function() return true end }
 	},
 	http = {
+		getenv = function(name) return name == "REQUEST_METHOD" and "POST" or nil end,
 		formvalue = function(name) return forms[name] end,
 		redirect = function(url) redirected = url end,
 		header = function() end,
 		prepare_content = function() end,
 		write = function() end
 	},
-	dispatcher = { build_url = function(...) return table.concat({...}, "/") end }
+	dispatcher = {
+		build_url = function(...) return table.concat({...}, "/") end,
+		context = { authsession = "test-csrf-token" }
+	}
 }
 
 package.preload["nixio.fs"] = function()
@@ -1307,7 +1352,7 @@ end
 dofile(controller_path)
 
 local provider = "https://example.test/a$(touch_x);`id`'\""
-forms = { url = provider }
+forms = { url = provider, token = "test-csrf-token" }
 executed = nil
 local ok, err = pcall(action_geo_update)
 assert(not ok and tostring(err):match("exec%-stop"), tostring(err))
@@ -1323,7 +1368,7 @@ for _, invalid in ipairs({
 	"file:///tmp/provider",
 	"https://example.test/line1\nline2"
 }) do
-	forms = { url = invalid }
+	forms = { url = invalid, token = "test-csrf-token" }
 	executed = nil
 	redirected = nil
 	ok, err = pcall(action_geo_update)

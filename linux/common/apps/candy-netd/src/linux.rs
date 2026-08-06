@@ -21,6 +21,17 @@ mod backend {
     use std::os::unix::fs::OpenOptionsExt;
     use std::path::Path;
 
+    fn route_delete_is_idempotent(error: &rtnetlink::Error) -> bool {
+        matches!(
+            error,
+            rtnetlink::Error::NetlinkError(message)
+                if matches!(
+                    message.to_io().raw_os_error(),
+                    Some(nix::libc::ENOENT | nix::libc::ESRCH)
+                )
+        )
+    }
+
     pub struct LinuxNetworkBackend {
         runtime: tokio::runtime::Runtime,
         handle: Handle,
@@ -193,7 +204,11 @@ mod backend {
                     .protocol(RouteProtocol::Static)
                     .scope(RouteScope::Link)
                     .build();
-                let _ = handle.route().del(route).execute().await;
+                if let Err(error) = handle.route().del(route).execute().await {
+                    if !route_delete_is_idempotent(&error) {
+                        return Err(NetworkError::Backend);
+                    }
+                }
             }
             for exclusion in &plan.exclusions {
                 let route = RouteMessageBuilder::<Ipv4Addr>::new()
@@ -205,7 +220,11 @@ mod backend {
                     .protocol(RouteProtocol::Static)
                     .kind(RouteType::Throw)
                     .build();
-                let _ = handle.route().del(route).execute().await;
+                if let Err(error) = handle.route().del(route).execute().await {
+                    if !route_delete_is_idempotent(&error) {
+                        return Err(NetworkError::Backend);
+                    }
+                }
             }
             Ok(())
         }

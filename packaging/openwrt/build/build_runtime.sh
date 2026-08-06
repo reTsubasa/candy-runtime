@@ -29,7 +29,17 @@ esac
 cargo build --manifest-path "$repo_root/Cargo.toml" --release --locked \
 	--package candy-netd --target "$target"
 
-binary="$repo_root/target/$target/release/candy-netd"
+command -v jq >/dev/null 2>&1 || {
+	printf '%s\n' "jq is required to locate the Cargo target directory" >&2
+	exit 2
+}
+target_root=$(cargo metadata --format-version 1 --no-deps --manifest-path "$repo_root/Cargo.toml" |
+	jq -er '.target_directory')
+[ -n "$target_root" ] || {
+	printf '%s\n' "unable to determine Cargo target directory" >&2
+	exit 2
+}
+binary="$target_root/$target/release/candy-netd"
 [ -x "$binary" ] || {
 	printf '%s\n' "candy-netd was not produced: $binary" >&2
 	exit 1

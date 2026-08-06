@@ -1,7 +1,7 @@
 module("luci.controller.candy", package.seeall)
 
 local GEO_CN_RULE = "GEOIP,CN,DIRECT,no-resolve"
-local GEO_DEFAULT_URL = "https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt"
+local GEO_DEFAULT_URL = "https://gaoyifan.github.io/china-operator-ip/china46.txt"
 local GFWLIST_DEFAULT_URL = "https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt"
 local SERVICE_LIFECYCLE_FILE = "/tmp/candy.lifecycle"
 local SERVICE_LIFECYCLE_TTL = 10
@@ -9,6 +9,8 @@ local PASSIVE_STATUS_FILE = "/var/run/candy/passive-status.json"
 local MAX_PASSIVE_STATUS_BYTES = 262144
 local SDWAN_STATUS_FILE = "/var/run/candy/sdwan-status.json"
 local MAX_SDWAN_STATUS_BYTES = 65536
+local FAULT_STATUS_FILE = "/var/lib/candy/runtime-fault.json"
+local MAX_FAULT_STATUS_BYTES = 16384
 local CONGESTION_TEST_LOCK_DIR = "/tmp/candy-congestion-test.lock"
 local CONGESTION_TEST_RESULT_FILE = "/tmp/candy-congestion-test.json"
 local CONGESTION_TEST_LOG_FILE = "/tmp/candy-congestion-test.log"
@@ -117,6 +119,34 @@ local function read_sdwan_status(uci)
 	status.enabled = enabled
 	status.schema_version = 1
 	return status
+end
+
+local function read_fault_status()
+	local fs = require "nixio.fs"
+	local jsonc = require "luci.jsonc"
+	local stat = fs.stat(FAULT_STATUS_FILE)
+	if not stat or stat.type ~= "reg" or tonumber(stat.size or 0) > MAX_FAULT_STATUS_BYTES then
+		return nil
+	end
+	local text = fs.readfile(FAULT_STATUS_FILE)
+	if not text or #text > MAX_FAULT_STATUS_BYTES then
+		return nil
+	end
+	local status = jsonc.parse(text)
+	if type(status) ~= "table" or tonumber(status.schema_version) ~= 1 then
+		return nil
+	end
+	if type(status.reason) ~= "string" or type(status.cleanup) ~= "string" then
+		return nil
+	end
+	return {
+		schema_version = 1,
+		state = status.state == "active" and "active" or "unknown",
+		reason = status.reason,
+		cleanup = status.cleanup,
+		detail = type(status.detail) == "string" and status.detail or "",
+		updated_at = tonumber(status.updated_at)
+	}
 end
 
 local function read_core_status()
@@ -315,7 +345,6 @@ local RULE_KINDS = {
 	["SRC-IP-CIDR"] = true,
 	["SRC-PORT"] = true,
 	["DST-PORT"] = true,
-	["PROCESS-NAME"] = true,
 	["RULE-SET"] = true,
 	["MATCH"] = true
 }
@@ -477,7 +506,6 @@ function index()
 	entry({"admin", "services", "candy", "congestion_test"}, call("action_congestion_test")).leaf = true
 	entry({"admin", "services", "candy", "congestion_test_status"}, call("action_congestion_test_status")).leaf = true
 	entry({"admin", "services", "candy", "core_status"}, call("action_core_status")).leaf = true
-	entry({"admin", "services", "candy", "core_install"}, call("action_core_install")).leaf = true
 	entry({"admin", "services", "candy", "core_activate"}, call("action_core_activate")).leaf = true
 	entry({"admin", "services", "candy", "core_rollback"}, call("action_core_rollback")).leaf = true
 	entry({"admin", "services", "candy", "core_remove"}, call("action_core_remove")).leaf = true
@@ -517,18 +545,6 @@ function action_core_status()
 	luci.http.write(jsonc.stringify(read_core_status()))
 end
 
-function action_core_install()
-	if not require_post() then return end
-	local version = trim(luci.http.formvalue("version") or "")
-	local url = trim(luci.http.formvalue("url") or "")
-	local sha256 = trim(luci.http.formvalue("sha256") or "")
-	if version == "" or url == "" or sha256 == "" then
-		luci.http.status(400, "Bad Request")
-		return
-	end
-	start_core_operation({ CORE_MANAGER, "install", version, url, sha256 })
-end
-
 function action_core_activate()
 	if not require_post() then return end
 	local version = trim(luci.http.formvalue("version") or "")
@@ -555,6 +571,7 @@ function action_core_remove()
 end
 
 function action_congestion_test()
+	if not require_post() then return end
 	local fs = require "nixio.fs"
 	local jsonc = require "luci.jsonc"
 	local test_point = trim(luci.http.formvalue("test_point") or "vultr-tokyo")
@@ -597,6 +614,7 @@ function action_congestion_test_status()
 end
 
 function action_service(action)
+	if not require_post() then return end
 	local allowed = {
 		start = true,
 		stop = true,
@@ -614,6 +632,7 @@ function action_service(action)
 end
 
 function action_runtime_mode()
+	if not require_post() then return end
 	local uci = require "luci.model.uci".cursor()
 	local mode = luci.http.formvalue("runtime_mode") or "fallback"
 
@@ -633,11 +652,18 @@ function action_runtime_mode()
 	if mode == "performance" then
 		uci:set("candy", "client", "block_quic", "0")
 		uci:set("candy", "client", "redirect_udp", "1")
+		-- Performance mode is the explicit high-throughput profile. Start with
+		-- bounded x2 redundancy; the Core adaptive policy may raise it to x3
+		-- after sustained loss evidence and its own capacity budget check.
+		uci:set("candy", "client", "udp_client_multiplier", "2")
+		uci:set("candy", "client", "udp_server_multiplier", "2")
 		uci:set("candy", "client", "transparent_udp_port", "12346")
 		uci:set("candy", "client", "tproxy_mark", "100")
 	else
 		uci:set("candy", "client", "block_quic", "1")
 		uci:set("candy", "client", "redirect_udp", "0")
+		uci:set("candy", "client", "udp_client_multiplier", "1")
+		uci:set("candy", "client", "udp_server_multiplier", "1")
 		uci:set("candy", "client", "transparent_udp_port", "12346")
 		uci:set("candy", "client", "tproxy_mark", "100")
 	end
@@ -650,6 +676,7 @@ function action_runtime_mode()
 end
 
 function action_traffic_log_active()
+	if not require_post() then return end
 	atomic_write_file("/tmp/candy-traffic-log.enabled", tostring(os.time()) .. "\n")
 	local fs = require "nixio.fs"
 	local text = fs.readfile("/tmp/candy-traffic.log") or ""
@@ -689,6 +716,7 @@ function action_status_json()
 	runtime.multi_node = nil
 	status.runtime = runtime
 	status.sdwan = read_sdwan_status(uci)
+	status.fault = read_fault_status()
 	status.core = read_core_status()
 	status.version = status.version or "0.4.0"
 	status.release = status.release or "1"
@@ -708,6 +736,7 @@ function action_rules_export()
 end
 
 function action_rules_import()
+	if not require_post() then return end
 	local uci = require "luci.model.uci".cursor()
 	local text = luci.http.formvalue("rules") or ""
 	local normalized = normalized_rules_text(text)
@@ -790,6 +819,7 @@ local function redirect_gfwlist(status)
 end
 
 function action_geo_update()
+	if not require_post() then return end
 	local uci = require "luci.model.uci".cursor()
 	local url, err = normalize_geo_update_url(luci.http.formvalue("url") or uci:get("candy", "client", "geo_update_url") or GEO_DEFAULT_URL)
 
@@ -802,7 +832,7 @@ function action_geo_update()
 	uci:commit("candy")
 
 	local argv = { "/usr/bin/candy-client", "geo", "update", "cn-ip", "--url", url, "--output", "/etc/candy/rulesets/cn-ip.cidr" }
-	if run_argv(argv, { output = "/tmp/candy-geo-update.log" }) then
+	if run_argv(argv, { output = "/tmp/candy-geo-update.log", append = true }) then
 		candy_service_async("reload")
 		redirect_geo("ok")
 	else
@@ -811,6 +841,7 @@ function action_geo_update()
 end
 
 function action_gfwlist_update()
+	if not require_post() then return end
 	local uci = require "luci.model.uci".cursor()
 	local url, err = normalize_gfwlist_update_url(luci.http.formvalue("url") or uci:get("candy", "client", "gfwlist_update_url") or GFWLIST_DEFAULT_URL)
 
@@ -823,7 +854,7 @@ function action_gfwlist_update()
 	uci:commit("candy")
 
 	local argv = { "/usr/bin/candy-client", "dns", "update", "gfwlist", "--url", url, "--output", "/etc/candy/rulesets/gfwlist.domains" }
-	if run_argv(argv, { output = "/tmp/candy-gfwlist-update.log" }) then
+	if run_argv(argv, { output = "/tmp/candy-gfwlist-update.log", append = true }) then
 		candy_service_async("reload")
 		redirect_gfwlist("ok")
 	else

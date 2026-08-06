@@ -31,7 +31,8 @@ function M.run(argv, options)
 	options = options or {}
 	local pid = nixio.fork()
 	if pid == 0 then
-		local output = nixio.open(options.output or "/dev/null", "w", "rw-------")
+		local output_mode = options.append and "a" or "w"
+		local output = nixio.open(options.output or "/dev/null", output_mode, "rw-------")
 		if output then
 			nixio.dup(output, nixio.stdout)
 			nixio.dup(output, nixio.stderr)

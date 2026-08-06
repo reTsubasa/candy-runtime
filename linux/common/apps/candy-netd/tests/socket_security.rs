@@ -2,6 +2,7 @@ use candy_netd::{bind_private_socket, bind_private_socket_for, SocketSecurityErr
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::net::UnixListener;
 
 fn test_directory() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("candy-netd-test-{}", std::process::id()))
@@ -20,6 +21,7 @@ fn socket_can_be_owned_by_the_configured_caller() {
     let metadata = fs::metadata(&socket).unwrap();
     assert_eq!((metadata.uid(), metadata.gid()), (uid, gid));
     drop(listener);
+    assert!(!socket.exists());
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -63,12 +65,36 @@ fn socket_is_owner_only_and_rejects_unsafe_parent() {
         0o600
     );
     drop(listener);
-    fs::remove_file(&socket).unwrap();
+    assert!(!socket.exists());
 
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
     assert!(matches!(
         bind_private_socket(&socket),
         Err(SocketSecurityError::UnsafeParent)
     ));
+    fs::remove_dir(&directory).unwrap();
+}
+
+#[test]
+fn stale_owned_socket_is_replaced_but_live_socket_is_preserved() {
+    let directory = test_directory().with_extension("stale");
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = directory.join("netd.sock");
+
+    let live = UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(matches!(
+        bind_private_socket(&socket),
+        Err(SocketSecurityError::ExistingPath)
+    ));
+    assert!(socket.exists());
+    drop(live);
+
+    let replacement = bind_private_socket(&socket).unwrap();
+    assert!(socket.exists());
+    drop(replacement);
+    assert!(!socket.exists());
     fs::remove_dir(&directory).unwrap();
 }

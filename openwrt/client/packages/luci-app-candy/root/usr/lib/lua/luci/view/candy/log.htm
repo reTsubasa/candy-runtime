@@ -7,13 +7,44 @@
 local fs = require "nixio.fs"
 local xml = require "luci.xml"
 local process = require "luci.candy.process"
-local traffic_enabled_file = "/tmp/candy-traffic-log.enabled"
 
-fs.writefile(traffic_enabled_file, tostring(os.time()))
-fs.writefile("/tmp/candy-traffic.log", "")
+local LOG_HISTORY_GENERATIONS = 5
+local LOG_READ_LIMIT = 128 * 1024
 
-local service_log = fs.readfile("/tmp/candy.log") or ""
-local traffic_log = fs.readfile("/tmp/candy-traffic.log") or ""
+local function read_log_tail(path)
+	local handle = io.open(path, "r")
+	if not handle then
+		return ""
+	end
+	local size = handle:seek("end") or 0
+	local offset = math.max(0, size - LOG_READ_LIMIT)
+	handle:seek("set", offset)
+	local text = handle:read("*a") or ""
+	handle:close()
+	if offset > 0 then
+		local first_newline = text:find("\n", 1, true)
+		text = first_newline and text:sub(first_newline + 1) or ""
+	end
+	return text
+end
+
+local function read_log_history(base)
+	local parts = {}
+	for generation = LOG_HISTORY_GENERATIONS, 1, -1 do
+		local text = read_log_tail(base .. "." .. generation)
+		if text ~= "" then
+			parts[#parts + 1] = text
+		end
+	end
+	local current = read_log_tail(base)
+	if current ~= "" then
+		parts[#parts + 1] = current
+	end
+	return table.concat(parts, "\n")
+end
+
+local service_log = read_log_history("/tmp/candy.log")
+local traffic_log = read_log_history("/tmp/candy-traffic.log")
 local _, raw_system_log = process.capture({ "/sbin/logread" })
 
 local function candy_system_log(text)
@@ -85,17 +116,19 @@ end
 document.addEventListener("DOMContentLoaded", function() {
 	var trafficBox = document.getElementById("candy_traffic_log");
 	var emptyTrafficText = trafficBox ? trafficBox.value : "";
+	var csrfToken = <%=string.format("%q", tostring(luci.dispatcher.context.authsession or ""))%>;
 
 	function keepTrafficLogActive() {
 		var xhr = new XMLHttpRequest();
-		xhr.open("GET", "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'traffic_log_active')%>?_=" + Date.now(), true);
+		xhr.open("POST", "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'traffic_log_active')%>", true);
 		xhr.setRequestHeader("Cache-Control", "no-cache");
+		xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 		xhr.onreadystatechange = function() {
 			if (xhr.readyState === 4 && xhr.status === 200 && trafficBox) {
 				trafficBox.value = xhr.responseText && xhr.responseText.replace(/\s+/g, "") ? xhr.responseText : emptyTrafficText;
 			}
 		};
-		xhr.send();
+		xhr.send("token=" + encodeURIComponent(csrfToken));
 	}
 	keepTrafficLogActive();
 	window.setInterval(keepTrafficLogActive, 2000);
