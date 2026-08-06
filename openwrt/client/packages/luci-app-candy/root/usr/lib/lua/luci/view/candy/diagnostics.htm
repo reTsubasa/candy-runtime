@@ -207,7 +207,7 @@ end
 				<tr class="tr">
 					<td class="td"><%=xml.pcdata(text_label(node.name or node.id))%></td><td class="td"><%=xml.pcdata(text_label(node.state))%></td>
 					<td class="td candy-metric-lines"><%=xml.pcdata(metric_line("RTT", micros_label(local_status.smoothed_rtt_micros)) .. "\n" .. metric_line("RTT variation", micros_label(local_status.rtt_variance_micros)))%></td>
-					<td class="td candy-metric-lines"><%=xml.pcdata(metric_line("Goodput", bps_label(local_status.goodput_bps)) .. "\n" .. metric_line("Loss", text_label(local_status.lost_packets)))%></td>
+					<td class="td candy-metric-lines"><%=xml.pcdata(metric_line("Goodput", tonumber(local_status.goodput_bps) == 0 and translate("Idle") or bps_label(local_status.goodput_bps)) .. "\n" .. metric_line("Estimated capacity", bps_label(local_status.bandwidth_estimate_bps)) .. "\n" .. metric_line("Loss", text_label(local_status.lost_packets)))%></td>
 					<td class="td candy-metric-lines"><%=xml.pcdata(metric_line("In flight", bytes_label(local_status.bytes_in_flight)) .. " / " .. bytes_label(local_status.cwnd_bytes) .. " (" .. percent_label(local_status.bytes_in_flight, local_status.cwnd_bytes) .. ")\n" .. metric_line("Pacing", bps_label(local_status.pacing_rate_bps)))%></td>
 					<td class="td candy-metric-lines"><%=xml.pcdata(mapped_label(congestion_mode_labels, local_status.congestion_mode) .. "\n" .. mapped_label(recovery_state_labels, local_status.recovery_state) .. "\n" .. controller_label(applied, passive))%></td>
 					<td class="td candy-metric-lines"><%=xml.pcdata(metric_line("MTU", text_label(local_status.path_mtu)))%></td>
@@ -264,7 +264,7 @@ var candyDiagnosticsLabels = {
 		"serverius-netherlands": <%=js_string(i18n.translate("Serverius Netherlands"))%>
 	},
 	rtt: "RTT", rttVariation: <%=js_string(i18n.translate("RTT variation"))%>,
-	goodput: <%=js_string(i18n.translate("Goodput"))%>, loss: <%=js_string(i18n.translate("Loss"))%>,
+	goodput: <%=js_string(i18n.translate("Goodput"))%>, estimatedCapacity: <%=js_string(i18n.translate("Estimated capacity"))%>, idle: <%=js_string(i18n.translate("Idle"))%>, loss: <%=js_string(i18n.translate("Loss"))%>,
 	inFlight: <%=js_string(i18n.translate("In flight"))%>, pacing: <%=js_string(i18n.translate("Pacing"))%>, bandwidth: <%=js_string(i18n.translate("Bandwidth estimate"))%>,
 	cwnd: "CWND", mtu: "MTU"
 };
@@ -320,6 +320,11 @@ function candyDiagnosticsBps(value) {
 	if (n >= 1000000) return (n / 1000000).toFixed(1) + " Mbps";
 	if (n >= 1000) return (n / 1000).toFixed(1) + " Kbps";
 	return String(n) + " bps";
+}
+function candyDiagnosticsGoodput(value) {
+	var n = Number(value);
+	if (value === null || value === undefined || !isFinite(n)) return "-";
+	return n === 0 ? candyDiagnosticsLabels.idle : candyDiagnosticsBps(n);
 }
 function candyDiagnosticsMicros(value) { var n = Number(value); return value !== null && value !== undefined && isFinite(n) ? (n / 1000).toFixed(2) + " ms" : "-"; }
 function candyDiagnosticsBytes(value) {
@@ -421,7 +426,7 @@ function candyDiagnosticsRender(data) {
 		row = document.createElement("tr"); row.className = "tr";
 		candyDiagnosticsAppendCell(row, candyDiagnosticsText(node.name || node.id)); candyDiagnosticsAppendCell(row, candyDiagnosticsText(node.state));
 		candyDiagnosticsAppendCell(row, candyDiagnosticsLines(["RTT: " + candyDiagnosticsMicros(localStatus.smoothed_rtt_micros), candyDiagnosticsLabels.rttVariation + ": " + candyDiagnosticsMicros(localStatus.rtt_variance_micros)]));
-		candyDiagnosticsAppendCell(row, candyDiagnosticsLines([candyDiagnosticsLabels.goodput + ": " + candyDiagnosticsBps(localStatus.goodput_bps), candyDiagnosticsLabels.loss + ": " + candyDiagnosticsText(localStatus.lost_packets)]));
+		candyDiagnosticsAppendCell(row, candyDiagnosticsLines([candyDiagnosticsLabels.goodput + ": " + candyDiagnosticsGoodput(localStatus.goodput_bps), candyDiagnosticsLabels.estimatedCapacity + ": " + candyDiagnosticsBps(localStatus.bandwidth_estimate_bps), candyDiagnosticsLabels.loss + ": " + candyDiagnosticsText(localStatus.lost_packets)]));
 		candyDiagnosticsAppendCell(row, candyDiagnosticsLines([candyDiagnosticsLabels.inFlight + ": " + candyDiagnosticsBytes(localStatus.bytes_in_flight) + " / " + candyDiagnosticsBytes(localStatus.cwnd_bytes) + " (" + candyDiagnosticsPercent(localStatus.bytes_in_flight, localStatus.cwnd_bytes) + ")", candyDiagnosticsLabels.pacing + ": " + candyDiagnosticsBps(localStatus.pacing_rate_bps)]));
 		candyDiagnosticsAppendCell(row, candyDiagnosticsLines([candyDiagnosticsMappedText(candyDiagnosticsLabels.congestionModes, localStatus.congestion_mode), candyDiagnosticsMappedText(candyDiagnosticsLabels.recoveryStates, localStatus.recovery_state), candyDiagnosticsController(applied, passive)]));
 		candyDiagnosticsAppendCell(row, "MTU: " + candyDiagnosticsText(localStatus.path_mtu)); body.appendChild(row);

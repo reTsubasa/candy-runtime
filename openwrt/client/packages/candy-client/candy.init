@@ -1187,7 +1187,7 @@ write_runtime_status() {
 }
 
 congestion_test() {
-	local test_point temporary rc
+	local test_point temporary rc help
 	test_point=${2:-vultr-tokyo}
 	case "$test_point" in
 		vultr-tokyo|linode-singapore|hetzner-ashburn|ovh-france|serverius-netherlands) ;;
@@ -1204,6 +1204,17 @@ congestion_test() {
 	printf '%s\n' "$$" > "$CONGESTION_TEST_LOCK_DIR/pid"
 	rotate_log_file "$CONGESTION_TEST_LOG_FILE"
 	temporary=$(atomic_temp_path "$CONGESTION_TEST_RESULT_FILE") || return 1
+	help=$("$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format candy-json --platform openwrt \
+		congestion-test --help 2>&1) || {
+		printf '%s\n' "Active Candy Core does not support congestion comparison; update Core to 0.3.5 or newer." > "$CONGESTION_TEST_LOG_FILE"
+		rm -f "$temporary"
+		return 126
+	}
+	printf '%s' "$help" | grep -Fq -- '--test-point' || {
+		printf '%s\n' "Active Candy Core is too old for selectable congestion test points; update Core to 0.3.5 or newer." > "$CONGESTION_TEST_LOG_FILE"
+		rm -f "$temporary"
+		return 126
+	}
 	log_msg "starting bounded congestion comparison at $test_point: CUBIC, current BBR, BBR v1, aggressive BBR"
 	"$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format candy-json --platform openwrt \
 		congestion-test --test-point "$test_point" --samples 1 --max-bytes 104857600 --timeout-ms 60000 \
@@ -2868,7 +2879,7 @@ start_service() {
 		# Root remains required for ordinary transparent proxy routing.
 		procd_set_param user root
 	fi
-	procd_set_param env CANDY_TRAFFIC_LOG="$TRAFFIC_LOG_FILE" CANDY_TRAFFIC_LOG_CONTROL="$TRAFFIC_LOG_CONTROL_FILE" CANDY_READY_FILE="$CANDY_READY_FILE" CANDY_PASSIVE_STATUS_FILE="$CANDY_PASSIVE_STATUS_FILE"
+	procd_set_param env CANDY_TRAFFIC_LOG="$TRAFFIC_LOG_FILE" CANDY_READY_FILE="$CANDY_READY_FILE" CANDY_PASSIVE_STATUS_FILE="$CANDY_PASSIVE_STATUS_FILE"
 	procd_set_param respawn 3600 10 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1

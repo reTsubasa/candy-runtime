@@ -281,7 +281,9 @@ grep -F 'chown -R candy-sdwan:candy-sdwan "$CANDY_EPOCH_DIRECTORY"' "$repo_root/
 grep -F -- '--probe-socket "$CANDY_NETD_SOCKET"' "$repo_root/candy-client/candy.init" >/dev/null || fail "netd readiness does not perform a live socket probe"
 grep -F 'verify_promoted_runtime_candidate "$candidate_sha"' "$repo_root/candy-client/candy.init" >/dev/null || fail "successful reload does not verify daemon promotion"
 grep -F 'config_load candy 2>/dev/null || true' "$repo_root/candy-client/candy.init" >/dev/null
-grep -F 'procd_set_param env CANDY_TRAFFIC_LOG="$TRAFFIC_LOG_FILE" CANDY_TRAFFIC_LOG_CONTROL="$TRAFFIC_LOG_CONTROL_FILE" CANDY_READY_FILE="$CANDY_READY_FILE"' "$repo_root/candy-client/candy.init" >/dev/null
+grep -F 'procd_set_param env CANDY_TRAFFIC_LOG="$TRAFFIC_LOG_FILE" CANDY_READY_FILE="$CANDY_READY_FILE" CANDY_PASSIVE_STATUS_FILE="$CANDY_PASSIVE_STATUS_FILE"' "$repo_root/candy-client/candy.init" >/dev/null
+! grep -F 'procd_set_param env CANDY_TRAFFIC_LOG="$TRAFFIC_LOG_FILE" CANDY_TRAFFIC_LOG_CONTROL=' "$repo_root/candy-client/candy.init" >/dev/null ||
+  fail "traffic decision logging is still tied to the LuCI page lifetime"
 test "$(grep -Fc 'procd_set_param respawn 3600 10 5' "$repo_root/candy-client/candy.init")" -eq 3 ||
   fail "long-running Candy procd instances must stop after a bounded crash loop"
 ! grep -F 'procd_set_param respawn 3600 10 0' "$repo_root/candy-client/candy.init" >/dev/null ||

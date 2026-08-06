@@ -93,7 +93,7 @@ local function service_text()
 end
 
 local function traffic_text()
-	return empty_note(newest_first(traffic_log), translate("No traffic decisions since this log page was opened. New transparent proxy flows will appear as time, source -> destination, matched rule, and outbound while this page remains open."))
+	return empty_note(newest_first(traffic_log), translate("No traffic decisions for this boot yet. New transparent proxy flows are recorded with time, source, destination, matched rule, and outbound."))
 end
 %>
 

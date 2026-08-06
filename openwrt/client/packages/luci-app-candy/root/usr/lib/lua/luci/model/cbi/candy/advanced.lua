@@ -7,7 +7,7 @@ local GEO_DEFAULT_URL = "https://gaoyifan.github.io/china-operator-ip/china46.tx
 
 m = Map("candy", translate("Advanced"), translate("Expert DNS, provider, congestion-control, and transparent proxy controls."))
 
-s = m:section(NamedSection, "client", "candy", translate("DNS and GEO expert settings"))
+s = m:section(NamedSection, "client", "candy", translate("DNS expert settings"))
 s.addremove = false
 s.anonymous = true
 

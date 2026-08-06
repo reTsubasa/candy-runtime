@@ -474,10 +474,10 @@ function index()
 	page = entry({"admin", "services", "candy", "overview"}, template("candy/status"), _("Overview"), 10)
 	page.leaf = true
 
-	page = entry({"admin", "services", "candy", "traffic"}, template("candy/rules"), _("Traffic Policy"), 20)
+	page = entry({"admin", "services", "candy", "traffic"}, template("candy/rules"), _("Policy"), 20)
 	page.leaf = true
 
-	page = entry({"admin", "services", "candy", "dns_geo"}, cbi("candy/dns"), _("DNS & GEO"), 30)
+	page = entry({"admin", "services", "candy", "dns_geo"}, cbi("candy/dns"), _("DNS"), 30)
 	page.leaf = true
 
 	page = entry({"admin", "services", "candy", "nodes"}, cbi("candy/nodes"), _("Nodes"), 40)

@@ -507,8 +507,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=5$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=5$'
+assert_contains "$makefile" '^PKG_RELEASE:=6$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=6$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'
@@ -550,8 +550,8 @@ assert_contains "$po" '^"Language: zh_CN\\n"$'
 for msgid in \
 	"Candy" \
 	"Overview" \
-	"Traffic Policy" \
-	"DNS & GEO" \
+	"Policy" \
+	"DNS" \
 	"Nodes" \
 	"Runtime mode" \
 	"Version" \
@@ -593,7 +593,7 @@ for msgid in \
 	"Traffic log" \
 	"System service events" \
 	"No service log for this boot yet." \
-	"No traffic decisions since this log page was opened. New transparent proxy flows will appear as time, source -> destination, matched rule, and outbound while this page remains open." \
+	"No traffic decisions for this boot yet. New transparent proxy flows are recorded with time, source, destination, matched rule, and outbound." \
 	"Running" \
 	"Stopping" \
 	"Invalid reason" \
@@ -631,7 +631,7 @@ done
 for msgstr in \
 	"概览" \
 	"流量策略" \
-	"DNS 与 GEO" \
+	"DNS" \
 	"节点" \
 	"运行模式" \
 	"版本" \
@@ -705,8 +705,8 @@ for route in overview traffic dns_geo nodes diagnostics logs advanced core; do
 	assert_contains "$controller" "\"$route\""
 done
 assert_contains "$controller" '\{"admin", "services", "candy", "overview"\}.*_\("Overview"\)'
-assert_contains "$controller" '\{"admin", "services", "candy", "traffic"\}.*_\("Traffic Policy"\)'
-assert_contains "$controller" '\{"admin", "services", "candy", "dns_geo"\}.*_\("DNS & GEO"\)'
+assert_contains "$controller" '\{"admin", "services", "candy", "traffic"\}.*_\("Policy"\)'
+assert_contains "$controller" '\{"admin", "services", "candy", "dns_geo"\}.*_\("DNS"\)'
 assert_contains "$controller" '\{"admin", "services", "candy", "nodes"\}.*_\("Nodes"\)'
 assert_contains "$controller" '\{"admin", "services", "candy", "diagnostics"\}.*_\("Diagnostics"\)'
 assert_contains "$controller" '\{"admin", "services", "candy", "logs"\}.*_\("Logs"\)'
@@ -845,7 +845,7 @@ assert_not_contains "$nodes" '/etc/init.d/carrier'
 assert_contains "$nodes" 'process\.run\(\{ "/etc/init.d/candy", "status" \}\)'
 
 assert_contains "$dns" 'Map\("candy"'
-assert_contains "$dns" 'translate\("DNS & GEO"\)'
+assert_contains "$dns" 'translate\("DNS"\)'
 assert_contains "$dns" 'DOMESTIC_RESOLVERS_DEFAULT = "system,223\.5\.5\.5:53,119\.29\.29\.29:53"'
 assert_contains "$dns" 'FOREIGN_RESOLVER_DEFAULT = "8\.8\.8\.8:53"'
 assert_contains "$dns" 'normalize_resolver_list'
@@ -893,7 +893,7 @@ assert_contains "$advanced" '"congestion_profile"'
 assert_not_contains "$advanced" 'value\("cubic"'
 assert_not_contains "$advanced" 'set\("candy", section, "congestion", "cubic"\)'
 assert_contains "$advanced" 'set\("candy", section, "congestion", "candy-bbr"\)'
-assert_contains "$advanced" 'translate\("DNS and GEO expert settings"\)'
+assert_contains "$advanced" 'translate\("DNS expert settings"\)'
 assert_contains "$advanced" 'translate\("Provider updates"\)'
 assert_not_contains "$advanced" 'translate\("Weak-link performance"\)'
 assert_not_contains "$advanced" 'translate\("Local forwards"\)'
@@ -927,6 +927,8 @@ assert_contains "$init" 'geo_update_interval_hours'
 assert_contains "$init" 'dns update gfwlist'
 assert_contains "$init" 'geo update cn-ip'
 assert_contains "$init" 'congestion-test --test-point "\$test_point" --samples 1 --max-bytes 104857600 --timeout-ms 60000'
+assert_contains "$init" 'congestion-test --help'
+assert_contains "$init" 'update Core to 0\.3\.5 or newer'
 assert_not_contains "$init" 'congestion-test --samples 1 --max-bytes 2097152'
 if [ -e "$repo_root/luci-app-candy/root/usr/lib/lua/luci/model/cbi/candy/geo.lua" ]; then
 	fail "GEO model must be merged into DNS & GEO"
@@ -1184,6 +1186,10 @@ assert_not_contains "$diagnostics" 'candy-chart-flight'
 assert_contains "$diagnostics" 'table-layout: fixed'
 assert_contains "$diagnostics" '<colgroup>'
 assert_contains "$diagnostics" 'translate\("Goodput"\)'
+assert_contains "$diagnostics" 'translate\("Estimated capacity"\)'
+assert_contains "$diagnostics" 'translate\("Idle"\)'
+assert_contains "$diagnostics" 'bandwidth_estimate_bps'
+assert_contains "$diagnostics" 'candyDiagnosticsGoodput'
 assert_not_contains "$diagnostics" 'carrier'
 
 assert_count "$logs" '<div class="cbi-map">' 1
@@ -1191,7 +1197,7 @@ assert_contains "$logs" '<%:Logs%>'
 assert_contains "$logs" '<%:Service log%>'
 assert_contains "$logs" '<%:Traffic log%>'
 assert_contains "$logs" 'System service events'
-assert_contains "$logs" 'No traffic decisions since this log page was opened'
+assert_contains "$logs" 'No traffic decisions for this boot yet'
 assert_contains "$logs" 'traffic_log_active'
 assert_contains "$logs" 'candy_traffic_log'
 assert_contains "$logs" 'LOG_HISTORY_GENERATIONS = 5'
@@ -1219,7 +1225,7 @@ assert_not_contains "$logs" 'redact_runtime'
 assert_not_contains "$logs" '/tmp/candy\.nodes'
 
 assert_count "$rules" '<div class="cbi-map">' 2
-assert_contains "$rules" '<%:Traffic Policy%>'
+assert_contains "$rules" '<%:Policy%>'
 assert_not_contains "$rules" '"runtime_mode"'
 assert_not_contains "$rules" 'value="stable"'
 assert_not_contains "$rules" 'value="performance"'

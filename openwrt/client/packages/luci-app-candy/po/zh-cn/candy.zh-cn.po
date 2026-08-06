@@ -21,8 +21,8 @@ msgstr "高级"
 msgid "Expert DNS, provider, and transparent proxy controls. Candy negotiates transport performance automatically."
 msgstr "DNS、规则数据源和透明代理的专家设置。传输性能由 Candy 自动协商。"
 
-msgid "DNS and GEO expert settings"
-msgstr "DNS 与 GEO 专家设置"
+msgid "DNS expert settings"
+msgstr "DNS 专家设置"
 
 msgid "Provider updates"
 msgstr "规则数据更新"
@@ -218,6 +218,15 @@ msgstr "最低"
 
 msgid "Goodput"
 msgstr "有效吞吐"
+
+msgid "Estimated capacity"
+msgstr "估算容量"
+
+msgid "Idle"
+msgstr "空闲"
+
+msgid "No traffic decisions for this boot yet. New transparent proxy flows are recorded with time, source, destination, matched rule, and outbound."
+msgstr "本次启动后尚无用户流量决策。新的透明代理连接会持续记录时间、来源、目标、匹配规则和出口。"
 
 msgid "Loss"
 msgstr "丢包"
@@ -726,11 +735,11 @@ msgstr "支持，未授权"
 msgid "Evidence"
 msgstr "依据"
 
-msgid "Traffic Policy"
-msgstr "流量策略"
+msgid "Policy"
+msgstr "策略"
 
-msgid "DNS & GEO"
-msgstr "DNS 与 GEO"
+msgid "DNS"
+msgstr "DNS"
 
 msgid "Quick actions"
 msgstr "快捷操作"
@@ -944,9 +953,6 @@ msgstr "本地转发"
 
 msgid "Missing valid downlink throughput sample."
 msgstr "缺少有效的下行吞吐样本。"
-
-msgid "No traffic decisions since this log page was opened. New transparent proxy flows will appear as time, source -> destination, matched rule, and outbound while this page remains open."
-msgstr "打开本日志页后暂无流量决策。页面保持打开时，新的透明代理流量会显示时间、源地址 -> 目的地址、命中规则和出口。"
 
 msgid "Optional local port forwards through the Candy tunnel. Normal transparent proxy use does not need entries here."
 msgstr "通过 Candy 隧道转发本地端口的可选配置。正常透明代理使用不需要在这里添加条目。"

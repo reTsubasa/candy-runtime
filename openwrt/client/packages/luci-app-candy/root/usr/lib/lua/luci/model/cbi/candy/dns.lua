@@ -123,9 +123,9 @@ local function read_dns_tunnel_status()
 	return rows
 end
 
-m = Map("candy", translate("DNS & GEO"), translate("Enable Candy DNS and China routing with sensible defaults. Custom DNS servers are optional."))
+m = Map("candy", translate("DNS"), translate("Enable Candy DNS and China routing with sensible defaults. Custom DNS servers are optional."))
 
-s = m:section(NamedSection, "client", "candy", translate("DNS & GEO"))
+s = m:section(NamedSection, "client", "candy", translate("DNS"))
 s.addremove = false
 s.anonymous = true
 
