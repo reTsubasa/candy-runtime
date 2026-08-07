@@ -933,7 +933,7 @@ assert_contains "$init" 'geo update cn-ip'
 assert_contains "$init" 'node_id=\$\{1:-\}'
 assert_contains "$init" 'congestion-test --node "\$node_id" --samples 1 --max-bytes 52428800 --timeout-ms 120000'
 assert_contains "$init" 'congestion-test --help'
-assert_contains "$init" 'update Core to 0\.3\.6 or newer'
+assert_contains "$init" 'update Core to 0\.3\.7 or newer'
 assert_not_contains "$init" 'congestion-test --samples 1 --max-bytes 2097152'
 if [ -e "$repo_root/luci-app-candy/root/usr/lib/lua/luci/model/cbi/candy/geo.lua" ]; then
 	fail "GEO model must be merged into DNS & GEO"
