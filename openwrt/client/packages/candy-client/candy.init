@@ -364,13 +364,28 @@ wait_for_current_readiness() {
 }
 
 ensure_no_existing_candy_client_before_start() {
-	local pids
+	local allow_takeover="${1:-0}" pids
 	pids=$(candy_client_pids)
 	[ -n "$pids" ] || return 0
 	log_msg "existing candy-client process still running before start: $pids"
 	if wait_for_candy_client_exit "$CANDY_SERVICE_WAIT_SECONDS"; then
 		log_msg "previous candy-client process exited before start"
 		return 0
+	fi
+	if [ "$allow_takeover" -ne 1 ]; then
+		log_error "refusing to terminate another candy-client from inside run_client"
+		return 1
+	fi
+	# Stop the registered supervisor first. Killing only its Core child makes the
+	# supervisor correctly interpret the exit as an unexpected crash and invoke
+	# fail-open while a replacement instance is starting.
+	if [ -f /lib/functions/procd.sh ]; then
+		. /lib/functions/procd.sh
+		procd_kill candy >/dev/null 2>&1 || true
+		if wait_for_candy_client_exit 3; then
+			log_msg "stopped previous supervised candy-client before start"
+			return 0
+		fi
 	fi
 	pids=$(candy_client_pids)
 	[ -n "$pids" ] || return 0
@@ -2872,7 +2887,7 @@ start_service() {
 		cleanup_failed_start down || true
 		return 1
 	fi
-	if ! ensure_no_existing_candy_client_before_start; then
+	if ! ensure_no_existing_candy_client_before_start 1; then
 		log_error "stale Candy process could not be cleared"
 		cleanup_failed_start down || true
 		return 1
