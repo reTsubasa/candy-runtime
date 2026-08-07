@@ -30,13 +30,17 @@ case "$port" in ''|*[!0-9]*) fail "server listen port is invalid: $listen" ;; es
 
 listener_ready() {
 	if command -v ss >/dev/null 2>&1; then
-		ss -lun | awk -v port="$port" '
-			NR > 1 {
-				address=$5
-				sub(/^.*:/, "", address)
-				if (address == port) found=1
+		ss -H -lun | awk -v port="$port" '
+		{
+			# iproute2 has emitted both 5-column and 6-column layouts.
+			# Match the local endpoint by value, never by a fixed column.
+			for (i = 1; i <= NF; i++) {
+				value=$i
+				gsub(/[\[\]]/, "", value)
+				if (value ~ (":" port "$") || value == port) found=1
 			}
-			END { exit found ? 0 : 1 }
+		}
+		END { exit found ? 0 : 1 }
 		'
 		return
 	fi

@@ -1536,6 +1536,12 @@ msgstr "GFWList 域名"
 msgid "Ready"
 msgstr "可用"
 
+msgid "Node is not ready"
+msgstr "节点尚未就绪"
+
+msgid "Server Core 0.3.6 or newer is required"
+msgstr "需要服务器 Core 0.3.6 或更新版本"
+
 msgid "Built-in"
 msgstr "内置数据"
 

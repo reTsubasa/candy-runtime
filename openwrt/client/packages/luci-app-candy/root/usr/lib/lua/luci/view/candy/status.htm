@@ -503,7 +503,12 @@ function candyOverviewCapabilityTags(node, manifest) {
 	definitions.forEach(function(definition) {
 		var value = features[definition.status_key || definition.id] || {};
 		if (definition.protocol_bit !== null && definition.protocol_bit !== undefined && value.supported === true && value.authorized === true) {
-			tags.push({ label: definition.short_name || definition.id, active: value.active === true });
+			tags.push({
+				label: definition.short_name || definition.id,
+				name: definition.name || definition.short_name || definition.id,
+				description: definition["description"] || "",
+				active: value.active === true
+			});
 		}
 	});
 	return tags;
@@ -555,7 +560,15 @@ function candyOverviewRenderNodes(nodes) {
 		cell = candyOverviewAppendCell(row, "");
 		var tags = candyOverviewCapabilityTags(node, candyOverviewCurrentManifest);
 		if (!tags.length) { cell.textContent = "-"; cell.className += " candy-capability-empty"; }
-		tags.forEach(function(tag) { var badge = document.createElement("span"); badge.className = "candy-capability-tag" + (tag.active ? " active" : ""); badge.textContent = tag.label; badge.title = tag.active ? <%=js_string(i18n.translate("Active"))%> : <%=js_string(i18n.translate("Available"))%>; cell.appendChild(badge); });
+		tags.forEach(function(tag) {
+			var badge = document.createElement("span");
+			var state = tag.active ? <%=js_string(i18n.translate("Active"))%> : <%=js_string(i18n.translate("Available"))%>;
+			badge.className = "candy-capability-tag" + (tag.active ? " active" : "");
+			badge.textContent = tag.label;
+			badge.title = tag.name + " · " + state + (tag.description ? "\n" + tag.description : "");
+			badge.setAttribute("aria-label", badge.title);
+			cell.appendChild(badge);
+		});
 		candyOverviewAppendCell(row, candyOverviewList(node.groups));
 		candyOverviewAppendCell(row, candyOverviewLocalRtt(node));
 		candyOverviewAppendCell(row, candyOverviewLatency((node.url_test || {}).latency_ms));

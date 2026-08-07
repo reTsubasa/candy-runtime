@@ -10,15 +10,41 @@ local xml = require "luci.xml"
 local status = jsonc.parse(fs.readfile("/tmp/candy.nodes") or "") or {}
 local uci = require "luci.model.uci".cursor()
 local congestion_test_nodes = {}
+local congestion_test_min_server = { major = 0, minor = 3, patch = 6 }
 local congestion_test_node_labels = {}
 local congestion_test_node_sections = {}
+local function parse_version(value)
+	local major, minor, patch = tostring(value or ""):match("^(%d+)%.(%d+)%.(%d+)")
+	return tonumber(major), tonumber(minor), tonumber(patch)
+end
+
+local function version_at_least(value, required)
+	local major, minor, patch = parse_version(value)
+	if not major then return false end
+	if major ~= required.major then return major > required.major end
+	if minor ~= required.minor then return minor > required.minor end
+	return patch >= required.patch
+end
+
+local passive_by_name = {}
+local passive_status = jsonc.parse(fs.readfile("/var/run/candy/passive-status.json") or "") or {}
+for name, node in pairs(type(passive_status.nodes) == "table" and passive_status.nodes or {}) do
+	passive_by_name[name] = node
+end
+
 uci:foreach("candy", "node", function(section)
 	if section.enabled ~= "0" then
+		local name = section.name or section[".name"]
+		local live = passive_by_name[name] or {}
+		local supported = live.state == "ready" and version_at_least(live.server_version, congestion_test_min_server)
 		local node = {
 			id = section[".name"],
-			name = section.name or section[".name"]
+			name = name,
+			supported = supported,
+			reason = live.state ~= "ready" and i18n.translate("Node is not ready") or
+				(not supported and i18n.translate("Server Core 0.3.6 or newer is required") or "")
 		}
-		congestion_test_nodes[#congestion_test_nodes + 1] = node
+		if supported then congestion_test_nodes[#congestion_test_nodes + 1] = node end
 		congestion_test_node_labels[node.id] = node.name
 		congestion_test_node_labels[node.name] = node.name
 		congestion_test_node_sections[node.name] = node.id
@@ -337,7 +363,8 @@ function candyCongestionTestRender(data) {
 	if (samples.length && samples[0].node) {
 		if (select) select.value = candyDiagnosticsLabels.testNodeSections[samples[0].node] || samples[0].node;
 	}
-	state.textContent = data.state === "running" ? "Running…" : data.state === "completed" ? "Completed" : data.state === "error" ? (data.message || "Failed") : "Not run";
+	var allFailed = samples.length > 0 && samples.every(function(sample) { return !!sample.error; });
+	state.textContent = data.state === "running" ? "Running…" : (data.state === "completed" && !allFailed) ? "Completed" : (data.state === "error" || allFailed) ? (data.message || (samples[0] && samples[0].error) || "Failed") : "Not run";
 	if (!samples.length) return;
 	body.textContent = "";
 	samples.forEach(function(sample) {
@@ -355,6 +382,8 @@ function startCandyCongestionTest(event) {
 	event.preventDefault(); var node = document.getElementById("candy-congestion-test-node"), button = document.getElementById("candy-congestion-test-start"), xhr = new XMLHttpRequest();
 	if (!node || !node.value || !button) return;
 	button.disabled = true;
+	var state = document.getElementById("candy-congestion-test-state");
+	if (state) state.textContent = "Starting…";
 	xhr.open("POST", candyCongestionTestUrl, true);
 	if (xhr.setRequestHeader) xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 	xhr.onreadystatechange = function() {
