@@ -857,6 +857,8 @@ write_nft_cidr_set() {
 
 refresh_runtime_geo_provider() {
 	local bypass_china_ip source_path runtime_path rejected_local=0 validation_detail
+	source_path=
+	validation_detail=
 	config_get_bool bypass_china_ip client bypass_china_ip 1
 	GEO_ACTIVE_PATH=
 	GEO_ACTIVE_SOURCE=none
@@ -1018,6 +1020,8 @@ gfwlist_provider_source_path() {
 
 refresh_runtime_gfwlist_provider() {
 	local source_path runtime_path rejected_local=0 validation_detail
+	source_path=
+	validation_detail=
 	GFWLIST_ACTIVE_PATH=
 	GFWLIST_ACTIVE_SOURCE=none
 	GFWLIST_LAST_ERROR=
