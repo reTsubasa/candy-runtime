@@ -283,6 +283,10 @@ grep -F -- '--probe-socket "$CANDY_NETD_SOCKET"' "$repo_root/candy-client/candy.
 grep -F 'verify_promoted_runtime_candidate "$candidate_sha"' "$repo_root/candy-client/candy.init" >/dev/null || fail "successful reload does not verify daemon promotion"
 grep -F 'config_load candy 2>/dev/null || true' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'procd_set_param env CANDY_TRAFFIC_LOG="$TRAFFIC_LOG_FILE" CANDY_READY_FILE="$CANDY_READY_FILE" CANDY_PASSIVE_STATUS_FILE="$CANDY_PASSIVE_STATUS_FILE"' "$repo_root/candy-client/candy.init" >/dev/null
+! grep -F 'log_traffic_msg "traffic decision log started for this boot"' "$repo_root/candy-client/candy.init" >/dev/null ||
+  fail "service lifecycle markers still pollute the user traffic log"
+! grep -F 'log_traffic_msg "service disabled; traffic capture is not active"' "$repo_root/candy-client/candy.init" >/dev/null ||
+  fail "service state still pollutes the user traffic log"
 ! grep -F 'procd_set_param env CANDY_TRAFFIC_LOG="$TRAFFIC_LOG_FILE" CANDY_TRAFFIC_LOG_CONTROL=' "$repo_root/candy-client/candy.init" >/dev/null ||
   fail "traffic decision logging is still tied to the LuCI page lifetime"
 test "$(grep -Fc 'procd_set_param respawn 3600 10 5' "$repo_root/candy-client/candy.init")" -eq 3 ||
@@ -294,6 +298,7 @@ grep -F 'logread 2>/dev/null | grep -i candy' "$repo_root/candy-client/candy.ini
 grep -F -- '--check-config' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F "option enabled '0'" "$repo_root/candy-client/candy.config" >/dev/null || fail "bootstrap node must default disabled"
 grep -F 'validate_node_profile_placeholders' "$repo_root/candy-client/candy.init" >/dev/null || fail "placeholder node validation is missing"
+grep -F 'update Core to 0.3.7 or newer' "$repo_root/candy-client/candy.init" >/dev/null || fail "congestion test compatibility message is stale"
 . "$repo_root/candy-client/candy.init"
 TEST_CANDY_PROC_ROOT=$runtime_dir/proc
 CANDY_PROC_ROOT=$TEST_CANDY_PROC_ROOT

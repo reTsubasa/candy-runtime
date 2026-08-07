@@ -712,12 +712,14 @@ end
 
 function action_traffic_log_active()
 	if not require_post() then return end
-	atomic_write_file("/tmp/candy-traffic-log.enabled", tostring(os.time()) .. "\n")
 	local fs = require "nixio.fs"
 	local text = fs.readfile("/tmp/candy-traffic.log") or ""
 	local lines = {}
 	for line in text:gmatch("[^\r\n]+") do
-		lines[#lines + 1] = line
+		local protocol = line:match("^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%dZ %[(%u+)%] ")
+		if protocol == "TCP" or protocol == "UDP" then
+			lines[#lines + 1] = line
+		end
 	end
 	local out = {}
 	for i = #lines, 1, -1 do

@@ -255,11 +255,13 @@ assert.equal(elements.get("candy-status-client-version").textContent, "new",
 	"late request A must not overwrite newer request B");
 assert.equal(elements.get("candy-status-core-version").textContent, "core-new");
 const nodeCells = elements.get("candy-status-nodes").children[0].children;
-assert.equal(nodeCells.length, 7, "node status must include the server version in its operational summary");
+assert.equal(nodeCells.length, 9, "node status must include protocol and line capability summaries");
 assert.equal(nodeCells[3].textContent, "0.3.1");
-assert.equal(nodeCells[4].textContent, "Video, Proxy");
-assert.equal(nodeCells[5].textContent, "12.35 ms");
-assert.equal(nodeCells[6].textContent, "42 ms");
+assert.equal(nodeCells[4].textContent, "-");
+assert.equal(nodeCells[5].textContent, "-");
+assert.equal(nodeCells[6].textContent, "Video, Proxy");
+assert.equal(nodeCells[7].textContent, "12.35 ms");
+assert.equal(nodeCells[8].textContent, "42 ms");
 
 context.refreshCandyOverviewStatus();
 requests[2].respond(200, response("stopped", "stopped"));
@@ -285,16 +287,13 @@ context.candyOverviewRenderSdwan({ enabled: true, phase: "unavailable" });
 assert.equal(elements.get("candy-sdwan-status").style.display, "none",
 	"SD-WAN status must hide when runtime status becomes unavailable");
 
-context.candyOverviewRenderFeatures({ core: { features: [{
-	id: "future_feature", status_key: "future_status", name: "Future feature",
-	description: "Owned by Core", activation: "Core-defined condition"
-}] } }, [{ passive: { features: { future_status: { supported: true, authorized: true, active: false, evidence: 7 } } } }]);
-assert.equal(elements.get("candy-protocol-features").style.display, "");
-assert.equal(elements.get("candy-status-features").children.length, 1);
-assert.equal(elements.get("candy-status-features").children[0].children[0].children[0].textContent, "Future feature");
-assert.equal(elements.get("candy-status-features").children[0].className, "candy-feature-card inactive");
-assert.equal(elements.get("candy-status-features").children[0].children.length, 1,
-	"overview feature cards must only render the feature header and status");
+context.candyOverviewCurrentManifest = { core: { features: [{
+	id: "future_feature", status_key: "future_status", short_name: "FUTURE", protocol_bit: 1
+}] } };
+context.candyOverviewRenderNodes([{ state: "ready", name: "node-b", server_version: "0.3.1", protocol_version: { major: 0, minor: 3 }, passive: { features: { future_status: { supported: true, authorized: true, active: true, evidence: 7 } } } }]);
+assert.equal(elements.get("candy-status-nodes").children[0].children.length, 9);
+assert.equal(elements.get("candy-status-nodes").children[0].children[5].children[0].textContent, "FUTURE");
+assert.equal(elements.get("candy-status-nodes").children[0].children[5].children[0].className, "candy-capability-tag active");
 
 context.refreshCandyOverviewStatus();
 requests[3].respond(200, response("restarted", "running", 5));
@@ -510,8 +509,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=15$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=15$'
+assert_contains "$makefile" '^PKG_RELEASE:=16$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=16$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'
@@ -759,7 +758,7 @@ assert_contains "$controller" 'rules_unchanged'
 assert_not_contains "$controller" 'local argv = \{ "/usr/bin/candy-client", "--config", "/var/run/candy/runtime\.json"'
 assert_not_contains "$controller" 'link probe'
 assert_not_contains "$controller" 'cdn_probe'
-assert_contains "$controller" '/tmp/candy-traffic-log\.enabled'
+assert_not_contains "$controller" '/tmp/candy-traffic-log\.enabled'
 assert_contains "$controller" '/tmp/candy-traffic\.log'
 assert_contains "$controller" 'Cache-Control'
 assert_not_contains "$controller" 'action_diagnostics_bundle'
@@ -973,19 +972,11 @@ assert_not_contains "$status" 'Smart DNS/GEO'
 assert_not_contains "$status" 'Weak-link QoS'
 assert_not_contains "$status" 'Video/CDN diagnostics'
 assert_contains "$status" 'candy-overview-actions'
-assert_contains "$status" 'candy-feature-grid'
-assert_contains "$status" 'candy-feature-card\.active'
-assert_contains "$status" 'candy-feature-card\.unauthorized'
-assert_contains "$status" 'grid-template-columns: minmax\(0, 1fr\) auto'
-assert_contains "$status" 'align-items: start'
-assert_contains "$status" 'min-height: 2\.5em'
-assert_contains "$status" 'candy-feature-badge\.active'
-assert_contains "$status" 'badge\.className = "candy-feature-badge " \+ state'
-assert_contains "$status" 'candy-feature-card\.active \{ border-color: #b8ddc3; background: #f4fbf6; \}'
-assert_contains "$status" 'candy-feature-card\.active::before \{ background: #238636; \}'
-assert_contains "$status" 'authorized \? "inactive" : "unauthorized"'
-assert_contains "$status" 'Supported, inactive'
-assert_contains "$status" 'Supported, not authorized'
+assert_contains "$status" 'candy-capability-tags'
+assert_contains "$status" 'candy-capability-tag\.active'
+assert_contains "$status" 'definition\.protocol_bit'
+assert_contains "$status" 'value\.supported === true && value\.authorized === true'
+assert_contains "$status" 'short_name'
 assert_not_contains "$status" 'candyOverviewFeatureEvidence'
 assert_not_contains "$status" 'definition\.description'
 assert_not_contains "$status" 'definition\.activation'
@@ -1017,6 +1008,11 @@ assert_contains "$status" 'node\.url_test'
 assert_not_contains "$status" 'node\.active_tcp_flows'
 assert_not_contains "$status" 'node\.active_udp_flows'
 assert_contains "$status" 'node\.server_version'
+assert_contains "$status" 'node\.protocol_version'
+assert_contains "$status" 'candyOverviewCapabilityTags'
+assert_contains "$status" 'short_name'
+assert_contains "$status" 'candy-capability-tag'
+assert_not_contains "$status" 'candyOverviewRenderFeatures(manifest, nodes)'
 assert_not_contains "$status" 'node\.reconnects'
 assert_not_contains "$status" 'node\.last_error'
 assert_not_contains "$status" 'status\.dns'
@@ -1196,6 +1192,8 @@ assert_contains "$diagnostics" 'translate\("Estimated capacity"\)'
 assert_contains "$diagnostics" 'translate\("Idle"\)'
 assert_contains "$diagnostics" 'bandwidth_estimate_bps'
 assert_contains "$diagnostics" 'candyDiagnosticsGoodput'
+assert_contains "$diagnostics" 'candy-feature-matrix-section'
+assert_contains "$diagnostics" 'candyDiagnosticsRenderFeatureMatrix'
 assert_not_contains "$diagnostics" 'carrier'
 
 assert_count "$logs" '<div class="cbi-map">' 1
@@ -1208,6 +1206,8 @@ assert_contains "$logs" 'traffic_log_active'
 assert_contains "$logs" 'candy_traffic_log'
 assert_contains "$logs" 'LOG_HISTORY_GENERATIONS = 5'
 assert_contains "$logs" 'read_log_history'
+assert_contains "$logs" 'traffic_decisions'
+assert_contains "$logs" 'protocol == "TCP" or protocol == "UDP"'
 assert_contains "$logs" 'LOG_READ_LIMIT = 128 \* 1024'
 assert_contains "$logs" 'base .. "." .. generation'
 assert_contains "$logs" 'xhr\.open\("POST"'

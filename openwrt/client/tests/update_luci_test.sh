@@ -18,6 +18,8 @@ grep -F '{ UPDATE_MANAGER, "install-runtime", version_key }' "$controller" >/dev
 grep -F 'candy-update-runtime' "$view" >/dev/null
 grep -F 'candy-update-core' "$view" >/dev/null
 grep -F 'candy-update-core-installed' "$view" >/dev/null
+grep -F 'candy-update-catalog-actions' "$view" >/dev/null
+grep -F 'candy-update-section' "$view" >/dev/null
 grep -F 'data.core && data.core.installed' "$view" >/dev/null
 grep -F 'installedCore && !installedCore.active' "$view" >/dev/null
 grep -F 'Review Core' "$view" "$po" >/dev/null

@@ -150,6 +150,9 @@ end
 .candy-test-actions select { min-width: 14em; max-width: 100%; }
 .candy-diagnostics-alert { border-left: 4px solid #c62828; background: #fff4f4; padding: .8em 1em; }
 .candy-diagnostics-alert strong { display: block; margin-bottom: .35em; }
+.candy-feature-matrix { overflow-x: auto; }
+.candy-feature-matrix .table { min-width: 62em; }
+.candy-feature-state { white-space: pre-line; line-height: 1.4; }
 @media (max-width: 1000px) { .candy-chart-grid { grid-template-columns: 1fr; } }
 </style>
 
@@ -168,6 +171,13 @@ end
 			<span id="candy-congestion-test-state"><%=#congestion_test_nodes == 0 and i18n.translate("No enabled nodes") or i18n.translate("Not run")%></span>
 		</div>
 		<table class="table"><thead><tr class="tr table-titles"><th class="th"><%:Node / controller / preset%></th><th class="th"><%:Goodput%></th><th class="th">TTFB</th><th class="th"><%:Total time%></th><th class="th"><%:Data%></th><th class="th"><%:Result%></th></tr></thead><tbody id="candy-congestion-test-results"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table>
+	</div>
+</div>
+
+<div id="candy-feature-matrix-section" class="cbi-map">
+	<h3><%:Per-node protocol capability matrix%></h3>
+	<div class="cbi-section candy-feature-matrix">
+		<table class="table"><thead><tr class="tr table-titles"><th class="th"><%:Node / server Core%></th><th class="th"><%:Wire protocol%></th><th class="th"><%:Feature%></th><th class="th"><%:Negotiation%></th><th class="th"><%:Authorization%></th><th class="th"><%:Runtime evidence%></th></tr></thead><tbody id="candy-diagnostics-feature-matrix"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table>
 	</div>
 </div>
 
@@ -278,7 +288,10 @@ var candyDiagnosticsLabels = {
 	rtt: "RTT", rttVariation: <%=js_string(i18n.translate("RTT variation"))%>,
 	goodput: <%=js_string(i18n.translate("Goodput"))%>, estimatedCapacity: <%=js_string(i18n.translate("Estimated capacity"))%>, idle: <%=js_string(i18n.translate("Idle"))%>, loss: <%=js_string(i18n.translate("Loss"))%>,
 	inFlight: <%=js_string(i18n.translate("In flight"))%>, pacing: <%=js_string(i18n.translate("Pacing"))%>, bandwidth: <%=js_string(i18n.translate("Bandwidth estimate"))%>,
-	cwnd: "CWND", mtu: "MTU"
+	cwnd: "CWND", mtu: "MTU",
+	negotiated: <%=js_string(i18n.translate("Negotiated"))%>, notNegotiated: <%=js_string(i18n.translate("Not negotiated"))%>,
+	authorized: <%=js_string(i18n.translate("Authorized"))%>, notAuthorized: <%=js_string(i18n.translate("Not authorized"))%>,
+	active: <%=js_string(i18n.translate("Active"))%>, idleFeature: <%=js_string(i18n.translate("Available"))%>, evidence: <%=js_string(i18n.translate("Evidence"))%>
 };
 
 function candyDiagnosticsText(value) { return value === null || value === undefined || value === "" ? "-" : String(value); }
@@ -288,6 +301,26 @@ function candyDiagnosticsMappedText(labels, value) {
 }
 function candyDiagnosticsController(applied, passive) {
 	return candyDiagnosticsMappedText(candyDiagnosticsLabels.controllers, applied && applied.congestion);
+}
+function candyDiagnosticsRenderFeatureMatrix(data) {
+	var section = document.getElementById("candy-feature-matrix-section"), body = document.getElementById("candy-diagnostics-feature-matrix");
+	var definitions = data && data.core && data.core.current_manifest && data.core.current_manifest.core && data.core.current_manifest.core.features || [], nodes = data && data.nodes || [];
+	if (!section || !body) return;
+	section.style.display = definitions.length && nodes.length ? "" : "none";
+	body.textContent = "";
+	nodes.forEach(function(node) {
+		var passive = node.passive || {}, features = passive.features || {}, protocol = node.protocol_version || {}, peer = (node.server_version || "-") + " / " + (protocol.major === undefined ? "-" : protocol.major + "." + protocol.minor);
+		definitions.forEach(function(definition) {
+			var value = features[definition.status_key || definition.id] || {}, row = document.createElement("tr"); row.className = "tr";
+			candyDiagnosticsAppendCell(row, candyDiagnosticsText(node.name || node.id) + " / " + peer);
+			candyDiagnosticsAppendCell(row, protocol.major === undefined ? "-" : protocol.major + "." + protocol.minor);
+			candyDiagnosticsAppendCell(row, definition.short_name || definition.name || definition.id);
+			candyDiagnosticsAppendCell(row, value.supported === true ? candyDiagnosticsLabels.negotiated : candyDiagnosticsLabels.notNegotiated);
+			candyDiagnosticsAppendCell(row, value.authorized === true ? candyDiagnosticsLabels.authorized : candyDiagnosticsLabels.notAuthorized);
+			candyDiagnosticsAppendCell(row, (value.active === true ? candyDiagnosticsLabels.active : candyDiagnosticsLabels.idleFeature) + " / " + candyDiagnosticsLabels.evidence + " " + candyDiagnosticsText(value.evidence));
+			body.appendChild(row);
+		});
+	});
 }
 
 function candyCongestionTestLabel(sample) {
@@ -433,6 +466,7 @@ function candyDiagnosticsRender(data) {
 	var processStatus = data.process || {}, socketBuffers = processStatus.socket_buffers || {}, legacyLocal = legacy && legacy.local || {};
 	var nodes = data.nodes || [], body = document.getElementById("candy-diagnostics-nodes"), row, cell, text;
 	candyDiagnosticsRenderRecovery(data.fault);
+	candyDiagnosticsRenderFeatureMatrix(data);
 	candyDiagnosticsSetProvider("candy-diagnostics-geo-state", data.geo);
 	candyDiagnosticsSetProvider("candy-diagnostics-gfwlist-state", data.gfwlist);
 	if (!nodes.length && legacy) nodes = [{ id: "-", name: "-", state: "-", passive: legacy }];

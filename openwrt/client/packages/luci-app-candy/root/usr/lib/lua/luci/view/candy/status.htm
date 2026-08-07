@@ -214,80 +214,12 @@ end
 .candy-overview-section {
 	margin-top: 2em;
 }
-.candy-feature-card {
-	position: relative;
-	display: grid;
-	grid-template-rows: 1fr;
-	min-height: 4.75em;
-	box-sizing: border-box;
-	overflow: hidden;
-	border: 1px solid #d8dee4;
-	border-radius: 6px;
-	background: #fff;
-	padding: 0.85em 0.95em 0.8em 1.05em;
-	min-width: 0;
-	box-shadow: 0 1px 2px rgba(31, 42, 68, 0.06);
-}
-.candy-feature-card::before {
-	content: "";
-	position: absolute;
-	inset: 0 auto 0 0;
-	width: 4px;
-	background: #3578c7;
-}
-.candy-feature-card.active { border-color: #b8ddc3; background: #f4fbf6; }
-.candy-feature-card.active::before { background: #238636; }
-.candy-feature-card.inactive::before { background: #3578c7; }
-.candy-feature-card.unsupported {
-	border-color: #d8dee4;
-	background: #f6f8fa;
-}
-.candy-feature-card.unsupported::before { background: #6e7781; }
-.candy-feature-card.unauthorized {
-	border-color: #e8d39a;
-	background: #fffaf0;
-}
-.candy-feature-card.unauthorized::before { background: #bf8700; }
-.candy-feature-grid {
-	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(21em, 1fr));
-	gap: 0.75em;
-}
-.candy-feature-head {
-	display: grid;
-	grid-template-columns: minmax(0, 1fr) auto;
-	align-items: start;
-	gap: 0.75em;
-}
-.candy-feature-name {
-	min-width: 0;
-	min-height: 2.5em;
-	font-weight: 700;
-	font-size: 1.02em;
-	line-height: 1.25;
-}
-.candy-feature-badge {
-	display: inline-flex;
-	align-items: center;
-	min-height: 2em;
-	box-sizing: border-box;
-	border: 1px solid #afb8c1;
-	border-radius: 4px;
-	padding: 0.2em 0.55em;
-	background: #fff;
-	color: #57606a;
-	font-size: 0.86em;
-	font-weight: 600;
-	line-height: 1;
-	white-space: nowrap;
-}
-.candy-feature-badge.active { border-color: #77b984; color: #1a7f37; background: #f0fff4; }
-.candy-feature-badge.inactive { border-color: #96b8dc; color: #0969da; background: #f4f9ff; }
-.candy-feature-badge.unauthorized { border-color: #d4ad4c; color: #8a6100; background: #fff8df; }
-.candy-feature-badge.unsupported { border-color: #afb8c1; color: #57606a; background: #f6f8fa; }
+.candy-capability-tags { display: flex; flex-wrap: wrap; gap: .3em; min-width: 14em; }
+.candy-capability-tag { display: inline-block; border: 1px solid #8fb2df; border-radius: 4px; padding: .12em .38em; color: #1559a6; background: #f5f9ff; font-size: .86em; line-height: 1.25; white-space: nowrap; }
+.candy-capability-tag.active { border-color: #77b984; color: #1a7f37; background: #f0fff4; }
+.candy-capability-empty { color: #777; }
+.candy-capability-legend { display: block; margin-top: .2em; color: #666; font-size: .78em; font-weight: 400; }
 @media (max-width: 720px) {
-	.candy-feature-grid { grid-template-columns: 1fr; }
-	.candy-feature-card { min-height: 4.5em; }
 }
 </style>
 
@@ -355,11 +287,6 @@ end
 	</div>
 </div>
 
-<div id="candy-protocol-features" class="cbi-map candy-overview-section" style="display: none">
-	<h3><%:Protocol features%></h3>
-	<div id="candy-status-features" class="candy-feature-grid"></div>
-</div>
-
 <div id="candy-sdwan-status" class="cbi-map candy-overview-section" style="display: none">
 	<h3><%:SD-WAN status%></h3>
 	<div class="cbi-section">
@@ -387,6 +314,8 @@ end
 					<th class="th"><%:Node%></th>
 					<th class="th"><%:Server%></th>
 					<th class="th"><%:Server version%></th>
+					<th class="th"><%:Wire protocol%></th>
+					<th class="th"><%:Line capabilities%><span class="candy-capability-legend"><%:Active / available%></span></th>
 					<th class="th"><%:Node groups%></th>
 					<th class="th"><%:Local RTT%></th>
 					<th class="th"><%:URL latency%></th>
@@ -395,7 +324,7 @@ end
 			<tbody id="candy-status-nodes">
 			<% if #nodes == 0 then %>
 				<tr class="tr">
-						<td class="td" colspan="7"><em><%:No node status available%></em></td>
+						<td class="td" colspan="9"><em><%:No node status available%></em></td>
 				</tr>
 			<% else %>
 				<% for _, node in ipairs(nodes) do node = type(node) == "table" and node or {} %>
@@ -407,6 +336,8 @@ end
 						<td class="td"><%=xml.pcdata(node.name ~= "" and node.name or node.id)%></td>
 						<td class="td"><%=xml.pcdata(text_label(node.server))%></td>
 						<td class="td"><%=xml.pcdata(text_label(node.server_version))%></td>
+						<td class="td"><%=xml.pcdata(node.protocol_version and tostring(node.protocol_version.major) .. "." .. tostring(node.protocol_version.minor) or "-")%></td>
+		<td class="td"><%=xml.pcdata("-")%></td>
 						<td class="td"><%=xml.pcdata(list_label(node.groups))%></td>
 							<td class="td"><%=xml.pcdata(local_rtt_label(node))%></td>
 							<td class="td"><%=xml.pcdata(latency_label((node.url_test or {}).latency_ms))%></td>
@@ -567,36 +498,18 @@ function candyOverviewRenderSdwan(sdwan) {
 	candyOverviewSetText("candy-sdwan-failover", candyOverviewText(failover.reason) + " / " + candyOverviewText(failover.at));
 }
 
-function candyOverviewRenderFeatures(manifest, nodes) {
-	var body = document.getElementById("candy-status-features");
-	var section = document.getElementById("candy-protocol-features");
-	var definitions = (manifest && manifest.core && manifest.core.features) || [];
-	var features = {}, nodeFeatures, nodeIndex;
-	var card, head, name, badge, value, definition, state, supported, authorized, i;
-	if (!body) return;
-	for (nodeIndex = 0; nodes && nodeIndex < nodes.length; nodeIndex += 1) {
-		nodeFeatures = ((nodes[nodeIndex].passive || {}).features);
-		if (nodeFeatures) { features = nodeFeatures; break; }
-	}
-	body.textContent = "";
-	if (section) section.style.display = definitions.length ? "" : "none";
-	for (i = 0; i < definitions.length; i += 1) {
-		definition = definitions[i] || {};
-		value = features[definition.status_key || definition.id] || {};
-		supported = definition.supported !== false;
-		authorized = value.authorized === true;
-		state = !supported ? "unsupported" :
-			(value.active === true ? "active" : (authorized ? "inactive" : "unauthorized"));
-		card = document.createElement("div"); card.className = "candy-feature-card " + state;
-		head = document.createElement("div"); head.className = "candy-feature-head";
-		name = document.createElement("span"); name.className = "candy-feature-name"; name.textContent = candyOverviewText(definition.name || definition.id);
-		badge = document.createElement("span"); badge.className = "candy-feature-badge " + state;
-		badge.textContent = state === "active" ? <%=js_string(i18n.translate("Active"))%> :
-			(state === "unsupported" ? <%=js_string(i18n.translate("Unsupported"))%> :
-			(authorized ? <%=js_string(i18n.translate("Supported, inactive"))%> : <%=js_string(i18n.translate("Supported, not authorized"))%>));
-		head.appendChild(name); head.appendChild(badge); card.appendChild(head); body.appendChild(card);
-	}
+function candyOverviewCapabilityTags(node, manifest) {
+	var definitions = (manifest && manifest.core && manifest.core.features) || [], features = ((node || {}).passive || {}).features || {}, tags = [];
+	definitions.forEach(function(definition) {
+		var value = features[definition.status_key || definition.id] || {};
+		if (definition.protocol_bit !== null && definition.protocol_bit !== undefined && value.supported === true && value.authorized === true) {
+			tags.push({ label: definition.short_name || definition.id, active: value.active === true });
+		}
+	});
+	return tags;
 }
+
+var candyOverviewCurrentManifest = {};
 
 function candyOverviewAppendCell(row, value) {
 	var cell = document.createElement("td");
@@ -618,7 +531,7 @@ function candyOverviewRenderNodes(nodes) {
 		row.className = "tr";
 		cell = document.createElement("td");
 		cell.className = "td";
-		cell.colSpan = 7;
+		cell.colSpan = 9;
 		text = document.createElement("em");
 		text.textContent = candyOverviewLabels.noNodes;
 		cell.appendChild(text);
@@ -637,6 +550,12 @@ function candyOverviewRenderNodes(nodes) {
 		candyOverviewAppendCell(row, candyOverviewText(node.name || node.id));
 		candyOverviewAppendCell(row, candyOverviewText(node.server));
 		candyOverviewAppendCell(row, candyOverviewText(node.server_version));
+		var protocol = node.protocol_version || {}, protocolText = protocol.major === undefined ? "-" : protocol.major + "." + protocol.minor;
+		candyOverviewAppendCell(row, protocolText);
+		cell = candyOverviewAppendCell(row, "");
+		var tags = candyOverviewCapabilityTags(node, candyOverviewCurrentManifest);
+		if (!tags.length) { cell.textContent = "-"; cell.className += " candy-capability-empty"; }
+		tags.forEach(function(tag) { var badge = document.createElement("span"); badge.className = "candy-capability-tag" + (tag.active ? " active" : ""); badge.textContent = tag.label; badge.title = tag.active ? <%=js_string(i18n.translate("Active"))%> : <%=js_string(i18n.translate("Available"))%>; cell.appendChild(badge); });
 		candyOverviewAppendCell(row, candyOverviewList(node.groups));
 		candyOverviewAppendCell(row, candyOverviewLocalRtt(node));
 		candyOverviewAppendCell(row, candyOverviewLatency((node.url_test || {}).latency_ms));
@@ -682,8 +601,8 @@ function refreshCandyOverviewStatus() {
 		candyOverviewSetText("candy-status-client-version", candyOverviewClientVersion(data));
 		candyOverviewSetText("candy-status-core-version", data.core && data.core.current_version);
 		candyOverviewRenderSdwan(data.sdwan);
+		candyOverviewCurrentManifest = data.core && data.core.current_manifest;
 		candyOverviewRenderNodes(data.nodes || []);
-		candyOverviewRenderFeatures(data.core && data.core.current_manifest, data.nodes || []);
 	};
 	try {
 		xhr.send(null);

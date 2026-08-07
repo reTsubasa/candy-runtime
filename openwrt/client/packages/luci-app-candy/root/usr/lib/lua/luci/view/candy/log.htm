@@ -75,6 +75,17 @@ local function newest_first(text)
 	return table.concat(out, "\n")
 end
 
+local function traffic_decisions(text)
+	local lines = {}
+	for line in (text or ""):gmatch("[^\r\n]+") do
+		local protocol = line:match("^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%dZ %[(%u+)%] ")
+		if protocol == "TCP" or protocol == "UDP" then
+			lines[#lines + 1] = line
+		end
+	end
+	return table.concat(lines, "\n")
+end
+
 local function empty_note(text, note)
 	text = text or ""
 	if text:gsub("%s+", "") == "" then
@@ -93,7 +104,7 @@ local function service_text()
 end
 
 local function traffic_text()
-	return empty_note(newest_first(traffic_log), translate("No traffic decisions for this boot yet. New transparent proxy flows are recorded with time, source, destination, matched rule, and outbound."))
+	return empty_note(newest_first(traffic_decisions(traffic_log)), translate("No traffic decisions for this boot yet. New transparent proxy flows are recorded with time, source, destination, matched rule, and outbound."))
 end
 %>
 

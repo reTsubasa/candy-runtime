@@ -1403,13 +1403,13 @@ congestion_test() {
 	fi
 	help=$(CANDY_CORE_BIN="$core_bin" "$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format candy-json --platform openwrt \
 		congestion-test --help 2>&1) || {
-		printf '%s\n' "Active Candy Core does not support congestion comparison; update Core to 0.3.6 or newer." > "$CONGESTION_TEST_LOG_FILE"
+		printf '%s\n' "Active Candy Core does not support congestion comparison; update Core to 0.3.7 or newer." > "$CONGESTION_TEST_LOG_FILE"
 		printf '%s\n' "$help" >> "$CONGESTION_TEST_LOG_FILE"
 		rm -f "$temporary"
 		return 126
 	}
 	printf '%s' "$help" | grep -Fq -- '--node' || {
-		printf '%s\n' "Active Candy Core does not support node-local congestion comparison; update Core to 0.3.6 or newer." > "$CONGESTION_TEST_LOG_FILE"
+		printf '%s\n' "Active Candy Core does not support node-local congestion comparison; update Core to 0.3.7 or newer." > "$CONGESTION_TEST_LOG_FILE"
 		printf '%s\n' "$help" >> "$CONGESTION_TEST_LOG_FILE"
 		rm -f "$temporary"
 		return 126
@@ -3048,7 +3048,6 @@ start_service() {
 	config_get_bool enabled client enabled 0
 	if [ "$enabled" -ne 1 ]; then
 		log_msg "start skipped: service disabled"
-		log_traffic_msg "service disabled; traffic capture is not active"
 		if cleanup_failed_start standby; then
 			CANDY_START_PHASE=disabled
 			return 0
@@ -3117,7 +3116,6 @@ service_started() {
 			return 1
 			;;
 	esac
-	log_traffic_msg "traffic decision log started for this boot"
 	if ! wait_for_sdwan_netd; then
 		log_error "candy-netd socket readiness timed out"
 		cleanup_failed_start down 1 || true

@@ -15,6 +15,8 @@ end
 <style>
 .candy-update-toolbar { display: flex; flex-wrap: wrap; gap: .6em; align-items: center; }
 .candy-update-toolbar form { margin: 0; }
+.candy-update-catalog-actions { margin-top: 1em; }
+.candy-update-section { margin-top: 1.75em; }
 .candy-update-operation { border-left: 4px solid #777; padding: .7em 1em; margin-bottom: 1em; }
 .candy-update-operation.running { border-color: #d7a51d; }
 .candy-update-operation.completed { border-color: #2e7d32; }
@@ -39,7 +41,7 @@ end
 			<tr class="tr"><td class="td left"><%:Last checked%></td><td id="candy-update-checked" class="td left">-</td></tr>
 			<tr class="tr"><td class="td left"><%:Platform%></td><td id="candy-update-platform" class="td left">-</td></tr>
 		</table>
-		<div class="candy-update-toolbar">
+		<div class="candy-update-toolbar candy-update-catalog-actions">
 			<form method="post" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'update_check')%>">
 				<input type="hidden" name="token" value="<%=xml.pcdata(auth_token)%>" />
 				<button id="candy-update-check" class="cbi-button cbi-button-action" type="submit"><%:Check for updates%></button>
@@ -48,7 +50,7 @@ end
 	</div>
 </div>
 
-<div class="cbi-map">
+<div class="cbi-map candy-update-section">
 	<h3><%:Runtime updates%></h3>
 	<div class="cbi-section candy-update-table-scroll">
 		<table class="table">

@@ -717,6 +717,9 @@ msgstr "支持"
 msgid "Authorized"
 msgstr "已授权"
 
+msgid "Authorization"
+msgstr "授权"
+
 msgid "Active"
 msgstr "运行中"
 
@@ -1583,3 +1586,38 @@ msgstr "优先 UDP 吞吐"
 
 msgid "Choose the behavior that best matches your connection. Candy will not silently switch to a weaker mode."
 msgstr "请选择最适合当前网络的模式。Candy 不会静默切换到更弱的模式。"
+msgid "Wire protocol"
+msgstr "线路协议"
+
+msgid "Line capabilities"
+msgstr "线路能力"
+
+msgid "Active / available"
+msgstr "活跃 / 可用"
+
+msgid "Per-node protocol capability matrix"
+msgstr "分节点协议能力矩阵"
+
+msgid "Node / server Core"
+msgstr "节点 / 服务端 Core"
+
+msgid "Negotiated"
+msgstr "已协商"
+
+msgid "Negotiation"
+msgstr "协商"
+
+msgid "Not negotiated"
+msgstr "未协商"
+
+msgid "Authorized"
+msgstr "已授权"
+
+msgid "Not authorized"
+msgstr "未授权"
+
+msgid "Evidence"
+msgstr "证据"
+
+msgid "Runtime evidence"
+msgstr "运行证据"
