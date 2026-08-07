@@ -2875,6 +2875,13 @@ start_service() {
 		fi
 		return 1
 	fi
+	if candy_process_running && current_readiness; then
+		# A second init start must not tear down a healthy supervised instance.
+		# Restart and update paths explicitly stop the service before reaching here.
+		CANDY_START_PHASE=already_running
+		log_msg "start skipped: Candy service is already healthy"
+		return 0
+	fi
 	log_msg "starting candy service"
 	if ! generate_config; then
 		log_error "runtime config generation failed"
@@ -2927,6 +2934,9 @@ start_service() {
 service_started() {
 	case "${CANDY_START_PHASE:-failed}" in
 		disabled)
+			return 0
+			;;
+		already_running)
 			return 0
 			;;
 		submitted)

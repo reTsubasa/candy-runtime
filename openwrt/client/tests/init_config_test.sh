@@ -236,6 +236,7 @@ grep -F 'CANDY_RELEASE=${CANDY_RELEASE:-1}' "$repo_root/candy-client/candy.init"
 grep -F 'run_client()' "$repo_root/candy-client/candy.init" >/dev/null
 sed -n '/^run_client()/,/^}/p' "$repo_root/candy-client/candy.init" | grep -F 'ensure_no_existing_candy_client_before_start;' >/dev/null || fail "run_client can terminate another supervised client"
 sed -n '/^start_service()/,/^}/p' "$repo_root/candy-client/candy.init" | grep -F 'ensure_no_existing_candy_client_before_start 1;' >/dev/null || fail "start_service cannot safely take over an old supervised client"
+sed -n '/^start_service()/,/^}/p' "$repo_root/candy-client/candy.init" | grep -F 'start skipped: Candy service is already healthy' >/dev/null || fail "repeated healthy start can disrupt the active Candy service"
 grep -F 'CANDY_PASSIVE_STATUS_FILE=${CANDY_PASSIVE_STATUS_FILE:-$RUNTIME_DIR/passive-status.json}' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F -- '--passive-status-path "$CANDY_PASSIVE_STATUS_FILE"' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'clear_passive_status()' "$repo_root/candy-client/candy.init" >/dev/null
