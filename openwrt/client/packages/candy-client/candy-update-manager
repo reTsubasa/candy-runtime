@@ -406,6 +406,12 @@ restore_service_state() {
 		service_action_retry disable || return 1
 	fi
 	if [ "$was_running" = 1 ]; then
+		# APK's default post-upgrade hook starts init scripts. Give that startup
+		# ownership a bounded chance to become healthy before issuing another
+		# start: overlapping starts can replace a not-yet-ready procd instance.
+		if runtime_healthy; then
+			return 0
+		fi
 		service_action_retry start || return 1
 	else
 		"$SERVICE_INIT" stop >/dev/null 2>&1 || true

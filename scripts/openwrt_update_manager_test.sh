@@ -105,7 +105,15 @@ case "$1" in
 	add)
 		printf '%s\n' "$*" >> "$FAKE_APK_LOG"
 		for argument in "$@"; do
-			case "${argument##*/}" in candy-client-*.apk) version=${argument##*/candy-client-}; version=${version%.apk}; printf '%s\n' "$version" > "$FAKE_INSTALLED_VERSION" ;; esac
+			case "${argument##*/}" in
+				candy-client-*.apk)
+					version=${argument##*/candy-client-}; version=${version%.apk}
+					printf '%s\n' "$version" > "$FAKE_INSTALLED_VERSION"
+					if [ "${FAKE_APK_AUTOSTART:-0}" = 1 ] && [ "$version" = 0.4.0-r3 ]; then
+						printf '%s\n' 1 > "$FAKE_SERVICE_RUNNING"
+					fi
+					;;
+			esac
 		done
 		;;
 	*) exit 1 ;;
@@ -266,6 +274,21 @@ grep -Fx disable "$FAKE_SERVICE_LOG" >/dev/null
 grep -Fx enable "$FAKE_SERVICE_LOG" >/dev/null
 grep -Fx start "$FAKE_SERVICE_LOG" >/dev/null
 [ "$(cat "$CANDY_UPDATE_CONFIG_FILE")" = test-config ]
+
+# OpenWrt's default APK post-upgrade hook starts init scripts. The update
+# manager must adopt that healthy instance instead of starting it a second
+# time while it is still transitioning through procd.
+: > "$FAKE_SERVICE_LOG"
+printf '%s\n' 0 > "$FAKE_SERVICE_RUNNING"
+FAKE_APK_AUTOSTART=1 "$manager" install-runtime v0_4_0_r3 >/dev/null
+grep -Fx stop "$FAKE_SERVICE_LOG" >/dev/null
+grep -Fx disable "$FAKE_SERVICE_LOG" >/dev/null
+grep -Fx enable "$FAKE_SERVICE_LOG" >/dev/null
+if grep -Fx start "$FAKE_SERVICE_LOG" >/dev/null; then
+	echo "update manager issued a duplicate start after APK post-upgrade startup" >&2
+	exit 1
+fi
+[ "$(cat "$FAKE_SERVICE_RUNNING")" = 1 ]
 
 apk_lines_before=$(wc -l < "$FAKE_APK_LOG" | tr -d ' ')
 if FAKE_FAIL_TARGET_HEALTH=1 "$manager" install-runtime v0_4_0_r3 >/dev/null 2>&1; then
