@@ -236,7 +236,9 @@ grep -F 'CANDY_RELEASE=${CANDY_RELEASE:-1}' "$repo_root/candy-client/candy.init"
 grep -F 'run_client()' "$repo_root/candy-client/candy.init" >/dev/null
 sed -n '/^run_client()/,/^}/p' "$repo_root/candy-client/candy.init" | grep -F 'ensure_no_existing_candy_client_before_start;' >/dev/null || fail "run_client can terminate another supervised client"
 sed -n '/^start_service()/,/^}/p' "$repo_root/candy-client/candy.init" | grep -F 'ensure_no_existing_candy_client_before_start 1;' >/dev/null || fail "start_service cannot safely take over an old supervised client"
-sed -n '/^start_service()/,/^}/p' "$repo_root/candy-client/candy.init" | grep -F 'start skipped: Candy service is already healthy' >/dev/null || fail "repeated healthy start can disrupt the active Candy service"
+grep -F '[ "${CANDY_PROCD_START:-0}" != 1 ]' "$repo_root/candy-client/candy.init" >/dev/null || fail "ordinary start enters procd before the idempotency guard"
+sed -n '/^start()/,/^}/p' "$repo_root/candy-client/candy.init" | grep -F 'start skipped: Candy service is already healthy' >/dev/null || fail "repeated healthy start can disrupt the active Candy service"
+sed -n '/^start_service()/,/^}/p' "$repo_root/candy-client/candy.init" | grep -F 'start skipped: Candy service is already healthy' >/dev/null && fail "procd start transaction can return without submitting an instance"
 grep -F 'CANDY_PASSIVE_STATUS_FILE=${CANDY_PASSIVE_STATUS_FILE:-$RUNTIME_DIR/passive-status.json}' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F -- '--passive-status-path "$CANDY_PASSIVE_STATUS_FILE"' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'clear_passive_status()' "$repo_root/candy-client/candy.init" >/dev/null
@@ -1673,5 +1675,32 @@ done
   grep -Fq '"cleanup":"failed"' "$CANDY_FAULT_STATE_FILE" || fail "incomplete fail-open cleanup was hidden"
   grep -Fq 'event=fail_open' "$LOG_FILE" || fail "fail-open lifecycle context was not logged"
 )
+
+(
+  start_guard_dir=$runtime_dir/start-guard
+  mkdir -p "$start_guard_dir"
+  CANDY_INIT_SELF=$start_guard_dir/candy-init
+  LOG_FILE=$start_guard_dir/candy.log
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'printf '\''%s\n'\'' "phase=${CANDY_PROCD_START:-0} args=$*" > "${CANDY_START_GUARD_MARKER:?}"' \
+    > "$CANDY_INIT_SELF"
+  chmod +x "$CANDY_INIT_SELF"
+  CANDY_START_GUARD_MARKER=$start_guard_dir/second-phase
+  export CANDY_START_GUARD_MARKER
+  : > "$LOG_FILE"
+
+  candy_process_running() { return 0; }
+  current_readiness() { return 0; }
+  start
+  test ! -e "$CANDY_START_GUARD_MARKER" || fail "healthy repeated start entered a procd transaction"
+  grep -Fq 'start skipped: Candy service is already healthy' "$LOG_FILE" ||
+    fail "healthy repeated start was not recorded"
+
+  candy_process_running() { return 1; }
+  start regression-check
+)
+grep -Fq 'phase=1 args=start regression-check' "$runtime_dir/start-guard/second-phase" ||
+  fail "unhealthy start did not enter the guarded procd phase"
 
 printf '%s\n' "OpenWrt Candy init config generation test passed"
