@@ -20,15 +20,14 @@ while [ "$#" -gt 0 ]; do
 		*) shift ;;
 	esac
 done
-node -e '
-const fs = require("fs");
-const file = process.argv[1];
-const expression = process.argv[2];
-const value = JSON.parse(fs.readFileSync(file || 0, "utf8"));
-let current = value;
-for (const key of expression.replace(/^@\./, "").split(".")) current = current == null ? undefined : current[key];
-if (current !== undefined && current !== null) process.stdout.write(typeof current === "object" ? JSON.stringify(current) : String(current));
-' "$file" "$expression"
+case "$expression" in
+	@.*) expression=".${expression#@.}" ;;
+esac
+if [ -n "$file" ]; then
+	jq -r "$expression" "$file"
+else
+	jq -r "$expression"
+fi
 EOF
 chmod 0755 "$bin/jsonfilter"
 
@@ -109,7 +108,7 @@ case "$1" in
 				candy-client-*.apk)
 					version=${argument##*/candy-client-}; version=${version%.apk}
 					printf '%s\n' "$version" > "$FAKE_INSTALLED_VERSION"
-					if [ "${FAKE_APK_AUTOSTART:-0}" = 1 ] && [ "$version" = 0.4.0-r3 ]; then
+					if [ "${FAKE_APK_AUTOSTART:-0}" = 1 ] && [ "${argument##*/}" = candy-client-0.4.0-r3.apk ]; then
 						printf '%s\n' 1 > "$FAKE_SERVICE_RUNNING"
 					fi
 					;;
@@ -200,9 +199,14 @@ export FAKE_SERVICE_LOG="$tmp/service.log"
 export FAKE_SERVICE_ENABLED="$tmp/service.enabled"
 export FAKE_SERVICE_RUNNING="$tmp/service.running"
 export FAKE_INSTALLED_VERSION="$tmp/installed-version"
+export FAKE_APK_AUTOSTART=0
 export CANDY_UPDATE_SERVICE_INIT="$bin/candy-service"
 export CANDY_UPDATE_HEALTH_CHECK="$bin/candy-health"
 export CANDY_UPDATE_CONFIG_FILE="$tmp/candy.config"
+# Keep this fixture independent from the package revision used by the caller
+# or by a release workflow environment.
+export CANDY_RUNTIME_VERSION=0.4.0
+export CANDY_RUNTIME_RELEASE=2
 export CANDY_UPDATE_HEALTH_WAIT_SECONDS=1
 printf '%s\n' 1 > "$FAKE_SERVICE_ENABLED"
 printf '%s\n' 1 > "$FAKE_SERVICE_RUNNING"
@@ -279,8 +283,10 @@ grep -Fx start "$FAKE_SERVICE_LOG" >/dev/null
 # manager must adopt that healthy instance instead of starting it a second
 # time while it is still transitioning through procd.
 : > "$FAKE_SERVICE_LOG"
-printf '%s\n' 0 > "$FAKE_SERVICE_RUNNING"
-FAKE_APK_AUTOSTART=1 "$manager" install-runtime v0_4_0_r3 >/dev/null
+printf '%s\n' 1 > "$FAKE_SERVICE_RUNNING"
+export FAKE_APK_AUTOSTART=1
+"$manager" install-runtime v0_4_0_r3 >/dev/null
+export FAKE_APK_AUTOSTART=0
 grep -Fx stop "$FAKE_SERVICE_LOG" >/dev/null
 grep -Fx disable "$FAKE_SERVICE_LOG" >/dev/null
 grep -Fx enable "$FAKE_SERVICE_LOG" >/dev/null
