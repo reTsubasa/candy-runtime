@@ -69,6 +69,7 @@ dns_tunnel_status=luci-app-candy/root/usr/lib/lua/luci/view/candy/dns_tunnel_sta
 logs=luci-app-candy/root/usr/lib/lua/luci/view/candy/log.htm
 
 assert_file "candy-client/rulesets/cn-ip.cidr"
+assert_file "candy-client/rulesets/manifest.json"
 assert_file "candy-client/rulesets/gfwlist.domains"
 assert_file "candy-client/rulesets/PROVENANCE.md"
 assert_file "candy-client/rulesets/SHA256SUMS"
@@ -333,11 +334,13 @@ assert.ok(source.includes("Per-node passive diagnostics"), "diagnostics must ren
 assert.ok(source.includes("Service resources"), "diagnostics must separate process resources");
 assert.ok(source.includes("candy-diagnostics-nodes"), "diagnostics must expose the node table");
 assert.ok(source.includes("candyDiagnosticsRender"), "diagnostics must own passive refresh rendering");
-for (const testPoint of ["vultr-tokyo", "linode-singapore", "hetzner-ashburn", "ovh-france", "serverius-netherlands"]) {
-	assert.ok(source.includes('value="' + testPoint + '"'), "diagnostics must expose test point: " + testPoint);
+assert.ok(source.includes('uci:foreach("candy", "node"'), "congestion comparison must use configured Candy nodes");
+assert.ok(source.includes("testNodes"), "congestion comparison must label configured nodes");
+assert.ok(source.includes("50 MiB"), "congestion comparison must use the node-local 50 MiB object");
+assert.ok(source.includes("&node="), "congestion comparison must submit the selected node");
+for (const externalPoint of ["vultr-tokyo", "linode-singapore", "hetzner-ashburn", "ovh-france", "serverius-netherlands"]) {
+	assert.ok(!source.includes(externalPoint), "external test point remains: " + externalPoint);
 }
-assert.ok(source.includes("100 MiB"), "congestion comparison must use a 100 MiB transfer cap");
-assert.ok(source.includes("test_point="), "congestion comparison must submit the selected test point");
 for (const usefulField of ["Overall performance trends", "Latency quality", "Delivery", "Flight control", "Transport state", "Path"]) {
 	assert.ok(source.includes(usefulField), "diagnostics must retain useful transport field: " + usefulField);
 }
@@ -507,8 +510,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=14$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=14$'
+assert_contains "$makefile" '^PKG_RELEASE:=15$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=15$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'
@@ -906,9 +909,11 @@ assert_contains "$controller" '"dns", "update", "gfwlist"'
 assert_contains "$controller" 'output = "/tmp/candy-geo-update\.log", append = true'
 assert_contains "$controller" 'output = "/tmp/candy-gfwlist-update\.log", append = true'
 assert_contains "$process_helper" 'options\.append and "a" or "w"'
-assert_contains "$controller" 'CONGESTION_TEST_POINTS'
-assert_contains "$controller" 'formvalue\("test_point"\)'
-assert_contains "$controller" '"congestion_test", test_point'
+assert_not_contains "$controller" 'CONGESTION_TEST_POINTS'
+assert_contains "$controller" 'formvalue\("node"\)'
+assert_contains "$controller" 'uci:get\("candy", section\) ~= "node"'
+assert_contains "$controller" 'uci:get\("candy", section, "name"\) or section'
+assert_contains "$controller" '"congestion_test", node'
 assert_contains "$init" 'provider_update_loop'
 assert_contains "$init" 'CANDY_DNS_LISTEN=.*127\.0\.0\.1:15353'
 assert_contains "$init" 'run_client\(\)'
@@ -926,9 +931,10 @@ assert_contains "$init" 'gfwlist_update_interval_hours'
 assert_contains "$init" 'geo_update_interval_hours'
 assert_contains "$init" 'dns update gfwlist'
 assert_contains "$init" 'geo update cn-ip'
-assert_contains "$init" 'congestion-test --test-point "\$test_point" --samples 1 --max-bytes 104857600 --timeout-ms 60000'
+assert_contains "$init" 'node_id=\$\{1:-\}'
+assert_contains "$init" 'congestion-test --node "\$node_id" --samples 1 --max-bytes 52428800 --timeout-ms 120000'
 assert_contains "$init" 'congestion-test --help'
-assert_contains "$init" 'update Core to 0\.3\.5 or newer'
+assert_contains "$init" 'update Core to 0\.3\.6 or newer'
 assert_not_contains "$init" 'congestion-test --samples 1 --max-bytes 2097152'
 if [ -e "$repo_root/luci-app-candy/root/usr/lib/lua/luci/model/cbi/candy/geo.lua" ]; then
 	fail "GEO model must be merged into DNS & GEO"

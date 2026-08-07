@@ -15,13 +15,6 @@ local CONGESTION_TEST_LOCK_DIR = "/tmp/candy-congestion-test.lock"
 local CONGESTION_TEST_RESULT_FILE = "/tmp/candy-congestion-test.json"
 local CONGESTION_TEST_LOG_FILE = "/tmp/candy-congestion-test.log"
 local MAX_CONGESTION_TEST_BYTES = 262144
-local CONGESTION_TEST_POINTS = {
-	["vultr-tokyo"] = true,
-	["linode-singapore"] = true,
-	["hetzner-ashburn"] = true,
-	["ovh-france"] = true,
-	["serverius-netherlands"] = true
-}
 local CORE_MANAGER = "/usr/libexec/candy-core-manager"
 local MAX_CORE_STATUS_BYTES = 524288
 local process = require "luci.candy.process"
@@ -55,6 +48,38 @@ end
 
 local function trim(value)
 	return (value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function process_start_time(pid)
+	local fs = require "nixio.fs"
+	local stat = fs.readfile("/proc/" .. tostring(pid) .. "/stat") or ""
+	local rest = stat:match("^%d+ %(.+%) (.+)$")
+	local index = 0
+	if not rest then return nil end
+	for value in rest:gmatch("%S+") do
+		index = index + 1
+		if index == 20 then return value end
+	end
+	return nil
+end
+
+local function remove_stale_congestion_test_lock()
+	local fs = require "nixio.fs"
+	if not fs.stat(CONGESTION_TEST_LOCK_DIR) then return false end
+	local pid = tonumber(trim(fs.readfile(CONGESTION_TEST_LOCK_DIR .. "/pid") or ""))
+	local expected_start = trim(fs.readfile(CONGESTION_TEST_LOCK_DIR .. "/start_time") or "")
+	local expected_boot = trim(fs.readfile(CONGESTION_TEST_LOCK_DIR .. "/boot_id") or "")
+	local actual_start = pid and process_start_time(pid) or nil
+	local actual_boot = trim(fs.readfile("/proc/sys/kernel/random/boot_id") or "")
+	if actual_start and expected_start ~= "" and actual_start == expected_start and
+		(expected_boot == "" or actual_boot == "" or expected_boot == actual_boot) then
+		return false
+	end
+	fs.unlink(CONGESTION_TEST_LOCK_DIR .. "/pid")
+	fs.unlink(CONGESTION_TEST_LOCK_DIR .. "/start_time")
+	fs.unlink(CONGESTION_TEST_LOCK_DIR .. "/boot_id")
+	fs.rmdir(CONGESTION_TEST_LOCK_DIR)
+	return true
 end
 
 local function read_node_status()
@@ -574,24 +599,33 @@ function action_congestion_test()
 	if not require_post() then return end
 	local fs = require "nixio.fs"
 	local jsonc = require "luci.jsonc"
-	local test_point = trim(luci.http.formvalue("test_point") or "vultr-tokyo")
-	if not CONGESTION_TEST_POINTS[test_point] then
+	local uci = require "luci.model.uci".cursor()
+	local section = trim(luci.http.formvalue("node") or "")
+	local node = section ~= "" and (uci:get("candy", section, "name") or section) or ""
+	if section == "" or uci:get("candy", section) ~= "node" or uci:get("candy", section, "enabled") == "0" or node == "" then
 		luci.http.status(400, "Bad Request")
 		luci.http.prepare_content("application/json")
-		luci.http.write(jsonc.stringify({ accepted = false, message = "invalid test point" }))
+		luci.http.write(jsonc.stringify({ accepted = false, message = "invalid node" }))
 		return
 	end
+	remove_stale_congestion_test_lock()
 	if fs.stat(CONGESTION_TEST_LOCK_DIR) then
 		luci.http.status(409, "Conflict")
+		luci.http.prepare_content("application/json")
+		luci.http.write(jsonc.stringify({ accepted = false, message = "comparison already running" }))
+		return
 	else
 		fs.unlink(CONGESTION_TEST_RESULT_FILE)
 		fs.unlink(CONGESTION_TEST_LOG_FILE)
-		if not process.run({ "/etc/init.d/candy", "congestion_test", test_point }, { background = true }) then
+		if not process.run({ "/etc/init.d/candy", "congestion_test", node }, { background = true, timeout = 600 }) then
 			luci.http.status(500, "Internal Server Error")
+			luci.http.prepare_content("application/json")
+			luci.http.write(jsonc.stringify({ accepted = false, message = "could not start comparison" }))
+			return
 		end
 	end
 	luci.http.prepare_content("application/json")
-	luci.http.write(jsonc.stringify({ accepted = true }))
+	luci.http.write(jsonc.stringify({ accepted = true, node = node }))
 end
 
 function action_congestion_test_status()
@@ -599,6 +633,7 @@ function action_congestion_test_status()
 	local jsonc = require "luci.jsonc"
 	local stat = fs.stat(CONGESTION_TEST_RESULT_FILE)
 	local result, state, message
+	remove_stale_congestion_test_lock()
 	if fs.stat(CONGESTION_TEST_LOCK_DIR) then
 		state = "running"
 	elseif stat and stat.type == "reg" and tonumber(stat.size or 0) <= MAX_CONGESTION_TEST_BYTES then

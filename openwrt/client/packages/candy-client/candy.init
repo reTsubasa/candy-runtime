@@ -79,10 +79,6 @@ GEO_RUNTIME_RULESETS_DIR=${GEO_RUNTIME_RULESETS_DIR:-$RUNTIME_DIR/rulesets}
 DNS_ETC_RULESETS_DIR=${DNS_ETC_RULESETS_DIR:-/etc/candy/rulesets}
 DNS_SHARE_RULESETS_DIR=${DNS_SHARE_RULESETS_DIR:-/usr/share/candy/rulesets}
 DNS_RUNTIME_RULESETS_DIR=${DNS_RUNTIME_RULESETS_DIR:-$RUNTIME_DIR/rulesets}
-CANDY_MIN_CN_IP_ENTRIES=${CANDY_MIN_CN_IP_ENTRIES:-5000}
-CANDY_MIN_CN_IPV4_ENTRIES=${CANDY_MIN_CN_IPV4_ENTRIES:-4000}
-CANDY_MIN_CN_IPV6_ENTRIES=${CANDY_MIN_CN_IPV6_ENTRIES:-1500}
-CANDY_MIN_GFWLIST_ENTRIES=${CANDY_MIN_GFWLIST_ENTRIES:-4000}
 DNS_TRACE_LOG_FILE=${DNS_TRACE_LOG_FILE:-/tmp/candy-dns-trace.log}
 NETWORK_CHECK_LOG_FILE=${NETWORK_CHECK_LOG_FILE:-/tmp/candy-network-check.log}
 CONGESTION_TEST_LOCK_DIR=${CONGESTION_TEST_LOCK_DIR:-/tmp/candy-congestion-test.lock}
@@ -788,15 +784,35 @@ geo_provider_counts() {
 }
 
 geo_provider_valid() {
-	local path="$1" counts total rest ipv4 ipv6
+	local path="$1" counts detail
 	counts=$(geo_provider_counts "$path" 2>/dev/null) || return 1
-	total=${counts%% *}
-	rest=${counts#* }
-	ipv4=${rest%% *}
-	ipv6=${rest#* }
-	[ "$total" -ge "$CANDY_MIN_CN_IP_ENTRIES" ] &&
-		[ "$ipv4" -ge "$CANDY_MIN_CN_IPV4_ENTRIES" ] &&
-		[ "$ipv6" -ge "$CANDY_MIN_CN_IPV6_ENTRIES" ]
+	[ "$path" = "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr" ] && return 0
+	[ -x "$CANDY_CLIENT_BIN" ] || return 1
+	if detail=$("$CANDY_CLIENT_BIN" geo validate cn-ip --candidate "$path" 2>&1); then
+		GEO_PROVIDER_VALIDATION_PATH=
+		GEO_PROVIDER_VALIDATION_DETAIL=
+		return 0
+	fi
+	GEO_PROVIDER_VALIDATION_PATH="$path"
+	GEO_PROVIDER_VALIDATION_DETAIL=$(printf '%s\n' "$detail" | tail -n 1)
+	return 1
+}
+
+geo_provider_validation_detail() {
+	local path="$1" candidate
+	candidate=$(geo_provider_counts "$path" 2>/dev/null) || {
+		printf '%s\n' "malformed CIDR data"
+		return
+	}
+	if [ "${GEO_PROVIDER_VALIDATION_PATH:-}" = "$path" ] && [ -n "${GEO_PROVIDER_VALIDATION_DETAIL:-}" ]; then
+		printf '%s\n' "$GEO_PROVIDER_VALIDATION_DETAIL"
+		return
+	fi
+	if [ -x "$CANDY_CLIENT_BIN" ]; then
+		"$CANDY_CLIENT_BIN" geo validate cn-ip --candidate "$path" 2>&1 | tail -n 1
+	else
+		printf '%s\n' "Core provider validation unavailable"
+	fi
 }
 
 geo_provider_source_path() {
@@ -840,25 +856,39 @@ write_nft_cidr_set() {
 }
 
 refresh_runtime_geo_provider() {
-	local bypass_china_ip source_path runtime_path rejected_local=0
+	local bypass_china_ip source_path runtime_path rejected_local=0 validation_detail
 	config_get_bool bypass_china_ip client bypass_china_ip 1
 	GEO_ACTIVE_PATH=
+	GEO_ACTIVE_SOURCE=none
 	GEO_LAST_ERROR=
+	GEO_LAST_WARNING=
 	GEO_RUNTIME_PROVIDER_PATH="$GEO_RUNTIME_RULESETS_DIR/cn-ip.cidr"
 	if [ "$bypass_china_ip" -ne 1 ]; then
 		return 0
 	fi
-	if [ -e "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" ] && ! geo_provider_valid "$GEO_ETC_RULESETS_DIR/cn-ip.cidr"; then
-		rejected_local=1
-		log_event warn provider_validation "provider=cn-ip source=local result=rejected reason=invalid-or-incomplete"
+	if [ -e "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" ]; then
+		if geo_provider_valid "$GEO_ETC_RULESETS_DIR/cn-ip.cidr"; then
+			source_path="$GEO_ETC_RULESETS_DIR/cn-ip.cidr"
+		else
+			rejected_local=1
+			validation_detail=$(geo_provider_validation_detail "$GEO_ETC_RULESETS_DIR/cn-ip.cidr")
+			log_event warn provider_validation "provider=cn-ip source=local result=rejected detail=$validation_detail"
+		fi
 	fi
-	source_path=$(geo_provider_source_path)
+	if [ -z "$source_path" ] && geo_provider_valid "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr"; then
+		source_path="$GEO_SHARE_RULESETS_DIR/cn-ip.cidr"
+	fi
 	runtime_path="$GEO_RUNTIME_PROVIDER_PATH"
 	mkdir -p "$GEO_RUNTIME_RULESETS_DIR"
 	if [ -n "$source_path" ]; then
 		if atomic_copy_file "$source_path" "$runtime_path"; then
 			GEO_ACTIVE_PATH="$runtime_path"
-			[ "$rejected_local" -eq 0 ] || GEO_LAST_ERROR="invalid local provider ignored; using packaged bootstrap"
+			if [ "$source_path" = "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" ]; then
+				GEO_ACTIVE_SOURCE=local
+			else
+				GEO_ACTIVE_SOURCE=bootstrap
+			fi
+			[ "$rejected_local" -eq 0 ] || GEO_LAST_WARNING="$validation_detail; using packaged bootstrap"
 		else
 			GEO_LAST_ERROR="failed to copy provider"
 		fi
@@ -868,11 +898,25 @@ refresh_runtime_geo_provider() {
 }
 
 write_geo_status() {
-	local bypass_china_ip active_path entry_count updated_at
+	local bypass_china_ip active_path entry_count updated_at source last_warning validation_detail
 	config_get_bool bypass_china_ip client bypass_china_ip 1
 	active_path="$GEO_RUNTIME_RULESETS_DIR/cn-ip.cidr"
 	entry_count=$(geo_provider_entry_count "$active_path")
 	updated_at=$(file_updated_at "$active_path")
+	source=${GEO_ACTIVE_SOURCE:-none}
+	last_warning=${GEO_LAST_WARNING:-}
+	if [ -s "$active_path" ]; then
+		if [ -s "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" ] && cmp -s "$active_path" "$GEO_ETC_RULESETS_DIR/cn-ip.cidr"; then
+			source=local
+		elif [ -s "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr" ] && cmp -s "$active_path" "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr"; then
+			source=bootstrap
+		fi
+	fi
+	if [ -z "$last_warning" ] && [ "$source" = bootstrap ] && [ -e "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" ] &&
+		! geo_provider_valid "$GEO_ETC_RULESETS_DIR/cn-ip.cidr"; then
+		validation_detail=$(geo_provider_validation_detail "$GEO_ETC_RULESETS_DIR/cn-ip.cidr")
+		last_warning="$validation_detail; using packaged bootstrap"
+	fi
 	printf '"geo":{"bypass_china_ip":'
 	json_bool "$bypass_china_ip"
 	printf ',"active_path":'
@@ -882,6 +926,8 @@ write_geo_status() {
 		printf 'null'
 	fi
 	printf ',"entry_count":%s' "$entry_count"
+	printf ',"source":'
+	json_string "$source"
 	printf ',"updated_at":'
 	if [ -n "$updated_at" ]; then
 		json_string "$updated_at"
@@ -891,6 +937,12 @@ write_geo_status() {
 	printf ',"last_error":'
 	if [ -n "${GEO_LAST_ERROR:-}" ]; then
 		json_string "$GEO_LAST_ERROR"
+	else
+		json_string ""
+	fi
+	printf ',"last_warning":'
+	if [ -n "$last_warning" ]; then
+		json_string "$last_warning"
 	else
 		json_string ""
 	fi
@@ -925,9 +977,35 @@ domain_provider_count() {
 }
 
 domain_provider_valid() {
-	local count
+	local path="$1" count detail
 	count=$(domain_provider_count "$1" 2>/dev/null) || return 1
-	[ "$count" -ge "$CANDY_MIN_GFWLIST_ENTRIES" ]
+	[ "$path" = "$DNS_SHARE_RULESETS_DIR/gfwlist.domains" ] && return 0
+	[ -x "$CANDY_CLIENT_BIN" ] || return 1
+	if detail=$("$CANDY_CLIENT_BIN" dns validate gfwlist --candidate "$path" 2>&1); then
+		DOMAIN_PROVIDER_VALIDATION_PATH=
+		DOMAIN_PROVIDER_VALIDATION_DETAIL=
+		return 0
+	fi
+	DOMAIN_PROVIDER_VALIDATION_PATH="$path"
+	DOMAIN_PROVIDER_VALIDATION_DETAIL=$(printf '%s\n' "$detail" | tail -n 1)
+	return 1
+}
+
+domain_provider_validation_detail() {
+	local path="$1" candidate
+	candidate=$(domain_provider_count "$path" 2>/dev/null) || {
+		printf '%s\n' "malformed domain data"
+		return
+	}
+	if [ "${DOMAIN_PROVIDER_VALIDATION_PATH:-}" = "$path" ] && [ -n "${DOMAIN_PROVIDER_VALIDATION_DETAIL:-}" ]; then
+		printf '%s\n' "$DOMAIN_PROVIDER_VALIDATION_DETAIL"
+		return
+	fi
+	if [ -x "$CANDY_CLIENT_BIN" ]; then
+		"$CANDY_CLIENT_BIN" dns validate gfwlist --candidate "$path" 2>&1 | tail -n 1
+	else
+		printf '%s\n' "Core provider validation unavailable"
+	fi
 }
 
 gfwlist_provider_source_path() {
@@ -939,21 +1017,35 @@ gfwlist_provider_source_path() {
 }
 
 refresh_runtime_gfwlist_provider() {
-	local source_path runtime_path rejected_local=0
+	local source_path runtime_path rejected_local=0 validation_detail
 	GFWLIST_ACTIVE_PATH=
+	GFWLIST_ACTIVE_SOURCE=none
 	GFWLIST_LAST_ERROR=
+	GFWLIST_LAST_WARNING=
 	GFWLIST_RUNTIME_PROVIDER_PATH="$DNS_RUNTIME_RULESETS_DIR/gfwlist.domains"
-	if [ -e "$DNS_ETC_RULESETS_DIR/gfwlist.domains" ] && ! domain_provider_valid "$DNS_ETC_RULESETS_DIR/gfwlist.domains"; then
-		rejected_local=1
-		log_event warn provider_validation "provider=gfwlist source=local result=rejected reason=invalid-or-incomplete"
+	if [ -e "$DNS_ETC_RULESETS_DIR/gfwlist.domains" ]; then
+		if domain_provider_valid "$DNS_ETC_RULESETS_DIR/gfwlist.domains"; then
+			source_path="$DNS_ETC_RULESETS_DIR/gfwlist.domains"
+		else
+			rejected_local=1
+			validation_detail=$(domain_provider_validation_detail "$DNS_ETC_RULESETS_DIR/gfwlist.domains")
+			log_event warn provider_validation "provider=gfwlist source=local result=rejected detail=$validation_detail"
+		fi
 	fi
-	source_path=$(gfwlist_provider_source_path)
+	if [ -z "$source_path" ] && domain_provider_valid "$DNS_SHARE_RULESETS_DIR/gfwlist.domains"; then
+		source_path="$DNS_SHARE_RULESETS_DIR/gfwlist.domains"
+	fi
 	runtime_path="$GFWLIST_RUNTIME_PROVIDER_PATH"
 	mkdir -p "$DNS_RUNTIME_RULESETS_DIR"
 	if [ -n "$source_path" ]; then
 		if atomic_copy_file "$source_path" "$runtime_path"; then
 			GFWLIST_ACTIVE_PATH="$runtime_path"
-			[ "$rejected_local" -eq 0 ] || GFWLIST_LAST_ERROR="invalid local provider ignored; using packaged bootstrap"
+			if [ "$source_path" = "$DNS_ETC_RULESETS_DIR/gfwlist.domains" ]; then
+				GFWLIST_ACTIVE_SOURCE=local
+			else
+				GFWLIST_ACTIVE_SOURCE=bootstrap
+			fi
+			[ "$rejected_local" -eq 0 ] || GFWLIST_LAST_WARNING="$validation_detail; using packaged bootstrap"
 		else
 			GFWLIST_LAST_ERROR="failed to copy gfwlist provider"
 		fi
@@ -963,10 +1055,24 @@ refresh_runtime_gfwlist_provider() {
 }
 
 write_gfwlist_status() {
-	local active_path entry_count updated_at
+	local active_path entry_count updated_at source last_warning validation_detail
 	active_path="$DNS_RUNTIME_RULESETS_DIR/gfwlist.domains"
 	entry_count=$(domain_provider_entry_count "$active_path")
 	updated_at=$(file_updated_at "$active_path")
+	source=${GFWLIST_ACTIVE_SOURCE:-none}
+	last_warning=${GFWLIST_LAST_WARNING:-}
+	if [ -s "$active_path" ]; then
+		if [ -s "$DNS_ETC_RULESETS_DIR/gfwlist.domains" ] && cmp -s "$active_path" "$DNS_ETC_RULESETS_DIR/gfwlist.domains"; then
+			source=local
+		elif [ -s "$DNS_SHARE_RULESETS_DIR/gfwlist.domains" ] && cmp -s "$active_path" "$DNS_SHARE_RULESETS_DIR/gfwlist.domains"; then
+			source=bootstrap
+		fi
+	fi
+	if [ -z "$last_warning" ] && [ "$source" = bootstrap ] && [ -e "$DNS_ETC_RULESETS_DIR/gfwlist.domains" ] &&
+		! domain_provider_valid "$DNS_ETC_RULESETS_DIR/gfwlist.domains"; then
+		validation_detail=$(domain_provider_validation_detail "$DNS_ETC_RULESETS_DIR/gfwlist.domains")
+		last_warning="$validation_detail; using packaged bootstrap"
+	fi
 	printf '"gfwlist":{"active_path":'
 	if [ -f "$active_path" ]; then
 		json_string "$active_path"
@@ -974,6 +1080,8 @@ write_gfwlist_status() {
 		printf 'null'
 	fi
 	printf ',"entry_count":%s' "$entry_count"
+	printf ',"source":'
+	json_string "$source"
 	printf ',"updated_at":'
 	if [ -n "$updated_at" ]; then
 		json_string "$updated_at"
@@ -983,6 +1091,12 @@ write_gfwlist_status() {
 	printf ',"last_error":'
 	if [ -n "${GFWLIST_LAST_ERROR:-}" ]; then
 		json_string "$GFWLIST_LAST_ERROR"
+	else
+		json_string ""
+	fi
+	printf ',"last_warning":'
+	if [ -n "$last_warning" ]; then
+		json_string "$last_warning"
 	else
 		json_string ""
 	fi
@@ -1207,22 +1321,69 @@ write_runtime_status() {
 	printf '}'
 }
 
+process_start_time() {
+	local pid="$1"
+	[ -r "/proc/$pid/stat" ] || return 1
+	awk '{ print $22 }' "/proc/$pid/stat" 2>/dev/null
+}
+
+congestion_test_lock_active() {
+	local pid expected_start actual_start expected_boot actual_boot
+	[ -d "$CONGESTION_TEST_LOCK_DIR" ] || return 1
+	pid=$(cat "$CONGESTION_TEST_LOCK_DIR/pid" 2>/dev/null) || return 1
+	case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+	kill -0 "$pid" 2>/dev/null || return 1
+	expected_start=$(cat "$CONGESTION_TEST_LOCK_DIR/start_time" 2>/dev/null) || return 1
+	actual_start=$(process_start_time "$pid") || return 1
+	[ "$expected_start" = "$actual_start" ] || return 1
+	if [ -r /proc/sys/kernel/random/boot_id ]; then
+		expected_boot=$(cat "$CONGESTION_TEST_LOCK_DIR/boot_id" 2>/dev/null) || return 1
+		actual_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || return 1
+		[ "$expected_boot" = "$actual_boot" ] || return 1
+	fi
+}
+
+release_congestion_test_lock() {
+	local owner_pid owner_start
+	owner_pid=$(cat "$CONGESTION_TEST_LOCK_DIR/pid" 2>/dev/null || true)
+	owner_start=$(cat "$CONGESTION_TEST_LOCK_DIR/start_time" 2>/dev/null || true)
+	[ "$owner_pid" = "$$" ] && [ "$owner_start" = "${CONGESTION_TEST_LOCK_START_TIME:-}" ] || return 0
+	rm -rf "$CONGESTION_TEST_LOCK_DIR" 2>/dev/null || true
+}
+
+acquire_congestion_test_lock() {
+	if [ -d "$CONGESTION_TEST_LOCK_DIR" ] && ! congestion_test_lock_active; then
+		log_event warn diagnostics_lock "kind=congestion-test result=stale-removed"
+		rm -rf "$CONGESTION_TEST_LOCK_DIR" 2>/dev/null || return 1
+	fi
+	mkdir "$CONGESTION_TEST_LOCK_DIR" 2>/dev/null || return 1
+	CONGESTION_TEST_LOCK_START_TIME=$(process_start_time "$$") || {
+		rm -rf "$CONGESTION_TEST_LOCK_DIR" 2>/dev/null || true
+		return 1
+	}
+	printf '%s\n' "$$" > "$CONGESTION_TEST_LOCK_DIR/pid"
+	printf '%s\n' "$CONGESTION_TEST_LOCK_START_TIME" > "$CONGESTION_TEST_LOCK_DIR/start_time"
+	if [ -r /proc/sys/kernel/random/boot_id ]; then
+		cat /proc/sys/kernel/random/boot_id > "$CONGESTION_TEST_LOCK_DIR/boot_id"
+	fi
+}
+
 congestion_test() {
-	local test_point temporary rc help core_bin
-	test_point=${2:-vultr-tokyo}
-	case "$test_point" in
-		vultr-tokyo|linode-singapore|hetzner-ashburn|ovh-france|serverius-netherlands) ;;
-		*)
-			log_error "invalid congestion comparison test point: $test_point"
-			return 1
-			;;
-	esac
-	if ! mkdir "$CONGESTION_TEST_LOCK_DIR" 2>/dev/null; then
+	local node_id temporary rc help core_bin
+	node_id=${1:-}
+	[ -n "$node_id" ] && ! printf '%s' "$node_id" | LC_ALL=C grep -q '[[:cntrl:]]' || {
+		log_error "invalid congestion comparison node"
+		return 1
+	}
+	[ "${#node_id}" -le 128 ] || {
+		log_error "invalid congestion comparison node: identifier is too long"
+		return 1
+	}
+	if ! acquire_congestion_test_lock; then
 		log_error "congestion comparison already running"
 		return 1
 	fi
-	trap 'rm -rf "$CONGESTION_TEST_LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
-	printf '%s\n' "$$" > "$CONGESTION_TEST_LOCK_DIR/pid"
+	trap 'release_congestion_test_lock' EXIT INT TERM
 	rotate_log_file "$CONGESTION_TEST_LOG_FILE"
 	temporary=$(atomic_temp_path "$CONGESTION_TEST_RESULT_FILE") || return 1
 	# Resolve the active Core once so capability probing and execution cannot
@@ -1238,20 +1399,20 @@ congestion_test() {
 	fi
 	help=$(CANDY_CORE_BIN="$core_bin" "$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format candy-json --platform openwrt \
 		congestion-test --help 2>&1) || {
-		printf '%s\n' "Active Candy Core does not support congestion comparison; update Core to 0.3.5 or newer." > "$CONGESTION_TEST_LOG_FILE"
+		printf '%s\n' "Active Candy Core does not support congestion comparison; update Core to 0.3.6 or newer." > "$CONGESTION_TEST_LOG_FILE"
 		printf '%s\n' "$help" >> "$CONGESTION_TEST_LOG_FILE"
 		rm -f "$temporary"
 		return 126
 	}
-	printf '%s' "$help" | grep -Fq -- '--test-point' || {
-		printf '%s\n' "Active Candy Core is too old for selectable congestion test points; update Core to 0.3.5 or newer." > "$CONGESTION_TEST_LOG_FILE"
+	printf '%s' "$help" | grep -Fq -- '--node' || {
+		printf '%s\n' "Active Candy Core does not support node-local congestion comparison; update Core to 0.3.6 or newer." > "$CONGESTION_TEST_LOG_FILE"
 		printf '%s\n' "$help" >> "$CONGESTION_TEST_LOG_FILE"
 		rm -f "$temporary"
 		return 126
 	}
-	log_msg "starting bounded congestion comparison at $test_point: CUBIC, current BBR, BBR v1, aggressive BBR"
+	log_msg "starting bounded congestion comparison through node $node_id: CUBIC, current BBR, BBR v1, aggressive BBR"
 	CANDY_CORE_BIN="$core_bin" "$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format candy-json --platform openwrt \
-		congestion-test --test-point "$test_point" --samples 1 --max-bytes 104857600 --timeout-ms 60000 \
+		congestion-test --node "$node_id" --samples 1 --max-bytes 52428800 --timeout-ms 120000 \
 		> "$temporary" 2> "$CONGESTION_TEST_LOG_FILE"
 	rc=$?
 	if [ "$rc" -eq 0 ] && [ -s "$temporary" ]; then

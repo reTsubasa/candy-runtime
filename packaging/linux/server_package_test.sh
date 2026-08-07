@@ -33,6 +33,10 @@ stage=$dist/server/x86_64
 [ -x "$dist/serverd-linux-x86_64" ] || fail "release launcher artifact was not staged"
 cmp "$root/linux/server/apps/candy-server/serverd-linux" \
 	"$stage/usr/local/bin/serverd-linux" >/dev/null || fail "staged launcher differs from source"
+grep -F 'CONGESTION_TEST_BYTES=52428800' "$stage/install/install-candy-server.sh" >/dev/null ||
+	fail "server installer does not provision the 50 MiB congestion test object"
+grep -F 'dd if=/dev/zero' "$stage/install/install-candy-server.sh" >/dev/null ||
+	fail "server installer does not generate congestion test data locally"
 
 if find "$dist" -type f \( -name 'candy-core' -o -name 'libcandy_core.so' \) | grep -q .; then
 	fail "private Core artifact leaked into Runtime package"

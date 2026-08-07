@@ -4,7 +4,7 @@ PKG_NAME:=candy-client
 PKG_VERSION:=0.4.0
 # OpenWrt requires a package revision. This is internal metadata, not part of
 # the Candy product version shown to users.
-PKG_RELEASE:=14
+PKG_RELEASE:=15
 CANDY_RUNTIME_BIN_DIR?=
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
@@ -60,6 +60,7 @@ define Package/candy-client/install
 	$(INSTALL_DATA) ./rulesets/cn-ip.cidr $(1)/usr/share/candy/rulesets/cn-ip.cidr
 	$(INSTALL_DATA) ./rulesets/gfwlist.domains $(1)/usr/share/candy/rulesets/gfwlist.domains
 	$(INSTALL_DATA) ./rulesets/PROVENANCE.md $(1)/usr/share/candy/rulesets/PROVENANCE.md
+	$(INSTALL_DATA) ./rulesets/manifest.json $(1)/usr/share/candy/rulesets/manifest.json
 	$(INSTALL_DATA) ./rulesets/SHA256SUMS $(1)/usr/share/candy/rulesets/SHA256SUMS
 	$(INSTALL_DIR) $(1)/usr/share/candy/keys
 	$(INSTALL_DATA) ./catalog-release.pub $(1)/usr/share/candy/keys/catalog-release.pub

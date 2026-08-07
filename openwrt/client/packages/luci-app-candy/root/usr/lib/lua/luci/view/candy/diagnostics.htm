@@ -8,6 +8,22 @@ local fs = require "nixio.fs"
 local i18n = require "luci.i18n"
 local xml = require "luci.xml"
 local status = jsonc.parse(fs.readfile("/tmp/candy.nodes") or "") or {}
+local uci = require "luci.model.uci".cursor()
+local congestion_test_nodes = {}
+local congestion_test_node_labels = {}
+local congestion_test_node_sections = {}
+uci:foreach("candy", "node", function(section)
+	if section.enabled ~= "0" then
+		local node = {
+			id = section[".name"],
+			name = section.name or section[".name"]
+		}
+		congestion_test_nodes[#congestion_test_nodes + 1] = node
+		congestion_test_node_labels[node.id] = node.name
+		congestion_test_node_labels[node.name] = node.name
+		congestion_test_node_sections[node.name] = node.id
+	end
+end)
 if type(status) ~= "table" then status = {} end
 local fault = status.fault or {}
 local geo = status.geo or {}
@@ -46,6 +62,7 @@ end
 local function provider_state(provider)
 	if type(provider) ~= "table" then return i18n.translate("Unavailable") end
 	if provider.last_error and provider.last_error ~= "" then return i18n.translate("Error") end
+	if provider.source == "bootstrap" and tonumber(provider.entry_count or 0) > 0 then return i18n.translate("Built-in") end
 	if tonumber(provider.entry_count or 0) > 0 then return i18n.translate("Ready") end
 	return i18n.translate("Unavailable")
 end
@@ -139,20 +156,18 @@ end
 <div class="cbi-map">
 	<h3><%:Congestion controller comparison%></h3>
 	<div class="cbi-section">
-		<p><%:Runs one bounded 100 MiB download through CUBIC and each Candy BBR preset. It does not change the running configuration.%></p>
+		<p><%:Runs one 50 MiB node-local download through CUBIC and each Candy BBR preset. It does not change the running configuration.%></p>
 		<div class="candy-test-actions">
-			<label for="candy-congestion-test-point"><%:Test point%></label>
-			<select id="candy-congestion-test-point" class="cbi-input-select">
-				<option value="vultr-tokyo"><%:Vultr Tokyo%></option>
-				<option value="linode-singapore"><%:Akamai Linode Singapore%></option>
-				<option value="hetzner-ashburn"><%:Hetzner Ashburn%></option>
-				<option value="ovh-france"><%:OVHcloud France%></option>
-				<option value="serverius-netherlands"><%:Serverius Netherlands%></option>
+			<label for="candy-congestion-test-node"><%:Node%></label>
+			<select id="candy-congestion-test-node" class="cbi-input-select"<%=#congestion_test_nodes == 0 and ' disabled="disabled"' or ''%>>
+			<% for _, node in ipairs(congestion_test_nodes) do %>
+				<option value="<%=xml.pcdata(node.id)%>"><%=xml.pcdata(node.name)%></option>
+			<% end %>
 			</select>
-			<button id="candy-congestion-test-start" class="cbi-button cbi-button-action"><%:Start comparison%></button>
-			<span id="candy-congestion-test-state"><%:Not run%></span>
+			<button id="candy-congestion-test-start" class="cbi-button cbi-button-action"<%=#congestion_test_nodes == 0 and ' disabled="disabled"' or ''%>><%:Start comparison%></button>
+			<span id="candy-congestion-test-state"><%=#congestion_test_nodes == 0 and i18n.translate("No enabled nodes") or i18n.translate("Not run")%></span>
 		</div>
-		<table class="table"><thead><tr class="tr table-titles"><th class="th"><%:Test point / controller / preset%></th><th class="th"><%:Goodput%></th><th class="th">TTFB</th><th class="th"><%:Total time%></th><th class="th"><%:Data%></th><th class="th"><%:Result%></th></tr></thead><tbody id="candy-congestion-test-results"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table>
+		<table class="table"><thead><tr class="tr table-titles"><th class="th"><%:Node / controller / preset%></th><th class="th"><%:Goodput%></th><th class="th">TTFB</th><th class="th"><%:Total time%></th><th class="th"><%:Data%></th><th class="th"><%:Result%></th></tr></thead><tbody id="candy-congestion-test-results"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table>
 	</div>
 </div>
 
@@ -168,8 +183,8 @@ end
 		</table>
 		<h4><%:Bootstrap providers%></h4>
 		<table class="table">
-			<tr class="tr"><td class="td left" width="33%"><%:China IP ranges%></td><td id="candy-diagnostics-geo-state" class="td left"><%=xml.pcdata(provider_state(geo) .. " / " .. tostring(geo.entry_count or 0) .. " " .. i18n.translate("entries"))%></td></tr>
-			<tr class="tr"><td class="td left"><%:GFWList domains%></td><td id="candy-diagnostics-gfwlist-state" class="td left"><%=xml.pcdata(provider_state(gfwlist) .. " / " .. tostring(gfwlist.entry_count or 0) .. " " .. i18n.translate("entries"))%></td></tr>
+			<tr class="tr"><td class="td left" width="33%"><%:China IP ranges%></td><td id="candy-diagnostics-geo-state" class="td left" title="<%=xml.pcdata(geo.last_error ~= "" and geo.last_error or geo.last_warning or "")%>"><%=xml.pcdata(provider_state(geo) .. (geo.last_warning ~= "" and " / " .. i18n.translate("Fallback active") or "") .. " / " .. tostring(geo.entry_count or 0) .. " " .. i18n.translate("entries"))%></td></tr>
+			<tr class="tr"><td class="td left"><%:GFWList domains%></td><td id="candy-diagnostics-gfwlist-state" class="td left" title="<%=xml.pcdata(gfwlist.last_error ~= "" and gfwlist.last_error or gfwlist.last_warning or "")%>"><%=xml.pcdata(provider_state(gfwlist) .. (gfwlist.last_warning ~= "" and " / " .. i18n.translate("Fallback active") or "") .. " / " .. tostring(gfwlist.entry_count or 0) .. " " .. i18n.translate("entries"))%></td></tr>
 		</table>
 		<table class="table">
 			<tr class="tr"><td class="td left" width="33%"><%:Process CPU%></td><td id="candy-diagnostics-process-cpu" class="td left"><%=xml.pcdata(process_cpu ~= nil and tostring(process_cpu) .. " %" or "-")%></td></tr>
@@ -234,8 +249,10 @@ var candyDiagnosticsLabels = {
 	noNodes: <%=js_string(i18n.translate("No node diagnostics available"))%>,
 	noFault: <%=js_string(i18n.translate("No active failure"))%>,
 	providerReady: <%=js_string(i18n.translate("Ready"))%>,
+	providerBuiltin: <%=js_string(i18n.translate("Built-in"))%>,
 	providerError: <%=js_string(i18n.translate("Error"))%>,
 	providerUnavailable: <%=js_string(i18n.translate("Unavailable"))%>,
+	providerFallback: <%=js_string(i18n.translate("Fallback active"))%>,
 	entries: <%=js_string(i18n.translate("entries"))%>,
 	congestionModes: {
 		"startup": <%=js_string(i18n.translate("Startup acceleration"))%>,
@@ -256,13 +273,8 @@ var candyDiagnosticsLabels = {
 		"candy-bbr": "Candy BBR",
 		"cubic": "CUBIC"
 	},
-	testPoints: {
-		"vultr-tokyo": <%=js_string(i18n.translate("Vultr Tokyo"))%>,
-		"linode-singapore": <%=js_string(i18n.translate("Akamai Linode Singapore"))%>,
-		"hetzner-ashburn": <%=js_string(i18n.translate("Hetzner Ashburn"))%>,
-		"ovh-france": <%=js_string(i18n.translate("OVHcloud France"))%>,
-		"serverius-netherlands": <%=js_string(i18n.translate("Serverius Netherlands"))%>
-	},
+	testNodes: <%=jsonc.stringify(congestion_test_node_labels)%>,
+	testNodeSections: <%=jsonc.stringify(congestion_test_node_sections)%>,
 	rtt: "RTT", rttVariation: <%=js_string(i18n.translate("RTT variation"))%>,
 	goodput: <%=js_string(i18n.translate("Goodput"))%>, estimatedCapacity: <%=js_string(i18n.translate("Estimated capacity"))%>, idle: <%=js_string(i18n.translate("Idle"))%>, loss: <%=js_string(i18n.translate("Loss"))%>,
 	inFlight: <%=js_string(i18n.translate("In flight"))%>, pacing: <%=js_string(i18n.translate("Pacing"))%>, bandwidth: <%=js_string(i18n.translate("Bandwidth estimate"))%>,
@@ -280,17 +292,17 @@ function candyDiagnosticsController(applied, passive) {
 
 function candyCongestionTestLabel(sample) {
 	var presets = { current: "Current 1.50/0.90", "bbr-v1": "BBR v1 1.25/0.75", aggressive: "Aggressive 2.00/0.75" };
-	var point = candyDiagnosticsLabels.testPoints[sample.test_point];
+	var node = candyDiagnosticsLabels.testNodes[sample.node] || candyDiagnosticsText(sample.node);
 	var controller = sample.controller === "cubic" ? "CUBIC" : "Candy BBR / " + (presets[sample.preset] || candyDiagnosticsText(sample.preset));
-	return point ? point + " / " + controller : controller;
+	return node + " / " + controller;
 }
 function candyCongestionTestRender(data) {
 	var state = document.getElementById("candy-congestion-test-state"), body = document.getElementById("candy-congestion-test-results"), button = document.getElementById("candy-congestion-test-start"), samples = data.result || [];
 	if (!state || !body || !button) return;
-	button.disabled = data.state === "running";
-	if (samples.length && samples[0].test_point) {
-		var point = document.getElementById("candy-congestion-test-point");
-		if (point) point.value = samples[0].test_point;
+	var select = document.getElementById("candy-congestion-test-node");
+	button.disabled = data.state === "running" || !select || select.options.length === 0;
+	if (samples.length && samples[0].node) {
+		if (select) select.value = candyDiagnosticsLabels.testNodeSections[samples[0].node] || samples[0].node;
 	}
 	state.textContent = data.state === "running" ? "Running…" : data.state === "completed" ? "Completed" : data.state === "error" ? (data.message || "Failed") : "Not run";
 	if (!samples.length) return;
@@ -307,12 +319,23 @@ function refreshCandyCongestionTest() {
 	xhr.onreadystatechange = function() { if (xhr.readyState !== 4 || xhr.status !== 200) return; try { var data = JSON.parse(xhr.responseText || "{}"); candyCongestionTestRender(data); if (data.state === "running") setTimeout(refreshCandyCongestionTest, 2000); } catch (e) {} }; xhr.send(null);
 }
 function startCandyCongestionTest(event) {
-	event.preventDefault(); var point = document.getElementById("candy-congestion-test-point"), button = document.getElementById("candy-congestion-test-start"), xhr = new XMLHttpRequest();
-	if (!point || !button) return;
+	event.preventDefault(); var node = document.getElementById("candy-congestion-test-node"), button = document.getElementById("candy-congestion-test-start"), xhr = new XMLHttpRequest();
+	if (!node || !node.value || !button) return;
 	button.disabled = true;
 	xhr.open("POST", candyCongestionTestUrl, true);
 	if (xhr.setRequestHeader) xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-	xhr.onreadystatechange = function() { if (xhr.readyState === 4) setTimeout(refreshCandyCongestionTest, 500); }; xhr.send("token=" + encodeURIComponent(candyCsrfToken) + "&test_point=" + encodeURIComponent(point.value));
+	xhr.onreadystatechange = function() {
+		if (xhr.readyState !== 4) return;
+		if (xhr.status !== 200) {
+			try {
+				var error = JSON.parse(xhr.responseText || "{}");
+				var state = document.getElementById("candy-congestion-test-state");
+				if (state) state.textContent = error.message || "Failed";
+			} catch (e) {}
+		}
+		setTimeout(refreshCandyCongestionTest, 500);
+	};
+	xhr.send("token=" + encodeURIComponent(candyCsrfToken) + "&node=" + encodeURIComponent(node.value));
 }
 function candyDiagnosticsBps(value) {
 	var n = Number(value);
@@ -338,8 +361,15 @@ function candyDiagnosticsSetText(id, value) { var element = document.getElementB
 function candyDiagnosticsProviderText(provider) {
 	provider = provider || {};
 	var entries = Number(provider.entry_count);
-	var state = provider.last_error ? candyDiagnosticsLabels.providerError : (isFinite(entries) && entries > 0 ? candyDiagnosticsLabels.providerReady : candyDiagnosticsLabels.providerUnavailable);
+	var state = provider.last_error ? candyDiagnosticsLabels.providerError : (provider.last_warning ? candyDiagnosticsLabels.providerFallback : (provider.source === "bootstrap" && isFinite(entries) && entries > 0 ? candyDiagnosticsLabels.providerBuiltin : (isFinite(entries) && entries > 0 ? candyDiagnosticsLabels.providerReady : candyDiagnosticsLabels.providerUnavailable)));
 	return state + " / " + (isFinite(entries) ? String(entries) : "0") + " " + candyDiagnosticsLabels.entries;
+}
+function candyDiagnosticsSetProvider(id, provider) {
+	var element = document.getElementById(id), detail;
+	if (!element) return;
+	element.textContent = candyDiagnosticsProviderText(provider);
+	detail = provider && (provider.last_error || provider.last_warning) || "";
+	element.title = detail;
 }
 function candyDiagnosticsRenderRecovery(fault) {
 	fault = fault || {};
@@ -403,8 +433,8 @@ function candyDiagnosticsRender(data) {
 	var processStatus = data.process || {}, socketBuffers = processStatus.socket_buffers || {}, legacyLocal = legacy && legacy.local || {};
 	var nodes = data.nodes || [], body = document.getElementById("candy-diagnostics-nodes"), row, cell, text;
 	candyDiagnosticsRenderRecovery(data.fault);
-	candyDiagnosticsSetText("candy-diagnostics-geo-state", candyDiagnosticsProviderText(data.geo));
-	candyDiagnosticsSetText("candy-diagnostics-gfwlist-state", candyDiagnosticsProviderText(data.gfwlist));
+	candyDiagnosticsSetProvider("candy-diagnostics-geo-state", data.geo);
+	candyDiagnosticsSetProvider("candy-diagnostics-gfwlist-state", data.gfwlist);
 	if (!nodes.length && legacy) nodes = [{ id: "-", name: "-", state: "-", passive: legacy }];
 	candyDiagnosticsUpdateCharts(nodes);
 	var cpu = candyDiagnosticsFirstDefined([processStatus.cpu_percent, legacyLocal.process_cpu_percent]);

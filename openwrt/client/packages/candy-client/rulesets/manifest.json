@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-05",
+  "providers": {
+    "cn_ip": {
+      "source_url": "https://gaoyifan.github.io/china-operator-ip/china46.txt",
+      "source_sha256": "5220ab4fbf03bb6fa003e7928bb072fe549fefd274269992b3cc817e25bf8ba3",
+      "installed_sha256": "5220ab4fbf03bb6fa003e7928bb072fe549fefd274269992b3cc817e25bf8ba3",
+      "entries": {
+        "total": 5814,
+        "ipv4": 4209,
+        "ipv6": 1605
+      }
+    },
+    "gfwlist": {
+      "source_url": "https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt",
+      "source_sha256": "156591c393401ea28d099b9ffd255d4e3ed43a8c164cb8814dabc12c3139a38d",
+      "installed_sha256": "8b4cbea2cbebc441ed9653cb2ad1b4508d6b38be07f4895d7f80bdcdbd924e18",
+      "entries": {
+        "total": 4294
+      }
+    }
+  }
+}

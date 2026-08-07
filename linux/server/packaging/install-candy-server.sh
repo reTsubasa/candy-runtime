@@ -20,6 +20,8 @@ LEGACY_ROOT=/root/candy
 DEFAULT_ARTIFACT_BASE_URL=${CANDY_RELEASE_BASE_URL:-}
 CORE_BINARY=${CANDY_CORE_BINARY:-/opt/candy/cores/current/candy-core}
 EXPECTED_CORE_PROCESS_API=1
+CONGESTION_TEST_FILE=$STATE_DIR/congestion-test.bin
+CONGESTION_TEST_BYTES=52428800
 
 usage() {
 	cat <<'EOF'
@@ -196,8 +198,10 @@ previous_service_active=0
 config_backup=
 config_changed=0
 cert_sha256=
+congestion_test_temporary=
 
 cleanup() {
+	[ -z "$congestion_test_temporary" ] || rm -f "$congestion_test_temporary"
 	rm -rf "$work_dir"
 }
 trap cleanup EXIT HUP INT TERM
@@ -277,6 +281,35 @@ random_secret() {
 	else
 		od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
 	fi
+}
+
+file_size_bytes() {
+	stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null
+}
+
+ensure_congestion_test_object() {
+	if [ -f "$CONGESTION_TEST_FILE" ] && [ ! -L "$CONGESTION_TEST_FILE" ] &&
+		[ "$(file_size_bytes "$CONGESTION_TEST_FILE" || true)" = "$CONGESTION_TEST_BYTES" ]; then
+		run chmod 0440 "$CONGESTION_TEST_FILE"
+		run chown "$SERVICE_USER:$SERVICE_USER" "$CONGESTION_TEST_FILE"
+		return
+	fi
+	congestion_test_temporary=$(mktemp "$STATE_DIR/.congestion-test.bin.XXXXXX") ||
+		die "failed to allocate congestion test object"
+	temporary=$congestion_test_temporary
+	log "Generating 50 MiB Candy node congestion test object"
+	if ! dd if=/dev/zero of="$temporary" bs=1048576 count=50 >/dev/null 2>&1; then
+		rm -f "$temporary"
+		die "failed to generate congestion test object"
+	fi
+	[ "$(file_size_bytes "$temporary" || true)" = "$CONGESTION_TEST_BYTES" ] || {
+		rm -f "$temporary"
+		die "generated congestion test object has an unexpected size"
+	}
+	run chmod 0440 "$temporary"
+	run chown "$SERVICE_USER:$SERVICE_USER" "$temporary"
+	run mv -f "$temporary" "$CONGESTION_TEST_FILE"
+	congestion_test_temporary=
 }
 
 write_default_config() {
@@ -442,6 +475,7 @@ run chmod 0755 "$artifact_path"
 create_service_user
 run mkdir -p "$INSTALL_PREFIX/releases" "$CONFIG_DIR" "$tls_dir" "$STATE_DIR/candy-data" "$BACKUP_DIR"
 run chown "$SERVICE_USER:$SERVICE_USER" "$STATE_DIR" "$STATE_DIR/candy-data" "$tls_dir"
+ensure_congestion_test_object
 
 if [ -L "$current_link" ]; then
 	previous_current=$(readlink "$current_link")

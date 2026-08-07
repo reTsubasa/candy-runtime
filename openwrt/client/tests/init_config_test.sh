@@ -4,10 +4,6 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../packages" && pwd)
 runtime_dir=$(mktemp -d)
 trap 'rm -rf "$runtime_dir"' EXIT
-CANDY_MIN_CN_IP_ENTRIES=1
-CANDY_MIN_CN_IPV4_ENTRIES=1
-CANDY_MIN_CN_IPV6_ENTRIES=0
-CANDY_MIN_GFWLIST_ENTRIES=1
 
 fail() {
   printf '%s\n' "openwrt_candy_init_config_test: $*" >&2
@@ -354,6 +350,16 @@ printf '%s\n' 'google.com' 'youtube.com' 'googlevideo.com' > "$DNS_SHARE_RULESET
 cat > "$CANDY_CLIENT_BIN" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$CANDY_CLIENT_CALLS"
+if [ "$1" = geo ] && [ "$2" = validate ]; then
+  if [ "$(awk 'NF { n++ } END { print n + 0 }' "$5")" -gt 1 ]; then exit 0; fi
+  printf '%s\n' 'Core provider validation unavailable' >&2
+  exit 1
+fi
+if [ "$1" = dns ] && [ "$2" = validate ]; then
+  if [ "$(awk 'NF { n++ } END { print n + 0 }' "$5")" -gt 1 ]; then exit 0; fi
+  printf '%s\n' 'Core provider validation unavailable' >&2
+  exit 1
+fi
 if [ "$1" = "status" ] && [ "$2" = "--path" ]; then
   cat "$3"
 fi
@@ -381,10 +387,6 @@ test_placeholder_node_rejected
   DNS_SHARE_RULESETS_DIR=$GEO_SHARE_RULESETS_DIR
   DNS_RUNTIME_RULESETS_DIR=$RUNTIME_DIR/rulesets
   LOG_FILE=$provider_fallback_dir/candy.log
-  CANDY_MIN_CN_IP_ENTRIES=2
-  CANDY_MIN_CN_IPV4_ENTRIES=1
-  CANDY_MIN_CN_IPV6_ENTRIES=1
-  CANDY_MIN_GFWLIST_ENTRIES=2
   mkdir -p "$GEO_ETC_RULESETS_DIR" "$GEO_SHARE_RULESETS_DIR"
   printf '%s\n' '1.0.1.0/24' > "$GEO_ETC_RULESETS_DIR/cn-ip.cidr"
   printf '%s\n' '1.0.1.0/24' '2409:8000::/20' > "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr"
@@ -394,14 +396,48 @@ test_placeholder_node_rejected
   refresh_runtime_geo_provider
   refresh_runtime_gfwlist_provider
 
+  [ "$(grep -Fxc "geo validate cn-ip --candidate $GEO_ETC_RULESETS_DIR/cn-ip.cidr" "$CANDY_CLIENT_CALLS")" -eq 1 ] ||
+    fail "China IP refresh repeated Core validation for one candidate"
+  [ "$(grep -Fxc "dns validate gfwlist --candidate $DNS_ETC_RULESETS_DIR/gfwlist.domains" "$CANDY_CLIENT_CALLS")" -eq 1 ] ||
+    fail "GFWList refresh repeated Core validation for one candidate"
+
   cmp -s "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr" "$GEO_RUNTIME_RULESETS_DIR/cn-ip.cidr" ||
     fail "incomplete local China IP provider did not fall back to packaged bootstrap"
   cmp -s "$DNS_SHARE_RULESETS_DIR/gfwlist.domains" "$DNS_RUNTIME_RULESETS_DIR/gfwlist.domains" ||
     fail "incomplete local GFWList provider did not fall back to packaged bootstrap"
-  [ "$GEO_LAST_ERROR" = "invalid local provider ignored; using packaged bootstrap" ]
-  [ "$GFWLIST_LAST_ERROR" = "invalid local provider ignored; using packaged bootstrap" ]
+  [ -z "$GEO_LAST_ERROR" ] || fail "successful China IP fallback was reported as an error"
+  [ -z "$GFWLIST_LAST_ERROR" ] || fail "successful GFWList fallback was reported as an error"
+  [ "$GEO_ACTIVE_SOURCE" = bootstrap ] || fail "China IP fallback source was not exposed"
+  [ "$GFWLIST_ACTIVE_SOURCE" = bootstrap ] || fail "GFWList fallback source was not exposed"
+  printf '%s' "$GEO_LAST_WARNING" | grep -Fq 'Core provider validation unavailable' ||
+    fail "China IP rejection did not expose Core validation failure"
+  printf '%s' "$GFWLIST_LAST_WARNING" | grep -Fq 'Core provider validation unavailable' ||
+    fail "GFWList rejection did not expose Core validation failure"
   grep -q 'provider=cn-ip source=local result=rejected' "$LOG_FILE"
   grep -q 'provider=gfwlist source=local result=rejected' "$LOG_FILE"
+)
+
+(
+  provider_retention_dir=$(mktemp -d)
+  GEO_ETC_RULESETS_DIR=$provider_retention_dir/etc
+  GEO_SHARE_RULESETS_DIR=$provider_retention_dir/share
+  DNS_ETC_RULESETS_DIR=$GEO_ETC_RULESETS_DIR
+  DNS_SHARE_RULESETS_DIR=$GEO_SHARE_RULESETS_DIR
+  mkdir -p "$GEO_ETC_RULESETS_DIR" "$GEO_SHARE_RULESETS_DIR"
+  for index in 1 2 3 4 5 6 7 8 9 10; do
+    printf '10.0.%s.0/24\n' "$index" >> "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr"
+    printf '2409:8000:%s::/48\n' "$index" >> "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr"
+    printf 'domain%s.example\n' "$index" >> "$DNS_SHARE_RULESETS_DIR/gfwlist.domains"
+    if [ "$index" -lt 10 ]; then
+      printf '10.0.%s.0/24\n' "$index" >> "$GEO_ETC_RULESETS_DIR/cn-ip.cidr"
+      printf '2409:8000:%s::/48\n' "$index" >> "$GEO_ETC_RULESETS_DIR/cn-ip.cidr"
+      printf 'domain%s.example\n' "$index" >> "$DNS_ETC_RULESETS_DIR/gfwlist.domains"
+    fi
+  done
+  geo_provider_valid "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" ||
+    fail "legitimate China IP count drift was rejected"
+  domain_provider_valid "$DNS_ETC_RULESETS_DIR/gfwlist.domains" ||
+    fail "legitimate GFWList count drift was rejected"
 )
 
 generate_config
