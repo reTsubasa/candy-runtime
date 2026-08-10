@@ -21,6 +21,7 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 case "$expression" in
+	'@.core.releases.*.version') expression='.core.releases[].version' ;;
 	@.*) expression=".${expression#@.}" ;;
 esac
 if [ -n "$file" ]; then
@@ -79,6 +80,11 @@ case "$1" in
 	install)
 		printf '%s\n' "$*" >> "$FAKE_CORE_LOG"
 		case "$3" in file:///*) [ -f "${3#file://}" ] ;; *) exit 1 ;; esac
+		;;
+	install-local)
+		printf '%s\n' "$*" >> "$FAKE_CORE_LOG"
+		[ -f "$2" ] || exit 1
+		printf '%s\n' '{"schema_version":2,"state":"completed","action":"install-local","version":"0.3.6","message":"installed","phase":"install","error_code":"","detail":"","updated_at":1}' > "$CANDY_CORE_OPERATION_FILE"
 		;;
 	*) printf '%s\n' "$*" >> "$FAKE_CORE_LOG"; exit 94 ;;
 esac
@@ -184,7 +190,9 @@ export PATH="$bin:$PATH"
 export CANDY_UPDATE_STATE_ROOT="$state"
 export CANDY_UPDATE_CATALOG_KEY="$root/openwrt/client/packages/candy-client/catalog-release.pub"
 export CANDY_UPDATE_OPERATION_FILE="$tmp/operation.json"
+export CANDY_CORE_OPERATION_FILE="$tmp/core-operation.json"
 export CANDY_UPDATE_LOCK_DIR="$tmp/update.lock"
+export CANDY_UPDATE_UPLOAD_ROOT="$tmp/uploads"
 export CANDY_CORE_MANAGER="$bin/candy-core-manager"
 export CANDY_UPDATE_TEST_PLATFORM=1
 export CANDY_UPDATE_TEST_OPENWRT_RELEASE=25.12.4
@@ -325,8 +333,17 @@ tail -n +$((apk_lines_before + 1)) "$FAKE_APK_LOG" | grep -F -- '--force-old-apk
 
 make_catalog 4 3 0.3.4
 "$manager" check >/dev/null
-if "$manager" install-core v0_3_4 >/dev/null 2>&1; then
-	echo "Core downgrade or reinstall was accepted" >&2
+"$manager" install-core v0_3_4 >/dev/null
+grep -Eq '^install 0\.3\.4 file:///.+ [0-9a-f]{64}$' "$FAKE_CORE_LOG"
+
+mkdir -m 0700 "$CANDY_UPDATE_UPLOAD_ROOT"
+printf '%s\n' uploaded-core > "$CANDY_UPDATE_UPLOAD_ROOT/core-test.tar.gz"
+"$manager" install-core-upload "$CANDY_UPDATE_UPLOAD_ROOT/core-test.tar.gz" >/dev/null
+grep -F 'install-local ' "$FAKE_CORE_LOG" >/dev/null
+[ ! -e "$CANDY_UPDATE_UPLOAD_ROOT/core-test.tar.gz" ]
+printf '%s\n' invalid-upload > "$tmp/outside.tar.gz"
+if "$manager" install-core-upload "$tmp/outside.tar.gz" >/dev/null 2>&1; then
+	echo "Core upload outside the protected staging directory was accepted" >&2
 	exit 1
 fi
 
@@ -336,6 +353,23 @@ if "$manager" install-runtime v0_4_0_r1 >/dev/null 2>&1; then
 	echo "Runtime downgrade was accepted" >&2
 	exit 1
 fi
+
+# The status contract exposes the five newest compatible catalog releases,
+# independently of the latest pointer.
+cp "$assets/candy-core-0.3.5-x86_64-unknown-linux-musl.tar.gz" "$assets/candy-core-0.3.9-x86_64-unknown-linux-musl.tar.gz"
+make_catalog 6 3 0.3.9
+base_entry=$(jq -c '.core.releases.v0_3_9' "$FAKE_CATALOG")
+for candidate in 0.3.4 0.3.5 0.3.6 0.3.7 0.3.8; do
+	key="v$(printf '%s' "$candidate" | tr . _)"
+	base_entry=$(jq -c --arg version "$candidate" --arg key "$key" '.version=$version | .targets.linux_musl_x86_64.url=("https://github.com/reTsubasa/candy-release/releases/download/core-v" + $version + "/candy-core-" + $version + "-x86_64-unknown-linux-musl.tar.gz")' <<<"$base_entry")
+	jq --arg key "$key" --argjson entry "$base_entry" '.core.releases[$key]=$entry' "$FAKE_CATALOG" > "$FAKE_CATALOG.next"
+	mv "$FAKE_CATALOG.next" "$FAKE_CATALOG"
+done
+jq '.core.latest="v0_3_9"' "$FAKE_CATALOG" > "$FAKE_CATALOG.next"
+mv "$FAKE_CATALOG.next" "$FAKE_CATALOG"
+"$manager" check >/dev/null
+status=$($manager status)
+jq -e '.core_candidates | length == 5 and .[0].version == "0.3.9" and .[4].version == "0.3.5"' <<<"$status" >/dev/null
 
 if "$manager" install-core '../../bad' >/dev/null 2>&1; then
 	echo "invalid version key was accepted" >&2

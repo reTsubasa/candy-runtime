@@ -70,6 +70,12 @@ cat > "$bin/core-signature-verifier" <<'EOF'
 EOF
 chmod +x "$bin/core-signature-verifier"
 
+cat > "$bin/usign" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "$bin/usign"
+
 cat > "$bin/runtime-health-check" <<'EOF'
 #!/bin/sh
 [ "$1" = client ]
@@ -143,6 +149,14 @@ printf '%s\n' 99999999 > "$CANDY_CORE_LOCK_DIR/pid"
 
 make_bundle 0.4.1 1 "$tmp/core-0.4.1.tar.gz"
 sha_041=$(sha256sum "$tmp/core-0.4.1.tar.gz" | awk '{ print $1 }')
+if CANDY_CORE_SIGNATURE_VERIFIER= CANDY_CORE_SIGNING_KEY="$tmp/missing-core-release.pub" \
+	"$manager" install 0.4.1 "file://$tmp/core-0.4.1.tar.gz" "$sha_041" >/dev/null 2>&1; then
+	echo "Core bundle was accepted without a signing key" >&2
+	exit 1
+fi
+grep -F '"phase":"signature"' "$CANDY_CORE_OPERATION_FILE" >/dev/null
+grep -F '"error_code":"signing_key_missing"' "$CANDY_CORE_OPERATION_FILE" >/dev/null
+
 if CANDY_CORE_ALLOW_FILE_URL=0 "$manager" install 0.4.8 "file://$tmp/core-0.4.1.tar.gz" "$sha_041" >/dev/null 2>&1; then
 	echo "local Core bundle was accepted without explicit opt-in" >&2
 	exit 1
@@ -205,6 +219,12 @@ sha_043=$(sha256sum "$tmp/core-0.4.3.tar.gz" | awk '{ print $1 }')
 grep -F 'replaced inactive Core 0.4.3' "$tmp/replaced.out" >/dev/null
 "$manager" remove 0.4.3 >/dev/null
 [ ! -e "$cores/0.4.3" ]
+
+make_bundle 0.4.5 1 "$tmp/core-0.4.5.tar.gz"
+"$manager" install-local "$tmp/core-0.4.5.tar.gz" >/dev/null
+[ -x "$cores/0.4.5/candy-core" ]
+grep -F '"action":"install-local"' "$CANDY_CORE_OPERATION_FILE" >/dev/null
+grep -F '"version":"0.4.5"' "$CANDY_CORE_OPERATION_FILE" >/dev/null
 
 make_bundle 0.5.0 2 "$tmp/core-bad-api.tar.gz"
 sha_bad_api=$(sha256sum "$tmp/core-bad-api.tar.gz" | awk '{ print $1 }')

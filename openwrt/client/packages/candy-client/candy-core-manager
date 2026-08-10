@@ -7,7 +7,7 @@ CURRENT_LINK=${CANDY_CORE_CURRENT_LINK:-$CORE_ROOT/current}
 PREVIOUS_LINK=${CANDY_CORE_PREVIOUS_LINK:-$CORE_ROOT/previous}
 SERVICE_INIT=${CANDY_SERVICE_INIT:-/etc/init.d/candy}
 SIGNATURE_VERIFIER=${CANDY_CORE_SIGNATURE_VERIFIER:-}
-CORE_SIGNING_KEY=${CANDY_CORE_SIGNING_KEY:-/etc/candy/core-signing-key.pub}
+CORE_SIGNING_KEY=${CANDY_CORE_SIGNING_KEY:-/usr/share/candy/keys/core-release.pub}
 HEALTH_CHECK=${CANDY_RUNTIME_HEALTH_CHECK:-/usr/libexec/candy-runtime-health-check}
 EXPECTED_PROCESS_API=${CANDY_EXPECTED_CORE_PROCESS_API:-1}
 EXPECTED_CORE_API=${CANDY_EXPECTED_CORE_API:-1}
@@ -18,6 +18,10 @@ OPERATION_FILE=${CANDY_CORE_OPERATION_FILE:-/tmp/candy-core-operation.json}
 HEALTH_WAIT_SECONDS=${CANDY_CORE_HEALTH_WAIT_SECONDS:-15}
 OPERATION_ACTION=
 OPERATION_VERSION=
+VALIDATION_PHASE=
+VALIDATION_CODE=
+VALIDATION_DETAIL=
+LOCAL_UPLOAD_COPY=
 
 json_string() {
 	printf '"'
@@ -35,12 +39,12 @@ json_string() {
 }
 
 write_operation() {
-	local state="$1" message="$2" temporary
+	local state="$1" message="$2" phase="${3:-}" error_code="${4:-}" detail="${5:-}" temporary
 	[ -n "$OPERATION_ACTION" ] || return 0
 	mkdir -p "$(dirname "$OPERATION_FILE")" || return 0
 	temporary="$OPERATION_FILE.tmp.$$"
 	{
-		printf '{"state":'
+		printf '{"schema_version":2,"state":'
 		json_string "$state"
 		printf ',"action":'
 		json_string "$OPERATION_ACTION"
@@ -48,25 +52,43 @@ write_operation() {
 		json_string "$OPERATION_VERSION"
 		printf ',"message":'
 		json_string "$message"
+		printf ',"phase":'
+		json_string "$phase"
+		printf ',"error_code":'
+		json_string "$error_code"
+		printf ',"detail":'
+		json_string "$detail"
 		printf ',"updated_at":%s}\n' "$(date +%s 2>/dev/null || printf 0)"
-	} > "$temporary" && mv -f "$temporary" "$OPERATION_FILE"
+	} > "$temporary" && chmod 0600 "$temporary" && mv -f "$temporary" "$OPERATION_FILE"
 }
 
 fail() {
-	write_operation error "$*" || true
-	log_manager "error: $*"
+	fail_stage manager operation_failed "$*"
+}
+
+fail_stage() {
+	local phase="$1" code="$2"
+	shift 2
+	write_operation error "$*" "$phase" "$code" "$*" || true
+	log_event error core_operation "$phase" "$code" "$*"
 	printf '%s\n' "$*" >&2
 	exit 1
 }
 
-log_manager() {
+log_event() {
+	local level="$1" event="$2" phase="$3" code="$4"
+	shift 4
 	if command -v logger >/dev/null 2>&1; then
-		logger -t candy -- "Core manager: $*"
+		logger -t candy -- "level=$level event=$event pid=$$ action=${OPERATION_ACTION:-none} version=${OPERATION_VERSION:-unknown} phase=$phase code=$code detail=$*"
 	fi
 }
 
-invalid_manifest() {
-	printf 'invalid Core manifest: %s\n' "$*" >&2
+validation_error() {
+	VALIDATION_PHASE=$1
+	VALIDATION_CODE=$2
+	shift 2
+	VALIDATION_DETAIL=$*
+	printf '%s\n' "$VALIDATION_DETAIL" >&2
 	return 1
 }
 
@@ -84,7 +106,7 @@ acquire_lock() {
 		mkdir "$LOCK_DIR" 2>/dev/null || return 1
 	fi
 	printf '%s\n' "$$" > "$LOCK_DIR/pid" || { rmdir "$LOCK_DIR" 2>/dev/null || true; return 1; }
-	trap 'rm -f "$LOCK_DIR/pid" 2>/dev/null || true; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT HUP INT TERM
+	trap 'rm -f "$LOCAL_UPLOAD_COPY" 2>/dev/null || true; rm -f "$LOCK_DIR/pid" 2>/dev/null || true; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT HUP INT TERM
 }
 
 valid_version() {
@@ -142,7 +164,7 @@ manifest_size_ok() {
 
 validate_manifest_file() {
 	local manifest="$1" expected_version="$2" schema process_api core_schema api version core_target_os core_target_arch target_os target_arch libc executable executable_sha
-	[ -f "$manifest" ] && manifest_size_ok "$manifest" || invalid_manifest "missing or oversized manifest" || return 1
+	[ -f "$manifest" ] && [ ! -L "$manifest" ] && manifest_size_ok "$manifest" || validation_error manifest manifest_missing "Core manifest is missing, unsafe, or oversized" || return 1
 	schema=$(manifest_field "$manifest" '@.schema_version')
 	process_api=$(manifest_field "$manifest" '@.process_api_version')
 	core_schema=$(manifest_field "$manifest" '@.core.schema_version')
@@ -155,59 +177,60 @@ validate_manifest_file() {
 	libc=$(manifest_field "$manifest" '@.artifact.libc')
 	executable=$(manifest_field "$manifest" '@.artifact.executable')
 	executable_sha=$(manifest_field "$manifest" '@.artifact.executable_sha256')
-	[ "$schema" = 1 ] || invalid_manifest "schema version $schema is not supported" || return 1
-	[ "$process_api" = "$EXPECTED_PROCESS_API" ] || invalid_manifest "Core process API $process_api is not compatible with required API $EXPECTED_PROCESS_API" || return 1
-	[ "$core_schema" = 1 ] || invalid_manifest "Core manifest schema $core_schema is not supported" || return 1
-	[ "$api" = "$EXPECTED_CORE_API" ] || invalid_manifest "Core API $api is not compatible with required API $EXPECTED_CORE_API" || return 1
-	[ "$version" = "$expected_version" ] || invalid_manifest "version $version does not match requested version $expected_version" || return 1
-	[ "$target_os" = linux ] || invalid_manifest "target OS $target_os is not supported" || return 1
-	[ "$core_target_os" = "$target_os" ] || invalid_manifest "Core target OS $core_target_os does not match artifact target OS $target_os" || return 1
-	[ "$core_target_arch" = "$target_arch" ] || invalid_manifest "Core target architecture $core_target_arch does not match artifact target architecture $target_arch" || return 1
-	[ "$libc" = musl ] || invalid_manifest "Core libc $libc is not compatible with OpenWrt" || return 1
-	[ -n "$target_arch" ] || invalid_manifest "target architecture is missing" || return 1
+	[ "$schema" = 1 ] || validation_error manifest schema_incompatible "Core manifest schema ${schema:-missing} is not supported" || return 1
+	[ "$process_api" = "$EXPECTED_PROCESS_API" ] || validation_error manifest process_api_incompatible "Core process API ${process_api:-missing} is not compatible with required API $EXPECTED_PROCESS_API" || return 1
+	[ "$core_schema" = 1 ] || validation_error manifest core_schema_incompatible "Core schema ${core_schema:-missing} is not supported" || return 1
+	[ "$api" = "$EXPECTED_CORE_API" ] || validation_error manifest core_api_incompatible "Core API ${api:-missing} is not compatible with required API $EXPECTED_CORE_API" || return 1
+	[ "$version" = "$expected_version" ] || validation_error manifest version_mismatch "Core version ${version:-missing} does not match requested version $expected_version" || return 1
+	[ "$target_os" = linux ] || validation_error manifest os_incompatible "Core target OS ${target_os:-missing} is not supported" || return 1
+	[ "$core_target_os" = "$target_os" ] || validation_error manifest os_mismatch "Core and artifact target OS values do not match" || return 1
+	[ "$core_target_arch" = "$target_arch" ] || validation_error manifest arch_mismatch "Core and artifact target architecture values do not match" || return 1
+	[ "$libc" = musl ] || validation_error manifest libc_incompatible "Core libc ${libc:-missing} is not compatible with OpenWrt" || return 1
+	[ -n "$target_arch" ] || validation_error manifest arch_missing "Core target architecture is missing" || return 1
 	case "$(uname -m 2>/dev/null || true):$target_arch" in
 		x86_64:x86_64|amd64:x86_64|aarch64:aarch64|arm64:aarch64|arm*:arm|arm*:armv7|arm*:armv7l) ;;
-		*) invalid_manifest "target architecture $target_arch does not match $(uname -m 2>/dev/null || printf unknown)" || return 1 ;;
+		*) validation_error manifest arch_incompatible "Core target architecture $target_arch does not match $(uname -m 2>/dev/null || printf unknown)" || return 1 ;;
 	esac
-	[ "$executable" = candy-core ] || invalid_manifest "Core executable path is invalid" || return 1
-	valid_sha256 "$executable_sha" || invalid_manifest "Core executable SHA-256 is invalid" || return 1
+	[ "$executable" = candy-core ] || validation_error manifest executable_path_invalid "Core executable path is invalid" || return 1
+	valid_sha256 "$executable_sha" || validation_error manifest executable_sha_invalid "Core executable SHA-256 is invalid" || return 1
 }
 
 verify_manifest_signature() {
 	local manifest="$1" signature="$2"
 	if [ -n "$SIGNATURE_VERIFIER" ]; then
-		[ -x "$SIGNATURE_VERIFIER" ] || return 1
-		"$SIGNATURE_VERIFIER" "$manifest" "$signature"
-		return $?
+		[ -x "$SIGNATURE_VERIFIER" ] || validation_error signature verifier_unavailable "Core signature verifier is unavailable" || return 1
+		"$SIGNATURE_VERIFIER" "$manifest" "$signature" || validation_error signature signature_invalid "Core manifest signature is invalid" || return 1
+		return 0
 	fi
-	command -v usign >/dev/null 2>&1 || return 1
-	[ -f "$CORE_SIGNING_KEY" ] && [ ! -L "$CORE_SIGNING_KEY" ] || return 1
-	usign -V -p "$CORE_SIGNING_KEY" -m "$manifest" -x "$signature"
+	command -v usign >/dev/null 2>&1 || validation_error signature verifier_unavailable "usign is unavailable" || return 1
+	[ -f "$CORE_SIGNING_KEY" ] && [ ! -L "$CORE_SIGNING_KEY" ] || validation_error signature signing_key_missing "Core signing key is unavailable" || return 1
+	usign -V -p "$CORE_SIGNING_KEY" -m "$manifest" -x "$signature" >/dev/null 2>&1 || validation_error signature signature_invalid "Core manifest signature is invalid" || return 1
 }
 
 validate_core_directory() {
 	local directory="$1" expected_version="$2" executable="$1/candy-core" manifest="$1/manifest.json" signature="$1/manifest.sig" info="$1/manifest.runtime.json" expected_executable_sha actual_executable_sha process_api info_schema info_process_api info_api info_version expected_target_os expected_target_arch info_target_os info_target_arch
-	[ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
-	[ -f "$signature" ] && [ ! -L "$signature" ] || return 1
-	[ -f "$executable" ] && [ -x "$executable" ] && [ ! -L "$executable" ] || return 1
+	VALIDATION_PHASE= VALIDATION_CODE= VALIDATION_DETAIL=
+	[ -f "$manifest" ] && [ ! -L "$manifest" ] || validation_error archive manifest_missing "Core bundle does not contain a regular manifest.json" || return 1
+	[ -f "$signature" ] && [ ! -L "$signature" ] || validation_error archive signature_missing "Core bundle does not contain a regular manifest.sig" || return 1
+	[ -f "$executable" ] && [ -x "$executable" ] && [ ! -L "$executable" ] || validation_error archive executable_missing "Core bundle does not contain an executable candy-core" || return 1
 	validate_manifest_file "$manifest" "$expected_version" || return 1
-	verify_manifest_signature "$manifest" "$signature" || invalid_manifest "Core manifest signature is invalid" || return 1
+	verify_manifest_signature "$manifest" "$signature" || return 1
 	expected_executable_sha=$(manifest_field "$manifest" '@.artifact.executable_sha256' | tr 'A-F' 'a-f')
 	actual_executable_sha=$(sha256sum "$executable" 2>/dev/null | awk '{ print tolower($1) }')
-	[ "$actual_executable_sha" = "$expected_executable_sha" ] || invalid_manifest "Core executable SHA-256 mismatch" || return 1
+	[ "$actual_executable_sha" = "$expected_executable_sha" ] || validation_error executable executable_sha_mismatch "Core executable SHA-256 does not match the signed manifest" || return 1
 	if command -v timeout >/dev/null 2>&1; then
-		process_api=$(timeout 10 "$executable" runtime-api-version 2>/dev/null) || invalid_manifest "Core process API probe failed" || return 1
+		process_api=$(timeout 10 "$executable" runtime-api-version 2>/dev/null) || validation_error process_probe runtime_api_probe_failed "Core runtime API probe failed" || return 1
 	else
-		process_api=$("$executable" runtime-api-version 2>/dev/null) || invalid_manifest "Core process API probe failed" || return 1
+		process_api=$("$executable" runtime-api-version 2>/dev/null) || validation_error process_probe runtime_api_probe_failed "Core runtime API probe failed" || return 1
 	fi
-	[ "$process_api" = "$EXPECTED_PROCESS_API" ] || invalid_manifest "Core executable process API $process_api is incompatible" || return 1
+	[ "$process_api" = "$EXPECTED_PROCESS_API" ] || validation_error process_probe runtime_api_incompatible "Core executable process API ${process_api:-missing} is incompatible" || return 1
 	rm -f "$info"
 	if command -v timeout >/dev/null 2>&1; then
-		timeout 10 "$executable" core-info > "$info" 2>/dev/null || invalid_manifest "Core process inspection failed" || return 1
+		timeout 10 "$executable" core-info > "$info" 2>/dev/null || validation_error process_probe core_info_probe_failed "Core information probe failed" || return 1
 	else
-		"$executable" core-info > "$info" 2>/dev/null || invalid_manifest "Core process inspection failed" || return 1
+		"$executable" core-info > "$info" 2>/dev/null || validation_error process_probe core_info_probe_failed "Core information probe failed" || return 1
 	fi
-	[ -f "$info" ] && manifest_size_ok "$info" || invalid_manifest "Core process manifest is missing or oversized" || return 1
+	[ -f "$info" ] && manifest_size_ok "$info" || validation_error process_probe core_info_invalid "Core information response is missing or oversized" || return 1
 	info_schema=$(manifest_field "$info" '@.schema_version')
 	info_process_api=$(manifest_field "$info" '@.process_api_version')
 	info_api=$(manifest_field "$info" '@.core_api_version')
@@ -216,12 +239,12 @@ validate_core_directory() {
 	expected_target_arch=$(manifest_field "$manifest" '@.artifact.target_arch')
 	info_target_os=$(manifest_field "$info" '@.target_os')
 	info_target_arch=$(manifest_field "$info" '@.target_arch')
-	[ "$info_schema" = 1 ] || invalid_manifest "Core process returned unsupported manifest schema" || return 1
-	[ "$info_process_api" = "$EXPECTED_PROCESS_API" ] || invalid_manifest "Core process returned an incompatible process API" || return 1
-	[ "$info_api" = "$EXPECTED_CORE_API" ] || invalid_manifest "Core process returned incompatible Core API" || return 1
-	[ "$info_version" = "$expected_version" ] || invalid_manifest "Core process returned a different version" || return 1
-	[ "$info_target_os" = "$expected_target_os" ] || invalid_manifest "Core process returned a different target OS" || return 1
-	[ "$info_target_arch" = "$expected_target_arch" ] || invalid_manifest "Core process returned a different target architecture" || return 1
+	[ "$info_schema" = 1 ] || validation_error process_probe core_info_schema_invalid "Core process returned an unsupported information schema" || return 1
+	[ "$info_process_api" = "$EXPECTED_PROCESS_API" ] || validation_error process_probe runtime_api_incompatible "Core process returned an incompatible process API" || return 1
+	[ "$info_api" = "$EXPECTED_CORE_API" ] || validation_error process_probe core_api_incompatible "Core process returned an incompatible Core API" || return 1
+	[ "$info_version" = "$expected_version" ] || validation_error process_probe version_mismatch "Core process returned a different version" || return 1
+	[ "$info_target_os" = "$expected_target_os" ] || validation_error process_probe os_mismatch "Core process returned a different target OS" || return 1
+	[ "$info_target_arch" = "$expected_target_arch" ] || validation_error process_probe arch_mismatch "Core process returned a different target architecture" || return 1
 	rm -f "$info"
 }
 
@@ -272,82 +295,132 @@ safe_archive() {
 			if (count != 3 || seen["manifest.json"] != 1 || seen["manifest.sig"] != 1 || seen["candy-core"] != 1) ok = 0
 			exit ok ? 0 : 1
 		}
+	' || return 1
+	tar -tvzf "$archive" 2>/dev/null | awk '
+		BEGIN { ok = 1; count = 0 }
+		{
+			if (substr($0, 1, 1) != "-") ok = 0
+			count++
+		}
+		END { exit (ok && count == 3) ? 0 : 1 }
 	'
+}
+
+inspect_local_bundle() {
+	local source="$1" probe size version
+	case "$source" in /*) ;; *) validation_error upload upload_path_invalid "Uploaded Core path is invalid" || return 1 ;; esac
+	[ -s "$source" ] && [ -f "$source" ] && [ ! -L "$source" ] || validation_error upload upload_file_invalid "Uploaded Core is not a regular file" || return 1
+	size=$(wc -c < "$source" 2>/dev/null | tr -d ' ' || printf 0)
+	case "$size" in ''|*[!0-9]*) validation_error upload upload_size_invalid "Uploaded Core size is invalid" || return 1 ;; esac
+	[ "$size" -le "$MAX_CORE_BYTES" ] || validation_error upload upload_too_large "Uploaded Core exceeds the size limit" || return 1
+	mkdir -p "$CORE_ROOT" || validation_error install core_root_unavailable "Cannot create the Core directory" || return 1
+	[ ! -L "$CORE_ROOT" ] || validation_error install core_root_unsafe "Core root must not be a symbolic link" || return 1
+	LOCAL_UPLOAD_COPY="$CORE_ROOT/.upload-$$.tar.gz"
+	cp "$source" "$LOCAL_UPLOAD_COPY" && chmod 0600 "$LOCAL_UPLOAD_COPY" || validation_error upload upload_copy_failed "Cannot stage the uploaded Core" || return 1
+	safe_archive "$LOCAL_UPLOAD_COPY" || validation_error archive archive_unsafe "Core bundle contains unsafe paths, entries, or file types" || return 1
+	probe="$CORE_ROOT/.upload-inspect-$$"
+	rm -rf "$probe"
+	mkdir -m 0700 "$probe" || validation_error archive staging_failed "Cannot create Core inspection directory" || return 1
+	if ! tar -xzf "$LOCAL_UPLOAD_COPY" -C "$probe"; then
+		rm -rf "$probe"
+		validation_error archive extraction_failed "Core bundle extraction failed" || return 1
+	fi
+	if find "$probe" ! -type f ! -type d -print 2>/dev/null | grep -q .; then
+		rm -rf "$probe"
+		validation_error archive archive_unsafe "Core bundle contains unsupported file types" || return 1
+	fi
+	[ -f "$probe/manifest.json" ] && [ ! -L "$probe/manifest.json" ] || { rm -rf "$probe"; validation_error archive manifest_missing "Core bundle does not contain a regular manifest.json" || return 1; }
+	[ -f "$probe/manifest.sig" ] && [ ! -L "$probe/manifest.sig" ] || { rm -rf "$probe"; validation_error archive signature_missing "Core bundle does not contain a regular manifest.sig" || return 1; }
+	verify_manifest_signature "$probe/manifest.json" "$probe/manifest.sig" || { rm -rf "$probe"; return 1; }
+	version=$(manifest_field "$probe/manifest.json" '@.core.core_version')
+	rm -rf "$probe"
+	valid_version "$version" || validation_error manifest version_invalid "Signed Core manifest has an invalid version" || return 1
+	OPERATION_VERSION=$version
 }
 
 install_core() {
 	local version="$1" url="$2" expected_sha="$3" temporary archive destination size actual_sha current previous backup existing=0
-	valid_version "$version" || fail "invalid Core version"
-	valid_sha256 "$expected_sha" || fail "invalid Core SHA-256"
-	destination=$(version_path "$version") || fail "invalid Core version"
+	valid_version "$version" || fail_stage request version_invalid "Invalid Core version"
+	valid_sha256 "$expected_sha" || fail_stage request sha_invalid "Invalid Core SHA-256"
+	destination=$(version_path "$version") || fail_stage request version_invalid "Invalid Core version"
 	if [ -e "$destination" ]; then
-		[ -d "$destination" ] && [ ! -L "$destination" ] || fail "Core $version has an unsafe existing path"
+		[ -d "$destination" ] && [ ! -L "$destination" ] || fail_stage install destination_unsafe "Core $version has an unsafe existing path"
 		current=$(link_version "$CURRENT_LINK")
 		previous=$(link_version "$PREVIOUS_LINK")
-		[ "$version" != "$current" ] || fail "Core $version is active and cannot be replaced"
-		[ "$version" != "$previous" ] || fail "Core $version is the rollback Core and cannot be replaced"
+		[ "$version" != "$current" ] || fail_stage install active_replace_rejected "Core $version is active and cannot be replaced"
+		[ "$version" != "$previous" ] || fail_stage install rollback_replace_rejected "Core $version is the rollback Core and cannot be replaced"
 		existing=1
 	fi
-	mkdir -p "$CORE_ROOT" || fail "cannot create Core directory"
-	[ ! -L "$CORE_ROOT" ] || fail "Core root must not be a symbolic link"
+	mkdir -p "$CORE_ROOT" || fail_stage install core_root_unavailable "Cannot create the Core directory"
+	[ ! -L "$CORE_ROOT" ] || fail_stage install core_root_unsafe "Core root must not be a symbolic link"
 	temporary="$CORE_ROOT/.install-$version-$$"
 	archive="$temporary/core.tar.gz"
 	rm -rf "$temporary"
-	mkdir -m 0700 "$temporary" || fail "cannot create staging directory"
+	mkdir -m 0700 "$temporary" || fail_stage install staging_failed "Cannot create the Core staging directory"
 	download_bundle "$url" "$archive" || {
 		rm -rf "$temporary"
-		fail "Core bundle download failed"
+		fail_stage download download_failed "Core bundle download failed"
 	}
 	size=$(wc -c < "$archive" 2>/dev/null | tr -d ' ' || printf 0)
-	case "$size" in ''|*[!0-9]*) rm -rf "$temporary"; fail "invalid Core bundle size" ;; esac
+	case "$size" in ''|*[!0-9]*) rm -rf "$temporary"; fail_stage download size_invalid "Core bundle size is invalid" ;; esac
 	[ "$size" -gt 0 ] && [ "$size" -le "$MAX_CORE_BYTES" ] || {
 		rm -rf "$temporary"
-		fail "Core bundle exceeds the size limit"
+		fail_stage download size_limit_exceeded "Core bundle exceeds the size limit"
 	}
 	actual_sha=$(sha256sum "$archive" 2>/dev/null | awk '{ print tolower($1) }')
 	[ "$actual_sha" = "$(printf '%s' "$expected_sha" | tr 'A-F' 'a-f')" ] || {
 		rm -rf "$temporary"
-		fail "Core bundle SHA-256 mismatch"
+		fail_stage download sha_mismatch "Core bundle SHA-256 does not match the signed catalog"
 	}
 	safe_archive "$archive" || {
 		rm -rf "$temporary"
-		fail "Core bundle contains unsafe archive paths"
+		fail_stage archive archive_unsafe "Core bundle contains unsafe paths, entries, or file types"
 	}
 	tar -xzf "$archive" -C "$temporary" || {
 		rm -rf "$temporary"
-		fail "Core bundle extraction failed"
+		fail_stage archive extraction_failed "Core bundle extraction failed"
 	}
 	rm -f "$archive"
 	if find "$temporary" ! -type f ! -type d -print 2>/dev/null | grep -q .; then
 		rm -rf "$temporary"
-		fail "Core bundle contains unsupported file types"
+		fail_stage archive archive_unsafe "Core bundle contains unsupported file types"
 	fi
 	validate_core_directory "$temporary" "$version" || {
 		rm -rf "$temporary"
-		fail "Core bundle signature, manifest, process API, architecture, or executable is invalid"
+		fail_stage "${VALIDATION_PHASE:-validation}" "${VALIDATION_CODE:-validation_failed}" "${VALIDATION_DETAIL:-Core bundle validation failed}"
 	}
 	if [ "$existing" = 1 ]; then
 		backup="$CORE_ROOT/.replace-$version-$$"
 		mv "$destination" "$backup" || {
 			rm -rf "$temporary"
-			fail "cannot stage replacement for Core $version"
+			fail_stage install replacement_stage_failed "Cannot stage replacement for Core $version"
 		}
 		if ! mv "$temporary" "$destination"; then
 			mv "$backup" "$destination" 2>/dev/null || true
 			rm -rf "$temporary"
-			fail "cannot install replacement Core bundle"
+			fail_stage install replacement_failed "Cannot install replacement Core bundle"
 		fi
 		rm -rf "$backup"
-		log_manager "replaced inactive version $version"
+		log_event info core_installed install inactive_replaced "Replaced inactive Core $version"
 		printf '%s\n' "replaced inactive Core $version"
 		return 0
 	fi
 	mv "$temporary" "$destination" || {
 		rm -rf "$temporary"
-		fail "cannot install Core bundle"
+		fail_stage install install_failed "Cannot install Core bundle"
 	}
-	log_manager "installed version $version"
+	log_event info core_installed install installed "Installed Core $version without activation"
 	printf '%s\n' "installed Core $version"
+}
+
+install_local_core() {
+	local source="$1" sha
+	inspect_local_bundle "$source" || fail_stage "${VALIDATION_PHASE:-upload}" "${VALIDATION_CODE:-upload_invalid}" "${VALIDATION_DETAIL:-Uploaded Core validation failed}"
+	sha=$(sha256sum "$LOCAL_UPLOAD_COPY" 2>/dev/null | awk '{ print tolower($1) }')
+	valid_sha256 "$sha" || fail_stage upload sha_failed "Cannot calculate the uploaded Core SHA-256"
+	CANDY_CORE_ALLOW_FILE_URL=1 install_core "$OPERATION_VERSION" "file://$LOCAL_UPLOAD_COPY" "$sha"
+	rm -f "$LOCAL_UPLOAD_COPY"
+	LOCAL_UPLOAD_COPY=
 }
 
 service_running() {
@@ -373,7 +446,7 @@ activate_core() {
 	local version="$1" directory old old_previous was_running=0
 	directory=$(version_path "$version") || fail "invalid Core version"
 	[ -d "$directory" ] || fail "Core $version is not installed"
-	validate_core_directory "$directory" "$version" || fail "Core validation failed"
+	validate_core_directory "$directory" "$version" || fail_stage "${VALIDATION_PHASE:-validation}" "${VALIDATION_CODE:-validation_failed}" "${VALIDATION_DETAIL:-Core validation failed}"
 	old=$(link_version "$CURRENT_LINK")
 	old_previous=$(link_version "$PREVIOUS_LINK")
 	[ "$old" != "$version" ] || { printf '%s\n' "Core $version is already active"; return 0; }
@@ -389,7 +462,7 @@ activate_core() {
 		restart_if_running "$was_running" || true
 		fail "Core health check failed; previous Core restored"
 	fi
-	log_manager "activated version $version"
+	log_event info core_activated activate activated "Activated Core $version"
 	printf '%s\n' "activated Core $version"
 }
 
@@ -398,7 +471,7 @@ rollback_core() {
 	current=$(link_version "$CURRENT_LINK")
 	previous=$(link_version "$PREVIOUS_LINK")
 	[ -n "$previous" ] || fail "no previous Core is available"
-	validate_core_directory "$CORE_ROOT/$previous" "$previous" || fail "previous Core validation failed"
+	validate_core_directory "$CORE_ROOT/$previous" "$previous" || fail_stage "${VALIDATION_PHASE:-validation}" "${VALIDATION_CODE:-validation_failed}" "${VALIDATION_DETAIL:-Previous Core validation failed}"
 	service_running && was_running=1
 	atomic_link "$CURRENT_LINK" "$previous" || fail "cannot activate previous Core"
 	if ! restore_link "$PREVIOUS_LINK" "$current"; then
@@ -412,7 +485,7 @@ rollback_core() {
 		restart_if_running "$was_running" || true
 		fail "rollback health check failed; original Core restored"
 	fi
-	log_manager "rolled back from ${current:-none} to $previous"
+	log_event warn core_rollback rollback rolled_back "Rolled back from ${current:-none} to $previous"
 	printf '%s\n' "rolled back to Core $previous"
 }
 
@@ -425,7 +498,7 @@ remove_core() {
 	[ "$version" != "$previous" ] || fail "cannot remove the rollback Core"
 	[ -d "$directory" ] || fail "Core $version is not installed"
 	rm -rf "$directory"
-	log_manager "removed version $version"
+	log_event info core_removed install removed "Removed Core $version"
 	printf '%s\n' "removed Core $version"
 }
 
@@ -465,7 +538,8 @@ status_json() {
 command=${1:-status}
 case "$command" in
 	status|list) status_json ;;
-	install) [ "$#" -eq 4 ] || fail "usage: $0 install VERSION URL SHA256"; acquire_lock || fail "another Core operation is running"; OPERATION_ACTION=install; OPERATION_VERSION=$2; write_operation running "downloading and validating Core bundle"; install_core "$2" "$3" "$4"; write_operation completed "Core $2 was installed" ;;
+	install) [ "$#" -eq 4 ] || fail "usage: $0 install VERSION URL SHA256"; acquire_lock || fail "another Core operation is running"; OPERATION_ACTION=install; OPERATION_VERSION=$2; write_operation running "downloading and validating Core bundle" download; install_core "$2" "$3" "$4"; write_operation completed "Core $2 was installed" install ;;
+	install-local) [ "$#" -eq 2 ] || fail "usage: $0 install-local FILE"; acquire_lock || fail "another Core operation is running"; OPERATION_ACTION=install-local; write_operation running "validating uploaded Core bundle" upload; install_local_core "$2"; write_operation completed "Core $OPERATION_VERSION was installed" install ;;
 	activate) [ "$#" -eq 2 ] || fail "usage: $0 activate VERSION"; acquire_lock || fail "another Core operation is running"; OPERATION_ACTION=activate; OPERATION_VERSION=$2; write_operation running "validating and activating Core"; activate_core "$2"; write_operation completed "Core $2 is active" ;;
 	rollback) [ "$#" -eq 1 ] || fail "usage: $0 rollback"; acquire_lock || fail "another Core operation is running"; OPERATION_ACTION=rollback; OPERATION_VERSION=$(link_version "$PREVIOUS_LINK"); write_operation running "activating the previous Core"; rollback_core; write_operation completed "Core $OPERATION_VERSION is active" ;;
 	remove) [ "$#" -eq 2 ] || fail "usage: $0 remove VERSION"; acquire_lock || fail "another Core operation is running"; OPERATION_ACTION=remove; OPERATION_VERSION=$2; write_operation running "removing Core"; remove_core "$2"; write_operation completed "Core $2 was removed" ;;

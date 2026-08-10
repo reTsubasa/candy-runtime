@@ -1443,6 +1443,33 @@ msgstr "可用版本"
 msgid "Core updates"
 msgstr "Core 更新"
 
+msgid "Install selected Core"
+msgstr "安装所选 Core"
+
+msgid "Latest"
+msgstr "最新"
+
+msgid "Incompatible"
+msgstr "不兼容"
+
+msgid "Not installable"
+msgstr "不可安装"
+
+msgid "No compatible Core is available"
+msgstr "没有可安装的兼容 Core"
+
+msgid "Advanced: install a local Core bundle"
+msgstr "高级：安装本地 Core 包"
+
+msgid "Upload an official signed Core bundle only. The 128 MiB maximum is installed inactive and is never activated automatically."
+msgstr "仅可上传官方签名的 Core 包，最大 128 MiB。安装后保持未启用状态，绝不会自动启用。"
+
+msgid "Install uploaded Core"
+msgstr "安装上传的 Core"
+
+msgid "Validating uploaded Core"
+msgstr "正在验证上传的 Core"
+
 msgid "A downloaded Core is installed but never activated automatically. Review it on the Core page before activation."
 msgstr "下载的 Core 只会安装，不会自动启用。请在 Core 页面检查后再手动启用。"
 

@@ -52,6 +52,7 @@ cp "$client_package/candy-core-manager" "$pkg_dir/candy-core-manager"
 cp "$client_package/candy-update-manager" "$pkg_dir/candy-update-manager"
 cp "$client_package/candy-runtime-health-check" "$pkg_dir/candy-runtime-health-check"
 cp "$client_package/catalog-release.pub" "$pkg_dir/catalog-release.pub"
+cp "$client_package/core-release.pub" "$pkg_dir/core-release.pub"
 cp -R "$client_package/rulesets" "$pkg_dir/rulesets"
 
 luci_pkg_dir="$sdk/package/luci-app-candy"

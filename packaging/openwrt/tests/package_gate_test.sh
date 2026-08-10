@@ -62,6 +62,9 @@ test -f "$sdk/package/candy-client/candy-core-manager"
 test -f "$sdk/package/candy-client/candy-update-manager"
 test -f "$sdk/package/candy-client/candy-runtime-health-check"
 test -f "$sdk/package/candy-client/catalog-release.pub"
+test -f "$sdk/package/candy-client/core-release.pub"
+grep -Fx 'untrusted comment: Candy Core release 2026' "$sdk/package/candy-client/core-release.pub" >/dev/null
+grep -Fx 'RWTXjeIqv8pbV2/hEu479ar7zVRElSjW94sxU28rJfQ5c5SIH2CnnVB5' "$sdk/package/candy-client/core-release.pub" >/dev/null
 test -f "$sdk/package/candy-client/candy-client"
 test -f "$sdk/package/candy-client/candy-sdwan"
 test -f "$sdk/package/luci-app-candy/Makefile"

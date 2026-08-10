@@ -12,6 +12,7 @@ SEQUENCE_FILE=$STATE_ROOT/sequence
 CATALOG_HASH_FILE=$STATE_ROOT/catalog.sha256
 CHECKED_AT_FILE=$STATE_ROOT/checked-at
 OPERATION_FILE=${CANDY_UPDATE_OPERATION_FILE:-/tmp/candy-update-operation.json}
+CORE_OPERATION_FILE=${CANDY_CORE_OPERATION_FILE:-/tmp/candy-core-operation.json}
 LOCK_DIR=${CANDY_UPDATE_LOCK_DIR:-/var/lock/candy-update-manager.lock}
 CORE_MANAGER=${CANDY_CORE_MANAGER:-/usr/libexec/candy-core-manager}
 SERVICE_INIT=${CANDY_UPDATE_SERVICE_INIT:-/etc/init.d/candy}
@@ -32,9 +33,11 @@ MAX_CATALOG_BYTES=${CANDY_UPDATE_MAX_CATALOG_BYTES:-524288}
 MAX_SIGNATURE_BYTES=${CANDY_UPDATE_MAX_SIGNATURE_BYTES:-4096}
 MAX_RUNTIME_PACKAGE_BYTES=${CANDY_UPDATE_MAX_RUNTIME_PACKAGE_BYTES:-16777216}
 MAX_CORE_BYTES=${CANDY_UPDATE_MAX_CORE_BYTES:-134217728}
+UPLOAD_ROOT=${CANDY_UPDATE_UPLOAD_ROOT:-/tmp/candy-core-upload}
 OPERATION_ACTION=
 OPERATION_VERSION=
 TEMPORARY=
+UPLOAD_FILE=
 
 json_string() {
 	printf '"'
@@ -60,32 +63,44 @@ atomic_write() {
 }
 
 write_operation() {
-	local state="$1" message="$2" temporary
+	local state="$1" message="$2" phase="${3:-}" error_code="${4:-}" detail="${5:-}" temporary
 	[ -n "$OPERATION_ACTION" ] || return 0
 	temporary="$OPERATION_FILE.tmp.$$"
 	mkdir -p "$(dirname "$OPERATION_FILE")" || return 0
 	{
-		printf '{"state":'; json_string "$state"
+		printf '{"schema_version":2,"state":'; json_string "$state"
 		printf ',"action":'; json_string "$OPERATION_ACTION"
 		printf ',"version_key":'; json_string "$OPERATION_VERSION"
 		printf ',"message":'; json_string "$message"
+		printf ',"phase":'; json_string "$phase"
+		printf ',"error_code":'; json_string "$error_code"
+		printf ',"detail":'; json_string "$detail"
 		printf ',"updated_at":%s}\n' "$(date +%s 2>/dev/null || printf 0)"
 	} > "$temporary" && chmod 0600 "$temporary" && mv -f "$temporary" "$OPERATION_FILE"
 }
 
 log_update() {
-	command -v logger >/dev/null 2>&1 && logger -t candy -- "Update manager: $*"
+	local level="$1" event="$2" phase="$3" code="$4"
+	shift 4
+	command -v logger >/dev/null 2>&1 && logger -t candy -- "level=$level event=$event pid=$$ action=${OPERATION_ACTION:-none} version=${OPERATION_VERSION:-unknown} phase=$phase code=$code detail=$*"
 }
 
 fail() {
-	write_operation error "$*" || true
-	log_update "error: $*"
+	fail_stage manager operation_failed "$*"
+}
+
+fail_stage() {
+	local phase="$1" code="$2"
+	shift 2
+	write_operation error "$*" "$phase" "$code" "$*" || true
+	log_update error update_operation "$phase" "$code" "$*"
 	printf '%s\n' "$*" >&2
 	exit 1
 }
 
 cleanup() {
 	[ -n "$TEMPORARY" ] && [ -d "$TEMPORARY" ] && rm -rf "$TEMPORARY"
+	[ -n "$UPLOAD_FILE" ] && rm -f "$UPLOAD_FILE" 2>/dev/null || true
 	if [ -f "$LOCK_DIR/pid" ] && [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
 		rm -f "$LOCK_DIR/pid" 2>/dev/null || true
 		rmdir "$LOCK_DIR" 2>/dev/null || true
@@ -347,7 +362,7 @@ check_catalog() {
 	atomic_write "$CATALOG_HASH_FILE" "$new_hash" || fail "cannot store catalog hash"
 	checked_at=$(date +%s 2>/dev/null || printf 0)
 	atomic_write "$CHECKED_AT_FILE" "$checked_at" || fail "cannot store catalog check time"
-	log_update "accepted stable catalog sequence $new_sequence"
+	log_update info catalog_checked catalog accepted "Accepted stable catalog sequence $new_sequence"
 	printf '%s\n' "catalog sequence $new_sequence accepted"
 }
 
@@ -361,14 +376,12 @@ verify_download() {
 }
 
 install_core() {
-	local key="$1" version url sha size archive current
+	local key="$1" version url sha size archive
 	require_supported_platform || fail "this Runtime package does not support the current OpenWrt platform"
 	cached_catalog_valid || fail "no valid checked catalog is available"
 	validate_core_entry "$CATALOG_FILE" "$key" || fail "requested Core release is invalid or incompatible"
 	version=$(core_entry_field "$CATALOG_FILE" "$key" version)
 	[ -x "$CORE_MANAGER" ] || fail "Core manager is unavailable"
-	current=$("$CORE_MANAGER" status 2>/dev/null | jsonfilter -e '@.current_version' 2>/dev/null || true)
-	[ -z "$current" ] || version_is_newer "$version" "$current" || fail "Core downgrade or reinstall was rejected"
 	url=$(core_entry_field "$CATALOG_FILE" "$key" "targets.$CORE_TARGET_KEY.url")
 	sha=$(core_entry_field "$CATALOG_FILE" "$key" "targets.$CORE_TARGET_KEY.sha256")
 	size=$(core_entry_field "$CATALOG_FILE" "$key" "targets.$CORE_TARGET_KEY.size")
@@ -377,9 +390,41 @@ install_core() {
 	archive=$TEMPORARY/core.tar.gz
 	fetch_https "$url" "$archive" || fail "Core download failed"
 	verify_download "$archive" "$size" "$sha" "$MAX_CORE_BYTES" || fail "Core download size or SHA-256 is invalid"
-	CANDY_CORE_ALLOW_FILE_URL=1 "$CORE_MANAGER" install "$version" "file://$archive" "$sha" || fail "Core installation failed"
-	log_update "installed Core $version without activation"
+	if ! CANDY_CORE_ALLOW_FILE_URL=1 CANDY_CORE_OPERATION_FILE="$CORE_OPERATION_FILE" "$CORE_MANAGER" install "$version" "file://$archive" "$sha"; then
+		propagate_core_failure "Core installation failed"
+	fi
+	log_update info core_update install installed "Installed Core $version without activation"
 	printf '%s\n' "Core $version installed; activation remains manual"
+}
+
+propagate_core_failure() {
+	local fallback="$1" phase code detail
+	phase=$(jsonfilter -i "$CORE_OPERATION_FILE" -e '@.phase' 2>/dev/null || true)
+	code=$(jsonfilter -i "$CORE_OPERATION_FILE" -e '@.error_code' 2>/dev/null || true)
+	detail=$(jsonfilter -i "$CORE_OPERATION_FILE" -e '@.detail' 2>/dev/null || true)
+	[ -n "$phase" ] || phase=validation
+	[ -n "$code" ] || code=core_manager_failed
+	[ -n "$detail" ] || detail=$fallback
+	fail_stage "$phase" "$code" "$detail"
+}
+
+install_core_upload() {
+	local path="$1" size version
+	require_supported_platform || fail_stage upload platform_unsupported "This Runtime package does not support the current OpenWrt platform"
+	[ -x "$CORE_MANAGER" ] || fail_stage upload core_manager_unavailable "Core manager is unavailable"
+	case "$path" in "$UPLOAD_ROOT"/core-*.tar.gz) ;; *) fail_stage upload upload_path_invalid "Uploaded Core path is invalid" ;; esac
+	[ -s "$path" ] && [ -f "$path" ] && [ ! -L "$path" ] || fail_stage upload upload_file_invalid "Uploaded Core is not a regular file"
+	size=$(wc -c < "$path" 2>/dev/null | tr -d ' ' || printf 0)
+	case "$size" in ''|*[!0-9]*) fail_stage upload upload_size_invalid "Uploaded Core size is invalid" ;; esac
+	[ "$size" -le "$MAX_CORE_BYTES" ] || fail_stage upload upload_too_large "Uploaded Core exceeds the size limit"
+	UPLOAD_FILE=$path
+	if ! CANDY_CORE_OPERATION_FILE="$CORE_OPERATION_FILE" "$CORE_MANAGER" install-local "$path"; then
+		propagate_core_failure "Uploaded Core installation failed"
+	fi
+	version=$(jsonfilter -i "$CORE_OPERATION_FILE" -e '@.version' 2>/dev/null || true)
+	OPERATION_VERSION=$version
+	log_update info core_update install installed "Installed uploaded Core ${version:-unknown} without activation"
+	printf '%s\n' "Core ${version:-bundle} installed; activation remains manual"
 }
 
 apk_metadata_matches() {
@@ -517,8 +562,44 @@ install_runtime() {
 		runtime_healthy || fail "Runtime update and rollback health checks both failed"
 		fail "Runtime $display failed its health check and was rolled back to $current_display"
 	fi
-	log_update "installed Runtime $display with verified rollback packages"
+	log_update info runtime_update install installed "Installed Runtime $display with verified rollback packages"
 	printf '%s\n' "Runtime $display installed and verified"
+}
+
+core_candidates_json() {
+	local core_status="$1" core_current="$2" latest versions version key process_api core_api first=1 count=0 installed active
+	printf '['
+	[ -f "$CATALOG_FILE" ] || { printf ']'; return; }
+	latest=$(catalog_field "$CATALOG_FILE" '@.core.latest')
+	versions=$(jsonfilter -i "$CATALOG_FILE" -e '@.core.releases.*.version' 2>/dev/null | awk -F. '
+		/^[0-9]+\.[0-9]+\.[0-9]+([+.-].*)?$/ {
+			split($3, patch, /[-+]/)
+			printf "%010d.%010d.%010d\t%s\n", $1, $2, patch[1], $0
+		}
+	' | sort -r)
+	while IFS="	" read -r _rank version; do
+		[ -n "$version" ] || continue
+		key=$(expected_core_key "$version")
+		validate_core_entry "$CATALOG_FILE" "$key" || continue
+		process_api=$(core_entry_field "$CATALOG_FILE" "$key" process_api_version)
+		core_api=$(core_entry_field "$CATALOG_FILE" "$key" core_api_version)
+		installed=false
+		active=false
+		case "$core_status" in *\"version\":\"$version\"*) installed=true ;; esac
+		[ "$version" = "$core_current" ] && active=true
+		[ "$first" = 1 ] || printf ','
+		first=0
+		printf '{"version_key":'; json_string "$key"
+		printf ',"version":'; json_string "$version"
+		printf ',"process_api_version":%s,"core_api_version":%s,"compatible":true,"installed":%s,"active":%s,"latest":' "$process_api" "$core_api" "$installed" "$active"
+		[ "$key" = "$latest" ] && printf true || printf false
+		printf '}'
+		count=$((count + 1))
+		[ "$count" -lt 5 ] || break
+	done <<EOF
+$versions
+EOF
+	printf ']'
 }
 
 status_json() {
@@ -547,6 +628,8 @@ status_json() {
 	printf '},"runtime_current":'; json_string "$RUNTIME_VERSION-r$RUNTIME_RELEASE"
 	printf ',"core_current":'; if [ -n "$core_current" ]; then json_string "$core_current"; else printf null; fi
 	printf ',"core":'; if [ -n "$core_status" ]; then printf '%s' "$core_status"; else printf null; fi
+	printf ',"core_candidates":'
+	if [ "$catalog_valid" = 1 ]; then core_candidates_json "$core_status" "$core_current"; else printf '[]'; fi
 	printf ',"operation":'
 	if regular_bounded_file "$OPERATION_FILE" 65536 && [ -n "$(jsonfilter -i "$OPERATION_FILE" -e '@.state' 2>/dev/null || true)" ]; then cat "$OPERATION_FILE"; else printf null; fi
 	printf ',"catalog":'
@@ -563,25 +646,32 @@ case "$command" in
 	check)
 		[ "$#" -eq 1 ] || fail "usage: $0 check"
 		acquire_lock || fail "another update operation is running"
-		OPERATION_ACTION=check; write_operation running "downloading and verifying the stable catalog"
+		OPERATION_ACTION=check; write_operation running "downloading and verifying the stable catalog" catalog
 		check_catalog
-		write_operation completed "stable catalog verified"
+		write_operation completed "stable catalog verified" catalog
 		;;
 	install-core)
 		[ "$#" -eq 2 ] || fail "usage: $0 install-core VERSION_KEY"
 		valid_version_key "$2" || fail "invalid Core version key"
 		acquire_lock || fail "another update operation is running"
-		OPERATION_ACTION=install-core; OPERATION_VERSION=$2; write_operation running "downloading and validating Core"
+		OPERATION_ACTION=install-core; OPERATION_VERSION=$2; write_operation running "downloading and validating Core" download
 		install_core "$2"
-		write_operation completed "Core installed; activation remains manual"
+		write_operation completed "Core installed; activation remains manual" install
+		;;
+	install-core-upload)
+		[ "$#" -eq 2 ] || fail "usage: $0 install-core-upload FILE"
+		acquire_lock || fail "another update operation is running"
+		OPERATION_ACTION=install-core-upload; write_operation running "validating uploaded Core" upload
+		install_core_upload "$2"
+		write_operation completed "Core installed; activation remains manual" install
 		;;
 	install-runtime)
 		[ "$#" -eq 2 ] || fail "usage: $0 install-runtime VERSION_KEY"
 		valid_version_key "$2" || fail "invalid Runtime version key"
 		acquire_lock || fail "another update operation is running"
-		OPERATION_ACTION=install-runtime; OPERATION_VERSION=$2; write_operation running "downloading and validating Runtime packages"
+		OPERATION_ACTION=install-runtime; OPERATION_VERSION=$2; write_operation running "downloading and validating Runtime packages" download
 		install_runtime "$2"
-		write_operation completed "Runtime installed and verified"
+		write_operation completed "Runtime installed and verified" install
 		;;
 	*) fail "unknown update manager command" ;;
 esac

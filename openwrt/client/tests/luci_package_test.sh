@@ -73,6 +73,8 @@ assert_file "candy-client/rulesets/manifest.json"
 assert_file "candy-client/rulesets/gfwlist.domains"
 assert_file "candy-client/rulesets/PROVENANCE.md"
 assert_file "candy-client/rulesets/SHA256SUMS"
+assert_file "candy-client/core-release.pub"
+assert_contains "$client_makefile" 'core-release\.pub'
 "$repo_root/../../../packaging/openwrt/build/verify_bootstrap_rulesets.sh" "$repo_root/candy-client/rulesets" >/dev/null ||
 	fail "bootstrap ruleset validation failed"
 assert_contains "$client_makefile" 'rulesets/PROVENANCE\.md'
@@ -517,8 +519,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=18$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=18$'
+assert_contains "$makefile" '^PKG_RELEASE:=19$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=19$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'
@@ -1042,7 +1044,12 @@ assert_contains "$core_view" 'target_arch'
 assert_contains "$update_view" 'data\.core && data\.core\.installed'
 assert_contains "$update_view" 'candy-update-core-installed'
 assert_contains "$update_view" 'candyUpdateCorePageUrl'
-assert_contains "$update_view" 'installedCore && !installedCore\.active'
+assert_contains "$update_view" 'data\.core_candidates'
+assert_contains "$update_view" 'candidates\.slice\(0, 5\)'
+assert_contains "$update_view" 'name="version_key"'
+assert_contains "$update_view" 'enctype="multipart/form-data"'
+assert_contains "$update_view" 'name="core_bundle"'
+assert_contains "$update_view" 'installed && !active'
 assert_contains "$update_view" 'candyUpdateLink'
 assert_not_contains "$status" 'status\.diagnostics'
 assert_not_contains "$status" 'runtime_mode'
