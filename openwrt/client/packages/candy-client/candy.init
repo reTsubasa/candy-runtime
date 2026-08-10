@@ -1540,6 +1540,13 @@ append_group_node() {
 	GROUP_FIRST_NODE=0
 }
 
+count_enabled_node() {
+	local node="$1" enabled
+	config_get_bool enabled "$node" enabled 1
+	[ "$enabled" -eq 1 ] || return 0
+	CANDY_CONFIG_ENABLED_NODE_COUNT=$((CANDY_CONFIG_ENABLED_NODE_COUNT + 1))
+}
+
 append_port_hopping_port() {
 	local port="$1"
 	case "$port" in ''|*[!0-9]*) log_error "node=$NODE_SECTION rejected invalid port hopping port: $port"; CANDY_CONFIG_NODE_ERROR=1; return 0 ;; esac
@@ -3055,6 +3062,16 @@ start_service() {
 		return 1
 	fi
 	log_msg "starting candy service"
+	CANDY_CONFIG_ENABLED_NODE_COUNT=0
+	config_foreach count_enabled_node node
+	if [ "$CANDY_CONFIG_ENABLED_NODE_COUNT" -eq 0 ]; then
+		log_msg "start skipped: no configured nodes; service remains ready for setup"
+		if cleanup_failed_start setup_required; then
+			CANDY_START_PHASE=setup_required
+			return 0
+		fi
+		return 1
+	fi
 	if ! generate_config; then
 		log_error "runtime config generation failed"
 		rm -f "$RUNTIME_CONFIG" || log_msg "failed to remove stale runtime config"
@@ -3380,6 +3397,10 @@ verify_promoted_runtime_candidate() {
 	}
 }
 
+extract_runtime_reload_ack() {
+	sed -n '/^[[:space:]]*{.*"ok"[[:space:]]*:/p' | tail -1
+}
+
 reload_runtime_locked() {
 	local candidate_sha expected_generation applied_generation output ack_json rc ok mode error_code
 	if ! candy_process_running || [ ! -S "$CANDY_CONTROL_SOCKET" ]; then
@@ -3429,7 +3450,9 @@ reload_runtime_locked() {
 		--expected-generation "$expected_generation" 2>&1)
 	rc=$?
 	printf '%s\n' "$output" | log_command_output
-	ack_json=$(printf '%s\n' "$output" | sed -n '1p')
+	# candy-client can emit its structured ACK after Core's diagnostic log lines.
+	# Select the JSON ACK instead of assuming it is the first captured line.
+	ack_json=$(printf '%s\n' "$output" | extract_runtime_reload_ack)
 	ok=$(printf '%s' "$ack_json" | jsonfilter -e '@.ok' 2>/dev/null || true)
 	mode=$(printf '%s' "$ack_json" | jsonfilter -e '@.mode' 2>/dev/null || true)
 	error_code=$(printf '%s' "$ack_json" | jsonfilter -e '@.error_code' 2>/dev/null || true)

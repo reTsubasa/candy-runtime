@@ -83,8 +83,9 @@ assert_contains "$config" "geo_update_url 'https://gaoyifan\.github\.io/china-op
 assert_contains "$config" "geo_auto_update '1'"
 assert_contains "$config" "gfwlist_auto_update '1'"
 assert_contains "$config" "block_quic '0'"
-assert_contains "$config" "^config node 'hk_1'$"
-assert_contains "$config" "^[[:space:]]*list node 'hk_1'$"
+assert_not_contains "$config" "^config node 'hk_1'$"
+assert_not_contains "$config" "^[[:space:]]*list node 'hk_1'$"
+assert_contains "$config" "^[[:space:]]*option enabled '1'$"
 assert_not_contains "$config" "^config[[:space:]][^[:space:]]+[[:space:]]+'[^']*-[^']*'$"
 assert_contains "$process_helper" 'exec_with_timeout\(argv, options\.timeout\)'
 assert_contains "$controller" 'process\.capture\(\{ CORE_MANAGER, "status" \}, \{ timeout = 3 \}\)'
@@ -519,8 +520,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=19$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=19$'
+assert_contains "$makefile" '^PKG_RELEASE:=20$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=20$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'
@@ -545,8 +546,8 @@ assert_contains "$makefile" '/usr/lib/lua/luci/i18n'
 assert_contains "$makefile" '\*\.zh-cn\.lmo'
 assert_contains "$makefile" '\$\(CP\) \$\(PKG_BUILD_DIR\)/root/\* \$\(1\)/'
 
-assert_contains "$config" "option value 'GEOIP,CN,DIRECT,no-resolve'"
-assert_contains "$config" "option value 'MATCH,Proxy'"
+assert_not_contains "$config" "option value 'GEOIP,CN,DIRECT,no-resolve'"
+assert_not_contains "$config" "option value 'MATCH,Proxy'"
 assert_contains "$nodes" 'o\.datatype = "ipaddrport"'
 assert_not_contains "$nodes" 'o\.datatype = "hostport"'
 assert_contains "$nodes" 'DynamicList, "port_hopping_port"'

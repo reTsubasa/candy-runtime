@@ -296,10 +296,18 @@ test "$(grep -Fc 'procd_set_param respawn 3600 10 5' "$repo_root/candy-client/ca
 grep -F 'procd_add_reload_trigger "candy"' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'logread 2>/dev/null | grep -i candy' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F -- '--check-config' "$repo_root/candy-client/candy.init" >/dev/null
-grep -F "option enabled '0'" "$repo_root/candy-client/candy.config" >/dev/null || fail "bootstrap node must default disabled"
+grep -F "option enabled '1'" "$repo_root/candy-client/candy.config" >/dev/null || fail "Candy client must default enabled for first-install setup"
+! grep -F "config node 'hk_1'" "$repo_root/candy-client/candy.config" >/dev/null || fail "bootstrap config must not ship a fake hk_1 node"
+grep -F 'no configured nodes; service remains ready for setup' "$repo_root/candy-client/candy.init" >/dev/null || fail "empty first-install config must enter setup state"
 grep -F 'validate_node_profile_placeholders' "$repo_root/candy-client/candy.init" >/dev/null || fail "placeholder node validation is missing"
 grep -F 'update Core to 0.3.9 or newer' "$repo_root/candy-client/candy.init" >/dev/null || fail "congestion test compatibility message is stale"
 . "$repo_root/candy-client/candy.init"
+reload_ack='{"ok":true,"generation":2,"mode":"hot-policy","duration_ms":20,"error_code":null,"message":null}'
+parsed_reload_ack=$(printf '%s\n' \
+  '\033[2m INFO Candy Core starting' \
+  "$reload_ack" \
+  '\033[2m INFO Candy Core exited' | extract_runtime_reload_ack)
+[ "$parsed_reload_ack" = "$reload_ack" ] || fail "runtime reload ACK parser was confused by Core diagnostics"
 TEST_CANDY_PROC_ROOT=$runtime_dir/proc
 CANDY_PROC_ROOT=$TEST_CANDY_PROC_ROOT
 mkdir -p "$CANDY_PROC_ROOT/$$" "$CANDY_PROC_ROOT/sys/kernel/random"

@@ -95,7 +95,7 @@ function o.validate(self, value, section)
 end
 
 o = s:option(Value, "name", translate("Name"))
-o.placeholder = "hk-1"
+o.placeholder = translate("Name")
 function o.validate(self, value, section)
 	value = (value or ""):gsub("^%s+", ""):gsub("%s+$", "")
 	if value == "" then
@@ -215,7 +215,7 @@ o = s:option(DynamicList, "node", translate("Nodes"))
 for _, node in ipairs(node_options) do
 	o:value(node.section, node.label)
 end
-o.placeholder = "hk-1"
+o.placeholder = translate("Nodes")
 o.rmempty = false
 function o.validate(self, value, section)
 	local values = type(value) == "table" and value or { value }
