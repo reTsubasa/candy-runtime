@@ -46,6 +46,7 @@ CANDY_FAULT_STATE_FILE=${CANDY_FAULT_STATE_FILE:-/var/lib/candy/runtime-fault.js
 CANDY_DNS_LISTEN=${CANDY_DNS_LISTEN:-127.0.0.1:15353}
 CANDY_LISTENER_WAIT_SECONDS=${CANDY_LISTENER_WAIT_SECONDS:-8}
 CANDY_SERVICE_LOCK_WAIT_SECONDS=${CANDY_SERVICE_LOCK_WAIT_SECONDS:-30}
+CANDY_PROVIDER_RELOAD_WAIT_SECONDS=${CANDY_PROVIDER_RELOAD_WAIT_SECONDS:-90}
 CANDY_LIFECYCLE_TTL_SECONDS=${CANDY_LIFECYCLE_TTL_SECONDS:-10}
 CANDY_READY_FILE=${CANDY_READY_FILE:-$RUNTIME_DIR/client.ready}
 CANDY_SERVICE_WAIT_SECONDS=${CANDY_SERVICE_WAIT_SECONDS:-8}
@@ -1216,12 +1217,24 @@ provider_update_sleep_seconds() {
 	printf '%s\n' "$interval"
 }
 
+wait_for_service_lifecycle_idle() {
+	local waited=0
+	while [ -d "$CANDY_SERVICE_LOCK_DIR" ]; do
+		[ "$waited" -lt "$CANDY_PROVIDER_RELOAD_WAIT_SECONDS" ] || return 1
+		sleep 1
+		waited=$((waited + 1))
+	done
+	return 0
+}
+
 provider_update_loop() {
 	while :; do
 		provider_update_once
 		if [ "${PROVIDER_UPDATED:-0}" -eq 1 ]; then
 			log_msg "reloading candy service after provider auto update"
-			if ! "$CANDY_INIT_SELF" reload_runtime >/dev/null 2>&1; then
+			if ! wait_for_service_lifecycle_idle; then
+				log_event warn provider_reload "provider update activation deferred; service lifecycle is busy"
+			elif ! "$CANDY_INIT_SELF" reload_runtime >/dev/null 2>&1; then
 				log_event error provider_reload "validated provider update could not be activated"
 			fi
 		fi
@@ -3398,7 +3411,7 @@ verify_promoted_runtime_candidate() {
 }
 
 extract_runtime_reload_ack() {
-	sed -n '/^[[:space:]]*{.*"ok"[[:space:]]*:/p' | tail -1
+	sed -n 's/^[^{]*\({.*"ok"[[:space:]]*:.*\)/\1/p' | tail -1
 }
 
 reload_runtime_locked() {
