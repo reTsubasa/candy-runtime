@@ -95,7 +95,7 @@ case "$1" in
 	adbdump)
 		name=$(basename "$2")
 		case "$name" in
-			candy-client-*) package=candy-client; arch=x86_64; version=${name#candy-client-}; version=${version%.apk} ;;
+			candy-client-*) package=candy-client; arch=${FAKE_APK_ARCH:-x86_64}; version=${name#candy-client-}; version=${version%.apk} ;;
 			luci-app-candy-*) package=luci-app-candy; arch=noarch; version=${name#luci-app-candy-}; version=${version%.apk} ;;
 			*) exit 1 ;;
 		esac
@@ -153,6 +153,7 @@ printf '%s\n' runtime-client-r2 > "$assets/candy-client-0.4.0-r2.apk"
 printf '%s\n' runtime-luci-r2 > "$assets/luci-app-candy-0.4.0-r2.apk"
 printf '%s\n' core-0.3.4 > "$assets/candy-core-0.3.4-x86_64-unknown-linux-musl.tar.gz"
 printf '%s\n' core-0.3.5 > "$assets/candy-core-0.3.5-x86_64-unknown-linux-musl.tar.gz"
+printf '%s\n' core-arm-0.3.5 > "$assets/candy-core-0.3.5-armv7-unknown-linux-musleabihf.tar.gz"
 
 file_sha() { sha256sum "$1" | awk '{ print $1 }'; }
 file_size() { wc -c < "$1" | tr -d ' '; }
@@ -263,6 +264,23 @@ if CANDY_UPDATE_TEST_TARGET=x86/generic "$manager" check >/dev/null 2>&1; then
 	echo "catalog check accepted the wrong OpenWrt target" >&2
 	exit 1
 fi
+
+# The same signed release entry must resolve to the IPQ40xx Runtime package
+# and ARMv7 musl Core without weakening the x86_64 validation path.
+arm_core="$assets/candy-core-0.3.5-armv7-unknown-linux-musleabihf.tar.gz"
+jq --arg core_url "https://github.com/reTsubasa/candy-release/releases/download/core-v0.3.5/candy-core-0.3.5-armv7-unknown-linux-musleabihf.tar.gz" \
+	--arg core_sha "$(file_sha "$arm_core")" --argjson core_size "$(file_size "$arm_core")" '
+	.runtime.releases.v0_4_0_r3.targets.openwrt_25_12_4_arm_cortex_a7_neon_vfpv4 =
+		(.runtime.releases.v0_4_0_r3.targets.openwrt_25_12_4_x86_64 |
+		 .target = "ipq40xx/generic" | .arch = "arm_cortex-a7_neon-vfpv4" |
+		 .candy_client.url = (.candy_client.url | sub("\\.apk$"; "-ipq40xx-generic-arm_cortex-a7_neon-vfpv4.apk")) |
+		 .luci_app_candy.url = (.luci_app_candy.url | sub("\\.apk$"; "-ipq40xx-generic-arm_cortex-a7_neon-vfpv4.apk"))) |
+	.core.releases.v0_3_5.targets.linux_musl_armv7 = {
+		target:"armv7-unknown-linux-musleabihf",os:"linux",libc:"musl",arch:"arm",
+		url:$core_url,sha256:$core_sha,size:$core_size
+	}' "$FAKE_CATALOG" > "$tmp/arm-catalog.json"
+cp "$tmp/arm-catalog.json" "$FAKE_CATALOG"
+CANDY_UPDATE_TEST_TARGET=ipq40xx/generic CANDY_UPDATE_TEST_ARCH=armv7l "$manager" check >/dev/null
 
 "$manager" check >/dev/null
 "$manager" install-core v0_3_5 >/dev/null
