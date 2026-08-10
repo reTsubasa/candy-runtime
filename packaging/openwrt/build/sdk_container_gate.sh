@@ -260,6 +260,32 @@ docker run --rm --platform linux/amd64 \
     find /tmp/openwrt-sdk/bin/packages -name "luci-app-candy*.$OPENWRT_PACKAGE_EXT" -type f -size +0c -exec cp {} /dist/ \;
     find /dist -name "$artifact_pattern" -type f -size +0c | grep -q .
     find /dist -name "luci-app-candy*.$OPENWRT_PACKAGE_EXT" -type f -size +0c | grep -q .
+    if [ "$OPENWRT_PACKAGE_EXT" = apk ]; then
+      set -- /dist/candy-client-*.apk
+      [ "$#" -eq 1 ] && [ -f "$1" ] || { echo "expected exactly one candy-client APK" >&2; exit 1; }
+      client_apk=$1
+      set -- /dist/luci-app-candy*.apk
+      [ "$#" -eq 1 ] && [ -f "$1" ] || { echo "expected exactly one luci-app-candy APK" >&2; exit 1; }
+      luci_apk=$1
+      apk_tool=/tmp/openwrt-sdk/staging_dir/host/bin/apk
+      [ -x "$apk_tool" ] || { echo "OpenWrt SDK host apk tool is missing" >&2; exit 1; }
+      payload=$(mktemp -d)
+      mkdir -p "$payload/client" "$payload/luci"
+      "$apk_tool" extract --allow-untrusted --no-chown --destination "$payload/client" "$client_apk" >/dev/null
+      "$apk_tool" extract --allow-untrusted --no-chown --destination "$payload/luci" "$luci_apk" >/dev/null
+      for executable in \
+        "$payload/client/etc/init.d/candy" \
+        "$payload/client/usr/bin/candy-netd" \
+        "$payload/client/usr/bin/candy-sdwan-agent"; do
+        [ -x "$executable" ] || { echo "OpenWrt package is missing executable ${executable#$payload/}" >&2; exit 1; }
+      done
+      for asset in \
+        "$payload/luci/usr/lib/lua/luci/controller/candy.lua" \
+        "$payload/luci/usr/lib/lua/luci/view/candy/status.htm" \
+        "$payload/luci/usr/lib/lua/luci/view/candy/sdwan.htm"; do
+        [ -s "$asset" ] || { echo "OpenWrt package is missing LuCI asset ${asset#$payload/}" >&2; exit 1; }
+      done
+    fi
     {
       printf "openwrt_release=%s\n" "$OPENWRT_RELEASE"
       printf "gcc_version=%s\n" "$OPENWRT_GCC_VERSION"

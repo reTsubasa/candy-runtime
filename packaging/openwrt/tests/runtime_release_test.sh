@@ -4,6 +4,7 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 prepare=$root/packaging/openwrt/build/prepare_runtime_release.sh
 workflow=$root/.github/workflows/release-openwrt-client.yml
+sdk_gate=$root/packaging/openwrt/build/sdk_container_gate.sh
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/candy-runtime-release-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
@@ -75,6 +76,9 @@ grep -Fq 'merge_runtime_release.sh' "$workflow" || fail "release workflow does n
 grep -Fq -- '--draft' "$workflow" || fail "release workflow does not stage assets in a draft release"
 grep -Fq 'incoming-$tag' "$workflow" || fail "release workflow does not isolate incoming assets"
 grep -Fq 'candy-artifact-ready' "$workflow" || fail "release workflow does not request central finalization"
+grep -Fq '"$payload/client/usr/bin/candy-sdwan-agent"' "$sdk_gate" || fail "SDK gate does not verify the packaged SD-WAN agent"
+grep -Fq '"$payload/client/usr/bin/candy-netd"' "$sdk_gate" || fail "SDK gate does not verify the packaged netd"
+grep -Fq '"$payload/luci/usr/lib/lua/luci/view/candy/sdwan.htm"' "$sdk_gate" || fail "SDK gate does not verify the packaged LuCI SD-WAN view"
 grep -Fq 'repos/$RELEASE_REPOSITORY/dispatches' "$workflow" || fail "release workflow dispatches to the wrong repository"
 if grep -Fq -- '--draft=false' "$workflow"; then
   fail "Runtime source workflow must not publish the draft itself"

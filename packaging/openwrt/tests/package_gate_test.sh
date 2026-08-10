@@ -73,6 +73,7 @@ test -f "$sdk/package/candy-client/candy-sdwan"
 test -f "$sdk/package/luci-app-candy/Makefile"
 grep -F -- "HOSTCC=/usr/bin/cc" "$log" >/dev/null
 grep -F 'target_arch=${OPENWRT_TARGET_ARCH:-}' "$root/packaging/openwrt/build/package_gate.sh" >/dev/null
+grep -F 'agent_file=$(file "$runtime_bin_dir/candy-sdwan-agent")' "$root/packaging/openwrt/build/package_gate.sh" >/dev/null
 ! grep -F 'cargo' "$root/packaging/openwrt/build/package_gate.sh" >/dev/null
 ! grep -Eq 'CANDY_CORE_SRC|git (clone|checkout)|libcandy_core' "$root/packaging/openwrt/build/package_gate.sh"
 

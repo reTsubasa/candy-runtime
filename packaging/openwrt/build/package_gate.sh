@@ -26,13 +26,16 @@ fi
 
 if [ -n "$target_arch" ] && command -v file >/dev/null 2>&1; then
   netd_file=$(file "$runtime_bin_dir/candy-netd")
-  case "$target_arch:$netd_file" in
-    x86_64:*ELF*x86-64*|aarch64:*ELF*aarch64*|aarch64:*ELF*ARM\ aarch64*|arm:*ELF*ARM*) ;;
-    *)
-      printf '%s\n' "candy-netd does not match OpenWrt target $target_arch: $netd_file" >&2
-      exit 2
-      ;;
-  esac
+  agent_file=$(file "$runtime_bin_dir/candy-sdwan-agent")
+  for runtime_file in "$netd_file" "$agent_file"; do
+    case "$target_arch:$runtime_file" in
+      x86_64:*ELF*x86-64*|aarch64:*ELF*aarch64*|aarch64:*ELF*ARM\ aarch64*|arm:*ELF*ARM*) ;;
+      *)
+        printf '%s\n' "Runtime executable does not match OpenWrt target $target_arch: $runtime_file" >&2
+        exit 2
+        ;;
+    esac
+  done
 fi
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
