@@ -40,7 +40,19 @@ case "$core_file" in
 esac
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/candy-core-docker-e2e.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+resource_suffix=${tmp##*.}
+network=candy-core-e2e-$resource_suffix
+container=candy-core-e2e-$resource_suffix
+network_created=0
+
+cleanup_host() {
+	docker rm -f "$container" >/dev/null 2>&1 || true
+	if [ "$network_created" = 1 ]; then
+		docker network rm "$network" >/dev/null 2>&1 || true
+	fi
+	rm -rf "$tmp"
+}
+trap cleanup_host EXIT HUP INT TERM
 
 cp "$core_binary" "$tmp/candy-core"
 cp "$root/linux/server/apps/candy-server/serverd-linux" "$tmp/serverd-linux"
@@ -54,7 +66,7 @@ cert_sha256=$(openssl x509 -in "$tmp/server.crt" -outform DER |
 	openssl dgst -sha256 -r | awk '{ print $1 }')
 
 cat >"$tmp/server.toml" <<'EOF'
-listen = "127.0.0.1:8443"
+listen = "0.0.0.0:8443"
 cert_pem = "/work/server.crt"
 key_pem = "/work/server.key"
 
@@ -68,7 +80,7 @@ features = ["recommended"]
 EOF
 
 cat >"$tmp/client.toml" <<EOF
-server = "127.0.0.1:8443"
+server = "__CANDY_E2E_SERVER_IP__:8443"
 server_name = "localhost"
 server_identity = "sha256:$cert_sha256"
 key_id = "docker-e2e"
@@ -90,6 +102,7 @@ set -eu
 server_pid=
 client_pid=
 echo_pid=
+client_config=/tmp/candy-client.toml
 
 cleanup() {
 	[ -z "$client_pid" ] || kill "$client_pid" >/dev/null 2>&1 || true
@@ -100,12 +113,33 @@ trap cleanup EXIT HUP INT TERM
 
 fail() {
 	printf '%s\n' "container E2E: $*" >&2
+	printf '%s\n' "--- server config-check log ---" >&2
+	tail -n 80 /work/server-check.log >&2 2>/dev/null || true
+	printf '%s\n' "--- client config-check log ---" >&2
+	tail -n 80 /work/client-check.log >&2 2>/dev/null || true
 	printf '%s\n' "--- server log ---" >&2
 	tail -n 80 /work/server.log >&2 2>/dev/null || true
 	printf '%s\n' "--- client log ---" >&2
 	tail -n 80 /work/client.log >&2 2>/dev/null || true
 	exit 1
 }
+
+server_ip=$(hostname -i 2>/dev/null | awk '
+	{
+		for (i = 1; i <= NF; i++) {
+			count = split($i, octet, ".")
+			first = octet[1] + 0
+			if (count == 4 && first > 0 && first < 224 && first != 127) {
+				print $i
+				exit
+			}
+		}
+	}
+')
+[ -n "$server_ip" ] || fail "container has no non-loopback IPv4 address"
+sed "s/__CANDY_E2E_SERVER_IP__/$server_ip/" /work/client.toml >"$client_config"
+! grep -Fq __CANDY_E2E_SERVER_IP__ "$client_config" ||
+	fail "client server address placeholder was not replaced"
 
 [ "$(/work/candy-core runtime-api-version)" = 1 ] ||
 	fail "real Core does not expose Process API v1"
@@ -114,7 +148,7 @@ CANDY_CORE_BINARY=/work/candy-core /work/serverd-linux \
 	--config /work/server.toml --check-config >/work/server-check.log 2>&1 ||
 	fail "server launcher config validation failed"
 CANDY_CORE_BIN=/work/candy-core /work/candy-client \
-	--config /work/client.toml --check-config >/work/client-check.log 2>&1 ||
+	--config "$client_config" --check-config >/work/client-check.log 2>&1 ||
 	fail "client launcher config validation failed"
 
 nc -lk -p 8080 -e /bin/cat >/work/echo.log 2>&1 &
@@ -133,7 +167,7 @@ done
 [ "$attempt" -lt 100 ] || fail "server did not bind UDP 8443"
 
 CANDY_CORE_BIN=/work/candy-core /work/candy-client \
-	--config /work/client.toml >/work/client.log 2>&1 &
+	--config "$client_config" >/work/client.log 2>&1 &
 client_pid=$!
 
 attempt=0
@@ -154,6 +188,8 @@ printf '%s\n' "Candy real Core server/client TCP forwarding E2E passed"
 EOF
 chmod 0755 "$tmp/run-e2e.sh"
 
-docker run --rm --platform linux/amd64 \
+docker network create --driver bridge "$network" >/dev/null
+network_created=1
+docker run --rm --name "$container" --platform linux/amd64 --network "$network" \
 	-v "$tmp:/work" \
 	"$docker_image" /work/run-e2e.sh
