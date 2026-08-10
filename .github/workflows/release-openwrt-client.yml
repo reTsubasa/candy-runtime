@@ -54,6 +54,8 @@ jobs:
 
       - name: Install pinned ARMv7 musl toolchain
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CANDY_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           arm_bin=$(scripts/install_pinned_arm_musl_toolchain.sh)
