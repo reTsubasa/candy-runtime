@@ -1458,6 +1458,9 @@ msgstr "不可安装"
 msgid "No compatible Core is available"
 msgstr "没有可安装的兼容 Core"
 
+msgid "Rollback available"
+msgstr "可回滚"
+
 msgid "Advanced: install a local Core bundle"
 msgstr "高级：安装本地 Core 包"
 
@@ -1660,6 +1663,7 @@ msgstr "证据"
 
 msgid "Runtime evidence"
 msgstr "运行证据"
+
 msgid "Sends controlled redundant UDP copies on lossy links to reduce real-time packet loss."
 msgstr "在丢包链路上发送受控 UDP 冗余副本，降低实时流量的有效丢包率。"
 

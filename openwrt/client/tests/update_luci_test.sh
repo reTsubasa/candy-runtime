@@ -27,6 +27,7 @@ grep -F 'candy-update-core' "$view" >/dev/null
 grep -F 'candy-update-core-installed' "$view" >/dev/null
 grep -F 'data.core_candidates' "$view" >/dev/null
 grep -F 'candidates.slice(0, 5)' "$view" >/dev/null
+grep -F 'Rollback available' "$view" "$po" >/dev/null
 grep -F 'name="version_key"' "$view" >/dev/null
 grep -F 'enctype="multipart/form-data"' "$view" >/dev/null
 grep -F 'name="core_bundle"' "$view" >/dev/null
@@ -212,7 +213,7 @@ const candidates = [
 const data = { core_candidates: candidates, core_current: "0.3.5", core: { installed: [{ version: "0.3.6", active: false }, { version: "0.3.5", active: true }] }, catalog: {}, operation: {} };
 context.candyUpdateRenderCore(data, false);
 assert.equal(elements["candy-update-core"].children.length, 5, "only five server candidates may be rendered");
-assert.deepEqual(elements["candy-update-core-select"].options.map((option) => option.value), ["v0_3_9", "v0_3_8"]);
+assert.deepEqual(elements["candy-update-core-select"].options.map((option) => option.value), ["v0_3_9", "v0_3_8", "v0_3_3"]);
 assert.equal(elements["candy-update-core"].children[3].children[4].children.length, 1, "installed inactive Core must link to review");
 elements["candy-update-core-select"].value = "v0_3_8";
 context.candyUpdateRenderCore(data, false);

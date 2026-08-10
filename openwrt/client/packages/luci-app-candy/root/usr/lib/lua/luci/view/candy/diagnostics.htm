@@ -180,7 +180,13 @@ end
 .candy-diagnostics-alert { border-left: 4px solid #c62828; background: #fff4f4; padding: .8em 1em; }
 .candy-diagnostics-alert strong { display: block; margin-bottom: .35em; }
 .candy-feature-matrix { overflow-x: auto; }
-.candy-feature-matrix .table { min-width: 62em; }
+.candy-feature-matrix .table { min-width: 62em; table-layout: fixed; }
+.candy-feature-matrix .table th, .candy-feature-matrix .table td { vertical-align: middle; overflow-wrap: anywhere; }
+.candy-feature-matrix .table th { white-space: normal; }
+.candy-feature-status { display: inline-block; padding: .15em .45em; border: 1px solid #bbb; border-radius: 3px; line-height: 1.25; white-space: nowrap; }
+.candy-feature-status.active { color: #2e7d32; border-color: #2e7d32; }
+.candy-feature-status.available { color: #666; }
+.candy-feature-evidence { color: #555; white-space: nowrap; }
 .candy-feature-state { white-space: pre-line; line-height: 1.4; }
 @media (max-width: 1000px) { .candy-chart-grid { grid-template-columns: 1fr; } }
 </style>
@@ -206,7 +212,7 @@ end
 <div id="candy-feature-matrix-section" class="cbi-map">
 	<h3><%:Per-node protocol capability matrix%></h3>
 	<div class="cbi-section candy-feature-matrix">
-		<table class="table"><thead><tr class="tr table-titles"><th class="th"><%:Node / server Core%></th><th class="th"><%:Wire protocol%></th><th class="th"><%:Feature%></th><th class="th"><%:Negotiation%></th><th class="th"><%:Authorization%></th><th class="th"><%:Runtime evidence%></th></tr></thead><tbody id="candy-diagnostics-feature-matrix"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table>
+		<table class="table"><colgroup><col style="width:22%"><col style="width:11%"><col style="width:14%"><col style="width:13%"><col style="width:13%"><col style="width:27%"></colgroup><thead><tr class="tr table-titles"><th class="th"><%:Node / server Core%></th><th class="th"><%:Wire protocol%></th><th class="th"><%:Feature%></th><th class="th"><%:Negotiation%></th><th class="th"><%:Authorization%></th><th class="th"><%:Runtime evidence%></th></tr></thead><tbody id="candy-diagnostics-feature-matrix"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table>
 	</div>
 </div>
 
@@ -344,9 +350,11 @@ function candyDiagnosticsRenderFeatureMatrix(data) {
 			candyDiagnosticsAppendCell(row, candyDiagnosticsText(node.name || node.id) + " / " + peer);
 			candyDiagnosticsAppendCell(row, protocol.major === undefined ? "-" : protocol.major + "." + protocol.minor);
 			candyDiagnosticsAppendCell(row, definition.short_name || definition.name || definition.id);
-			candyDiagnosticsAppendCell(row, value.supported === true ? candyDiagnosticsLabels.negotiated : candyDiagnosticsLabels.notNegotiated);
-			candyDiagnosticsAppendCell(row, value.authorized === true ? candyDiagnosticsLabels.authorized : candyDiagnosticsLabels.notAuthorized);
-			candyDiagnosticsAppendCell(row, (value.active === true ? candyDiagnosticsLabels.active : candyDiagnosticsLabels.idleFeature) + " / " + candyDiagnosticsLabels.evidence + " " + candyDiagnosticsText(value.evidence));
+			var negotiation = candyDiagnosticsAppendCell(row, ""), authorization = candyDiagnosticsAppendCell(row, ""), evidence = candyDiagnosticsAppendCell(row, "");
+			var badge = document.createElement("span"); badge.className = "candy-feature-status" + (value.supported === true ? " active" : " available"); badge.textContent = value.supported === true ? candyDiagnosticsLabels.negotiated : candyDiagnosticsLabels.notNegotiated; negotiation.appendChild(badge);
+			badge = document.createElement("span"); badge.className = "candy-feature-status" + (value.authorized === true ? " active" : " available"); badge.textContent = value.authorized === true ? candyDiagnosticsLabels.authorized : candyDiagnosticsLabels.notAuthorized; authorization.appendChild(badge);
+			badge = document.createElement("span"); badge.className = "candy-feature-status" + (value.active === true ? " active" : " available"); badge.textContent = value.active === true ? candyDiagnosticsLabels.active : candyDiagnosticsLabels.idleFeature; evidence.appendChild(badge);
+			var evidenceText = document.createElement("span"); evidenceText.className = "candy-feature-evidence"; evidenceText.textContent = " / " + candyDiagnosticsLabels.evidence + " " + candyDiagnosticsText(value.evidence); evidence.appendChild(evidenceText);
 			body.appendChild(row);
 		});
 	});
@@ -443,7 +451,7 @@ function candyDiagnosticsRenderRecovery(fault) {
 	candyDiagnosticsSetText("candy-diagnostics-fault-cleanup", fault.cleanup || "-");
 	candyDiagnosticsSetText("candy-diagnostics-fault-detail", fault.detail || "-");
 }
-function candyDiagnosticsAppendCell(row, value) { var cell = document.createElement("td"); cell.className = "td"; cell.textContent = value; row.appendChild(cell); }
+function candyDiagnosticsAppendCell(row, value) { var cell = document.createElement("td"); cell.className = "td"; cell.textContent = value; row.appendChild(cell); return cell; }
 function candyDiagnosticsFirstDefined(values) {
 	for (var i = 0; i < values.length; i++) if (values[i] !== null && values[i] !== undefined) return values[i];
 	return undefined;
