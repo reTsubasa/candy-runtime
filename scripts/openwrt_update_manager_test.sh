@@ -361,7 +361,7 @@ make_catalog 6 3 0.3.9
 base_entry=$(jq -c '.core.releases.v0_3_9' "$FAKE_CATALOG")
 for candidate in 0.3.4 0.3.5 0.3.6 0.3.7 0.3.8; do
 	key="v$(printf '%s' "$candidate" | tr . _)"
-	base_entry=$(jq -c --arg version "$candidate" --arg key "$key" '.version=$version | .targets.linux_musl_x86_64.url=("https://github.com/reTsubasa/candy-release/releases/download/core-v" + $version + "/candy-core-" + $version + "-x86_64-unknown-linux-musl.tar.gz")' <<<"$base_entry")
+	base_entry=$(printf '%s\n' "$base_entry" | jq -c --arg version "$candidate" '.version=$version | .targets.linux_musl_x86_64.url=("https://github.com/reTsubasa/candy-release/releases/download/core-v" + $version + "/candy-core-" + $version + "-x86_64-unknown-linux-musl.tar.gz")')
 	jq --arg key "$key" --argjson entry "$base_entry" '.core.releases[$key]=$entry' "$FAKE_CATALOG" > "$FAKE_CATALOG.next"
 	mv "$FAKE_CATALOG.next" "$FAKE_CATALOG"
 done
@@ -369,7 +369,7 @@ jq '.core.latest="v0_3_9"' "$FAKE_CATALOG" > "$FAKE_CATALOG.next"
 mv "$FAKE_CATALOG.next" "$FAKE_CATALOG"
 "$manager" check >/dev/null
 status=$($manager status)
-jq -e '.core_candidates | length == 5 and .[0].version == "0.3.9" and .[4].version == "0.3.5"' <<<"$status" >/dev/null
+printf '%s\n' "$status" | jq -e '.core_candidates | length == 5 and .[0].version == "0.3.9" and .[4].version == "0.3.5"' >/dev/null
 
 if "$manager" install-core '../../bad' >/dev/null 2>&1; then
 	echo "invalid version key was accepted" >&2
