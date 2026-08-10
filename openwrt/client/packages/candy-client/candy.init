@@ -1403,13 +1403,13 @@ congestion_test() {
 	fi
 	help=$(CANDY_CORE_BIN="$core_bin" "$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format candy-json --platform openwrt \
 		congestion-test --help 2>&1) || {
-		printf '%s\n' "Active Candy Core does not support congestion comparison; update Core to 0.3.7 or newer." > "$CONGESTION_TEST_LOG_FILE"
+		printf '%s\n' "Active Candy Core does not support congestion comparison; update Core to 0.3.9 or newer." > "$CONGESTION_TEST_LOG_FILE"
 		printf '%s\n' "$help" >> "$CONGESTION_TEST_LOG_FILE"
 		rm -f "$temporary"
 		return 126
 	}
 	printf '%s' "$help" | grep -Fq -- '--node' || {
-		printf '%s\n' "Active Candy Core does not support node-local congestion comparison; update Core to 0.3.7 or newer." > "$CONGESTION_TEST_LOG_FILE"
+		printf '%s\n' "Active Candy Core does not support native Candy-line congestion comparison; update Core to 0.3.9 or newer." > "$CONGESTION_TEST_LOG_FILE"
 		printf '%s\n' "$help" >> "$CONGESTION_TEST_LOG_FILE"
 		rm -f "$temporary"
 		return 126

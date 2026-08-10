@@ -21,10 +21,13 @@ HEALTH_WAIT_SECONDS=${CANDY_UPDATE_HEALTH_WAIT_SECONDS:-20}
 RUNTIME_VERSION=${CANDY_RUNTIME_VERSION:-0.4.0}
 RUNTIME_RELEASE=${CANDY_RUNTIME_RELEASE:-2}
 SUPPORTED_OPENWRT_RELEASE=25.12.4
-SUPPORTED_TARGET=x86/64
-SUPPORTED_ARCH=x86_64
-RUNTIME_TARGET_KEY=openwrt_25_12_4_x86_64
-CORE_TARGET_KEY=linux_musl_x86_64
+SUPPORTED_TARGET=
+SUPPORTED_ARCH=
+RUNTIME_TARGET_KEY=
+RUNTIME_ASSET_SUFFIX=
+CORE_TARGET_KEY=
+CORE_RUST_TARGET=
+CORE_ARCH=
 MAX_CATALOG_BYTES=${CANDY_UPDATE_MAX_CATALOG_BYTES:-524288}
 MAX_SIGNATURE_BYTES=${CANDY_UPDATE_MAX_SIGNATURE_BYTES:-4096}
 MAX_RUNTIME_PACKAGE_BYTES=${CANDY_UPDATE_MAX_RUNTIME_PACKAGE_BYTES:-16777216}
@@ -171,8 +174,27 @@ require_supported_platform() {
 	target=$(platform_target)
 	arch=$(platform_arch)
 	[ "$release" = "$SUPPORTED_OPENWRT_RELEASE" ] || return 1
-	[ "$target" = "$SUPPORTED_TARGET" ] || return 1
-	case "$arch" in x86_64|amd64) ;; *) return 1 ;; esac
+	case "$target:$arch" in
+		x86/64:x86_64|x86/64:amd64)
+			SUPPORTED_TARGET=x86/64
+			SUPPORTED_ARCH=x86_64
+			RUNTIME_TARGET_KEY=openwrt_25_12_4_x86_64
+			RUNTIME_ASSET_SUFFIX=x86_64
+			CORE_TARGET_KEY=linux_musl_x86_64
+			CORE_RUST_TARGET=x86_64-unknown-linux-musl
+			CORE_ARCH=x86_64
+			;;
+		ipq40xx/generic:armv7l|ipq40xx/generic:armv7|ipq40xx/generic:arm)
+			SUPPORTED_TARGET=ipq40xx/generic
+			SUPPORTED_ARCH=arm_cortex-a7_neon-vfpv4
+			RUNTIME_TARGET_KEY=openwrt_25_12_4_arm_cortex_a7_neon_vfpv4
+			RUNTIME_ASSET_SUFFIX=ipq40xx-generic-arm_cortex-a7_neon-vfpv4
+			CORE_TARGET_KEY=linux_musl_armv7
+			CORE_RUST_TARGET=armv7-unknown-linux-musleabihf
+			CORE_ARCH=arm
+			;;
+		*) return 1 ;;
+	esac
 }
 
 fetch_https() {
@@ -231,8 +253,14 @@ validate_runtime_entry() {
 	luci_sha=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.luci_app_candy.sha256")
 	luci_size=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.luci_app_candy.size")
 	expected_tag="https://github.com/reTsubasa/candy-release/releases/download/runtime-v$version-r$revision"
-	[ "$client_url" = "$expected_tag/candy-client-$display.apk" ] || return 1
-	[ "$luci_url" = "$expected_tag/luci-app-candy-$display.apk" ] || return 1
+	case "$client_url" in
+		"$expected_tag/candy-client-$display.apk"|"$expected_tag/candy-client-$display-$RUNTIME_ASSET_SUFFIX.apk") ;;
+		*) return 1 ;;
+	esac
+	case "$luci_url" in
+		"$expected_tag/luci-app-candy-$display.apk"|"$expected_tag/luci-app-candy-$display-$RUNTIME_ASSET_SUFFIX.apk") ;;
+		*) return 1 ;;
+	esac
 	valid_sha256 "$client_sha" && valid_sha256 "$luci_sha" || return 1
 	valid_unsigned_integer "$client_size" && [ "$client_size" -gt 0 ] && [ "$client_size" -le "$MAX_RUNTIME_PACKAGE_BYTES" ] || return 1
 	valid_unsigned_integer "$luci_size" && [ "$luci_size" -gt 0 ] && [ "$luci_size" -le "$MAX_RUNTIME_PACKAGE_BYTES" ] || return 1
@@ -250,11 +278,11 @@ validate_core_entry() {
 	os=$(core_entry_field "$catalog" "$key" "targets.$CORE_TARGET_KEY.os")
 	libc=$(core_entry_field "$catalog" "$key" "targets.$CORE_TARGET_KEY.libc")
 	arch=$(core_entry_field "$catalog" "$key" "targets.$CORE_TARGET_KEY.arch")
-	[ "$target" = x86_64-unknown-linux-musl ] && [ "$os" = linux ] && [ "$libc" = musl ] && [ "$arch" = x86_64 ] || return 1
+	[ "$target" = "$CORE_RUST_TARGET" ] && [ "$os" = linux ] && [ "$libc" = musl ] && [ "$arch" = "$CORE_ARCH" ] || return 1
 	url=$(core_entry_field "$catalog" "$key" "targets.$CORE_TARGET_KEY.url")
 	sha=$(core_entry_field "$catalog" "$key" "targets.$CORE_TARGET_KEY.sha256")
 	size=$(core_entry_field "$catalog" "$key" "targets.$CORE_TARGET_KEY.size")
-	expected_url="https://github.com/reTsubasa/candy-release/releases/download/core-v$version/candy-core-$version-x86_64-unknown-linux-musl.tar.gz"
+	expected_url="https://github.com/reTsubasa/candy-release/releases/download/core-v$version/candy-core-$version-$CORE_RUST_TARGET.tar.gz"
 	[ "$url" = "$expected_url" ] || return 1
 	valid_sha256 "$sha" || return 1
 	valid_unsigned_integer "$size" && [ "$size" -gt 0 ] && [ "$size" -le "$MAX_CORE_BYTES" ] || return 1
@@ -387,7 +415,7 @@ download_runtime_pair() {
 	fetch_https "$luci_url" "$luci_package" || return 1
 	verify_download "$client_package" "$client_size" "$client_sha" "$MAX_RUNTIME_PACKAGE_BYTES" || return 1
 	verify_download "$luci_package" "$luci_size" "$luci_sha" "$MAX_RUNTIME_PACKAGE_BYTES" || return 1
-	apk_metadata_matches "$client_package" candy-client "$display" x86_64 "$directory/client.metadata" || return 1
+	apk_metadata_matches "$client_package" candy-client "$display" "$SUPPORTED_ARCH" "$directory/client.metadata" || return 1
 	apk_metadata_matches "$luci_package" luci-app-candy "$display" noarch "$directory/luci.metadata" || return 1
 }
 
@@ -498,6 +526,7 @@ status_json() {
 	release=$(platform_release)
 	target=$(platform_target)
 	arch=$(platform_arch)
+	require_supported_platform >/dev/null 2>&1 || true
 	checked_at=$(cat "$CHECKED_AT_FILE" 2>/dev/null || printf 0)
 	case "$checked_at" in ''|*[!0-9]*) checked_at=0 ;; esac
 	if cached_catalog_valid; then catalog_valid=1; fi

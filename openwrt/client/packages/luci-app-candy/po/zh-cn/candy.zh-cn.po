@@ -1281,6 +1281,9 @@ msgstr "开始对比"
 msgid "No enabled nodes"
 msgstr "没有已启用的节点"
 
+msgid "No compatible nodes"
+msgstr "没有可用于测试的节点"
+
 msgid "Candy BBR"
 msgstr "Candy BBR"
 
@@ -1290,8 +1293,11 @@ msgstr "CUBIC"
 msgid "Select the congestion controller explicitly. Changing the controller or BBR preset restarts Candy so new QUIC connections use the selected parameters."
 msgstr "显式选择拥塞控制器。更改控制器或 BBR 预设后 Candy 将重启，使新的 QUIC 连接使用所选参数。"
 
-msgid "Runs one 50 MiB node-local download through CUBIC and each Candy BBR preset. It does not change the running configuration."
-msgstr "通过所选 Candy 节点，分别以 CUBIC 和每个 Candy BBR 预设下载一次节点本地 50 MiB 测试文件，不会更改当前运行配置。"
+msgid "Downloads the node's 50 MiB test object four times through the selected Candy QUIC line, once with CUBIC and once with each Candy BBR preset (up to about 200 MiB total). It does not change the running configuration."
+msgstr "通过所选 Candy QUIC 线路下载节点的 50 MiB 测试文件四次，分别使用一次 CUBIC 和三个 Candy BBR 预设（总量最多约 200 MiB），不会更改当前运行配置。"
+
+msgid "Server test object is unavailable"
+msgstr "服务器测试文件不可用"
 
 msgid "Controller / preset"
 msgstr "控制器 / 预设"
@@ -1539,8 +1545,8 @@ msgstr "可用"
 msgid "Node is not ready"
 msgstr "节点尚未就绪"
 
-msgid "Server Core 0.3.6 or newer is required"
-msgstr "需要服务器 Core 0.3.6 或更新版本"
+msgid "Server Core 0.3.9 or newer is required"
+msgstr "需要服务器 Core 0.3.9 或更新版本"
 
 msgid "Built-in"
 msgstr "内置数据"
@@ -1627,3 +1633,32 @@ msgstr "证据"
 
 msgid "Runtime evidence"
 msgstr "运行证据"
+msgid "Sends controlled redundant UDP copies on lossy links to reduce real-time packet loss."
+msgstr "在丢包链路上发送受控 UDP 冗余副本，降低实时流量的有效丢包率。"
+
+msgid "Reconstructs a lost fragment from an XOR repair shard without waiting for retransmission."
+msgstr "利用 XOR 修复分片重建丢失数据，无需等待重传。"
+
+msgid "Splits oversized UDP payloads into QUIC datagrams and reassembles them at the peer."
+msgstr "将超出路径承载能力的 UDP 数据拆分为 QUIC 数据报，并在对端重组。"
+
+msgid "Exchanges trusted link measurements to support transport decisions and diagnostics."
+msgstr "交换可信线路测量数据，为传输决策和诊断提供依据。"
+
+msgid "Starts eligible data streams while session authorization is in flight to reduce setup delay."
+msgstr "在会话授权进行期间提前启动符合条件的数据流，缩短建连等待。"
+
+msgid "Adjusts authorized transport policy from current loss, latency, and queue observations."
+msgstr "依据当前丢包、时延和排队状态调整已授权的传输策略。"
+
+msgid "Publishes the authenticated server build and negotiated capability information."
+msgstr "发布经过认证的服务端版本与协商能力信息。"
+
+msgid "Carries UDP payloads on a reliable QUIC stream when native datagrams are unavailable."
+msgstr "原生数据报不可用时，通过可靠 QUIC 流承载 UDP 数据。"
+
+msgid "Runs a bounded congestion comparison through the authenticated Candy QUIC data plane."
+msgstr "通过经过认证的 Candy QUIC 数据面运行有上限的拥塞对比测试。"
+
+msgid "Encrypts the TLS ClientHello server name when ECH is configured."
+msgstr "配置 ECH 后加密 TLS ClientHello 中的服务器名称。"

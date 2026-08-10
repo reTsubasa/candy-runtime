@@ -35,7 +35,7 @@ CANDY_RELEASE_VERSION="$version" \
 jq -e \
   --arg version "$version" \
   --argjson revision "$revision" \
-  '.runtime.version == $version and .runtime.revision == $revision and
+  '.schema_version == 2 and .runtime.version == $version and .runtime.revision == $revision and
    .target.openwrt_release == "25.12.4" and .target.architecture == "x86_64" and
    (.artifacts | length) == 2' \
   "$dist/runtime-release-metadata.json" >/dev/null || fail "release metadata is incomplete"
@@ -69,6 +69,9 @@ grep -Fq 'OPENWRT_RELEASE: "25.12.4"' "$workflow" || fail "release workflow does
 grep -Fq 'secrets.CANDY_RELEASE_TOKEN' "$workflow" || fail "release workflow does not use CANDY_RELEASE_TOKEN"
 grep -Fq 'reTsubasa/candy-release' "$workflow" || fail "release workflow targets the wrong repository"
 grep -Fq 'gh release upload' "$workflow" || fail "release workflow does not upload release assets"
+grep -Fq 'armv7-unknown-linux-musleabihf' "$workflow" || fail "release workflow does not build ARMv7 Runtime"
+grep -Fq 'ipq40xx-generic' "$workflow" || fail "release workflow does not package IPQ40xx Runtime"
+grep -Fq 'merge_runtime_release.sh' "$workflow" || fail "release workflow does not aggregate target assets"
 grep -Fq -- '--draft' "$workflow" || fail "release workflow does not stage assets in a draft release"
 grep -Fq 'incoming-$tag' "$workflow" || fail "release workflow does not isolate incoming assets"
 grep -Fq 'candy-artifact-ready' "$workflow" || fail "release workflow does not request central finalization"

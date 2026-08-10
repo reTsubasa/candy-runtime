@@ -10,7 +10,7 @@ local xml = require "luci.xml"
 local status = jsonc.parse(fs.readfile("/tmp/candy.nodes") or "") or {}
 local uci = require "luci.model.uci".cursor()
 local congestion_test_nodes = {}
-local congestion_test_min_server = { major = 0, minor = 3, patch = 6 }
+local congestion_test_min_server = { major = 0, minor = 3, patch = 9 }
 local congestion_test_node_labels = {}
 local congestion_test_node_sections = {}
 local function parse_version(value)
@@ -36,13 +36,14 @@ uci:foreach("candy", "node", function(section)
 	if section.enabled ~= "0" then
 		local name = section.name or section[".name"]
 		local live = passive_by_name[name] or {}
-		local supported = live.state == "ready" and version_at_least(live.server_version, congestion_test_min_server)
+		local probe = type(live.passive) == "table" and type(live.passive.features) == "table" and live.passive.features.congestion_probe or {}
+		local supported = live.state == "ready" and version_at_least(live.server_version, congestion_test_min_server) and probe.supported == true and probe.authorized == true
 		local node = {
 			id = section[".name"],
 			name = name,
 			supported = supported,
 			reason = live.state ~= "ready" and i18n.translate("Node is not ready") or
-				(not supported and i18n.translate("Server Core 0.3.6 or newer is required") or "")
+				(not supported and (version_at_least(live.server_version, congestion_test_min_server) and i18n.translate("Server test object is unavailable") or i18n.translate("Server Core 0.3.9 or newer is required")) or "")
 		}
 		if supported then congestion_test_nodes[#congestion_test_nodes + 1] = node end
 		congestion_test_node_labels[node.id] = node.name
@@ -174,6 +175,8 @@ end
 .candy-test-actions { display:flex; align-items:center; flex-wrap:wrap; gap:.75em 1em; margin:.75em 0; }
 .candy-test-actions label { margin: 0; font-weight: 700; }
 .candy-test-actions select { min-width: 14em; max-width: 100%; }
+.candy-table-scroll { overflow-x: auto; max-width: 100%; }
+.candy-table-scroll .table { min-width: 58em; }
 .candy-diagnostics-alert { border-left: 4px solid #c62828; background: #fff4f4; padding: .8em 1em; }
 .candy-diagnostics-alert strong { display: block; margin-bottom: .35em; }
 .candy-feature-matrix { overflow-x: auto; }
@@ -185,7 +188,7 @@ end
 <div class="cbi-map">
 	<h3><%:Congestion controller comparison%></h3>
 	<div class="cbi-section">
-		<p><%:Runs one 50 MiB node-local download through CUBIC and each Candy BBR preset. It does not change the running configuration.%></p>
+		<p><%:Downloads the node's 50 MiB test object four times through the selected Candy QUIC line, once with CUBIC and once with each Candy BBR preset (up to about 200 MiB total). It does not change the running configuration.%></p>
 		<div class="candy-test-actions">
 			<label for="candy-congestion-test-node"><%:Node%></label>
 			<select id="candy-congestion-test-node" class="cbi-input-select"<%=#congestion_test_nodes == 0 and ' disabled="disabled"' or ''%>>
@@ -194,9 +197,9 @@ end
 			<% end %>
 			</select>
 			<button id="candy-congestion-test-start" class="cbi-button cbi-button-action"<%=#congestion_test_nodes == 0 and ' disabled="disabled"' or ''%>><%:Start comparison%></button>
-			<span id="candy-congestion-test-state"><%=#congestion_test_nodes == 0 and i18n.translate("No enabled nodes") or i18n.translate("Not run")%></span>
+			<span id="candy-congestion-test-state"><%=#congestion_test_nodes == 0 and i18n.translate("No compatible nodes") or i18n.translate("Not run")%></span>
 		</div>
-		<table class="table"><thead><tr class="tr table-titles"><th class="th"><%:Node / controller / preset%></th><th class="th"><%:Goodput%></th><th class="th">TTFB</th><th class="th"><%:Total time%></th><th class="th"><%:Data%></th><th class="th"><%:Result%></th></tr></thead><tbody id="candy-congestion-test-results"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table>
+		<div class="candy-table-scroll"><table class="table"><thead><tr class="tr table-titles"><th class="th"><%:Node / controller / preset%></th><th class="th"><%:Goodput%></th><th class="th">TTFB</th><th class="th"><%:Total time%></th><th class="th"><%:Data%></th><th class="th"><%:Result%></th></tr></thead><tbody id="candy-congestion-test-results"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table></div>
 	</div>
 </div>
 

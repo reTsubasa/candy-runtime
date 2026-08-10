@@ -15,6 +15,12 @@ fail() {
   exit 1
 }
 
+case "$expected_profile" in
+  x86_64) target_id=x86_64; openwrt_target=x86/64; architecture=x86_64; package_arch=x86_64 ;;
+  ipq40xx-generic) target_id=ipq40xx-generic-arm_cortex-a7_neon-vfpv4; openwrt_target=ipq40xx/generic; architecture=armv7; package_arch=arm_cortex-a7_neon-vfpv4 ;;
+  *) fail "unsupported Runtime release profile: $expected_profile" ;;
+esac
+
 manifest_value() {
   sed -n "s/^$2:=//p" "$1"
 }
@@ -97,10 +103,14 @@ sdk_url=$(build_value sdk_url)
 [ "$package_format" = apk ] || fail "BUILD-INFO package format must be apk"
 [ -n "$gcc_version" ] && [ -n "$sdk_url" ] || fail "BUILD-INFO is incomplete"
 
-client_apk=candy-client-$expected_version-r$expected_revision.apk
-luci_apk=luci-app-candy-$expected_version-r$expected_revision.apk
-[ -s "$dist_dir/$client_apk" ] || fail "missing release artifact: $client_apk"
-[ -s "$dist_dir/$luci_apk" ] || fail "missing release artifact: $luci_apk"
+client_source=candy-client-$expected_version-r$expected_revision.apk
+luci_source=luci-app-candy-$expected_version-r$expected_revision.apk
+client_apk=candy-client-$expected_version-r$expected_revision-$target_id.apk
+luci_apk=luci-app-candy-$expected_version-r$expected_revision-$target_id.apk
+[ -s "$dist_dir/$client_source" ] || fail "missing release artifact: $client_source"
+[ -s "$dist_dir/$luci_source" ] || fail "missing release artifact: $luci_source"
+mv "$dist_dir/$client_source" "$dist_dir/$client_apk"
+mv "$dist_dir/$luci_source" "$dist_dir/$luci_apk"
 apk_count=$(find "$dist_dir" -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')
 [ "$apk_count" = 2 ] || fail "release directory must contain exactly two APK files"
 
@@ -132,6 +142,10 @@ jq -n \
   --arg commit "$(printf '%s' "$source_commit" | tr 'A-F' 'a-f')" \
   --arg openwrt "$openwrt_release" \
   --arg profile "$profile" \
+  --arg openwrt_target "$openwrt_target" \
+  --arg target_id "$target_id" \
+  --arg architecture "$architecture" \
+  --arg package_arch "$package_arch" \
   --arg client_name "$client_apk" \
   --arg client_sha "$client_sha" \
   --argjson client_size "$client_size" \
@@ -139,7 +153,7 @@ jq -n \
   --arg luci_sha "$luci_sha" \
   --argjson luci_size "$luci_size" \
   '{
-    schema_version: 1,
+    schema_version: 2,
     release_kind: "candy-runtime-openwrt-client",
     release_tag: $tag,
     runtime: {version: $version, revision: $revision},
@@ -149,7 +163,10 @@ jq -n \
       role: "client",
       openwrt_release: $openwrt,
       profile: $profile,
-      architecture: "x86_64",
+      openwrt_target: $openwrt_target,
+      target_id: $target_id,
+      architecture: $architecture,
+      package_architecture: $package_arch,
       package_format: "apk"
     },
     artifacts: [
@@ -168,6 +185,6 @@ jq -n \
 
 jq -e \
   --arg tag "$release_tag" \
-  '.schema_version == 1 and .release_tag == $tag and (.artifacts | length) == 2' \
+  '.schema_version == 2 and .release_tag == $tag and (.artifacts | length) == 2 and (.target.target_id | type == "string")' \
   "$dist_dir/runtime-release-metadata.json" >/dev/null
 printf '%s\n' "Prepared $release_tag in $dist_dir"

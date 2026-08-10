@@ -154,6 +154,7 @@ class Element {
 		this.className = "";
 		this.style = {};
 		this.attributes = {};
+		this.listeners = {};
 	}
 	set textContent(value) {
 		this._textContent = value;
@@ -169,6 +170,7 @@ class Element {
 	get firstChild() { return this.children[0] || null; }
 	removeChild(child) { this.children.splice(this.children.indexOf(child), 1); }
 	setAttribute(name, value) { this.attributes[name] = String(value); }
+	addEventListener(name, callback) { this.listeners[name] = callback; }
 }
 
 const elements = new Map();
@@ -294,6 +296,10 @@ context.candyOverviewRenderNodes([{ state: "ready", name: "node-b", server_versi
 assert.equal(elements.get("candy-status-nodes").children[0].children.length, 9);
 assert.equal(elements.get("candy-status-nodes").children[0].children[5].children[0].textContent, "FUTURE");
 assert.equal(elements.get("candy-status-nodes").children[0].children[5].children[0].className, "candy-capability-tag active");
+assert.ok(elements.get("candy-status-nodes").children[0].children[5].children[0].attributes["data-tooltip"],
+	"capability tag must expose hover explanation text");
+assert.ok(elements.get("candy-status-nodes").children[0].children[5].children[0].listeners.mouseenter,
+	"capability tag must register a visible hover tooltip");
 
 context.refreshCandyOverviewStatus();
 requests[3].respond(200, response("restarted", "running", 5));
@@ -335,7 +341,7 @@ assert.ok(source.includes("candy-diagnostics-nodes"), "diagnostics must expose t
 assert.ok(source.includes("candyDiagnosticsRender"), "diagnostics must own passive refresh rendering");
 assert.ok(source.includes('uci:foreach("candy", "node"'), "congestion comparison must use configured Candy nodes");
 assert.ok(source.includes("testNodes"), "congestion comparison must label configured nodes");
-assert.ok(source.includes("50 MiB"), "congestion comparison must use the node-local 50 MiB object");
+assert.ok(source.includes("50 MiB"), "congestion comparison must use the node 50 MiB object over Candy QUIC");
 assert.ok(source.includes("&node="), "congestion comparison must submit the selected node");
 for (const externalPoint of ["vultr-tokyo", "linode-singapore", "hetzner-ashburn", "ovh-france", "serverius-netherlands"]) {
 	assert.ok(!source.includes(externalPoint), "external test point remains: " + externalPoint);
@@ -364,6 +370,7 @@ class Element {
 		this.className = "";
 		this.style = {};
 		this.attributes = {};
+		this.listeners = {};
 	}
 	set textContent(value) {
 		this._textContent = value;
@@ -379,6 +386,7 @@ class Element {
 	get firstChild() { return this.children[0] || null; }
 	removeChild(child) { this.children.splice(this.children.indexOf(child), 1); }
 	setAttribute(name, value) { this.attributes[name] = String(value); }
+	addEventListener(name, callback) { this.listeners[name] = callback; }
 }
 
 const elements = new Map();
@@ -509,8 +517,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=17$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=17$'
+assert_contains "$makefile" '^PKG_RELEASE:=18$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=18$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'
@@ -933,7 +941,7 @@ assert_contains "$init" 'geo update cn-ip'
 assert_contains "$init" 'node_id=\$\{1:-\}'
 assert_contains "$init" 'congestion-test --node "\$node_id" --samples 1 --max-bytes 52428800 --timeout-ms 120000'
 assert_contains "$init" 'congestion-test --help'
-assert_contains "$init" 'update Core to 0\.3\.7 or newer'
+assert_contains "$init" 'update Core to 0\.3\.9 or newer'
 assert_not_contains "$init" 'congestion-test --samples 1 --max-bytes 2097152'
 if [ -e "$repo_root/luci-app-candy/root/usr/lib/lua/luci/model/cbi/candy/geo.lua" ]; then
 	fail "GEO model must be merged into DNS & GEO"
@@ -974,6 +982,8 @@ assert_not_contains "$status" 'Video/CDN diagnostics'
 assert_contains "$status" 'candy-overview-actions'
 assert_contains "$status" 'candy-capability-tags'
 assert_contains "$status" 'candy-capability-tag\.active'
+assert_contains "$status" 'candy-capability-tooltip'
+assert_contains "$status" 'data-tooltip'
 assert_contains "$status" 'definition\.protocol_bit'
 assert_contains "$status" 'value\.supported === true && value\.authorized === true'
 assert_contains "$status" 'short_name'

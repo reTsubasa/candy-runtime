@@ -611,12 +611,16 @@ function action_congestion_test()
 	local live = jsonc.parse(fs.readfile("/var/run/candy/passive-status.json") or "") or {}
 	local live_node = type(live.nodes) == "table" and live.nodes[node] or nil
 	local major, minor, patch = tostring(live_node and live_node.server_version or ""):match("^(%d+)%.(%d+)%.(%d+)")
+	major, minor, patch = tonumber(major), tonumber(minor), tonumber(patch)
+	local features = live_node and type(live_node.passive) == "table" and live_node.passive.features or {}
+	local probe = type(features) == "table" and features.congestion_probe or {}
 	local supported = live_node and live_node.state == "ready" and major and
-		(tonumber(major) > 0 or tonumber(minor) > 3 or tonumber(patch) >= 6)
+		(major > 0 or (major == 0 and (minor > 3 or (minor == 3 and patch >= 9)))) and
+		probe.supported == true and probe.authorized == true
 	if not supported then
 		luci.http.status(409, "Conflict")
 		luci.http.prepare_content("application/json")
-		luci.http.write(jsonc.stringify({ accepted = false, message = "selected node is not ready for congestion comparison (server Core 0.3.6 or newer required)" }))
+		luci.http.write(jsonc.stringify({ accepted = false, message = "selected node is not ready for congestion comparison or its server test object is unavailable" }))
 		return
 	end
 	remove_stale_congestion_test_lock()

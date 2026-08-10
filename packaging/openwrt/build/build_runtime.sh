@@ -20,8 +20,13 @@ case "$target" in
 			export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER
 		fi
 		;;
+	armv7-unknown-linux-musleabihf)
+		artifact_arch=arm_cortex-a7_neon-vfpv4
+		: "${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER:=armv7l-linux-musleabihf-gcc}"
+		export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER
+		;;
 	*)
-		printf '%s\n' "unsupported initial OpenWrt Runtime target: $target" >&2
+		printf '%s\n' "unsupported OpenWrt Runtime target: $target" >&2
 		exit 2
 		;;
 esac
@@ -50,10 +55,11 @@ mkdir -p "$stage"
 install -m 0755 "$binary" "$stage/candy-netd"
 
 if command -v file >/dev/null 2>&1; then
-	file "$stage/candy-netd" | grep -Eq 'ELF.*x86-64' || {
-		printf '%s\n' "candy-netd is not an x86_64 Linux ELF" >&2
-		exit 1
-	}
+	case "$target" in
+		x86_64-unknown-linux-musl) file "$stage/candy-netd" | grep -Eq 'ELF.*x86-64' ;;
+		armv7-unknown-linux-musleabihf) file "$stage/candy-netd" | grep -Eq 'ELF.*ARM' ;;
+	*) false ;;
+	esac || { printf '%s\n' "candy-netd has the wrong ELF architecture for $target" >&2; exit 1; }
 fi
 
 printf '%s\n' "$stage"

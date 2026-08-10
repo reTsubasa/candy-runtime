@@ -298,7 +298,7 @@ grep -F 'logread 2>/dev/null | grep -i candy' "$repo_root/candy-client/candy.ini
 grep -F -- '--check-config' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F "option enabled '0'" "$repo_root/candy-client/candy.config" >/dev/null || fail "bootstrap node must default disabled"
 grep -F 'validate_node_profile_placeholders' "$repo_root/candy-client/candy.init" >/dev/null || fail "placeholder node validation is missing"
-grep -F 'update Core to 0.3.7 or newer' "$repo_root/candy-client/candy.init" >/dev/null || fail "congestion test compatibility message is stale"
+grep -F 'update Core to 0.3.9 or newer' "$repo_root/candy-client/candy.init" >/dev/null || fail "congestion test compatibility message is stale"
 . "$repo_root/candy-client/candy.init"
 TEST_CANDY_PROC_ROOT=$runtime_dir/proc
 CANDY_PROC_ROOT=$TEST_CANDY_PROC_ROOT

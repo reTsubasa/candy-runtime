@@ -217,6 +217,8 @@ end
 .candy-capability-tags { display: flex; flex-wrap: wrap; gap: .3em; min-width: 14em; }
 .candy-capability-tag { display: inline-block; border: 1px solid #8fb2df; border-radius: 4px; padding: .12em .38em; color: #1559a6; background: #f5f9ff; font-size: .86em; line-height: 1.25; white-space: nowrap; }
 .candy-capability-tag.active { border-color: #77b984; color: #1a7f37; background: #f0fff4; }
+.candy-capability-tag:focus { outline: 2px solid #4c8fd8; outline-offset: 2px; }
+.candy-capability-tooltip { position: fixed; z-index: 10000; display: none; box-sizing: border-box; width: max-content; max-width: calc(100vw - 16px); padding: .55em .7em; border: 1px solid #4a5568; border-radius: 4px; background: #20252b; color: #fff; box-shadow: 0 4px 14px rgba(0, 0, 0, .24); font-size: .82rem; line-height: 1.45; white-space: pre-line; pointer-events: none; }
 .candy-capability-empty { color: #777; }
 .candy-capability-legend { display: block; margin-top: .2em; color: #666; font-size: .78em; font-weight: 400; }
 @media (max-width: 720px) {
@@ -498,15 +500,53 @@ function candyOverviewRenderSdwan(sdwan) {
 	candyOverviewSetText("candy-sdwan-failover", candyOverviewText(failover.reason) + " / " + candyOverviewText(failover.at));
 }
 
+var candyOverviewFeatureEffects = {
+	udp_multiplier: <%=js_string(i18n.translate("Sends controlled redundant UDP copies on lossy links to reduce real-time packet loss."))%>,
+	udp_fec: <%=js_string(i18n.translate("Reconstructs a lost fragment from an XOR repair shard without waiting for retransmission."))%>,
+	fragmented_datagram: <%=js_string(i18n.translate("Splits oversized UDP payloads into QUIC datagrams and reassembles them at the peer."))%>,
+	metrics: <%=js_string(i18n.translate("Exchanges trusted link measurements to support transport decisions and diagnostics."))%>,
+	early_data: <%=js_string(i18n.translate("Starts eligible data streams while session authorization is in flight to reduce setup delay."))%>,
+	adaptive_policy: <%=js_string(i18n.translate("Adjusts authorized transport policy from current loss, latency, and queue observations."))%>,
+	server_info: <%=js_string(i18n.translate("Publishes the authenticated server build and negotiated capability information."))%>,
+	stream_udp_fallback: <%=js_string(i18n.translate("Carries UDP payloads on a reliable QUIC stream when native datagrams are unavailable."))%>,
+	congestion_probe: <%=js_string(i18n.translate("Runs a bounded congestion comparison through the authenticated Candy QUIC data plane."))%>,
+	tls_ech: <%=js_string(i18n.translate("Encrypts the TLS ClientHello server name when ECH is configured."))%>
+};
+
+var candyOverviewCapabilityTooltip = null;
+var candyOverviewFocusedCapabilityId = null;
+
+function candyOverviewHideCapabilityTooltip() {
+	if (candyOverviewCapabilityTooltip) candyOverviewCapabilityTooltip.style.display = "none";
+}
+
+function candyOverviewShowCapabilityTooltip(badge) {
+	if (!candyOverviewCapabilityTooltip) {
+		candyOverviewCapabilityTooltip = document.createElement("div");
+		candyOverviewCapabilityTooltip.className = "candy-capability-tooltip";
+		candyOverviewCapabilityTooltip.setAttribute("role", "tooltip");
+		document.body.appendChild(candyOverviewCapabilityTooltip);
+	}
+	candyOverviewCapabilityTooltip.textContent = badge.getAttribute("data-tooltip") || "";
+	candyOverviewCapabilityTooltip.style.display = "block";
+	var badgeRect = badge.getBoundingClientRect(), tooltipRect = candyOverviewCapabilityTooltip.getBoundingClientRect();
+	var left = Math.max(8, Math.min(window.innerWidth - tooltipRect.width - 8, badgeRect.left));
+	var top = badgeRect.bottom + 7;
+	if (top + tooltipRect.height > window.innerHeight - 8) top = badgeRect.top - tooltipRect.height - 7;
+	candyOverviewCapabilityTooltip.style.left = left + "px";
+	candyOverviewCapabilityTooltip.style.top = Math.max(8, top) + "px";
+}
+
 function candyOverviewCapabilityTags(node, manifest) {
 	var definitions = (manifest && manifest.core && manifest.core.features) || [], features = ((node || {}).passive || {}).features || {}, tags = [];
 	definitions.forEach(function(definition) {
 		var value = features[definition.status_key || definition.id] || {};
 		if (definition.protocol_bit !== null && definition.protocol_bit !== undefined && value.supported === true && value.authorized === true) {
 			tags.push({
+				id: definition.id,
 				label: definition.short_name || definition.id,
 				name: definition.name || definition.short_name || definition.id,
-				description: definition["description"] || "",
+				description: candyOverviewFeatureEffects[definition.id] || definition["description"] || "",
 				active: value.active === true
 			});
 		}
@@ -530,6 +570,7 @@ function candyOverviewRenderNodes(nodes) {
 	if (!body) {
 		return;
 	}
+	candyOverviewHideCapabilityTooltip();
 	body.textContent = "";
 	if (!nodes || !nodes.length) {
 		row = document.createElement("tr");
@@ -566,8 +607,16 @@ function candyOverviewRenderNodes(nodes) {
 			badge.className = "candy-capability-tag" + (tag.active ? " active" : "");
 			badge.textContent = tag.label;
 			badge.title = tag.name + " · " + state + (tag.description ? "\n" + tag.description : "");
+			badge.setAttribute("data-tooltip", badge.title);
+			badge.setAttribute("data-capability-id", tag.id);
 			badge.setAttribute("aria-label", badge.title);
+			badge.tabIndex = 0;
+			badge.addEventListener("mouseenter", function() { candyOverviewShowCapabilityTooltip(badge); });
+			badge.addEventListener("mouseleave", candyOverviewHideCapabilityTooltip);
+			badge.addEventListener("focus", function() { candyOverviewFocusedCapabilityId = tag.id; candyOverviewShowCapabilityTooltip(badge); });
+			badge.addEventListener("blur", function() { if (candyOverviewFocusedCapabilityId === tag.id) candyOverviewFocusedCapabilityId = null; candyOverviewHideCapabilityTooltip(); });
 			cell.appendChild(badge);
+			if (candyOverviewFocusedCapabilityId === tag.id && typeof badge.focus === "function") badge.focus();
 		});
 		candyOverviewAppendCell(row, candyOverviewList(node.groups));
 		candyOverviewAppendCell(row, candyOverviewLocalRtt(node));

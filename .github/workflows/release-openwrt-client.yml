@@ -12,12 +12,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-openwrt-client-0.4.0-r17
+  group: release-openwrt-client-0.4.0-r18
   cancel-in-progress: false
 
 env:
   CANDY_RELEASE_VERSION: "0.4.0"
-  CANDY_RELEASE_REVISION: "17"
+  CANDY_RELEASE_REVISION: "18"
   OPENWRT_RELEASE: "25.12.4"
   OPENWRT_GCC_VERSION: "14.3.0"
   RELEASE_REPOSITORY: reTsubasa/candy-release
@@ -47,39 +47,62 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: x86_64-unknown-linux-musl,armv7-unknown-linux-musleabihf
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y musl-tools jq ripgrep lua5.4
+        run: sudo apt-get update && sudo apt-get install -y musl-tools jq ripgrep lua5.4 curl zstd docker.io
+
+      - name: Install pinned ARMv7 musl toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          arm_bin=$(scripts/install_pinned_arm_musl_toolchain.sh)
+          echo "$arm_bin" >> "$GITHUB_PATH"
+          echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=$arm_bin/armv7l-linux-musleabihf-gcc" >> "$GITHUB_ENV"
+          echo "CC_armv7_unknown_linux_musleabihf=$arm_bin/armv7l-linux-musleabihf-gcc" >> "$GITHUB_ENV"
+          echo "CXX_armv7_unknown_linux_musleabihf=$arm_bin/armv7l-linux-musleabihf-g++" >> "$GITHUB_ENV"
+          echo "AR_armv7_unknown_linux_musleabihf=$arm_bin/armv7l-linux-musleabihf-ar" >> "$GITHUB_ENV"
 
       - name: Run full Runtime verification
         run: scripts/verify.sh
 
-      - name: Build Runtime executable
-        id: runtime
+      - name: Build Runtime executables
         shell: bash
         run: |
           set -euo pipefail
-          stage=$(packaging/openwrt/build/build_runtime.sh x86_64-unknown-linux-musl)
-          echo "stage=$stage" >> "$GITHUB_OUTPUT"
+          packaging/openwrt/build/build_runtime.sh x86_64-unknown-linux-musl
+          packaging/openwrt/build/build_runtime.sh armv7-unknown-linux-musleabihf
 
-      - name: Build OpenWrt client APKs
+      - name: Build x86_64 OpenWrt client APKs
         env:
-          CANDY_RUNTIME_BIN_DIR: ${{ steps.runtime.outputs.stage }}
+          CANDY_RUNTIME_BIN_DIR: ${{ github.workspace }}/dist/runtime/openwrt-client/x86_64
+          OPENWRT_DIST_DIR: ${{ github.workspace }}/dist/openwrt/x86_64/apk
         run: packaging/openwrt/build/sdk_container_gate.sh apk x86_64
+
+      - name: Build IPQ40xx OpenWrt client APKs
+        env:
+          CANDY_RUNTIME_BIN_DIR: ${{ github.workspace }}/dist/runtime/openwrt-client/arm_cortex-a7_neon-vfpv4
+          OPENWRT_DIST_DIR: ${{ github.workspace }}/dist/openwrt/ipq40xx-generic/apk
+        run: packaging/openwrt/build/sdk_container_gate.sh apk ipq40xx-generic
 
       - name: Validate and describe release artifacts
         shell: bash
         run: |
           set -euo pipefail
-          sudo chown -R "$(id -u):$(id -g)" dist/openwrt/x86_64/apk
+          sudo chown -R "$(id -u):$(id -g)" dist/openwrt
           source_commit=$(git rev-parse HEAD)
           CANDY_RELEASE_SOURCE_REPOSITORY="$GITHUB_REPOSITORY" \
             CANDY_RELEASE_SOURCE_COMMIT="$source_commit" \
+            OPENWRT_PROFILE=x86_64 OPENWRT_RELEASE="$OPENWRT_RELEASE" \
             packaging/openwrt/build/prepare_runtime_release.sh dist/openwrt/x86_64/apk
-          test -s "dist/openwrt/x86_64/apk/candy-client-$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION.apk"
-          test -s "dist/openwrt/x86_64/apk/luci-app-candy-$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION.apk"
-          (cd dist/openwrt/x86_64/apk && sha256sum -c SHA256SUMS)
+          CANDY_RELEASE_SOURCE_REPOSITORY="$GITHUB_REPOSITORY" \
+            CANDY_RELEASE_SOURCE_COMMIT="$source_commit" \
+            OPENWRT_PROFILE=ipq40xx-generic OPENWRT_RELEASE="$OPENWRT_RELEASE" \
+            packaging/openwrt/build/prepare_runtime_release.sh dist/openwrt/ipq40xx-generic/apk
+          rm -rf dist/openwrt/merged
+          packaging/openwrt/build/merge_runtime_release.sh \
+            dist/openwrt/x86_64/apk dist/openwrt/ipq40xx-generic/apk dist/openwrt/merged
+          (cd dist/openwrt/merged && sha256sum -c SHA256SUMS)
 
       - name: Stage Runtime release and request central finalization
         shell: bash
@@ -90,14 +113,14 @@ jobs:
           test -n "$GH_TOKEN"
           tag="runtime-v$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION"
           staging_tag="incoming-$tag"
-          dist=dist/openwrt/x86_64/apk
+          dist=dist/openwrt/merged
           notes=$(mktemp)
           cat > "$notes" <<EOF
           Candy Runtime $CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION
 
           - Source: $GITHUB_REPOSITORY@$(git rev-parse HEAD)
-          - Target: OpenWrt $OPENWRT_RELEASE x86_64
-          - Package format: APK
+          - Targets: OpenWrt $OPENWRT_RELEASE x86_64 and ipq40xx/generic
+          - Package format: APK (target-qualified assets)
           EOF
           if gh release view "$staging_tag" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
             gh release delete "$staging_tag" --repo "$RELEASE_REPOSITORY" --yes
@@ -105,11 +128,6 @@ jobs:
           gh release create "$staging_tag" --repo "$RELEASE_REPOSITORY" --draft \
             --title "Incoming Candy Runtime $CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION" \
             --notes-file "$notes"
-          gh release upload "$staging_tag" --repo "$RELEASE_REPOSITORY" \
-            "$dist/candy-client-$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION.apk" \
-            "$dist/luci-app-candy-$CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION.apk" \
-            "$dist/BUILD-INFO" \
-            "$dist/SHA256SUMS" \
-            "$dist/runtime-release-metadata.json"
+          gh release upload "$staging_tag" --repo "$RELEASE_REPOSITORY" "$dist"/*
           jq -n --arg tag "$staging_tag" '{event_type:"candy-artifact-ready",client_payload:{release_kind:"runtime",staging_tag:$tag}}' | \
             gh api --method POST "repos/$RELEASE_REPOSITORY/dispatches" --input -
