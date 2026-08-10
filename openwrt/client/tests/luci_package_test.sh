@@ -142,7 +142,7 @@ assert.ok(source.includes("Server version"), "overview must show the negotiated 
 assert.ok(!source.includes("Runtime mode"), "overview must hide internal runtime modes");
 assert.ok(!source.includes("UDP packet multiplier"), "overview must hide negotiated packet multipliers");
 assert.ok(!source.includes("Candy 0.3.4 records BBR fallback evidence"), "overview must omit the BBR promotional description");
-assert.ok(source.includes('id="candy-sdwan-status"'), "overview must expose the conditional SD-WAN section");
+assert.ok(!source.includes('id="candy-sdwan-status"'), "overview must leave SD-WAN product state to the dedicated page");
 const match = source.match(/<script type="text\/javascript">([\s\S]*?)<\/script>/);
 assert.ok(match, "status page JavaScript was not found");
 const script = match[1].replace(/<%=([\s\S]*?)%>/g, (_, expression) => {
@@ -272,25 +272,9 @@ context.refreshCandyOverviewStatus();
 requests[2].respond(200, response("stopped", "stopped"));
 assert.equal(elements.get("candy-status-client-version").textContent, "stopped",
 	"a current response without passive status must still update ordinary fields");
-assert.equal(elements.get("candy-sdwan-status").style.display, "none",
-	"SD-WAN status must stay hidden without a valid running status");
 assert.equal(elements.get("candy-status-service").className, "label");
 assert.equal(elements.get("candy-status-nodes").children[0].children.length, 1,
 	"a current response without passive status must still replace nodes");
-
-context.candyOverviewRenderSdwan({
-	enabled: true,
-	phase: "ready",
-	site: "edge-1",
-	active_hub: "hub-1",
-	counters: {},
-	last_failover: {}
-});
-assert.equal(elements.get("candy-sdwan-status").style.display, "",
-	"SD-WAN status must appear for a valid running status");
-context.candyOverviewRenderSdwan({ enabled: true, phase: "unavailable" });
-assert.equal(elements.get("candy-sdwan-status").style.display, "none",
-	"SD-WAN status must hide when runtime status becomes unavailable");
 
 context.candyOverviewCurrentManifest = { core: { features: [{
 	id: "future_feature", status_key: "future_status", short_name: "FUTURE", protocol_bit: 1
@@ -977,8 +961,8 @@ assert_contains "$status" 'candy-logo-mark'
 assert_contains "$status" 'flex-direction: column'
 assert_contains "$status" 'text-align: center'
 assert_not_contains "$status" 'Candy 0\.3\.4 records BBR fallback evidence and automatically retries Candy BBR after a bounded CUBIC cooldown\.'
-assert_contains "$status" 'id="candy-sdwan-status"'
-assert_contains "$status" 'sdwan\.enabled === true'
+assert_not_contains "$status" 'id="candy-sdwan-status"'
+assert_not_contains "$status" 'candyOverviewRenderSdwan'
 assert_not_contains "$status" 'Smart DNS/GEO'
 assert_not_contains "$status" 'Weak-link QoS'
 assert_not_contains "$status" 'Video/CDN diagnostics'

@@ -8,6 +8,8 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 mkdir -p "$tmp/bin" "$tmp/runtime-bin"
 printf '#!/bin/sh\nexit 0\n' > "$tmp/runtime-bin/candy-netd"
 chmod 0755 "$tmp/runtime-bin/candy-netd"
+printf '#!/bin/sh\nexit 0\n' > "$tmp/runtime-bin/candy-sdwan-agent"
+chmod 0755 "$tmp/runtime-bin/candy-sdwan-agent"
 cat > "$tmp/bin/docker" <<'EOF'
 #!/bin/sh
 exit 1

@@ -69,7 +69,7 @@ config_get() {
     client:transparent_tcp_port) value='12345' ;;
     client:transparent_udp_port) value='12346' ;;
     client:tproxy_mark) value='100' ;;
-		sdwan:enabled) value='0' ;;
+		sdwan:enabled) value="${TEST_SDWAN_ENABLED:-0}" ;;
     hk-1:enabled) value='1' ;;
     hk-1:name) value='Hong Kong 1' ;;
     hk-1:server) value='104.243.28.153:18443' ;;
@@ -146,7 +146,7 @@ config_load() {
   test "$1" = candy
 }
 
-procd_open_instance() { printf '%s\n' "procd_open_instance" >> "$runtime_dir/procd.log"; }
+procd_open_instance() { printf '%s\n' "procd_open_instance $*" >> "$runtime_dir/procd.log"; }
 procd_set_param() { printf '%s\n' "procd_set_param $*" >> "$runtime_dir/procd.log"; }
 procd_close_instance() { printf '%s\n' "procd_close_instance" >> "$runtime_dir/procd.log"; }
 iptables() { printf '%s\n' "iptables $*" >> "$runtime_dir/fw.log"; }
@@ -253,7 +253,7 @@ grep -F 'migrate_reserved_dns_forward' "$repo_root/candy-client/candy.init" >/de
 grep -F 'forward local listen conflicts with reserved Candy DNS listener' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'CANDY_FAST_STATUS_ACTION' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'case "${action:-${1:-}}" in' "$repo_root/candy-client/candy.init" >/dev/null
-grep -F 'status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|fail_open|health_watchdog|congestion_test|run_client|run_sdwan|run_netd)' "$repo_root/candy-client/candy.init" >/dev/null
+grep -F 'status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|fail_open|sdwan_fail_open|sdwan_reconnect|sdwan_stop|health_watchdog|congestion_test|run_client|run_sdwan|run_netd)' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F -- '--control-socket-path "$CANDY_CONTROL_SOCKET"' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F -- '--active "$RUNTIME_CONFIG"' "$repo_root/candy-client/candy.init" >/dev/null || fail "runtime reload does not request atomic active-config promotion"
 grep -F 'reload_service()' "$repo_root/candy-client/candy.init" >/dev/null
@@ -289,7 +289,7 @@ grep -F 'procd_set_param env CANDY_TRAFFIC_LOG="$TRAFFIC_LOG_FILE" CANDY_READY_F
   fail "service state still pollutes the user traffic log"
 ! grep -F 'procd_set_param env CANDY_TRAFFIC_LOG="$TRAFFIC_LOG_FILE" CANDY_TRAFFIC_LOG_CONTROL=' "$repo_root/candy-client/candy.init" >/dev/null ||
   fail "traffic decision logging is still tied to the LuCI page lifetime"
-test "$(grep -Fc 'procd_set_param respawn 3600 10 5' "$repo_root/candy-client/candy.init")" -eq 3 ||
+test "$(grep -Fc 'procd_set_param respawn 3600 10 5' "$repo_root/candy-client/candy.init")" -eq 4 ||
   fail "long-running Candy procd instances must stop after a bounded crash loop"
 ! grep -F 'procd_set_param respawn 3600 10 0' "$repo_root/candy-client/candy.init" >/dev/null ||
   fail "Candy procd instances still retry forever"
@@ -1125,6 +1125,10 @@ kill "$provider_client_pid" 2>/dev/null || true
 wait "$provider_client_pid" 2>/dev/null || true
 CANDY_STALE_CLIENT=1 "$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format candy-json &
 stale_client_pid=$!
+TEST_SDWAN_ENABLED=1
+sdwan_enabled() { [ "${TEST_SDWAN_ENABLED:-0}" = 1 ]; }
+start_sdwan_netd() { printf '%s\n' sdwan-netd >> "$runtime_dir/procd.log"; }
+wait_for_sdwan_netd() { return 0; }
 start_service
 test ! -e "$runtime_dir/lifecycle.events" || fail "network policy applied before procd submission"
 printf '{"pid":%s,"listeners":["127.0.0.1:12345"]}\n' "$$" > "$CANDY_READY_FILE"
@@ -1138,6 +1142,29 @@ grep -q 'existing candy-client process still running before start:' "$LOG_FILE"
 grep -q 'terminated stale candy-client process before start:' "$LOG_FILE"
 wait "$stale_client_pid" 2>/dev/null || true
 grep -Fq 'procd_set_param command '"$CANDY_INIT_SELF"' run_client' "$runtime_dir/procd.log"
+grep -Fq 'procd_open_instance ordinary' "$runtime_dir/procd.log" || fail "ordinary Candy instance was not submitted"
+grep -Fq 'procd_open_instance sdwan' "$runtime_dir/procd.log" || fail "additive SD-WAN instance was not submitted"
+grep -Fq 'procd_set_param command '"$CANDY_INIT_SELF"' run_sdwan' "$runtime_dir/procd.log" || fail "SD-WAN child was not submitted"
+grep -Fq 'procd_open_instance watchdog' "$runtime_dir/procd.log" || fail "ordinary health watchdog disappeared when SD-WAN was enabled"
+TEST_SDWAN_ENABLED=0
+
+isolated_failure_log=$runtime_dir/isolated-failure.log
+run_detached_direct_command() { printf '%s\n' "$*" >> "$isolated_failure_log"; }
+service_failed sdwan
+grep -Fq 'sdwan_fail_open procd:sdwan' "$isolated_failure_log" || fail "SD-WAN failure did not use isolated fail-open"
+if grep -Fq 'fail_open' "$isolated_failure_log" && ! grep -Fq 'sdwan_fail_open' "$isolated_failure_log"; then
+  fail "SD-WAN failure triggered global fail-open"
+fi
+
+: >"$runtime_dir/procd.log"
+TEST_SDWAN_ENABLED=1
+start_sdwan_netd() { return 1; }
+start_service
+grep -Fq 'procd_open_instance ordinary' "$runtime_dir/procd.log" || fail "SD-WAN helper failure prevented ordinary Candy startup"
+if grep -Fq 'procd_set_param command '"$CANDY_INIT_SELF"' run_sdwan' "$runtime_dir/procd.log"; then
+  fail "SD-WAN child was submitted without its privileged helper"
+fi
+TEST_SDWAN_ENABLED=0
 
 reserved_forward_dir=$(mktemp -d)
 runtime_dir=$reserved_forward_dir

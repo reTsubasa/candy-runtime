@@ -3,7 +3,7 @@
 START=95
 STOP=10
 USE_PROCD=1
-EXTRA_COMMANDS="provider_update_once provider_update_loop network_apply network_cleanup reload_runtime restart_queued fail_open health_watchdog congestion_test run_client run_sdwan run_netd"
+EXTRA_COMMANDS="provider_update_once provider_update_loop network_apply network_cleanup reload_runtime restart_queued fail_open sdwan_fail_open sdwan_reconnect sdwan_stop health_watchdog congestion_test run_client run_sdwan run_netd"
 EXTRA_HELP="	provider_update_once	Run due provider auto updates once
 	provider_update_loop	Run provider auto update scheduler loop
 	network_apply	Apply firewall and DNS policy in background
@@ -11,13 +11,16 @@ EXTRA_HELP="	provider_update_once	Run due provider auto updates once
 	reload_runtime	Validate and apply the current Candy configuration
 	restart_queued	Restart Candy with lifecycle serialization
 	fail_open	Stop Candy and remove owned network steering after a fatal failure
+	sdwan_fail_open	Remove only SD-WAN-owned state after an SD-WAN failure
+	sdwan_reconnect	Restart only the SD-WAN child and preserve ordinary Candy
+	sdwan_stop	Stop only SD-WAN child processes and owned network state
 	health_watchdog	Monitor local Core liveness and fail open after repeated faults
 	congestion_test	Run a bounded CUBIC/BBR comparison without changing configuration
 	run_client	Run candy-client after listener preflight
 	run_netd	Run the privileged SD-WAN network helper"
 
 case "${action:-${1:-}}" in
-status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|fail_open|health_watchdog|congestion_test|run_client|run_sdwan|run_netd)
+status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|fail_open|sdwan_fail_open|sdwan_reconnect|sdwan_stop|health_watchdog|congestion_test|run_client|run_sdwan|run_netd)
 		CANDY_FAST_STATUS_ACTION="${action:-$1}"
 		EXTRA_COMMANDS="$EXTRA_COMMANDS status running"
 		USE_PROCD=
@@ -56,8 +59,13 @@ CANDY_HEALTH_CHECK_INTERVAL_SECONDS=${CANDY_HEALTH_CHECK_INTERVAL_SECONDS:-5}
 CANDY_HEALTH_CHECK_FAILURE_THRESHOLD=${CANDY_HEALTH_CHECK_FAILURE_THRESHOLD:-3}
 CANDY_HEALTH_CHECK_START_GRACE_SECONDS=${CANDY_HEALTH_CHECK_START_GRACE_SECONDS:-15}
 CANDY_SDWAN_BIN=${CANDY_SDWAN_BIN:-/usr/bin/candy-sdwan}
+CANDY_SDWAN_AGENT=${CANDY_SDWAN_AGENT:-/usr/bin/candy-sdwan-agent}
+CANDY_SDWAN_RUNTIME=${CANDY_SDWAN_RUNTIME:-/usr/libexec/candy-sdwan-runtime}
 CANDY_CORE_BIN=${CANDY_CORE_BIN:-/usr/lib/candy/cores/current/candy-core}
 CANDY_SDWAN_CONFIG=${CANDY_SDWAN_CONFIG:-/etc/candy/sdwan.toml}
+CANDY_SDWAN_DECLARATION=${CANDY_SDWAN_DECLARATION:-/var/lib/candy/sdwan/declaration-v1.json}
+CANDY_SDWAN_INSTANCE_ID_FILE=${CANDY_SDWAN_INSTANCE_ID_FILE:-/var/lib/candy/instance-id}
+CANDY_SDWAN_GENERATION_FILE=${CANDY_SDWAN_GENERATION_FILE:-/var/lib/candy/sdwan/generation}
 CANDY_NETD_BIN=${CANDY_NETD_BIN:-/usr/bin/candy-netd}
 CANDY_NETD_RUNTIME_DIR=${CANDY_NETD_RUNTIME_DIR:-/var/run/candy-netd}
 CANDY_NETD_SOCKET=${CANDY_NETD_SOCKET:-$CANDY_NETD_RUNTIME_DIR/netd.sock}
@@ -125,6 +133,19 @@ log_error() {
 
 log_debug() {
 	log_event debug general "$*"
+}
+
+sdwan_runtime_state() {
+	local action="$1"
+	shift
+	[ -x "$CANDY_SDWAN_RUNTIME" ] || return 0
+	CANDY_SDWAN_STATE_DIR=/var/lib/candy/sdwan \
+	CANDY_SDWAN_RUN_DIR="$RUNTIME_DIR" \
+	CANDY_SDWAN_STATUS_FILE="$CANDY_SDWAN_STATUS_FILE" \
+		"$CANDY_SDWAN_RUNTIME" "$action" "$@" >/dev/null 2>&1 || {
+			log_warn "SD-WAN Runtime state action failed: $action"
+			return 1
+		}
 }
 
 rotate_log_file() {
@@ -310,6 +331,11 @@ candy_client_pids() {
 	return 0
 }
 
+sdwan_process_pids() {
+	candy_ps | grep -E "($CANDY_INIT_SELF run_sdwan|$CANDY_SDWAN_BIN --config $CANDY_SDWAN_CONFIG|$CANDY_CORE_BIN client sdwan --config $CANDY_SDWAN_CONFIG)" |
+		grep -v grep | awk '{print $1}' 2>/dev/null || true
+}
+
 wait_for_candy_client_exit() {
 	local wait_seconds="${1:-$CANDY_SERVICE_WAIT_SECONDS}" waited=0
 	while [ -n "$(candy_client_pids)" ]; do
@@ -478,16 +504,27 @@ run_client() {
 }
 
 run_sdwan() {
-	local child rc stopping=0
+	local child rc stopping=0 instance_id generation
+	instance_id=$(cat "$CANDY_SDWAN_INSTANCE_ID_FILE" 2>/dev/null || true)
+	generation=$(cat "$CANDY_SDWAN_GENERATION_FILE" 2>/dev/null || true)
+	case "$instance_id" in
+		*[!0-9A-Fa-f]*|'') log_event error sdwan_agent_unavailable "reason=invalid_instance_id"; return 1 ;;
+	esac
+	case "$generation" in
+		''|*[!0-9]*|0) log_event error sdwan_agent_unavailable "reason=invalid_generation"; return 1 ;;
+	esac
+	[ -x "$CANDY_SDWAN_AGENT" ] || { log_event error sdwan_agent_unavailable "reason=agent_missing"; return 1; }
 	trap 'stopping=1; [ -z "${child:-}" ] || kill -TERM "$child" 2>/dev/null || true' TERM INT
-	"$CANDY_SDWAN_BIN" --config "$CANDY_SDWAN_CONFIG" &
+	"$CANDY_SDWAN_AGENT" --socket "$CANDY_NETD_SOCKET" --core "$CANDY_CORE_BIN" \
+		--config "$CANDY_SDWAN_CONFIG" --declaration "$CANDY_SDWAN_DECLARATION" \
+		--status "$CANDY_SDWAN_STATUS_FILE" --instance-id "$instance_id" --generation "$generation" run &
 	child=$!
 	wait "$child"
 	rc=$?
 	trap - TERM INT
 	if [ "$stopping" -eq 0 ]; then
-		log_event error sdwan_exit "exit=$rc; scheduling immediate fail-open"
-		run_detached_direct_command fail_open "sdwan_exit:$rc"
+		log_event error sdwan_exit "exit=$rc; scheduling isolated SD-WAN fail-open"
+		run_detached_direct_command sdwan_fail_open "sdwan_exit:$rc"
 	fi
 	return "$rc"
 }
@@ -527,6 +564,60 @@ sdwan_enabled() {
 	[ "$enabled" = 1 ] && [ "$mode" = sdwan_tun ]
 }
 
+ensure_sdwan_instance_id() {
+	local value temporary
+	if [ -e "$CANDY_SDWAN_INSTANCE_ID_FILE" ] || [ -L "$CANDY_SDWAN_INSTANCE_ID_FILE" ]; then
+		[ ! -L "$CANDY_SDWAN_INSTANCE_ID_FILE" ] || return 1
+		[ -f "$CANDY_SDWAN_INSTANCE_ID_FILE" ] || return 1
+		value=$(tr -d '\r\n' <"$CANDY_SDWAN_INSTANCE_ID_FILE" 2>/dev/null || true)
+		case "$value" in
+			????????????????????????????????)
+				case "$value" in *[!0-9A-Fa-f]*) return 1 ;; esac
+				case "$value" in 00000000000000000000000000000000) return 1 ;; esac
+				chown root:candy-sdwan "$CANDY_SDWAN_INSTANCE_ID_FILE" 2>/dev/null || return 1
+				chmod 0640 "$CANDY_SDWAN_INSTANCE_ID_FILE" || return 1
+				return 0
+				;;
+			*) return 1 ;;
+		esac
+	fi
+	value=$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+	case "$value" in
+		????????????????????????????????)
+			case "$value" in *[!0-9A-Fa-f]*) return 1 ;; esac
+			case "$value" in 00000000000000000000000000000000) return 1 ;; esac
+			;;
+		*) return 1 ;;
+	esac
+	temporary=$(mktemp "${CANDY_SDWAN_INSTANCE_ID_FILE}.XXXXXX") || return 1
+	if ! { umask 077; printf '%s\n' "$value" >"$temporary"; chmod 0640 "$temporary"; chown root:candy-sdwan "$temporary" 2>/dev/null; mv -f "$temporary" "$CANDY_SDWAN_INSTANCE_ID_FILE"; }; then
+		rm -f "$temporary"
+		return 1
+	fi
+	return 0
+}
+
+ensure_sdwan_generation() {
+	local current next temporary
+	if [ -e "$CANDY_SDWAN_GENERATION_FILE" ] || [ -L "$CANDY_SDWAN_GENERATION_FILE" ]; then
+		[ ! -L "$CANDY_SDWAN_GENERATION_FILE" ] || return 1
+		[ -f "$CANDY_SDWAN_GENERATION_FILE" ] || return 1
+		current=$(tr -d '\r\n' <"$CANDY_SDWAN_GENERATION_FILE" 2>/dev/null || true)
+		case "$current" in ''|*[!0-9]*|0) return 1 ;; esac
+		chown root:candy-sdwan "$CANDY_SDWAN_GENERATION_FILE" 2>/dev/null || return 1
+		chmod 0640 "$CANDY_SDWAN_GENERATION_FILE" || return 1
+		next=$((current + 1))
+	else
+		next=$(date +%s 2>/dev/null || true)
+		case "$next" in ''|*[!0-9]*|0) return 1 ;; esac
+	fi
+	temporary=$(atomic_temp_path "$CANDY_SDWAN_GENERATION_FILE") || return 1
+	if ! printf '%s\n' "$next" >"$temporary" || ! chmod 0640 "$temporary" || ! chown root:candy-sdwan "$temporary" 2>/dev/null || ! atomic_commit_file "$temporary" "$CANDY_SDWAN_GENERATION_FILE"; then
+		rm -f "$temporary"
+		return 1
+	fi
+}
+
 prepare_sdwan_state() {
 	config_get CANDY_NETD_SOCKET sdwan netd_socket "$CANDY_NETD_SOCKET"
 	config_get CANDY_NETD_JOURNAL sdwan netd_journal "$CANDY_NETD_JOURNAL"
@@ -536,7 +627,9 @@ prepare_sdwan_state() {
 	case "$CANDY_NETD_SOCKET" in "$CANDY_NETD_RUNTIME_DIR"/*) ;; *) return 1 ;; esac
 	case "$CANDY_NETD_JOURNAL" in /var/lib/candy/*) ;; *) return 1 ;; esac
 	case "$CANDY_EPOCH_DIRECTORY" in /var/lib/candy/*) ;; *) return 1 ;; esac
-	mkdir -p "$RUNTIME_DIR" "$CANDY_NETD_RUNTIME_DIR" /var/lib/candy "$CANDY_EPOCH_DIRECTORY" || return 1
+	mkdir -p "$RUNTIME_DIR" "$CANDY_NETD_RUNTIME_DIR" /var/lib/candy "$(dirname "$CANDY_SDWAN_GENERATION_FILE")" "$CANDY_EPOCH_DIRECTORY" || return 1
+	ensure_sdwan_instance_id || return 1
+	ensure_sdwan_generation || return 1
 	chown root:candy-sdwan "$RUNTIME_DIR" 2>/dev/null || return 1
 	chmod 0770 "$RUNTIME_DIR" || return 1
 	chown root:candy-sdwan "$CANDY_NETD_RUNTIME_DIR" 2>/dev/null || return 1
@@ -568,8 +661,8 @@ start_sdwan_netd() {
 		log_msg "candy-netd is missing"
 		return 1
 	}
-	[ -x "$CANDY_SDWAN_BIN" ] || {
-		log_msg "candy-sdwan is missing"
+	[ -x "$CANDY_SDWAN_AGENT" ] || {
+		log_msg "candy-sdwan-agent is missing"
 		return 1
 	}
 	procd_open_instance sdwan-netd
@@ -3055,11 +3148,13 @@ cleanup_failed_start() {
 
 start_service() {
 	CANDY_START_PHASE=failed
+	CANDY_SDWAN_START_READY=0
 	clear_passive_status
 	write_lifecycle_state start starting
 	rotate_log_file "$LOG_FILE"
 	rotate_log_file "$TRAFFIC_LOG_FILE" 2097152 5
 	log_msg "start requested"
+	sdwan_runtime_state publish || true
 	migrate_legacy_config
 	migrate_candy_node_rule_targets
 	migrate_reserved_dns_forward
@@ -3101,34 +3196,39 @@ start_service() {
 		cleanup_failed_start down || true
 		return 1
 	fi
-	if ! start_sdwan_netd; then
-		log_error "SD-WAN helper could not be started"
-		cleanup_failed_start down || true
-		return 1
-	fi
-	procd_open_instance
-	rm -f "$CANDY_READY_FILE"
 	if sdwan_enabled; then
-		procd_set_param command "$CANDY_INIT_SELF" run_sdwan
-		procd_set_param user candy-sdwan
-	else
-		procd_set_param command "$CANDY_INIT_SELF" run_client
-		# Root remains required for ordinary transparent proxy routing.
-		procd_set_param user root
+		if start_sdwan_netd; then
+			CANDY_SDWAN_START_READY=1
+		else
+			log_error "SD-WAN helper could not be started; ordinary Candy will continue"
+			sdwan_runtime_state fail-open "sdwan helper start failed" || true
+		fi
 	fi
+	procd_open_instance ordinary
+	rm -f "$CANDY_READY_FILE"
+	procd_set_param command "$CANDY_INIT_SELF" run_client
+	# Root remains required for ordinary transparent proxy routing.
+	procd_set_param user root
 	procd_set_param env CANDY_TRAFFIC_LOG="$TRAFFIC_LOG_FILE" CANDY_READY_FILE="$CANDY_READY_FILE" CANDY_PASSIVE_STATUS_FILE="$CANDY_PASSIVE_STATUS_FILE"
 	procd_set_param respawn 3600 10 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
-	if ! sdwan_enabled; then
-		procd_open_instance watchdog
-		procd_set_param command "$CANDY_INIT_SELF" health_watchdog
-		procd_set_param user root
+	if [ "$CANDY_SDWAN_START_READY" -eq 1 ]; then
+		procd_open_instance sdwan
+		procd_set_param command "$CANDY_INIT_SELF" run_sdwan
+		procd_set_param user candy-sdwan
+		procd_set_param respawn 3600 10 5
 		procd_set_param stdout 1
 		procd_set_param stderr 1
 		procd_close_instance
 	fi
+	procd_open_instance watchdog
+	procd_set_param command "$CANDY_INIT_SELF" health_watchdog
+	procd_set_param user root
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
 	CANDY_START_PHASE=submitted
 	start_provider_updater
 }
@@ -3146,10 +3246,10 @@ service_started() {
 			return 1
 			;;
 	esac
-	if ! wait_for_sdwan_netd; then
-		log_error "candy-netd socket readiness timed out"
-		cleanup_failed_start down 1 || true
-		return 1
+	if [ "${CANDY_SDWAN_START_READY:-0}" -eq 1 ] && ! wait_for_sdwan_netd; then
+		log_error "candy-netd socket readiness timed out; ordinary Candy will continue"
+		CANDY_SDWAN_START_READY=0
+		sdwan_stop "netd readiness timeout" || true
 	fi
 	if ! wait_for_current_readiness "$CANDY_LISTENER_WAIT_SECONDS"; then
 		log_error "candy listener readiness timed out"
@@ -3164,6 +3264,7 @@ service_started() {
 	refresh_node_status_fast "running"
 	log_msg "candy service submitted to procd"
 	write_lifecycle_state start running
+	[ "${CANDY_SDWAN_START_READY:-0}" -ne 1 ] || sdwan_runtime_state running || true
 	clear_fault_state || log_warn "started successfully but failed to clear persistent fault state"
 	CANDY_START_PHASE=running
 }
@@ -3196,6 +3297,7 @@ stop_service() {
 		write_lifecycle_state stop stopped
 	fi
 	log_msg "stop completed"
+	sdwan_runtime_state fail-open "service stopped" || true
 }
 
 stop() {
@@ -3235,6 +3337,7 @@ stop() {
 		write_lifecycle_state stop stopped
 	fi
 	log_msg "procd stop completed"
+	sdwan_runtime_state fail-open "service stopped" || true
 	return 0
 }
 
@@ -3243,6 +3346,11 @@ service_failed() {
 	case "$instance" in
 		provider-updater)
 			log_event error procd_failure "instance=$instance provider scheduler stopped after bounded retries; traffic runtime remains active"
+			return 0
+			;;
+		sdwan|sdwan-netd)
+			log_event error procd_failure "instance=$instance isolated SD-WAN service failed; ordinary Candy remains active"
+			run_detached_direct_command sdwan_fail_open "procd:$instance"
 			return 0
 			;;
 	esac
@@ -3319,6 +3427,7 @@ fail_open_locked() {
 		write_fault_state "$reason" "$cleanup" "instance=$instance; manual network cleanup required" || true
 		log_event error fail_open "reason=$reason instance=$instance cleanup=$cleanup service disabled; manual cleanup required"
 	fi
+	sdwan_runtime_state fail-open "$reason" || true
 	return "$rc"
 }
 
@@ -3337,6 +3446,38 @@ fail_open() {
 		esac
 	fi
 	with_service_lifecycle_lock fail_open_locked "$reason" "$instance"
+}
+
+sdwan_fail_open() {
+	local reason="${1:-sdwan_failure}" rc=0
+	log_event warn sdwan_fail_open "reason=$reason removing only SD-WAN-owned network state"
+	if [ -s "$CANDY_NETD_JOURNAL" ]; then
+		run_with_timeout 15 "$CANDY_NETD_BIN" --recover --journal "$CANDY_NETD_JOURNAL" >/dev/null 2>&1 || rc=1
+	fi
+	sdwan_runtime_state fail-open "$reason" || rc=1
+	if [ "$rc" -eq 0 ]; then
+		log_event info sdwan_fail_open "reason=$reason cleanup=completed ordinary_client=preserved"
+	else
+		log_event error sdwan_fail_open "reason=$reason cleanup=failed ordinary_client=preserved"
+	fi
+	return "$rc"
+}
+
+sdwan_reconnect() {
+	local pids
+	sdwan_runtime_state reconnect || return 1
+	pids=$(sdwan_process_pids)
+	[ -z "$pids" ] || kill -TERM $pids 2>/dev/null || true
+	log_event info sdwan_reconnect "SD-WAN child restart requested; ordinary_client=preserved"
+}
+
+sdwan_stop() {
+	if [ -f /lib/functions/procd.sh ]; then
+		. /lib/functions/procd.sh
+		procd_kill candy sdwan >/dev/null 2>&1 || true
+		procd_kill candy sdwan-netd >/dev/null 2>&1 || true
+	fi
+	sdwan_fail_open "${1:-user_stop}"
 }
 
 restart_queued_locked() {

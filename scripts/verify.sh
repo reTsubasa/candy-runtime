@@ -11,7 +11,9 @@ unset CANDY_CORE_BINARY
 
 scripts/runtime_version_test.sh
 scripts/runtime_layout_test.sh
+linux/client/tests/candy_sdwan_runtime_test.sh
 linux/server/tests/candy_server_launcher_test.sh
+linux/server/tests/candy_server_product_command_test.sh
 linux/server/tests/candy_core_manager_test.sh
 linux/server/tests/candy_server_health_check_test.sh
 CANDY_CORE_BINARY="$docker_e2e_core_binary" linux/server/tests/candy_core_docker_e2e.sh

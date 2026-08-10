@@ -121,6 +121,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "candy-sdwan-agent"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "candy-netd-client",
+ "candy-netd-proto",
+ "clap",
+ "nix 0.29.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

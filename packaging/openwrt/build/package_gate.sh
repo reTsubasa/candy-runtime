@@ -19,8 +19,8 @@ if [ -z "$sdk" ] || [ ! -f "$sdk/rules.mk" ] || [ ! -d "$sdk/package" ]; then
   exit 2
 fi
 
-[ -n "$runtime_bin_dir" ] && [ -x "$runtime_bin_dir/candy-netd" ] || {
-  printf '%s\n' "CANDY_RUNTIME_BIN_DIR must contain runtime-owned executable candy-netd" >&2
+[ -n "$runtime_bin_dir" ] && [ -x "$runtime_bin_dir/candy-netd" ] && [ -x "$runtime_bin_dir/candy-sdwan-agent" ] || {
+  printf '%s\n' "CANDY_RUNTIME_BIN_DIR must contain runtime-owned candy-netd and candy-sdwan-agent" >&2
   exit 2
 }
 
@@ -51,6 +51,9 @@ cp "$client_package/candy.config" "$pkg_dir/candy.config"
 cp "$client_package/candy-core-manager" "$pkg_dir/candy-core-manager"
 cp "$client_package/candy-update-manager" "$pkg_dir/candy-update-manager"
 cp "$client_package/candy-runtime-health-check" "$pkg_dir/candy-runtime-health-check"
+cp "$repo_root/linux/common/apps/candy-sdwan-runtime/candy-sdwan-runtime" "$pkg_dir/candy-sdwan-runtime"
+cp "$runtime_bin_dir/candy-sdwan-agent" "$pkg_dir/candy-sdwan-agent"
+chmod 0755 "$pkg_dir/candy-sdwan-runtime"
 cp "$client_package/catalog-release.pub" "$pkg_dir/catalog-release.pub"
 cp "$client_package/core-release.pub" "$pkg_dir/core-release.pub"
 cp -R "$client_package/rulesets" "$pkg_dir/rulesets"

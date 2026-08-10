@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+
+readonly_runtime_api=1
+core_root=${CANDY_CORE_ROOT:-/opt/candy/cores}
+core_current=${CANDY_CORE_CURRENT_LINK:-$core_root/current}
+core_candidate=${CANDY_CORE_BINARY:-$core_current/candy-core}
+
+fail() {
+	status=$1
+	shift
+	printf '%s\n' "candy-server: $*" >&2
+	exit "$status"
+}
+
+command -v readlink >/dev/null 2>&1 ||
+	fail 69 "cannot resolve the managed data plane: required command 'readlink' is missing"
+
+[ -e "$core_candidate" ] ||
+	fail 69 "the managed data plane is not installed or active"
+[ -f "$core_candidate" ] && [ -x "$core_candidate" ] ||
+	fail 69 "the managed data plane is invalid"
+
+core_binary=$(readlink -f "$core_candidate" 2>/dev/null) ||
+	fail 69 "cannot resolve the managed data plane"
+[ -n "$core_binary" ] && [ -f "$core_binary" ] && [ -x "$core_binary" ] ||
+	fail 69 "the managed data plane is not executable"
+
+launcher_binary=$(readlink -f "$0" 2>/dev/null || true)
+[ -z "$launcher_binary" ] || [ "$core_binary" != "$launcher_binary" ] ||
+	fail 78 "the managed data-plane selection points back to candy-server"
+
+if core_api=$("$core_binary" runtime-api-version); then
+	:
+else
+	status=$?
+	fail 69 "managed data-plane inspection failed with exit code $status"
+fi
+[ "$core_api" = "$readonly_runtime_api" ] ||
+	fail 78 "incompatible managed data-plane process API '$core_api'; this Runtime requires process API $readonly_runtime_api"
+
+export CANDY_RUNTIME_PROCESS_API_VERSION=$readonly_runtime_api
+export CANDY_RUNTIME_ROLE=server
+
+# Ordinary Candy and the optional SD-WAN capability are owned by this one
+# Core server process and one validated server configuration. Runtime keeps
+# the process boundary single so listeners, grants, and failure cleanup cannot
+# diverge between two independent servers.
+exec "$core_binary" server "$@"

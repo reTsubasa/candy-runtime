@@ -1,0 +1,93 @@
+#!/bin/sh
+set -eu
+
+runtime=${CANDY_SDWAN_RUNTIME:-/usr/local/libexec/candy-sdwan-runtime}
+service=${CANDY_EDGE_SERVICE:-candy-client.service}
+
+fail() {
+	printf '%s\n' "candy: $*" >&2
+	exit 1
+}
+
+require_runtime() {
+	[ -x "$runtime" ] || fail "SD-WAN Runtime is not installed"
+}
+
+usage() {
+	cat <<'EOF'
+usage:
+  candy join --cloud URL [--activation-file FILE]
+  candy sdwan status
+  candy sdwan reconnect
+  candy leave [--yes]
+EOF
+}
+
+command_name=${1:-}
+[ "$#" -eq 0 ] || shift
+case "$command_name" in
+	join)
+		cloud=
+		activation_file=
+		while [ "$#" -gt 0 ]; do
+			case "$1" in
+				--cloud) shift; [ "$#" -gt 0 ] || fail "--cloud requires a URL"; cloud=$1 ;;
+				--activation-file) shift; [ "$#" -gt 0 ] || fail "--activation-file requires a path"; activation_file=$1 ;;
+				*) fail "unknown join option: $1" ;;
+			esac
+			shift
+		done
+		[ -n "$cloud" ] || fail "--cloud is required"
+		require_runtime
+		if [ -n "$activation_file" ]; then
+			"$runtime" join "$cloud" "$activation_file"
+		else
+			"$runtime" join "$cloud"
+		fi
+		printf '%s\n' "Join request saved. Candy will report registered only after Cloud validation succeeds."
+		;;
+	sdwan)
+		subcommand=${1:-}
+		[ "$#" -eq 0 ] || shift
+		[ "$#" -eq 0 ] || fail "unexpected SD-WAN argument: $1"
+		require_runtime
+		case "$subcommand" in
+			status) "$runtime" status ;;
+			reconnect)
+				"$runtime" reconnect
+				if command -v systemctl >/dev/null 2>&1 && systemctl restart "$service"; then
+					printf '%s\n' "SD-WAN reconnect requested."
+				else
+					"$runtime" fail-open "reconnect failed; Candy-owned network state removed" || true
+					fail "reconnect failed; the network was restored to the Candy-stopped state"
+				fi
+				;;
+			*) usage >&2; exit 64 ;;
+		esac
+		;;
+	leave)
+		confirmed=0
+		case "${1:-}" in --yes) confirmed=1; shift ;; '') ;; *) fail "unknown leave option: $1" ;; esac
+		[ "$#" -eq 0 ] || fail "unexpected leave argument: $1"
+		if [ "$confirmed" -ne 1 ]; then
+			[ -t 0 ] || fail "leave requires --yes when input is not interactive"
+			printf '%s' "Leave Candy Cloud and remove local enrollment intent? [y/N] " >&2
+			read -r answer
+			case "$answer" in y|Y|yes|YES) ;; *) exit 1 ;; esac
+		fi
+		require_runtime
+		if command -v systemctl >/dev/null 2>&1; then
+			systemctl stop "$service" || true
+		fi
+		"$runtime" fail-open "node left Candy Cloud"
+		"$runtime" leave
+		printf '%s\n' "This node has left Candy Cloud."
+		;;
+	-h|--help|help|'')
+		usage
+		;;
+	*)
+		usage >&2
+		exit 64
+		;;
+esac

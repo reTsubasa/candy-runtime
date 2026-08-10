@@ -1626,6 +1626,84 @@ msgstr "均衡可靠性"
 msgid "UDP throughput first"
 msgstr "优先 UDP 吞吐"
 
+msgid "SD-WAN"
+msgstr "SD-WAN"
+
+msgid "Cloud"
+msgstr "云端"
+
+msgid "Join state"
+msgstr "加入状态"
+
+msgid "Waiting for Cloud validation"
+msgstr "等待云端验证"
+
+msgid "Registered"
+msgstr "已注册"
+
+msgid "Not enrolled"
+msgstr "未加入"
+
+msgid "Network restored"
+msgstr "网络已恢复"
+
+msgid "Segment"
+msgstr "网段"
+
+msgid "TUN"
+msgstr "TUN"
+
+msgid "Full duplex"
+msgstr "全双工"
+
+msgid "Peer"
+msgstr "对端"
+
+msgid "Relay"
+msgstr "中继"
+
+msgid "Local egress"
+msgstr "本地出口"
+
+msgid "Remote egress"
+msgstr "远端出口"
+
+msgid "Internal DNS"
+msgstr "内部 DNS"
+
+msgid "Runtime"
+msgstr "运行时"
+
+msgid "Cloud address"
+msgstr "云端地址"
+
+msgid "Activation code"
+msgstr "激活码"
+
+msgid "Join"
+msgstr "加入"
+
+msgid "Reconnect"
+msgstr "重新连接"
+
+msgid "Leave"
+msgstr "离开"
+
+msgid "Join request submitted; waiting for Cloud validation."
+msgstr "加入请求已提交，正在等待云端验证。"
+
+msgid "Reconnect requested."
+msgstr "已请求重新连接。"
+
+msgid "This node has left Candy Cloud."
+msgstr "此节点已离开 Candy Cloud。"
+
+msgid "Operation failed. Check Logs for details."
+msgstr "操作失败，请查看日志。"
+
+msgid "Leave Candy Cloud and remove this node?"
+msgstr "确认离开 Candy Cloud 并移除此节点？"
+
 msgid "Choose the behavior that best matches your connection. Candy will not silently switch to a weaker mode."
 msgstr "请选择最适合当前网络的模式。Candy 不会静默切换到更弱的模式。"
 msgid "Wire protocol"

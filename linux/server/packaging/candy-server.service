@@ -9,7 +9,7 @@ User=candy
 Group=candy
 WorkingDirectory=/var/lib/candy
 Environment=CANDY_CORE_CURRENT_LINK=/opt/candy/cores/current
-ExecStart=/opt/candy/current/serverd-linux --config /etc/candy/server.toml
+ExecStart=/opt/candy/current/candy-server --config /etc/candy/server.toml
 Restart=on-failure
 RestartSec=2s
 LimitNOFILE=1048576

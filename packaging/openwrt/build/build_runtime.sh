@@ -32,7 +32,7 @@ case "$target" in
 esac
 
 cargo build --manifest-path "$repo_root/Cargo.toml" --release --locked \
-	--package candy-netd --target "$target"
+	--package candy-netd --package candy-sdwan-agent --target "$target"
 
 command -v jq >/dev/null 2>&1 || {
 	printf '%s\n' "jq is required to locate the Cargo target directory" >&2
@@ -53,6 +53,12 @@ binary="$target_root/$target/release/candy-netd"
 stage="$dist_root/$artifact_arch"
 mkdir -p "$stage"
 install -m 0755 "$binary" "$stage/candy-netd"
+agent_binary="$target_root/$target/release/candy-sdwan-agent"
+[ -x "$agent_binary" ] || {
+	printf '%s\n' "candy-sdwan-agent was not produced: $agent_binary" >&2
+	exit 1
+}
+install -m 0755 "$agent_binary" "$stage/candy-sdwan-agent"
 
 if command -v file >/dev/null 2>&1; then
 	case "$target" in
@@ -60,6 +66,10 @@ if command -v file >/dev/null 2>&1; then
 		armv7-unknown-linux-musleabihf) file "$stage/candy-netd" | grep -Eq 'ELF.*ARM' ;;
 	*) false ;;
 	esac || { printf '%s\n' "candy-netd has the wrong ELF architecture for $target" >&2; exit 1; }
+	case "$target" in
+		x86_64-unknown-linux-musl) file "$stage/candy-sdwan-agent" | grep -Eq 'ELF.*x86-64' ;;
+		armv7-unknown-linux-musleabihf) file "$stage/candy-sdwan-agent" | grep -Eq 'ELF.*ARM' ;;
+	esac || { printf '%s\n' "candy-sdwan-agent has the wrong ELF architecture for $target" >&2; exit 1; }
 fi
 
 printf '%s\n' "$stage"

@@ -1,0 +1,231 @@
+#!/bin/sh
+set -eu
+
+# Runtime owns this cache. Core and Cloud may supply real state later through a
+# versioned agent boundary; this skeleton never infers protocol state.
+state_dir=${CANDY_SDWAN_STATE_DIR:-/var/lib/candy/sdwan}
+run_dir=${CANDY_SDWAN_RUN_DIR:-/run/candy}
+config_file=${CANDY_SDWAN_CONFIG_CACHE:-$state_dir/config-v1.json}
+durable_status_file=${CANDY_SDWAN_STATUS_CACHE:-$state_dir/status-v1.json}
+published_status_file=${CANDY_SDWAN_STATUS_FILE:-$run_dir/sdwan-status.json}
+max_activation_bytes=${CANDY_SDWAN_MAX_ACTIVATION_BYTES:-4096}
+max_cloud_bytes=${CANDY_SDWAN_MAX_CLOUD_BYTES:-2048}
+
+fail() {
+	printf '%s\n' "candy: $*" >&2
+	exit 1
+}
+
+require_root() {
+	[ "${CANDY_SDWAN_TEST_MODE:-0}" != 1 ] || return 0
+	[ "$(id -u)" = 0 ] || fail "this operation requires root privileges"
+}
+
+json_string() {
+	LC_ALL=C awk 'BEGIN { ORS="" }
+	{
+		if (NR > 1) printf "\\n"
+		gsub(/\\/, "\\\\")
+		gsub(/\"/, "\\\"")
+		gsub(/\t/, "\\t")
+		gsub(/\r/, "\\r")
+		printf "%s", $0
+	}' <<EOF
+$1
+EOF
+}
+
+ensure_directories() {
+	umask 077
+	[ ! -L "$state_dir" ] || fail "SD-WAN state directory must not be a symbolic link"
+	mkdir -p "$state_dir" "$run_dir"
+	chmod 0700 "$state_dir"
+	chmod 0755 "$run_dir"
+}
+
+atomic_from_stdin() {
+	target=$1
+	mode=$2
+	directory=${target%/*}
+	temporary=$(mktemp "$directory/.candy-sdwan.XXXXXX") || return 1
+	trap 'rm -f "$temporary"' EXIT HUP INT TERM
+	if ! cat >"$temporary" || ! chmod "$mode" "$temporary" || ! mv -f "$temporary" "$target"; then
+		rm -f "$temporary"
+		trap - EXIT HUP INT TERM
+		return 1
+	fi
+	trap - EXIT HUP INT TERM
+}
+
+atomic_copy() {
+	source=$1
+	target=$2
+	mode=$3
+	atomic_from_stdin "$target" "$mode" <"$source"
+}
+
+validate_cloud_address() {
+	cloud=$1
+	length=$(printf '%s' "$cloud" | wc -c | tr -d ' ')
+	[ "$length" -gt 0 ] && [ "$length" -le "$max_cloud_bytes" ] ||
+		fail "Cloud address must be between 1 and $max_cloud_bytes bytes"
+	case "$cloud" in
+		https://*) ;;
+		*) fail "Cloud address must use https://" ;;
+	esac
+	case "$cloud" in
+		*' '*|*'\t'*|*'\r'*|*'\n'*|*'\\'*|*'"'*) fail "Cloud address contains an invalid character" ;;
+	esac
+	authority=${cloud#https://}
+	authority=${authority%%/*}
+	[ -n "$authority" ] || fail "Cloud address is missing a host"
+	case "$authority" in *@*) fail "Cloud address must not contain user information" ;; esac
+}
+
+validate_activation_file() {
+	activation_file=$1
+	[ -f "$activation_file" ] && [ ! -L "$activation_file" ] ||
+		fail "activation input must be a regular file"
+	bytes=$(wc -c <"$activation_file" | tr -d ' ')
+	[ "$bytes" -gt 0 ] && [ "$bytes" -le "$max_activation_bytes" ] ||
+		fail "activation input must be between 1 and $max_activation_bytes bytes"
+}
+
+write_config() {
+	cloud=$1
+	requested_at=$(date +%s)
+	cloud_json=$(json_string "$cloud")
+	atomic_from_stdin "$config_file" 0600 <<EOF
+{"schema_version":1,"cloud_address":"$cloud_json","join_state":"join-pending","requested_at":$requested_at}
+EOF
+}
+
+read_cloud() {
+	[ -f "$config_file" ] && [ ! -L "$config_file" ] || return 1
+	bytes=$(wc -c <"$config_file" | tr -d ' ')
+	[ "$bytes" -le 8192 ] || return 1
+	sed -n 's/^.*"cloud_address":"\([^"\\]*\)".*$/\1/p' "$config_file"
+}
+
+write_status() {
+	registration_state=$1
+	runtime_state=$2
+	reason=${3:-}
+	updated_at=$(date +%s)
+	cloud=
+	if [ "$registration_state" != unregistered ]; then
+		cloud=$(read_cloud 2>/dev/null || true)
+		[ -n "$cloud" ] || registration_state=unregistered
+	fi
+	cloud_json=$(json_string "$cloud")
+	reason_json=$(json_string "$reason")
+	status_tmp=$(mktemp "$state_dir/.candy-sdwan-status.XXXXXX") || return 1
+	trap 'rm -f "$status_tmp"' EXIT HUP INT TERM
+	cat >"$status_tmp" <<EOF
+{"schema_version":1,"registration":{"state":"$registration_state","cloud_address":"$cloud_json","last_error":""},"runtime":{"state":"$runtime_state","updated_at":$updated_at,"last_error":"$reason_json"},"site":null,"segment":null,"tun":{"state":"unavailable","full_duplex":null},"peers":[],"path":null,"egress":{"local":null,"remote":null},"dns":{"state":"unavailable"}}
+EOF
+	chmod 0600 "$status_tmp"
+	mv -f "$status_tmp" "$durable_status_file"
+	trap - EXIT HUP INT TERM
+	atomic_copy "$durable_status_file" "$published_status_file" 0644
+}
+
+current_registration_state() {
+	if cloud=$(read_cloud 2>/dev/null) && [ -n "$cloud" ]; then
+		printf '%s\n' join-pending
+	else
+		printf '%s\n' unregistered
+	fi
+}
+
+publish_status() {
+	ensure_directories
+	if [ -f "$durable_status_file" ] && [ ! -L "$durable_status_file" ]; then
+		bytes=$(wc -c <"$durable_status_file" | tr -d ' ')
+		if [ "$bytes" -gt 0 ] && [ "$bytes" -le 65536 ] &&
+			grep -q '^{"schema_version":1,' "$durable_status_file"; then
+			atomic_copy "$durable_status_file" "$published_status_file" 0644
+			return
+		fi
+	fi
+	write_status "$(current_registration_state)" stopped ""
+}
+
+show_status() {
+	for candidate in "$published_status_file" "$durable_status_file"; do
+		if [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ -r "$candidate" ]; then
+			bytes=$(wc -c <"$candidate" | tr -d ' ')
+			if [ "$bytes" -gt 0 ] && [ "$bytes" -le 65536 ] && grep -q '^{"schema_version":1,' "$candidate"; then
+				cat "$candidate"
+				return
+			fi
+		fi
+	done
+	printf '%s\n' '{"schema_version":1,"registration":{"state":"unregistered","cloud_address":"","last_error":""},"runtime":{"state":"unavailable","updated_at":null,"last_error":""},"site":null,"segment":null,"tun":{"state":"unavailable","full_duplex":null},"peers":[],"path":null,"egress":{"local":null,"remote":null},"dns":{"state":"unavailable"}}'
+}
+
+usage() {
+	cat <<'EOF'
+usage: candy-sdwan-runtime ACTION [arguments]
+
+Runtime internal actions:
+  join CLOUD [ACTIVATION_FILE]
+  reconnect
+  leave
+  fail-open [REASON]
+  running
+  publish
+  status
+EOF
+}
+
+action=${1:-}
+[ "$#" -eq 0 ] || shift
+case "$action" in
+	join)
+		require_root
+		[ "$#" -ge 1 ] && [ "$#" -le 2 ] || fail "join requires a Cloud address and optional activation file"
+		validate_cloud_address "$1"
+		[ "$#" -lt 2 ] || validate_activation_file "$2"
+		ensure_directories
+		write_config "$1"
+		write_status join-pending stopped ""
+		;;
+	reconnect)
+		require_root
+		ensure_directories
+		state=$(current_registration_state)
+		[ "$state" != unregistered ] || fail "this node has not joined a Cloud"
+		write_status "$state" reconnecting ""
+		;;
+	leave)
+		require_root
+		ensure_directories
+		rm -f "$config_file"
+		write_status unregistered stopped ""
+		;;
+	fail-open)
+		require_root
+		ensure_directories
+		write_status "$(current_registration_state)" fail-open "${1:-Candy-owned network state removed}"
+		;;
+	running)
+		require_root
+		ensure_directories
+		write_status "$(current_registration_state)" running ""
+		;;
+	publish)
+		require_root
+		publish_status
+		;;
+	status)
+		show_status
+		;;
+	-h|--help|help)
+		usage
+		;;
+	*)
+		usage >&2
+		exit 64
+		;;
+esac

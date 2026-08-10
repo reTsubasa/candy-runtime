@@ -10,8 +10,8 @@ no_build=${OPENWRT_SDK_CONTAINER_NO_BUILD:-0}
 download_base=${OPENWRT_DOWNLOAD_BASE:-https://downloads.openwrt.org}
 official_download_base=https://downloads.openwrt.org
 
-[ -n "$runtime_bin_dir" ] && [ -x "$runtime_bin_dir/candy-netd" ] || {
-  printf '%s\n' "CANDY_RUNTIME_BIN_DIR must contain runtime-owned executable candy-netd" >&2
+[ -n "$runtime_bin_dir" ] && [ -x "$runtime_bin_dir/candy-netd" ] && [ -x "$runtime_bin_dir/candy-sdwan-agent" ] || {
+  printf '%s\n' "CANDY_RUNTIME_BIN_DIR must contain runtime-owned candy-netd and candy-sdwan-agent" >&2
   exit 2
 }
 

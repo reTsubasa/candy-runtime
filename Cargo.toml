@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "linux/common/apps/candy-netd",
+  "linux/common/apps/candy-sdwan-agent",
   "linux/common/crates/candy-netd-client",
   "linux/common/crates/candy-netd-proto",
 ]

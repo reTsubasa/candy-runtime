@@ -289,23 +289,6 @@ end
 	</div>
 </div>
 
-<div id="candy-sdwan-status" class="cbi-map candy-overview-section" style="display: none">
-	<h3><%:SD-WAN status%></h3>
-	<div class="cbi-section">
-		<table class="table">
-			<tr class="tr"><td class="td left" width="33%"><%:Phase%></td><td id="candy-sdwan-phase" class="td left">-</td></tr>
-			<tr class="tr"><td class="td left"><%:Site%></td><td id="candy-sdwan-site" class="td left">-</td></tr>
-			<tr class="tr"><td class="td left"><%:Active Hub%></td><td id="candy-sdwan-hub" class="td left">-</td></tr>
-			<tr class="tr"><td class="td left"><%:Route generation%></td><td id="candy-sdwan-generation" class="td left">-</td></tr>
-			<tr class="tr"><td class="td left"><%:Attachment epoch%></td><td id="candy-sdwan-epoch" class="td left">-</td></tr>
-			<tr class="tr"><td class="td left"><%:Effective MTU%></td><td id="candy-sdwan-mtu" class="td left">-</td></tr>
-			<tr class="tr"><td class="td left"><%:Traffic counters%></td><td id="candy-sdwan-traffic" class="td left">-</td></tr>
-			<tr class="tr"><td class="td left"><%:Drop counters%></td><td id="candy-sdwan-drops" class="td left">-</td></tr>
-			<tr class="tr"><td class="td left"><%:Last failover%></td><td id="candy-sdwan-failover" class="td left">-</td></tr>
-		</table>
-	</div>
-</div>
-
 <div class="cbi-map candy-overview-section">
 	<h3><%:Node status%></h3>
 	<div class="cbi-section candy-node-table-scroll">
@@ -474,32 +457,6 @@ function candyOverviewClientVersion(data) {
 	return version + "-r" + release;
 }
 
-function candyOverviewRenderSdwan(sdwan) {
-	sdwan = sdwan || {};
-	var section = document.getElementById("candy-sdwan-status");
-	var visible = sdwan.enabled === true &&
-		sdwan.phase !== "disabled" &&
-		sdwan.phase !== "unavailable" &&
-		sdwan.phase !== "invalid";
-	if (section) {
-		section.style.display = visible ? "" : "none";
-	}
-	if (!visible) {
-		return;
-	}
-	var counters = sdwan.counters || {};
-	var failover = sdwan.last_failover || {};
-	candyOverviewSetText("candy-sdwan-phase", candyOverviewText(sdwan.phase));
-	candyOverviewSetText("candy-sdwan-site", candyOverviewText(sdwan.site));
-	candyOverviewSetText("candy-sdwan-hub", candyOverviewText(sdwan.active_hub));
-	candyOverviewSetText("candy-sdwan-generation", candyOverviewText(sdwan.route_generation));
-	candyOverviewSetText("candy-sdwan-epoch", candyOverviewText(sdwan.attachment_epoch));
-	candyOverviewSetText("candy-sdwan-mtu", candyOverviewText(sdwan.effective_mtu));
-	candyOverviewSetText("candy-sdwan-traffic", "rx " + candyOverviewText(counters.rx_bytes) + " B / tx " + candyOverviewText(counters.tx_bytes) + " B");
-	candyOverviewSetText("candy-sdwan-drops", candyOverviewText(counters.drops));
-	candyOverviewSetText("candy-sdwan-failover", candyOverviewText(failover.reason) + " / " + candyOverviewText(failover.at));
-}
-
 var candyOverviewFeatureEffects = {
 	udp_multiplier: <%=js_string(i18n.translate("Sends controlled redundant UDP copies on lossy links to reduce real-time packet loss."))%>,
 	udp_fec: <%=js_string(i18n.translate("Reconstructs a lost fragment from an XOR repair shard without waiting for retransmission."))%>,
@@ -662,7 +619,6 @@ function refreshCandyOverviewStatus() {
 		candyOverviewRenderFault(data.fault);
 		candyOverviewSetText("candy-status-client-version", candyOverviewClientVersion(data));
 		candyOverviewSetText("candy-status-core-version", data.core && data.core.current_version);
-		candyOverviewRenderSdwan(data.sdwan);
 		candyOverviewCurrentManifest = data.core && data.core.current_manifest;
 		candyOverviewRenderNodes(data.nodes || []);
 	};

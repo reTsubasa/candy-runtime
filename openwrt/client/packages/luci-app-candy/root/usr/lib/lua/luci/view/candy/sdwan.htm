@@ -1,0 +1,106 @@
+<%+header%>
+
+<%
+local fs = require "nixio.fs"
+local jsonc = require "luci.jsonc"
+local xml = require "luci.xml"
+local uci = require "luci.model.uci".cursor()
+local status_file = "/var/run/candy/sdwan-status.json"
+local max_bytes = 65536
+local enabled = uci:get("candy", "sdwan", "enabled") == "1"
+local status = nil
+local stat = fs.stat(status_file)
+if stat and stat.type == "reg" and tonumber(stat.size or 0) <= max_bytes then
+	local text = fs.readfile(status_file) or ""
+	local parsed = jsonc.parse(text)
+	if #text <= max_bytes and type(parsed) == "table" and tonumber(parsed.schema_version) == 1 then
+		status = parsed
+	end
+end
+local registration = status and type(status.registration) == "table" and status.registration or {}
+local runtime = status and type(status.runtime) == "table" and status.runtime or {}
+local registration_state = registration.state == "registered" and "registered" or (registration.state == "join-pending" and "join-pending" or "unregistered")
+local function label(value)
+	if value == nil or value == "" then return translate("Unavailable") end
+	return xml.pcdata(tostring(value))
+end
+local function state_label(value)
+	if value == "registered" then return translate("Registered") end
+	if value == "join-pending" then return translate("Waiting for Cloud validation") end
+	if value == "disabled" then return translate("Disabled") end
+	if value == "fail-open" then return translate("Network restored") end
+	return translate("Not enrolled")
+end
+local function object_label(value, key)
+	if type(value) ~= "table" then return label(value) end
+	return label(value[key] or value.name or value.id)
+end
+local peers = type(status and status.peers) == "table" and status.peers or {}
+local path = type(status and status.path) == "table" and status.path or nil
+local tun = type(status and status.tun) == "table" and status.tun or {}
+local egress = type(status and status.egress) == "table" and status.egress or {}
+local dns = type(status and status.dns) == "table" and status.dns or {}
+local result = luci.http.formvalue("result") or ""
+%>
+
+<style>
+.candy-sdwan-head { display:flex; align-items:center; justify-content:space-between; gap:1em; flex-wrap:wrap; margin-bottom:1em; }
+.candy-sdwan-head h2 { margin:0; }
+.candy-sdwan-state { display:inline-flex; align-items:center; min-height:2em; padding:.2em .7em; border:1px solid #bbb; border-radius:999px; font-weight:600; }
+.candy-sdwan-state.registered { border-color:#2e7d32; color:#1b5e20; background:#f1f8f2; }
+.candy-sdwan-state.pending { border-color:#b26a00; color:#7a4700; background:#fff8e8; }
+.candy-sdwan-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.65em 1.25em; margin:0; }
+.candy-sdwan-grid > div { display:grid; grid-template-columns:minmax(7em, .8fr) minmax(0, 1.5fr); gap:.75em; padding:.65em 0; border-bottom:1px solid rgba(128,128,128,.3); min-width:0; }
+.candy-sdwan-grid dt { color:#666; }
+.candy-sdwan-grid dd { margin:0; overflow-wrap:anywhere; }
+.candy-sdwan-peers { margin:0; padding-left:1.2em; }
+.candy-sdwan-actions { display:flex; gap:.6em; flex-wrap:wrap; margin-top:1.2em; }
+.candy-sdwan-actions form { margin:0; }
+.candy-sdwan-form { max-width:42em; margin-top:1.2em; }
+.candy-sdwan-form .cbi-value { display:grid; grid-template-columns:minmax(9em,.8fr) minmax(0,1.8fr); gap:.8em; align-items:center; }
+.candy-sdwan-result { padding:.7em .9em; margin-bottom:1em; border-left:4px solid #b26a00; background:#fff8e8; }
+@media (max-width: 640px) { .candy-sdwan-grid { grid-template-columns:1fr; } }
+@media (max-width: 480px) { .candy-sdwan-form .cbi-value { grid-template-columns:1fr; gap:.25em; } }
+</style>
+
+<div class="cbi-map">
+	<% if result == "join-pending" then %><div class="candy-sdwan-result"><%:Join request submitted; waiting for Cloud validation.%></div><% end %>
+	<% if result == "reconnecting" then %><div class="candy-sdwan-result"><%:Reconnect requested.%></div><% end %>
+	<% if result == "left" then %><div class="candy-sdwan-result"><%:This node has left Candy Cloud.%></div><% end %>
+	<% if result == "error" then %><div class="candy-sdwan-result"><%:Operation failed. Check Logs for details.%></div><% end %>
+	<div class="candy-sdwan-head">
+		<h2><%:SD-WAN%></h2>
+		<span class="candy-sdwan-state <%=registration_state == "registered" and "registered" or (registration_state == "join-pending" and "pending" or "")%>"><%=state_label(enabled and registration_state or "disabled")%></span>
+	</div>
+	<% if registration_state ~= "registered" then %>
+		<dl class="candy-sdwan-grid">
+			<div><dt><%:Cloud%></dt><dd><%=label(registration.cloud_address)%></dd></div>
+			<div><dt><%:Join state%></dt><dd><%=state_label(enabled and registration_state or "disabled")%></dd></div>
+		</dl>
+		<form class="candy-sdwan-form" method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_join')%>">
+			<input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" />
+			<div class="cbi-value"><label for="candy-sdwan-cloud"><%:Cloud address%></label><input id="candy-sdwan-cloud" name="cloud" type="url" required maxlength="2048" placeholder="https://" value="<%=xml.pcdata(registration.cloud_address or '')%>" /></div>
+			<div class="cbi-value"><label for="candy-sdwan-activation"><%:Activation code%></label><input id="candy-sdwan-activation" name="activation" type="password" required maxlength="4096" autocomplete="one-time-code" /></div>
+			<div class="candy-sdwan-actions"><button class="cbi-button cbi-button-apply" type="submit"><%:Join%></button></div>
+		</form>
+	<% else %>
+		<dl class="candy-sdwan-grid">
+			<div><dt><%:Site%></dt><dd><%=object_label(status.site, "name")%></dd></div>
+			<div><dt><%:Segment%></dt><dd><%=object_label(status.segment, "name")%></dd></div>
+			<div><dt><%:Cloud%></dt><dd><%=label(registration.cloud_address)%></dd></div>
+			<div><dt><%:TUN%></dt><dd><%=label(tun.state)%><% if tun.full_duplex == true then %> / <%:Full duplex%><% elseif tun.full_duplex == false then %> / <%:Unavailable%><% end %></dd></div>
+			<div><dt><%:Peer%></dt><dd><% if #peers == 0 then %><%=translate("Unavailable")%><% else %><ul class="candy-sdwan-peers"><% for _, peer in ipairs(peers) do %><li><%=label(peer.name or peer.id)%> / <%=label(peer.state)%></li><% end %></ul><% end %></dd></div>
+			<div><dt><%:Path%></dt><dd><% if path and (path.kind == "direct" or path.kind == "relay") then %><%=path.kind == "direct" and translate("Direct") or translate("Relay")%><% else %><%=translate("Unavailable")%><% end %></dd></div>
+			<div><dt><%:Local egress%></dt><dd><%=object_label(egress["local"], "name")%></dd></div>
+			<div><dt><%:Remote egress%></dt><dd><%=object_label(egress.remote, "name")%></dd></div>
+			<div><dt><%:Internal DNS%></dt><dd><%=label(dns.state)%></dd></div>
+			<div><dt><%:Runtime%></dt><dd><%=label(runtime.state)%></dd></div>
+		</dl>
+		<div class="candy-sdwan-actions">
+			<form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_reconnect')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-action" type="submit"><%:Reconnect%></button></form>
+			<form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_leave')%>" onsubmit="return confirm('<%=translate('Leave Candy Cloud and remove this node?')%>');"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-negative" type="submit"><%:Leave%></button></form>
+		</div>
+	<% end %>
+</div>
+
+<%+footer%>

@@ -23,11 +23,15 @@ for runtime_source in \
   Cargo.toml \
   Cargo.lock \
   linux/client/apps/candy-client/candy-client \
+  linux/client/apps/candy/candy \
   linux/client/apps/candy-sdwan/candy-sdwan \
+  linux/common/apps/candy-sdwan-runtime/candy-sdwan-runtime \
+  linux/server/apps/candy-server/candy-server \
   linux/server/apps/candy-server/serverd-linux \
   linux/server/apps/candy-server/candy-core-manager \
   linux/server/apps/candy-server/candy-server-health-check \
   linux/common/apps/candy-netd/Cargo.toml \
+  linux/common/apps/candy-sdwan-agent/Cargo.toml \
   linux/common/crates/candy-netd-client/Cargo.toml \
   linux/common/crates/candy-netd-proto/Cargo.toml \
   openwrt/client/packages/candy-client/Makefile \
@@ -60,6 +64,10 @@ grep -Fq '$(INSTALL_BIN) ./candy-client $(1)/usr/bin/candy-client' "$client_make
   fail "OpenWrt client does not package its Runtime launcher"
 grep -Fq '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-netd' "$client_makefile" ||
   fail "OpenWrt client does not package runtime-owned candy-netd"
+grep -Fq '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan-agent' "$client_makefile" ||
+  fail "OpenWrt client does not package runtime-owned candy-sdwan-agent"
+grep -Fq '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan-runtime $(1)/usr/libexec/candy-sdwan-runtime' "$client_makefile" ||
+  fail "OpenWrt client does not package the Runtime-owned SD-WAN state helper"
 if grep -Eq '/usr/lib/candy/cores/current/(candy-client|candy-netd|candy-sdwan)' "$client_makefile"; then
   fail "Runtime executable is still owned by a Core bundle"
 fi

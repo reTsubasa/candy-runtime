@@ -32,7 +32,11 @@ define Build/Prepare
 	mkdir -p $(PKG_BUILD_DIR)
 	[ -n "$(CANDY_RUNTIME_BIN_DIR)" ] || { echo "CANDY_RUNTIME_BIN_DIR is required"; exit 1; }
 	[ -x "$(CANDY_RUNTIME_BIN_DIR)/candy-netd" ] || { echo "missing Runtime binary: candy-netd"; exit 1; }
+	[ -x "$(CANDY_RUNTIME_BIN_DIR)/candy-sdwan-agent" ] || { echo "missing Runtime binary: candy-sdwan-agent"; exit 1; }
+	[ -x "./candy-sdwan-runtime" ] || { echo "missing Runtime binary: candy-sdwan-runtime"; exit 1; }
 	cp "$(CANDY_RUNTIME_BIN_DIR)/candy-netd" "$(PKG_BUILD_DIR)/candy-netd"
+	cp "$(CANDY_RUNTIME_BIN_DIR)/candy-sdwan-agent" "$(PKG_BUILD_DIR)/candy-sdwan-agent"
+	cp "./candy-sdwan-runtime" "$(PKG_BUILD_DIR)/candy-sdwan-runtime"
 endef
 
 define Build/Compile
@@ -42,9 +46,11 @@ define Package/candy-client/install
 	$(INSTALL_DIR) $(1)/usr/bin/
 	$(INSTALL_BIN) ./candy-client $(1)/usr/bin/candy-client
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-netd $(1)/usr/bin/candy-netd
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan-agent $(1)/usr/bin/candy-sdwan-agent
 	$(INSTALL_BIN) ./candy-sdwan $(1)/usr/bin/candy-sdwan
 	ln -sf candy-client $(1)/usr/bin/client-cli
 	$(INSTALL_DIR) $(1)/usr/libexec
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan-runtime $(1)/usr/libexec/candy-sdwan-runtime
 	$(INSTALL_BIN) ./candy-core-manager $(1)/usr/libexec/candy-core-manager
 	$(INSTALL_BIN) ./candy-update-manager $(1)/usr/libexec/candy-update-manager
 	$(INSTALL_BIN) ./candy-runtime-health-check $(1)/usr/libexec/candy-runtime-health-check

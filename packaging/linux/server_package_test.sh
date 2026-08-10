@@ -20,19 +20,34 @@ EOF
 chmod 0755 "$fake_bin/cargo"
 
 dist=$tmp/dist
-PATH="$fake_bin:$PATH" CANDY_LINUX_DIST_DIR="$dist" \
+agent=$tmp/candy-sdwan-agent
+printf '#!/bin/sh\nexit 0\n' >"$agent"
+chmod 0755 "$agent"
+PATH="$fake_bin:$PATH" CANDY_LINUX_DIST_DIR="$dist" CANDY_SDWAN_AGENT_BINARY="$agent" \
 	"$root/packaging/linux/build.sh" x86_64-unknown-linux-gnu >/dev/null
 
 stage=$dist/server/x86_64
-[ -x "$stage/usr/local/bin/serverd-linux" ] || fail "server launcher was not staged"
+edge_stage=$dist/client/x86_64
+[ -x "$stage/usr/local/bin/candy-server" ] || fail "public candy-server command was not staged"
+[ -x "$stage/usr/local/libexec/serverd-linux" ] || fail "internal compatibility launcher was not staged"
+[ -x "$stage/usr/local/libexec/candy-sdwan-runtime" ] || fail "SD-WAN Runtime helper was not staged"
 [ -x "$stage/usr/local/bin/candy-core-manager" ] || fail "Core bundle manager was not staged"
 [ -x "$stage/usr/local/libexec/candy-server-health-check" ] || fail "server health check was not staged"
 [ -f "$stage/etc/candy/server.toml.example" ] || fail "server example config was not staged"
 [ -f "$stage/systemd/candy-server.service" ] || fail "systemd unit was not staged"
 [ -x "$stage/install/install-candy-server.sh" ] || fail "installer was not staged"
-[ -x "$dist/serverd-linux-x86_64" ] || fail "release launcher artifact was not staged"
-cmp "$root/linux/server/apps/candy-server/serverd-linux" \
-	"$stage/usr/local/bin/serverd-linux" >/dev/null || fail "staged launcher differs from source"
+[ -x "$dist/candy-server-x86_64" ] || fail "product release launcher artifact was not staged"
+cmp "$root/linux/server/apps/candy-server/candy-server" \
+	"$stage/usr/local/bin/candy-server" >/dev/null || fail "staged product launcher differs from source"
+[ -x "$edge_stage/usr/local/bin/candy" ] || fail "public Linux Edge candy command was not staged"
+[ -x "$edge_stage/usr/local/libexec/candy-client" ] || fail "private Linux Edge process launcher was not staged"
+[ -x "$edge_stage/usr/local/libexec/candy-sdwan-runtime" ] || fail "Linux Edge SD-WAN Runtime helper was not staged"
+[ -x "$edge_stage/usr/local/libexec/candy-sdwan-agent" ] || fail "Linux Edge SD-WAN agent was not staged"
+[ -f "$edge_stage/systemd/candy-client.service" ] || fail "Linux Edge systemd unit was not staged"
+grep -F 'ExecStart=/usr/local/libexec/candy-client' "$edge_stage/systemd/candy-client.service" >/dev/null ||
+	fail "Linux Edge service exposes a private data-plane command"
+grep -F 'ExecStopPost=+/usr/local/libexec/candy-sdwan-runtime fail-open' "$edge_stage/systemd/candy-client.service" >/dev/null ||
+	fail "Linux Edge service has no fail-open lifecycle hook"
 grep -F 'CONGESTION_TEST_BYTES=52428800' "$stage/install/install-candy-server.sh" >/dev/null ||
 	fail "server installer does not provision the 50 MiB congestion test object"
 grep -F 'dd if=/dev/zero' "$stage/install/install-candy-server.sh" >/dev/null ||
@@ -42,7 +57,7 @@ if find "$dist" -type f \( -name 'candy-core' -o -name 'libcandy_core.so' \) | g
 	fail "private Core artifact leaked into Runtime package"
 fi
 if rg -n 'cargo (build|install)|git (clone|fetch)|crates/candy-core' \
-	"$root/packaging/linux/build.sh" "$stage/usr/local/bin/serverd-linux" \
+	"$root/packaging/linux/build.sh" "$stage/usr/local/bin/candy-server" \
 	"$stage/usr/local/bin/candy-core-manager" "$stage/usr/local/libexec/candy-server-health-check" >/dev/null; then
 	fail "server package still builds or fetches Core source"
 fi

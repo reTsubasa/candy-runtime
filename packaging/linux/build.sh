@@ -15,6 +15,11 @@ case "$target" in
 esac
 
 launcher=$repo_root/linux/server/apps/candy-server/serverd-linux
+product_launcher=$repo_root/linux/server/apps/candy-server/candy-server
+sdwan_runtime=$repo_root/linux/common/apps/candy-sdwan-runtime/candy-sdwan-runtime
+sdwan_agent=${CANDY_SDWAN_AGENT_BINARY:-$repo_root/target/$target/release/candy-sdwan-agent}
+edge_product=$repo_root/linux/client/apps/candy/candy
+edge_launcher=$repo_root/linux/client/apps/candy-client/candy-client
 core_manager=$repo_root/linux/server/apps/candy-server/candy-core-manager
 health_check=$repo_root/linux/server/apps/candy-server/candy-server-health-check
 stage=$dist_root/server/$artifact_arch
@@ -22,12 +27,29 @@ stage=$dist_root/server/$artifact_arch
 	printf '%s\n' "Linux server Runtime launcher is missing: $launcher" >&2
 	exit 1
 }
+[ -f "$product_launcher" ] || { printf '%s\n' "Linux candy-server command is missing: $product_launcher" >&2; exit 1; }
+[ -f "$sdwan_runtime" ] || { printf '%s\n' "SD-WAN Runtime helper is missing: $sdwan_runtime" >&2; exit 1; }
+[ -f "$edge_product" ] || { printf '%s\n' "Linux candy command is missing: $edge_product" >&2; exit 1; }
+[ -f "$edge_launcher" ] || { printf '%s\n' "Linux Edge launcher is missing: $edge_launcher" >&2; exit 1; }
+[ -x "$sdwan_agent" ] || {
+	cargo_cmd=${CARGO_BIN:-cargo}
+	if command -v "$cargo_cmd" >/dev/null 2>&1; then
+		"$cargo_cmd" build --manifest-path "$repo_root/Cargo.toml" --release --locked --package candy-sdwan-agent --target "$target"
+	fi
+}
+[ -x "$sdwan_agent" ] || { printf '%s\n' "SD-WAN agent binary is missing: $sdwan_agent" >&2; exit 1; }
 sh -n "$launcher"
+sh -n "$product_launcher"
+sh -n "$sdwan_runtime"
+sh -n "$edge_product"
+sh -n "$edge_launcher"
 sh -n "$core_manager"
 sh -n "$health_check"
 
 mkdir -p "$stage/usr/local/bin" "$stage/usr/local/libexec" "$stage/etc/candy" "$stage/systemd" "$stage/install"
-install -m 0755 "$launcher" "$stage/usr/local/bin/serverd-linux"
+install -m 0755 "$product_launcher" "$stage/usr/local/bin/candy-server"
+install -m 0755 "$launcher" "$stage/usr/local/libexec/serverd-linux"
+install -m 0755 "$sdwan_runtime" "$stage/usr/local/libexec/candy-sdwan-runtime"
 install -m 0755 "$core_manager" "$stage/usr/local/bin/candy-core-manager"
 install -m 0755 "$health_check" "$stage/usr/local/libexec/candy-server-health-check"
 install -m 0644 "$repo_root/linux/server/docker/server.example.toml" \
@@ -41,9 +63,20 @@ install -m 0755 "$repo_root/linux/server/packaging/upgrade-candy-server.sh" \
 install -m 0644 "$repo_root/linux/server/README.md" "$stage/README.md"
 install -m 0644 "$repo_root/VERSION" "$stage/VERSION"
 
-# Keep the established release artifact name while its contents become the
-# architecture-neutral Runtime launcher. Core remains a separate native artifact.
-install -m 0755 "$launcher" "$dist_root/serverd-linux-$artifact_arch"
+# Publish the product command as the architecture-qualified Runtime artifact.
+# Core remains a separate native artifact managed through the signed channel.
+install -m 0755 "$product_launcher" "$dist_root/candy-server-$artifact_arch"
+
+edge_stage=$dist_root/client/$artifact_arch
+mkdir -p "$edge_stage/usr/local/bin" "$edge_stage/usr/local/libexec" "$edge_stage/etc/candy" "$edge_stage/systemd"
+install -m 0755 "$edge_product" "$edge_stage/usr/local/bin/candy"
+install -m 0755 "$edge_launcher" "$edge_stage/usr/local/libexec/candy-client"
+install -m 0755 "$sdwan_runtime" "$edge_stage/usr/local/libexec/candy-sdwan-runtime"
+install -m 0755 "$sdwan_agent" "$edge_stage/usr/local/libexec/candy-sdwan-agent"
+install -m 0644 "$repo_root/linux/client/packaging/client.example.toml" "$edge_stage/etc/candy/client.toml.example"
+install -m 0644 "$repo_root/linux/client/packaging/candy-client.service" "$edge_stage/systemd/candy-client.service"
+install -m 0644 "$repo_root/VERSION" "$edge_stage/VERSION"
 
 printf '%s\n' "Linux server Runtime package staged in $stage"
+printf '%s\n' "Linux Edge Runtime package staged in $edge_stage"
 printf '%s\n' "Core binary intentionally excluded; activate it under /opt/candy/cores/current"

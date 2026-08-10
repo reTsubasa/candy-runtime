@@ -1,0 +1,15 @@
+[package]
+name = "candy-sdwan-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+candy-netd-client = { path = "../../crates/candy-netd-client" }
+candy-netd-proto = { path = "../../crates/candy-netd-proto" }
+clap.workspace = true
+nix = { workspace = true, features = ["fs"] }
+serde.workspace = true
+serde_json.workspace = true

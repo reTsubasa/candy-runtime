@@ -168,10 +168,10 @@ core_process_api=$("$CORE_BINARY" runtime-api-version) ||
 arch=$(uname -m)
 case "$arch" in
 	x86_64|amd64)
-		artifact_name=serverd-linux-x86_64
+		artifact_name=candy-server-x86_64
 		;;
 	aarch64|arm64)
-		artifact_name=serverd-linux-aarch64
+		artifact_name=candy-server-aarch64
 		;;
 	*)
 		die "unsupported architecture: $arch"
@@ -396,7 +396,7 @@ User=$SERVICE_USER
 Group=$SERVICE_USER
 WorkingDirectory=$STATE_DIR
 Environment=CANDY_CORE_BINARY=$CORE_BINARY
-ExecStart=$current_link/serverd-linux --config $config_file
+ExecStart=$current_link/candy-server --config $config_file
 Restart=on-failure
 RestartSec=2s
 LimitNOFILE=1048576
@@ -515,18 +515,18 @@ if [ -n "$effective_cert_file" ] && [ -s "$effective_cert_file" ]; then
 fi
 
 run mkdir -p "$release_dir"
-run cp "$artifact_path" "$release_dir/serverd-linux"
-run chmod 0755 "$release_dir/serverd-linux"
+run cp "$artifact_path" "$release_dir/candy-server"
+run chmod 0755 "$release_dir/candy-server"
 run chown -R root:root "$release_dir"
 install_unit
 run systemctl daemon-reload
 
-if ! CANDY_CORE_BINARY="$CORE_BINARY" "$release_dir/serverd-linux" --config "$config_file" --check-config; then
+if ! CANDY_CORE_BINARY="$CORE_BINARY" "$release_dir/candy-server" --config "$config_file" --check-config; then
 	rollback
 	die "config check failed"
 fi
 run systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
-preflight_output=$(CANDY_CORE_BINARY="$CORE_BINARY" "$release_dir/serverd-linux" --config "$config_file" --preflight 2>&1) || {
+preflight_output=$(CANDY_CORE_BINARY="$CORE_BINARY" "$release_dir/candy-server" --config "$config_file" --preflight 2>&1) || {
 	printf '%s\n' "$preflight_output" >&2
 	rollback
 	die "preflight failed"

@@ -9,6 +9,7 @@ local PASSIVE_STATUS_FILE = "/var/run/candy/passive-status.json"
 local MAX_PASSIVE_STATUS_BYTES = 262144
 local SDWAN_STATUS_FILE = "/var/run/candy/sdwan-status.json"
 local MAX_SDWAN_STATUS_BYTES = 65536
+local SDWAN_RUNTIME = "/usr/libexec/candy-sdwan-runtime"
 local FAULT_STATUS_FILE = "/var/lib/candy/runtime-fault.json"
 local MAX_FAULT_STATUS_BYTES = 16384
 local CONGESTION_TEST_LOCK_DIR = "/tmp/candy-congestion-test.lock"
@@ -128,22 +129,67 @@ local function read_sdwan_status(uci)
 	local fs = require "nixio.fs"
 	local jsonc = require "luci.jsonc"
 	local enabled = uci:get("candy", "sdwan", "enabled") == "1"
+	local unavailable = { enabled = enabled, schema_version = 1, phase = enabled and "unavailable" or "disabled", registration = { state = "unregistered", cloud_address = "" }, runtime = { state = "unavailable" }, site = nil, segment = nil, tun = { state = "unavailable", full_duplex = nil }, peers = {}, path = nil, egress = { ["local"] = nil, remote = nil }, dns = { state = "unavailable" } }
 	local stat = fs.stat(SDWAN_STATUS_FILE)
 	local status
 	if not stat or stat.type ~= "reg" or tonumber(stat.size or 0) > MAX_SDWAN_STATUS_BYTES then
-		return { enabled = enabled, phase = enabled and "unavailable" or "disabled" }
+		return unavailable
 	end
 	local text = fs.readfile(SDWAN_STATUS_FILE)
 	if not text or #text > MAX_SDWAN_STATUS_BYTES then
-		return { enabled = enabled, phase = "invalid" }
+		unavailable.phase = "unavailable"
+		return unavailable
 	end
 	status = jsonc.parse(text)
 	if type(status) ~= "table" or tonumber(status.schema_version) ~= 1 or contains_credential_field(status) then
-		return { enabled = enabled, phase = "invalid" }
+		unavailable.phase = "unavailable"
+		return unavailable
 	end
-	status.enabled = enabled
-	status.schema_version = 1
-	return status
+	local function safe_string(value, limit)
+		if type(value) ~= "string" or #value > (limit or 256) then return nil end
+		return value
+	end
+	local registration = type(status.registration) == "table" and status.registration or {}
+	local runtime = type(status.runtime) == "table" and status.runtime or {}
+	local registration_state = safe_string(registration.state, 32) or "unregistered"
+	if registration_state ~= "unregistered" and registration_state ~= "join-pending" and registration_state ~= "registered" then
+		registration_state = "unavailable"
+	end
+	local result = {
+		enabled = enabled,
+		schema_version = 1,
+		phase = enabled and registration_state or "disabled",
+		registration = { state = registration_state, cloud_address = safe_string(registration.cloud_address, 2048) or "", last_error = safe_string(registration.last_error, 512) or "" },
+		runtime = { state = safe_string(runtime.state, 32) or "unavailable", updated_at = tonumber(runtime.updated_at), last_error = safe_string(runtime.last_error, 512) or "" },
+		site = safe_string(status.site, 128),
+		segment = safe_string(status.segment, 128),
+		tun = { state = "unavailable", full_duplex = nil },
+		peers = {},
+		path = nil,
+		egress = { ["local"] = nil, remote = nil },
+		dns = { state = "unavailable" }
+	}
+	if type(status.tun) == "table" then
+		result.tun.state = safe_string(status.tun.state, 32) or "unavailable"
+		if type(status.tun.full_duplex) == "boolean" then result.tun.full_duplex = status.tun.full_duplex end
+	end
+	if type(status.peers) == "table" then
+		for _, peer in ipairs(status.peers) do
+			if type(peer) == "table" then
+				result.peers[#result.peers + 1] = { name = safe_string(peer.name or peer.id, 128) or "", state = safe_string(peer.state, 32) or "unavailable" }
+			end
+		end
+	end
+	if type(status.path) == "table" then
+		local kind = safe_string(status.path.kind, 16)
+		if kind == "direct" or kind == "relay" then result.path = { kind = kind, state = safe_string(status.path.state, 32) or "unavailable" } end
+	end
+	if type(status.egress) == "table" then
+		result.egress["local"] = safe_string(status.egress["local"], 128)
+		result.egress.remote = safe_string(status.egress.remote, 128)
+	end
+	if type(status.dns) == "table" then result.dns.state = safe_string(status.dns.state, 32) or "unavailable" end
+	return result
 end
 
 local function read_fault_status()
@@ -499,6 +545,9 @@ function index()
 	page = entry({"admin", "services", "candy", "overview"}, template("candy/status"), _("Overview"), 10)
 	page.leaf = true
 
+	page = entry({"admin", "services", "candy", "sdwan"}, template("candy/sdwan"), _("SD-WAN"), 15)
+	page.leaf = true
+
 	page = entry({"admin", "services", "candy", "traffic"}, template("candy/rules"), _("Policy"), 20)
 	page.leaf = true
 
@@ -528,6 +577,9 @@ function index()
 	entry({"admin", "services", "candy", "rules_import"}, call("action_rules_import")).leaf = true
 	entry({"admin", "services", "candy", "rules_export"}, call("action_rules_export")).leaf = true
 	entry({"admin", "services", "candy", "status_json"}, call("action_status_json")).leaf = true
+	entry({"admin", "services", "candy", "sdwan_join"}, call("action_sdwan_join")).leaf = true
+	entry({"admin", "services", "candy", "sdwan_reconnect"}, call("action_sdwan_reconnect")).leaf = true
+	entry({"admin", "services", "candy", "sdwan_leave"}, call("action_sdwan_leave")).leaf = true
 	entry({"admin", "services", "candy", "congestion_test"}, call("action_congestion_test")).leaf = true
 	entry({"admin", "services", "candy", "congestion_test_status"}, call("action_congestion_test_status")).leaf = true
 	entry({"admin", "services", "candy", "core_status"}, call("action_core_status")).leaf = true
@@ -679,6 +731,69 @@ function action_service(action)
 	mark_service_transition(action)
 	candy_service_async(action)
 	luci.http.redirect(luci.dispatcher.build_url("admin", "services", "candy", "overview"))
+end
+
+local function redirect_sdwan(result)
+	local url = luci.dispatcher.build_url("admin", "services", "candy", "sdwan")
+	if result and result ~= "" then url = url .. "?result=" .. result end
+	luci.http.redirect(url)
+end
+
+function action_sdwan_join()
+	if not require_post() then return end
+	local fs = require "nixio.fs"
+	local cloud = trim(luci.http.formvalue("cloud") or "")
+	local activation = luci.http.formvalue("activation") or ""
+	if #cloud == 0 or #cloud > 2048 or not cloud:match("^https://") or #activation == 0 or #activation > 4096 then
+		luci.http.status(400, "Bad Request")
+		return
+	end
+	local made, temporary = process.capture({ "mktemp", "/tmp/candy-activation.XXXXXX" }, { timeout = 3 })
+	temporary = trim(temporary or "")
+	if not made or not temporary:match("^/tmp/candy%-activation%.[A-Za-z0-9]+$") then
+		luci.http.status(500, "Internal Server Error")
+		return
+	end
+	if not fs.writefile(temporary, activation) or not fs.chmod(temporary, 384) then
+		fs.unlink(temporary)
+		luci.http.status(500, "Internal Server Error")
+		return
+	end
+	local ok = process.run({ SDWAN_RUNTIME, "join", cloud, temporary }, { timeout = 10 })
+	fs.unlink(temporary)
+	if not ok then
+		redirect_sdwan("error")
+		return
+	end
+	redirect_sdwan("join-pending")
+end
+
+function action_sdwan_reconnect()
+	if not require_post() then return end
+	local uci = require "luci.model.uci".cursor()
+	local status = read_sdwan_status(uci)
+	if not status.registration or status.registration.state ~= "registered" then
+		luci.http.status(409, "Conflict")
+		return
+	end
+	if not process.run({ "/etc/init.d/candy", "sdwan_reconnect" }, { background = true, timeout = 30 }) then
+		redirect_sdwan("error")
+		return
+	end
+	redirect_sdwan("reconnecting")
+end
+
+function action_sdwan_leave()
+	if not require_post() then return end
+	local uci = require "luci.model.uci".cursor()
+	uci:set("candy", "sdwan", "enabled", "0")
+	uci:commit("candy")
+	process.run({ "/etc/init.d/candy", "sdwan_stop", "user_leave" }, { timeout = 30 })
+	if not process.run({ SDWAN_RUNTIME, "leave" }, { timeout = 10 }) then
+		redirect_sdwan("error")
+		return
+	end
+	redirect_sdwan("left")
 end
 
 function action_runtime_mode()

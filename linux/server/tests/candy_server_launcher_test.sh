@@ -2,7 +2,7 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
-launcher=$root/linux/server/apps/candy-server/serverd-linux
+launcher=$root/linux/server/apps/candy-server/candy-server
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/candy-server-launcher-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
@@ -67,7 +67,7 @@ else
 	status=$?
 fi
 [ "$status" -eq 69 ] || fail "missing Core exit code was $status, expected 69"
-grep -F "active Candy Core is missing" "$tmp/missing.out" >/dev/null ||
+grep -F "managed data plane is not installed" "$tmp/missing.out" >/dev/null ||
 	fail "missing Core error is not actionable"
 
 if CANDY_CORE_BINARY="$fake_core" FAKE_CORE_API=2 "$launcher" >"$tmp/api.out" 2>&1; then
@@ -134,7 +134,7 @@ else
 	status=$?
 fi
 [ "$status" -eq 78 ] || fail "recursive Core exit code was $status, expected 78"
-grep -F "points back to the Runtime launcher" "$tmp/recursive.out" >/dev/null ||
+grep -F "points back to candy-server" "$tmp/recursive.out" >/dev/null ||
 	fail "recursive Core error is not actionable"
 
 printf '%s\n' "Candy Linux server process launcher test passed"
