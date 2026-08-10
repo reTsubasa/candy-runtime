@@ -32,16 +32,16 @@ case "$status_before" in
 	*'"schema_version":1'*'"site":null'*'"path":null'*) ;;
 	*) fail "unregistered status fabricated live SD-WAN data: $status_before" ;;
 esac
-config_mode=$(stat -f '%Lp' "$state/config-v1.json" 2>/dev/null || stat -c '%a' "$state/config-v1.json")
+config_mode=$(stat -c '%a' "$state/config-v1.json" 2>/dev/null || stat -f '%Lp' "$state/config-v1.json")
 [ "$config_mode" = 600 ] || fail "config cache mode is $config_mode, expected 600"
 CANDY_SDWAN_STATE_DIR="$state" CANDY_SDWAN_RUN_DIR="$run" \
 	CANDY_SDWAN_CONFIG_CACHE="$state/config-v1.json" \
 	CANDY_SDWAN_STATUS_CACHE="$state/status-v1.json" \
 	CANDY_SDWAN_STATUS_FILE="$run/sdwan-status.json" "$runtime" status >/dev/null ||
 	fail "read-only status unexpectedly requires root"
-inode_before=$(stat -f '%i' "$run/sdwan-status.json" 2>/dev/null || stat -c '%i' "$run/sdwan-status.json")
+inode_before=$(stat -c '%i' "$run/sdwan-status.json" 2>/dev/null || stat -f '%i' "$run/sdwan-status.json")
 run_runtime reconnect
-inode_after=$(stat -f '%i' "$run/sdwan-status.json" 2>/dev/null || stat -c '%i' "$run/sdwan-status.json")
+inode_after=$(stat -c '%i' "$run/sdwan-status.json" 2>/dev/null || stat -f '%i' "$run/sdwan-status.json")
 [ "$inode_before" != "$inode_after" ] || fail "status replacement was not atomic"
 grep -F '"state":"reconnecting"' "$run/sdwan-status.json" >/dev/null || fail "reconnect state missing"
 
