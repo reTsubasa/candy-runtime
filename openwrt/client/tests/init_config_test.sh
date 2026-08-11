@@ -300,9 +300,16 @@ grep -F "option enabled '1'" "$repo_root/candy-client/candy.config" >/dev/null |
 ! grep -F "config node 'hk_1'" "$repo_root/candy-client/candy.config" >/dev/null || fail "bootstrap config must not ship a fake hk_1 node"
 grep -F 'no configured nodes; service remains ready for setup' "$repo_root/candy-client/candy.init" >/dev/null || fail "empty first-install config must enter setup state"
 grep -F 'CANDY_PROVIDER_RELOAD_WAIT_SECONDS=${CANDY_PROVIDER_RELOAD_WAIT_SECONDS:-90}' "$repo_root/candy-client/candy.init" >/dev/null || fail "provider reload has no lifecycle wait budget"
+grep -F 'CANDY_PROVIDER_ACTIVATION_PENDING=${CANDY_PROVIDER_ACTIVATION_PENDING:-/var/lib/candy/provider-activation.pending}' "$repo_root/candy-client/candy.init" >/dev/null || fail "provider activation state is not persisted"
 grep -F 'provider update activation deferred; service lifecycle is busy' "$repo_root/candy-client/candy.init" >/dev/null || fail "provider reload contention is reported as a hard activation error"
+grep -F 'rm -f "$CANDY_PROVIDER_ACTIVATION_PENDING"' "$repo_root/candy-client/candy.init" >/dev/null || fail "provider activation acknowledgement does not clear pending state"
+sed -n '/^current_readiness()/,/^}/p' "$repo_root/candy-client/candy.init" | grep -F '"$CANDY_RUNTIME_HEALTH_CHECK" client' >/dev/null || fail "startup readiness does not use the full runtime health contract"
 grep -F 'validate_node_profile_placeholders' "$repo_root/candy-client/candy.init" >/dev/null || fail "placeholder node validation is missing"
 grep -F 'update Core to 0.3.9 or newer' "$repo_root/candy-client/candy.init" >/dev/null || fail "congestion test compatibility message is stale"
+health_check_stub=$runtime_dir/health-check
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$health_check_stub"
+chmod +x "$health_check_stub"
+CANDY_RUNTIME_HEALTH_CHECK=$health_check_stub
 . "$repo_root/candy-client/candy.init"
 reload_ack='{"ok":true,"generation":2,"mode":"hot-policy","duration_ms":20,"error_code":null,"message":null}'
 parsed_reload_ack=$(printf '%s\n' \
@@ -478,6 +485,7 @@ grep -Fq '"performance":{"mode":"auto"' "$RUNTIME_CONFIG"
 grep -Fq '"lanes":"auto"' "$RUNTIME_CONFIG"
 grep -Fq '"udp_redundancy":{"client_multiplier":2,"server_multiplier":3}' "$RUNTIME_CONFIG"
 grep -Fq '"geo":{"bypass_china_ip":true,"providers":[{"name":"cn-ip","kind":"ip-cidr","path":' "$RUNTIME_CONFIG"
+grep -Fq '"name":"gfwlist","kind":"gfw-list","path":' "$RUNTIME_CONFIG"
 grep -Fq '"fallback_path":' "$RUNTIME_CONFIG"
 grep -Fq '{"name":"Hong Kong 1"' "$RUNTIME_CONFIG"
 grep -q '"server":"104.243.28.153:18443"' "$RUNTIME_CONFIG"
@@ -515,10 +523,10 @@ grep -q '"id":"hk-1"' "$NODE_STATUS_FILE"
 grep -q '"name":"Hong Kong 1"' "$NODE_STATUS_FILE"
 grep -q '"state":"down"' "$NODE_STATUS_FILE"
 grep -Fq '"groups":["Proxy","Fast"]' "$NODE_STATUS_FILE"
-grep -q '"active_tcp_flows":0' "$NODE_STATUS_FILE"
-grep -q '"url_test":{"status":"not-run","latency_ms":null' "$NODE_STATUS_FILE"
+grep -q '"telemetry_status":"unavailable","active_tcp_flows":null' "$NODE_STATUS_FILE"
+grep -q '"url_test":{"status":"unavailable","latency_ms":null' "$NODE_STATUS_FILE"
 ! grep -Eq '"selected"|"video_score"|"cdn_score"|"probe_source"|"ttfb_ms"' "$NODE_STATUS_FILE"
-grep -q '"last_error":""' "$NODE_STATUS_FILE"
+grep -q '"last_error":"telemetry unavailable"' "$NODE_STATUS_FILE"
 grep -q '"dns":{' "$NODE_STATUS_FILE"
 grep -q '"geo":{' "$NODE_STATUS_FILE"
 grep -q '"gfwlist":{' "$NODE_STATUS_FILE"
@@ -1735,7 +1743,7 @@ done
   CANDY_FAULT_STATE_FILE=$fault_dir/runtime-fault.json
   CANDY_INIT_SELF=$fault_dir/candy-init
   mkdir -p "$RUNTIME_DIR"
-  printf '%s\n' '#!/bin/sh' 'exit 0' > "$CANDY_INIT_SELF"
+  printf '%s\n' '#!/bin/sh' 'case "$1" in disable) exit 0 ;; enabled) exit 1 ;; esac' 'exit 0' > "$CANDY_INIT_SELF"
   chmod +x "$CANDY_INIT_SELF"
   : > "$LOG_FILE"
   config_load() { return 0; }

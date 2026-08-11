@@ -50,6 +50,7 @@ CANDY_DNS_LISTEN=${CANDY_DNS_LISTEN:-127.0.0.1:15353}
 CANDY_LISTENER_WAIT_SECONDS=${CANDY_LISTENER_WAIT_SECONDS:-8}
 CANDY_SERVICE_LOCK_WAIT_SECONDS=${CANDY_SERVICE_LOCK_WAIT_SECONDS:-30}
 CANDY_PROVIDER_RELOAD_WAIT_SECONDS=${CANDY_PROVIDER_RELOAD_WAIT_SECONDS:-90}
+CANDY_PROVIDER_ACTIVATION_PENDING=${CANDY_PROVIDER_ACTIVATION_PENDING:-/var/lib/candy/provider-activation.pending}
 CANDY_LIFECYCLE_TTL_SECONDS=${CANDY_LIFECYCLE_TTL_SECONDS:-10}
 CANDY_READY_FILE=${CANDY_READY_FILE:-$RUNTIME_DIR/client.ready}
 CANDY_SERVICE_WAIT_SECONDS=${CANDY_SERVICE_WAIT_SECONDS:-8}
@@ -380,7 +381,14 @@ current_readiness() {
 	case "$ready_pid" in
 		''|*[!0-9]*) return 1 ;;
 	esac
-	kill -0 "$ready_pid" 2>/dev/null
+	kill -0 "$ready_pid" 2>/dev/null || return 1
+	[ -x "$CANDY_RUNTIME_HEALTH_CHECK" ] || return 1
+	CANDY_READY_FILE="$CANDY_READY_FILE" \
+	CANDY_RUNTIME_CONFIG="$RUNTIME_CONFIG" \
+	CANDY_PASSIVE_STATUS_FILE="$CANDY_PASSIVE_STATUS_FILE" \
+	CANDY_CONTROL_SOCKET="$CANDY_CONTROL_SOCKET" \
+	CANDY_SERVICE_INIT=/bin/true \
+		"$CANDY_RUNTIME_HEALTH_CHECK" client >/dev/null 2>&1
 }
 
 wait_for_current_readiness() {
@@ -798,9 +806,9 @@ write_node_status() {
 	json_string "$server"
 	printf ',"groups":'
 	json_string_list "$groups"
-	printf ',"active_tcp_flows":0,"active_udp_flows":0,"reconnects":0'
-	printf ',"url_test":{"status":"not-run","latency_ms":null,"checked_unix_ms":null,"error":""}'
-	printf ',"passive":null,"last_error":""}'
+	printf ',"telemetry_status":"unavailable","active_tcp_flows":null,"active_udp_flows":null,"reconnects":null'
+	printf ',"url_test":{"status":"unavailable","latency_ms":null,"checked_unix_ms":null,"error":"telemetry unavailable"}'
+	printf ',"passive":null,"last_error":"telemetry unavailable"}'
 	FIRST_STATUS_NODE=0
 }
 
@@ -1256,9 +1264,23 @@ run_gfwlist_provider_update() {
 	"$CANDY_CLIENT_BIN" dns update gfwlist --url "$url" --output "$DNS_ETC_RULESETS_DIR/gfwlist.domains" >>"$update_log" 2>&1
 }
 
+provider_activation_required() {
+	if geo_provider_valid "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" &&
+		{ ! geo_provider_valid "$GEO_RUNTIME_RULESETS_DIR/cn-ip.cidr" ||
+		! cmp -s "$GEO_ETC_RULESETS_DIR/cn-ip.cidr" "$GEO_RUNTIME_RULESETS_DIR/cn-ip.cidr"; }; then
+		return 0
+	fi
+	if domain_provider_valid "$DNS_ETC_RULESETS_DIR/gfwlist.domains" &&
+		{ ! domain_provider_valid "$DNS_RUNTIME_RULESETS_DIR/gfwlist.domains" ||
+		! cmp -s "$DNS_ETC_RULESETS_DIR/gfwlist.domains" "$DNS_RUNTIME_RULESETS_DIR/gfwlist.domains"; }; then
+		return 0
+	fi
+	return 1
+}
+
 provider_update_once() {
 	config_load candy
-	local geo_auto gfwlist_auto geo_interval gfwlist_interval geo_url gfwlist_url updated=0
+	local geo_auto gfwlist_auto geo_interval gfwlist_interval geo_url gfwlist_url updated=0 failed=0
 	PROVIDER_UPDATED=0
 	config_get_bool geo_auto client geo_auto_update 1
 	config_get_bool gfwlist_auto client gfwlist_auto_update 1
@@ -1273,6 +1295,7 @@ provider_update_once() {
 			updated=1
 		else
 			log_event warn provider_update "provider=cn-ip result=failed retained=last-known-good"
+			failed=1
 		fi
 	fi
 
@@ -1282,13 +1305,24 @@ provider_update_once() {
 			updated=1
 		else
 			log_event warn provider_update "provider=gfwlist result=failed retained=last-known-good"
+			failed=1
 		fi
 	fi
 
 	if [ "$updated" -eq 1 ]; then
+		if ! mkdir -p "$(dirname "$CANDY_PROVIDER_ACTIVATION_PENDING")" ||
+			! printf '%s\n' "$(date +%s)" > "$CANDY_PROVIDER_ACTIVATION_PENDING"; then
+			log_event error provider_update "result=downloaded activation_state=persist-failed"
+			failed=1
+		fi
 		refresh_node_status_fast "running"
 	fi
-	PROVIDER_UPDATED="$updated"
+	if [ -s "$CANDY_PROVIDER_ACTIVATION_PENDING" ] || provider_activation_required; then
+		PROVIDER_UPDATED=1
+	else
+		PROVIDER_UPDATED="$updated"
+	fi
+	[ "$failed" -eq 0 ]
 }
 
 provider_update_sleep_seconds() {
@@ -1322,13 +1356,20 @@ wait_for_service_lifecycle_idle() {
 
 provider_update_loop() {
 	while :; do
-		provider_update_once
+		if ! provider_update_once; then
+			log_event warn provider_update "result=partial-or-failed activation_pending=${PROVIDER_UPDATED:-0}"
+		fi
 		if [ "${PROVIDER_UPDATED:-0}" -eq 1 ]; then
 			log_msg "reloading candy service after provider auto update"
 			if ! wait_for_service_lifecycle_idle; then
 				log_event warn provider_reload "provider update activation deferred; service lifecycle is busy"
 			elif ! "$CANDY_INIT_SELF" reload_runtime >/dev/null 2>&1; then
 				log_event error provider_reload "validated provider update could not be activated"
+			elif provider_activation_required; then
+				log_event error provider_reload "runtime reload returned success but provider content was not activated"
+			else
+				rm -f "$CANDY_PROVIDER_ACTIVATION_PENDING"
+				log_event info provider_reload "validated provider update activated"
 			fi
 		fi
 		sleep "$(provider_update_sleep_seconds)"
@@ -1947,6 +1988,14 @@ generate_config() {
 			json_string "$GEO_RUNTIME_RULESETS_DIR/cn-ip.cidr"
 			printf ',"fallback_path":'
 			json_string "$GEO_SHARE_RULESETS_DIR/cn-ip.cidr"
+			printf '}'
+		fi
+		if [ -n "${GFWLIST_RUNTIME_PROVIDER_PATH:-}" ] && [ -s "$GFWLIST_RUNTIME_PROVIDER_PATH" ]; then
+			[ "$bypass_china_ip" -eq 1 ] && printf ','
+			printf '{"name":"gfwlist","kind":"gfw-list","path":'
+			json_string "$GFWLIST_RUNTIME_PROVIDER_PATH"
+			printf ',"fallback_path":'
+			json_string "$DNS_SHARE_RULESETS_DIR/gfwlist.domains"
 			printf '}'
 		fi
 		printf ']}'
@@ -3365,7 +3414,7 @@ service_failed() {
 }
 
 fail_open_locked() {
-	local reason="${1:-runtime_failure}" instance="${2:-unknown}" pids cleanup=completed rc=0 netd_stopped=1
+	local reason="${1:-runtime_failure}" instance="${2:-unknown}" pids cleanup=completed rc=0 netd_stopped=1 autostart_disabled=0 detail
 	log_event warn fail_open "reason=$reason instance=$instance stopping service and removing owned steering"
 	write_lifecycle_state fail_open stopping || rc=1
 	if [ -f /lib/functions/procd.sh ]; then
@@ -3409,13 +3458,16 @@ fail_open_locked() {
 		cleanup=failed
 		rc=1
 	fi
-	if ! "$CANDY_INIT_SELF" disable >/dev/null 2>&1; then
+	if "$CANDY_INIT_SELF" disable >/dev/null 2>&1 && ! "$CANDY_INIT_SELF" enabled >/dev/null 2>&1; then
+		autostart_disabled=1
+	else
 		log_error "fail-open could not disable Candy autostart"
 		rc=1
 	fi
 	[ "$rc" -eq 0 ] || cleanup=failed
 	if [ "$rc" -eq 0 ]; then
-		if ! write_lifecycle_state fail_open failed || ! write_fault_state "$reason" completed "instance=$instance; service disabled"; then
+		detail="instance=$instance; service disabled"
+		if ! write_lifecycle_state fail_open failed || ! write_fault_state "$reason" completed "$detail"; then
 			rc=1
 			cleanup=failed
 			write_fault_state "$reason" failed "instance=$instance; cleanup completed but persistent state write failed" || true
@@ -3424,8 +3476,13 @@ fail_open_locked() {
 			log_event error fail_open "reason=$reason instance=$instance cleanup=completed service disabled after terminal failure"
 		fi
 	else
-		write_fault_state "$reason" "$cleanup" "instance=$instance; manual network cleanup required" || true
-		log_event error fail_open "reason=$reason instance=$instance cleanup=$cleanup service disabled; manual cleanup required"
+		if [ "$autostart_disabled" -eq 1 ]; then
+			detail="instance=$instance; service disabled; manual network cleanup required"
+		else
+			detail="instance=$instance; autostart disable failed; manual recovery required"
+		fi
+		write_fault_state "$reason" "$cleanup" "$detail" || true
+		log_event error fail_open "reason=$reason instance=$instance cleanup=$cleanup autostart_disabled=$autostart_disabled manual recovery required"
 	fi
 	sdwan_runtime_state fail-open "$reason" || true
 	return "$rc"
