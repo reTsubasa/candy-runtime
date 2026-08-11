@@ -182,6 +182,33 @@ make_catalog() {
 	cat > "$FAKE_CATALOG" <<EOF
 {"schema_version":1,"sequence":$sequence,"channel":"stable","published_at":"2026-08-05T02:00:00Z","runtime":{"latest":"v0_4_0_r$runtime_revision","releases":{$current_entry"v0_4_0_r$runtime_revision":{"version":"0.4.0","revision":$runtime_revision,"display_version":"$runtime_display","commit":"test","targets":{"openwrt_25_12_4_x86_64":{"openwrt_release":"25.12.4","target":"x86/64","arch":"x86_64","package_format":"apk","candy_client":{"url":"https://github.com/reTsubasa/candy-release/releases/download/runtime-v$runtime_display/candy-client-$runtime_display.apk","sha256":"$(file_sha "$client_file")","size":$(file_size "$client_file")},"luci_app_candy":{"url":"https://github.com/reTsubasa/candy-release/releases/download/runtime-v$runtime_display/luci-app-candy-$runtime_display.apk","sha256":"$(file_sha "$luci_file")","size":$(file_size "$luci_file")}}}}}},"core":{"latest":"v$(printf '%s' "$core_version" | tr . _)","releases":{"v$(printf '%s' "$core_version" | tr . _)":{"version":"$core_version","commit":"test","process_api_version":1,"core_api_version":1,"protocol_version":"0.3","targets":{"linux_musl_x86_64":{"target":"x86_64-unknown-linux-musl","os":"linux","libc":"musl","arch":"x86_64","url":"$core_url","sha256":"$(file_sha "$core_file")","size":$(file_size "$core_file")}}}}}}
 EOF
+	core_key="v$(printf '%s' "$core_version" | tr . _)"
+	jq --arg key "$core_key" --arg version "$core_version" '
+		.core.releases[$key].abi_profiles.cloud_control_linux_glibc_x86_64 = {
+			artifact_kind: "shared-library",
+			target: "x86_64-unknown-linux-gnu",
+			os: "linux",
+			libc: "glibc",
+			arch: "x86_64",
+			library: "libcandy_core_cloud.so",
+			module_abi_version: 1,
+			build_request_schema: "candy-core-cloud-build-v1",
+			url: ("https://github.com/reTsubasa/candy-release/releases/download/core-v" + $version + "/candy-core-" + $version + "-cloud-abi-x86_64-unknown-linux-gnu.tar.gz"),
+			sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			size: 1024
+		} |
+		.core_modules = {
+			latest: "v0_3_10",
+			releases: {
+				v0_3_10: {
+					version: "0.3.10",
+					legacy: true,
+					url: "https://github.com/reTsubasa/candy-release/releases/download/core-cloud-module-v0.3.10/candy-core-cloud-module-0.3.10-x86_64-unknown-linux-gnu.tar.gz"
+				}
+			}
+		}
+	' "$FAKE_CATALOG" > "$FAKE_CATALOG.next"
+	mv "$FAKE_CATALOG.next" "$FAKE_CATALOG"
 	printf '%s\n' trusted-signature > "$FAKE_CATALOG_SIGNATURE"
 }
 
@@ -295,6 +322,11 @@ CANDY_UPDATE_TEST_TARGET=ipq40xx/generic CANDY_UPDATE_TEST_ARCH=arm_cortex-a7_ne
 "$manager" install-core v0_3_5 >/dev/null
 grep -Eq '^install 0\.3\.5 file:///.+ [0-9a-f]{64}$' "$FAKE_CORE_LOG"
 ! grep -F 'activate' "$FAKE_CORE_LOG" >/dev/null
+grep -F 'releases/download/core-v0.3.5/candy-core-0.3.5-x86_64-unknown-linux-musl.tar.gz' "$FAKE_FETCH_LOG" >/dev/null
+if grep -E 'core-cloud-module-v|cloud-abi' "$FAKE_FETCH_LOG" >/dev/null; then
+	echo "OpenWrt update manager consumed a Cloud ABI or legacy module artifact" >&2
+	exit 1
+fi
 
 "$manager" install-runtime v0_4_0_r3 >/dev/null
 grep -F 'add --allow-untrusted ' "$FAKE_APK_LOG" >/dev/null
