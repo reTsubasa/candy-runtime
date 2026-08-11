@@ -289,6 +289,7 @@ jq --arg core_url "https://github.com/reTsubasa/candy-release/releases/download/
 	}' "$FAKE_CATALOG" > "$tmp/arm-catalog.json"
 cp "$tmp/arm-catalog.json" "$FAKE_CATALOG"
 CANDY_UPDATE_TEST_TARGET=ipq40xx/generic CANDY_UPDATE_TEST_ARCH=armv7l "$manager" check >/dev/null
+CANDY_UPDATE_TEST_TARGET=ipq40xx/generic CANDY_UPDATE_TEST_ARCH=arm_cortex-a7_neon-vfpv4 "$manager" check >/dev/null
 
 "$manager" check >/dev/null
 "$manager" install-core v0_3_5 >/dev/null

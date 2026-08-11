@@ -164,7 +164,7 @@ platform_release() {
 		printf '%s\n' "${CANDY_UPDATE_TEST_OPENWRT_RELEASE:-}"
 		return
 	fi
-	sed -n "s/^DISTRIB_RELEASE='\([^']*\)'/\1/p" /etc/openwrt_release 2>/dev/null | head -1
+	sed -n "s/^DISTRIB_RELEASE='\([^']*\)'/\1/p; s/^DISTRIB_RELEASE=\"\([^\"]*\)\"/\1/p" /etc/openwrt_release 2>/dev/null | head -1
 }
 
 platform_target() {
@@ -172,14 +172,19 @@ platform_target() {
 		printf '%s\n' "${CANDY_UPDATE_TEST_TARGET:-}"
 		return
 	fi
-	sed -n "s/^DISTRIB_TARGET='\([^']*\)'/\1/p" /etc/openwrt_release 2>/dev/null | head -1
+	sed -n "s/^DISTRIB_TARGET='\([^']*\)'/\1/p; s/^DISTRIB_TARGET=\"\([^\"]*\)\"/\1/p" /etc/openwrt_release 2>/dev/null | head -1
 }
 
 platform_arch() {
+	local arch
 	if [ "${CANDY_UPDATE_TEST_PLATFORM:-0}" = 1 ]; then
 		printf '%s\n' "${CANDY_UPDATE_TEST_ARCH:-}"
 		return
 	fi
+	# OpenWrt's DISTRIB_ARCH is the package ABI and is more reliable than
+	# uname(1), which may report a generic or vendor-specific ARM name.
+	arch=$(sed -n "s/^DISTRIB_ARCH='\([^']*\)'/\1/p; s/^DISTRIB_ARCH=\"\([^\"]*\)\"/\1/p" /etc/openwrt_release 2>/dev/null | head -1)
+	[ -n "$arch" ] && { printf '%s\n' "$arch"; return; }
 	uname -m 2>/dev/null || true
 }
 
@@ -199,7 +204,7 @@ require_supported_platform() {
 			CORE_RUST_TARGET=x86_64-unknown-linux-musl
 			CORE_ARCH=x86_64
 			;;
-		ipq40xx/generic:armv7l|ipq40xx/generic:armv7|ipq40xx/generic:arm)
+		ipq40xx/generic:armv7l|ipq40xx/generic:armv7|ipq40xx/generic:arm|ipq40xx/generic:arm_cortex-a7_neon-vfpv4|ipq40xx/generic:arm_cortex_a7_neon_vfpv4)
 			SUPPORTED_TARGET=ipq40xx/generic
 			SUPPORTED_ARCH=arm_cortex-a7_neon-vfpv4
 			RUNTIME_TARGET_KEY=openwrt_25_12_4_arm_cortex_a7_neon_vfpv4

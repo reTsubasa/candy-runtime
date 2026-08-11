@@ -113,6 +113,28 @@ valid_version() {
 	printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+.-][0-9A-Za-z][0-9A-Za-z.+-]*)?$'
 }
 
+host_arch_matches() {
+	local target_arch="$1" host_arch distro_arch
+	host_arch=$(uname -m 2>/dev/null || true)
+	case "$host_arch:$target_arch" in
+		x86_64:x86_64|amd64:x86_64|aarch64:aarch64|arm64:aarch64|arm*:arm|arm*:armv7|arm*:armv7l)
+			return 0
+		;;
+	esac
+	# On OpenWrt, DISTRIB_ARCH describes the package ABI and can be more
+	# specific than uname(1), e.g. arm_cortex-a7_neon-vfpv4 on IPQ40xx.
+	distro_arch=$(sed -n "s/^DISTRIB_ARCH='\([^']*\)'/\1/p; s/^DISTRIB_ARCH=\"\([^\"]*\)\"/\1/p" /etc/openwrt_release 2>/dev/null | head -1)
+	case "$distro_arch:$target_arch" in
+		x86_64:x86_64|aarch64:aarch64|arm_cortex-a7_neon-vfpv4:arm|arm_cortex-a7_neon-vfpv4:armv7|arm_cortex_a7_neon_vfpv4:arm|arm_cortex_a7_neon_vfpv4:armv7)
+			return 0
+		;;
+		*)
+			printf '%s' "${distro_arch:-${host_arch:-unknown}}" >&2
+			return 1
+		;;
+	esac
+}
+
 valid_sha256() {
 	printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{64}$'
 }
@@ -187,10 +209,9 @@ validate_manifest_file() {
 	[ "$core_target_arch" = "$target_arch" ] || validation_error manifest arch_mismatch "Core and artifact target architecture values do not match" || return 1
 	[ "$libc" = musl ] || validation_error manifest libc_incompatible "Core libc ${libc:-missing} is not compatible with OpenWrt" || return 1
 	[ -n "$target_arch" ] || validation_error manifest arch_missing "Core target architecture is missing" || return 1
-	case "$(uname -m 2>/dev/null || true):$target_arch" in
-		x86_64:x86_64|amd64:x86_64|aarch64:aarch64|arm64:aarch64|arm*:arm|arm*:armv7|arm*:armv7l) ;;
-		*) validation_error manifest arch_incompatible "Core target architecture $target_arch does not match $(uname -m 2>/dev/null || printf unknown)" || return 1 ;;
-	esac
+	host_arch_matches "$target_arch" || {
+		validation_error manifest arch_incompatible "Core target architecture $target_arch does not match $(uname -m 2>/dev/null || printf unknown)" || return 1
+	}
 	[ "$executable" = candy-core ] || validation_error manifest executable_path_invalid "Core executable path is invalid" || return 1
 	valid_sha256 "$executable_sha" || validation_error manifest executable_sha_invalid "Core executable SHA-256 is invalid" || return 1
 }
