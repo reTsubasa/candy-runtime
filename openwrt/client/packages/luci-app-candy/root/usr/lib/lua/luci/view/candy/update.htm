@@ -35,6 +35,10 @@ end
 .candy-update-advanced summary { cursor: pointer; font-weight: 600; }
 .candy-update-upload { display: flex; flex-wrap: wrap; gap: .6em; align-items: center; margin-top: .8em; }
 .candy-update-upload input[type="file"] { max-width: 100%; }
+.candy-update-upload progress { width: min(18em, 100%); height: 1em; }
+.candy-update-upload-status { flex-basis: 100%; margin: 0; }
+.candy-update-upload-status.error { color: #c62828; }
+.candy-update-upload-status.success { color: #2e7d32; }
 </style>
 
 <div id="candy-update-operation" class="candy-update-operation" style="display:none"></div>
@@ -86,10 +90,12 @@ end
 		<details class="candy-update-advanced">
 			<summary><%:Advanced: install a local Core bundle%></summary>
 			<p class="candy-update-note"><%:Upload an official signed Core bundle only. The 128 MiB maximum is installed inactive and is never activated automatically.%></p>
-			<form class="candy-update-upload" method="post" enctype="multipart/form-data" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'update_install_core_upload')%>">
+			<form id="candy-update-core-upload-form" class="candy-update-upload" method="post" enctype="multipart/form-data" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'update_install_core_upload')%>">
 				<input type="hidden" name="token" value="<%=xml.pcdata(auth_token)%>" />
-				<input type="file" name="core_bundle" accept=".tar.gz,application/gzip" required="required" />
+				<input id="candy-update-core-upload-file" type="file" name="core_bundle" accept=".tar.gz,application/gzip" required="required" />
 				<button id="candy-update-core-upload" class="cbi-button cbi-button-apply" type="submit"><%:Install uploaded Core%></button>
+				<progress id="candy-update-core-upload-progress" max="100" value="0" style="display:none"></progress>
+				<p id="candy-update-core-upload-status" class="candy-update-upload-status" aria-live="polite"></p>
 			</form>
 		</details>
 	</div>
@@ -101,6 +107,7 @@ var candyUpdateRuntimeUrl = "<%=luci.dispatcher.build_url('admin', 'services', '
 var candyUpdateCorePageUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core')%>";
 var candyUpdateToken = <%=js_string(auth_token)%>;
 var candyUpdateTimer = null;
+var candyUpdateUploading = false;
 var candyUpdateLabels = {
 	valid: <%=js_string(i18n.translate("Verified"))%>,
 	invalid: <%=js_string(i18n.translate("Not checked"))%>,
@@ -117,6 +124,9 @@ var candyUpdateLabels = {
 	notInstallable: <%=js_string(i18n.translate("Not installable"))%>,
 	rollbackAvailable: <%=js_string(i18n.translate("Rollback available"))%>,
 	noCompatibleCore: <%=js_string(i18n.translate("No compatible Core is available"))%>,
+	uploadingCore: <%=js_string(i18n.translate("Uploading Core bundle"))%>,
+	uploadAccepted: <%=js_string(i18n.translate("Upload complete; validating Core"))%>,
+	uploadFailed: <%=js_string(i18n.translate("Core upload failed"))%>,
 	operationMessages: {
 		"downloading and verifying the stable catalog": <%=js_string(i18n.translate("Downloading and verifying the stable catalog"))%>,
 		"stable catalog verified": <%=js_string(i18n.translate("Stable catalog verified"))%>,
@@ -139,6 +149,54 @@ function candyUpdateSet(id, value) {
 
 function candyUpdateOperationText(message) {
 	return candyUpdateLabels.operationMessages[message] || message || "";
+}
+
+function candyUpdateUploadState(message, className, progress) {
+	var status = document.getElementById("candy-update-core-upload-status");
+	var bar = document.getElementById("candy-update-core-upload-progress");
+	if (status) {
+		status.className = "candy-update-upload-status" + (className ? " " + className : "");
+		status.textContent = message || "";
+	}
+	if (bar) {
+		bar.style.display = progress === null ? "none" : "";
+		if (progress !== null) bar.value = progress;
+	}
+}
+
+function candyUpdateSubmitCoreUpload(event) {
+	if (event && event.preventDefault) event.preventDefault();
+	if (candyUpdateUploading) return false;
+	var form = document.getElementById("candy-update-core-upload-form");
+	var file = document.getElementById("candy-update-core-upload-file");
+	var button = document.getElementById("candy-update-core-upload");
+	if (!form || !file || !file.files || !file.files.length) return false;
+	var xhr = new XMLHttpRequest();
+	candyUpdateUploading = true;
+	if (button) button.disabled = true;
+	candyUpdateUploadState(candyUpdateLabels.uploadingCore + " (0%)", "", 0);
+	xhr.open("POST", form.action, true);
+	xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+	if (xhr.upload) xhr.upload.onprogress = function(uploadEvent) {
+		if (!uploadEvent.lengthComputable) return;
+		var percent = Math.min(100, Math.round(uploadEvent.loaded * 100 / uploadEvent.total));
+		candyUpdateUploadState(candyUpdateLabels.uploadingCore + " (" + percent + "%)", "", percent);
+	};
+	xhr.onreadystatechange = function() {
+		if (xhr.readyState !== 4) return;
+		candyUpdateUploading = false;
+		if (xhr.status === 202) {
+			file.value = "";
+			candyUpdateUploadState(candyUpdateLabels.uploadAccepted, "success", null);
+			refreshCandyUpdateStatus();
+		} else {
+			var detail = String(xhr.responseText || "").replace(/^\s+|\s+$/g, "");
+			candyUpdateUploadState(candyUpdateLabels.uploadFailed + (detail ? ": " + detail : ""), "error", null);
+			if (button) button.disabled = false;
+		}
+	};
+	xhr.send(new FormData(form));
+	return false;
 }
 
 function candyUpdateCompare(left, right) {
@@ -273,7 +331,7 @@ function candyUpdateRender(data) {
 	candyUpdateRow("candy-update-runtime", [data.runtime_current, runtimeEntry.display_version, runtimeNewer ? candyUpdateLabels.available : candyUpdateLabels.current], runtimeNewer && runtime.latest ? candyUpdateAction(candyUpdateRuntimeUrl, runtime.latest, candyUpdateLabels.installRuntime, busy) : null);
 	candyUpdateRenderCore(data, busy);
 	var check = document.getElementById("candy-update-check"); if (check) check.disabled = busy;
-	var upload = document.getElementById("candy-update-core-upload"); if (upload) upload.disabled = busy;
+	var upload = document.getElementById("candy-update-core-upload"); if (upload) upload.disabled = busy || candyUpdateUploading;
 }
 
 function refreshCandyUpdateStatus() {
@@ -288,6 +346,8 @@ function refreshCandyUpdateStatus() {
 	xhr.send(null);
 }
 
+var candyUpdateUploadForm = document.getElementById("candy-update-core-upload-form");
+if (candyUpdateUploadForm) candyUpdateUploadForm.addEventListener("submit", candyUpdateSubmitCoreUpload);
 refreshCandyUpdateStatus();
 </script>
 

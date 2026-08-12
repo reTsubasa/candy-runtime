@@ -1470,6 +1470,15 @@ msgstr "仅可上传官方签名的 Core 包，最大 128 MiB。安装后保持�
 msgid "Install uploaded Core"
 msgstr "安装上传的 Core"
 
+msgid "Uploading Core bundle"
+msgstr "正在上传 Core 包"
+
+msgid "Upload complete; validating Core"
+msgstr "上传完成，正在验证 Core"
+
+msgid "Core upload failed"
+msgstr "Core 上传失败"
+
 msgid "Validating uploaded Core"
 msgstr "正在验证上传的 Core"
 

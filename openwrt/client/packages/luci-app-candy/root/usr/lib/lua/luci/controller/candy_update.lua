@@ -46,11 +46,17 @@ local function manager_available()
 	return true
 end
 
-local function start_operation(arguments)
+local function start_operation(arguments, json_response)
 	if not manager_available() then return end
 	if not process.run(arguments, { background = true, output = "/tmp/candy-update-manager.log", append = true }) then
 		luci.http.status(500, "Internal Server Error")
 		return false
+	end
+	if json_response then
+		luci.http.status(202, "Accepted")
+		luci.http.prepare_content("application/json")
+		luci.http.write('{"accepted":true}\n')
+		return true
 	end
 	luci.http.redirect(luci.dispatcher.build_url("admin", "services", "candy", "update"))
 	return true
@@ -64,7 +70,7 @@ local function prepare_upload_root()
 	elseif not fs.mkdirr(CORE_UPLOAD_ROOT) then
 		return false
 	end
-	return fs.chmod(CORE_UPLOAD_ROOT, 448) ~= false
+	return fs.chmod(CORE_UPLOAD_ROOT, "0700") and true or false
 end
 
 local function allocate_upload_path()
@@ -166,7 +172,7 @@ function action_install_core_upload()
 				return
 			end
 			upload_file = io.open(upload_path, "wb")
-			if not upload_file or fs.chmod(upload_path, 384) == false then
+			if not upload_file or not fs.chmod(upload_path, "0600") then
 				upload_failure = "Cannot create Core upload staging file"
 				return
 			end
@@ -211,7 +217,8 @@ function action_install_core_upload()
 		upload_error(400, "A Core bundle is required", upload_path, upload_file)
 		return
 	end
-	if not start_operation({ UPDATE_MANAGER, "install-core-upload", upload_path }) then
+	local async_upload = luci.http.getenv("HTTP_X_REQUESTED_WITH") == "XMLHttpRequest"
+	if not start_operation({ UPDATE_MANAGER, "install-core-upload", upload_path }, async_upload) then
 		fs.unlink(upload_path)
 	end
 end

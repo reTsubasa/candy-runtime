@@ -19,8 +19,8 @@ grep -F 'luci.http.setfilehandler' "$controller" >/dev/null
 grep -F '128 * 1024 * 1024' "$controller" >/dev/null
 grep -F 'or "/tmp/candy-core-upload"' "$controller" >/dev/null
 grep -F 'tonumber(stat.uid) ~= 0' "$controller" >/dev/null
-grep -F 'fs.chmod(CORE_UPLOAD_ROOT, 448)' "$controller" >/dev/null
-grep -F 'fs.chmod(upload_path, 384)' "$controller" >/dev/null
+grep -F 'fs.chmod(CORE_UPLOAD_ROOT, "0700")' "$controller" >/dev/null
+grep -F 'fs.chmod(upload_path, "0600")' "$controller" >/dev/null
 ! grep -Eq 'formvalue\("(url|sha256|path)"\)' "$controller"
 grep -F 'candy-update-runtime' "$view" >/dev/null
 grep -F 'candy-update-core' "$view" >/dev/null
@@ -32,6 +32,10 @@ grep -F 'name="version_key"' "$view" >/dev/null
 grep -F 'enctype="multipart/form-data"' "$view" >/dev/null
 grep -F 'name="core_bundle"' "$view" >/dev/null
 grep -F 'update_install_core_upload' "$view" >/dev/null
+grep -F 'addEventListener("submit", candyUpdateSubmitCoreUpload)' "$view" >/dev/null
+grep -F 'xhr.status === 202' "$view" >/dev/null
+grep -F 'new FormData(form)' "$view" >/dev/null
+grep -F 'Uploading Core bundle' "$view" "$po" >/dev/null
 grep -F 'candy-update-catalog-actions' "$view" >/dev/null
 grep -F 'candy-update-section' "$view" >/dev/null
 grep -F 'data.core && data.core.installed' "$view" >/dev/null
@@ -70,8 +74,9 @@ function fs.mkdirr(path)
 	return ok == true or ok == 0
 end
 function fs.chmod(path, mode)
+	assert(type(mode) == "string" and mode:match("^[0-7][0-7][0-7][0-7]$"), "ucodebridge requires string chmod modes")
 	chmods[path] = mode
-	local ok = os.execute("chmod " .. string.format("%o", mode) .. " " .. shell_quote(path))
+	local ok = os.execute("chmod " .. mode .. " " .. shell_quote(path))
 	return ok == true or ok == 0
 end
 function fs.unlink(path) return os.remove(path) end
@@ -97,6 +102,7 @@ luci = {
 		getenv = function(name)
 			if name == "REQUEST_METHOD" then return "POST" end
 			if name == "CONTENT_LENGTH" then return content_length end
+			if name == "HTTP_X_REQUESTED_WITH" then return "XMLHttpRequest" end
 		end,
 		setfilehandler = function(callback) handler = callback end,
 		formvalue = function(name)
@@ -126,13 +132,13 @@ end
 
 reset({ first = "signed-", second = "bundle" }, "csrf-token", "128")
 action_install_core_upload()
-assert(status_code == nil, "successful upload must not set an error status")
+assert(status_code == 202, "successful asynchronous upload must return Accepted")
 assert(run_call and run_call.arguments[1] == "/usr/libexec/candy-update-manager")
 assert(run_call.arguments[2] == "install-core-upload")
 local staged = run_call.arguments[3]
 assert(type(staged) == "string" and staged:sub(1, #upload_root + 1) == upload_root .. "/")
-assert(chmods[upload_root] == 448, "upload root must be mode 0700")
-assert(chmods[staged] == 384, "staged upload must be mode 0600")
+assert(chmods[upload_root] == "0700", "upload root must be mode 0700")
+assert(chmods[staged] == "0600", "staged upload must be mode 0600")
 assert(run_call.options.background == true and run_call.options.append == true)
 local file = assert(io.open(staged, "rb")); local body = file:read("*a"); file:close()
 assert(body == "signed-bundle", "multipart chunks must be streamed in order")
@@ -170,7 +176,7 @@ source = source.replace(/"<%=[\s\S]*?%>"/g, '"/test"').replace(/<%=[\s\S]*?%>/g,
 source = source.replace(/\nrefreshCandyUpdateStatus\(\);\s*$/, "");
 
 class Element {
-	constructor(tag) { this.tagName = tag; this.children = []; this.style = {}; this.disabled = false; this._value = ""; this.selectedIndex = -1; this._text = ""; }
+	constructor(tag) { this.tagName = tag; this.children = []; this.style = {}; this.disabled = false; this._value = ""; this.selectedIndex = -1; this._text = ""; this.files = []; this.listeners = {}; this.action = "/upload"; }
 	appendChild(child) {
 		this.children.push(child);
 		if (this.tagName === "select" && this.selectedIndex < 0) { this.selectedIndex = 0; this._value = child.value; }
@@ -185,15 +191,25 @@ class Element {
 	}
 	get value() { return this._value; }
 	get options() { return this.children; }
+	addEventListener(name, handler) { this.listeners[name] = handler; }
 }
 
 const elements = {};
-for (const id of ["candy-update-core", "candy-update-core-select", "candy-update-core-install", "candy-update-core-upload", "candy-update-core-installed", "candy-update-runtime", "candy-update-operation", "candy-update-catalog-valid", "candy-update-sequence", "candy-update-published", "candy-update-checked", "candy-update-platform", "candy-update-check"]) {
+for (const id of ["candy-update-core", "candy-update-core-select", "candy-update-core-install", "candy-update-core-upload", "candy-update-core-upload-form", "candy-update-core-upload-file", "candy-update-core-upload-progress", "candy-update-core-upload-status", "candy-update-core-installed", "candy-update-runtime", "candy-update-operation", "candy-update-catalog-valid", "candy-update-sequence", "candy-update-published", "candy-update-checked", "candy-update-platform", "candy-update-check"]) {
 	elements[id] = new Element(id === "candy-update-core-select" ? "select" : "div");
+}
+const requests = [];
+class FakeXMLHttpRequest {
+	constructor() { this.readyState = 0; this.status = 0; this.responseText = ""; this.upload = {}; requests.push(this); }
+	open(method, url) { this.method = method; this.url = url; }
+	setRequestHeader(name, value) { this.headers = this.headers || {}; this.headers[name] = value; }
+	send(body) { this.body = body; }
+	respond(status, body) { this.status = status; this.responseText = body || ""; this.readyState = 4; this.onreadystatechange(); }
 }
 const context = {
 	document: { createElement: (tag) => new Element(tag), getElementById: (id) => elements[id] || null },
-	console, Date, JSON, Array, String, Number, setTimeout: () => 1, clearTimeout: () => {}
+	console, Date, JSON, Array, String, Number, XMLHttpRequest: FakeXMLHttpRequest,
+	FormData: class { constructor(form) { this.form = form; } }, setTimeout: () => 1, clearTimeout: () => {}
 };
 vm.createContext(context); vm.runInContext(source, context);
 Object.assign(context.candyUpdateLabels, {
@@ -201,6 +217,7 @@ Object.assign(context.candyUpdateLabels, {
 	notInstallable: "Not installable", available: "Available", reviewCore: "Review", active: "Active",
 	inactive: "Inactive", installedLocally: "Installed locally", noCompatibleCore: "None"
 });
+assert.equal(typeof elements["candy-update-core-upload-form"].listeners.submit, "function", "upload form must submit in place");
 
 const candidates = [
 	{ version_key: "v0_3_9", version: "0.3.9", process_api_version: 1, core_api_version: 1, compatible: true, installable: true, latest: true },
@@ -223,6 +240,18 @@ assert.equal(elements["candy-update-core-select"].disabled, true);
 assert.equal(elements["candy-update-core-install"].disabled, true);
 context.candyUpdateRender({ operation: { state: "running" }, catalog: {} });
 assert.equal(elements["candy-update-core-upload"].disabled, true);
+elements["candy-update-core-upload-file"].files = [{ name: "core.tar.gz" }];
+context.candyUpdateUploading = false;
+context.candyUpdateSubmitCoreUpload({ preventDefault() {} });
+const uploadRequest = requests[requests.length - 1];
+assert.equal(uploadRequest.method, "POST");
+assert.equal(uploadRequest.url, "/upload");
+assert.equal(uploadRequest.headers["X-Requested-With"], "XMLHttpRequest");
+uploadRequest.upload.onprogress({ lengthComputable: true, loaded: 5, total: 10 });
+assert.equal(Number(elements["candy-update-core-upload-progress"].value), 50);
+uploadRequest.respond(202, '{"accepted":true}');
+assert.equal(context.candyUpdateUploading, false);
+assert.equal(elements["candy-update-core-upload-status"].className, "candy-update-upload-status success");
 NODE
 
 printf '%s\n' "OpenWrt Candy update LuCI contract passed"
