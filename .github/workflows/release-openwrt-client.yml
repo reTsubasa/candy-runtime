@@ -1,6 +1,14 @@
 name: release-openwrt-client
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - VERSION
+      - openwrt/client/packages/candy-client/Makefile
+      - openwrt/client/packages/luci-app-candy/Makefile
+      - .github/workflows/release-openwrt-client.yml
   workflow_dispatch:
     inputs:
       source_commit:
@@ -21,6 +29,7 @@ env:
   OPENWRT_RELEASE: "25.12.4"
   OPENWRT_GCC_VERSION: "14.3.0"
   RELEASE_REPOSITORY: reTsubasa/candy-release
+  SOURCE_COMMIT: ${{ inputs.source_commit || github.sha }}
 
 jobs:
   release:
@@ -29,7 +38,7 @@ jobs:
       - name: Check out immutable Runtime commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ inputs.source_commit }}
+          ref: ${{ env.SOURCE_COMMIT }}
           fetch-depth: 0
 
       - name: Validate Runtime release version
@@ -37,8 +46,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = reTsubasa/candy-runtime
-          printf '%s' '${{ inputs.source_commit }}' | grep -Eq '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$'
-          test "$(git rev-parse HEAD)" = "$(git rev-parse '${{ inputs.source_commit }}')"
+          printf '%s' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$'
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$SOURCE_COMMIT")"
           test "$(tr -d '\r\n' < VERSION)" = "$CANDY_RELEASE_VERSION"
           test "$(sed -n 's/^PKG_VERSION:=//p' openwrt/client/packages/candy-client/Makefile)" = "$CANDY_RELEASE_VERSION"
           test "$(sed -n 's/^PKG_VERSION:=//p' openwrt/client/packages/luci-app-candy/Makefile)" = "$CANDY_RELEASE_VERSION"

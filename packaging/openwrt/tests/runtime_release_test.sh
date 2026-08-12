@@ -61,7 +61,10 @@ if CANDY_RELEASE_VERSION="$version" \
 fi
 
 [ -f "$workflow" ] || fail "OpenWrt client release workflow is missing"
-grep -Fq 'ref: ${{ inputs.source_commit }}' "$workflow" || fail "release workflow does not build an immutable source commit"
+grep -Fq 'push:' "$workflow" || fail "release workflow does not trigger automatically"
+grep -Fq 'branches:' "$workflow" || fail "release workflow does not restrict automatic releases to main"
+grep -Fq 'SOURCE_COMMIT: ${{ inputs.source_commit || github.sha }}' "$workflow" || fail "release workflow does not resolve an immutable automatic source commit"
+grep -Fq 'ref: ${{ env.SOURCE_COMMIT }}' "$workflow" || fail "release workflow does not build the resolved immutable source commit"
 grep -Fq 'source_commit:' "$workflow" || fail "release workflow does not require a source commit input"
 grep -Fq 'test "$GITHUB_REPOSITORY" = reTsubasa/candy-runtime' "$workflow" || fail "release workflow accepts an unexpected source repository"
 grep -Fq 'CANDY_RELEASE_VERSION: "0.4.0"' "$workflow" || fail "release workflow does not pin Runtime 0.4.0"
