@@ -7,6 +7,8 @@ use candy_netd::{
 };
 use clap::Parser;
 #[cfg(target_os = "linux")]
+use nix::unistd::{Group, User};
+#[cfg(target_os = "linux")]
 use std::io::ErrorKind;
 use std::path::PathBuf;
 #[cfg(target_os = "linux")]
@@ -21,11 +23,22 @@ struct Args {
     probe_socket: Option<PathBuf>,
     #[arg(long, required_unless_present_any = ["probe_socket", "recover"])]
     socket: Option<PathBuf>,
-    #[arg(long, required_unless_present_any = ["probe_socket", "recover"])]
+    #[arg(long, required_unless_present_any = ["probe_socket", "recover", "allowed_user"])]
     allowed_uid: Option<u32>,
-    #[arg(long, required_unless_present_any = ["probe_socket", "recover"])]
+    #[arg(long, required_unless_present_any = ["probe_socket", "recover", "allowed_group"])]
     allowed_gid: Option<u32>,
-    #[arg(long, conflicts_with_all = ["probe_socket", "socket", "allowed_uid", "allowed_gid"])]
+    #[arg(long, conflicts_with = "allowed_uid", requires = "allowed_group")]
+    allowed_user: Option<String>,
+    #[arg(long, conflicts_with = "allowed_gid", requires = "allowed_user")]
+    allowed_group: Option<String>,
+    #[arg(long, conflicts_with_all = [
+        "probe_socket",
+        "socket",
+        "allowed_uid",
+        "allowed_gid",
+        "allowed_user",
+        "allowed_group"
+    ])]
     recover: bool,
     #[arg(long, default_value = "/var/lib/candy/netd.journal")]
     journal: PathBuf,
@@ -60,8 +73,7 @@ fn run_linux(args: Args) -> anyhow::Result<()> {
         return Ok(());
     }
     let socket = args.socket.expect("clap requires --socket");
-    let allowed_uid = args.allowed_uid.expect("clap requires --allowed-uid");
-    let allowed_gid = args.allowed_gid.expect("clap requires --allowed-gid");
+    let (allowed_uid, allowed_gid) = resolve_allowed_identity(&args)?;
     let listener = bind_private_socket_for(&socket, allowed_uid, allowed_gid)?;
     listener.set_nonblocking(true)?;
     let network = NetworkTransaction::new(
@@ -100,6 +112,28 @@ fn run_linux(args: Args) -> anyhow::Result<()> {
     );
     shutdown_result?;
     service_result
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_allowed_identity(args: &Args) -> anyhow::Result<(u32, u32)> {
+    match (&args.allowed_user, &args.allowed_group) {
+        (Some(user), Some(group)) => {
+            let uid = User::from_name(user)?
+                .ok_or_else(|| anyhow::anyhow!("allowed user does not exist: {user}"))?
+                .uid
+                .as_raw();
+            let gid = Group::from_name(group)?
+                .ok_or_else(|| anyhow::anyhow!("allowed group does not exist: {group}"))?
+                .gid
+                .as_raw();
+            Ok((uid, gid))
+        }
+        (None, None) => Ok((
+            args.allowed_uid.expect("clap requires --allowed-uid"),
+            args.allowed_gid.expect("clap requires --allowed-gid"),
+        )),
+        _ => anyhow::bail!("allowed user and group must be provided together"),
+    }
 }
 
 #[cfg(target_os = "linux")]

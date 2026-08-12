@@ -1,0 +1,30 @@
+[Unit]
+Description=Candy SD-WAN managed data plane
+After=network-online.target candy-netd.service
+Wants=network-online.target
+Requires=candy-netd.service
+BindsTo=candy-netd.service
+ConditionPathExists=/etc/candy/sdwan-agent.env
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/candy/sdwan-agent.env
+ExecStartPre=+/usr/local/libexec/candy-sdwan-runtime publish
+ExecStart=/usr/local/libexec/candy-sdwan-agent run --socket ${CANDY_NETD_SOCKET} --core ${CANDY_CORE_BIN} --config ${CANDY_SDWAN_CORE_CONFIG} --declaration ${CANDY_SDWAN_DECLARATION} --status ${CANDY_SDWAN_STATUS_FILE} --instance-id ${CANDY_SDWAN_INSTANCE_ID} --generation ${CANDY_SDWAN_GENERATION} --lease-ms ${CANDY_SDWAN_LEASE_MS}
+# The agent rolls back through netd before exit; this hook only publishes state.
+ExecStopPost=+/usr/local/libexec/candy-sdwan-runtime fail-open service-stopped
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=20s
+User=candy-sdwan
+Group=candy-sdwan
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/candy /run/candy
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

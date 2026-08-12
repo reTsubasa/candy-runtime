@@ -11,12 +11,14 @@ use std::fs;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_DECLARATION_BYTES: u64 = 1024 * 1024;
 const MIN_LEASE_MS: u64 = 5_000;
 const MAX_LEASE_MS: u64 = 120_000;
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Parser, Debug)]
 #[command(
@@ -227,6 +229,36 @@ fn spawn_core(args: &Args, tun: &OwnedFd) -> Result<Child> {
         .with_context(|| format!("start Candy Core: {}", args.core.display()))
 }
 
+extern "C" fn request_shutdown(_signal: nix::libc::c_int) {
+    SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+fn install_shutdown_handlers() -> Result<()> {
+    let mut action: nix::libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = request_shutdown as *const () as usize;
+    action.sa_flags = 0;
+    unsafe {
+        nix::libc::sigemptyset(&mut action.sa_mask);
+        if nix::libc::sigaction(nix::libc::SIGTERM, &action, std::ptr::null_mut()) != 0
+            || nix::libc::sigaction(nix::libc::SIGINT, &action, std::ptr::null_mut()) != 0
+        {
+            return Err(std::io::Error::last_os_error()).context("install shutdown handlers");
+        }
+    }
+    Ok(())
+}
+
+fn stop_core(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn rollback_or_report(netd: &mut NetdClient, cause: &str) -> Result<()> {
+    netd.rollback()
+        .map(|_| ())
+        .with_context(|| format!("{cause}; netd rollback failed"))
+}
+
 fn run(args: Args) -> Result<()> {
     if args.generation == 0 {
         bail!("generation must be non-zero")
@@ -234,6 +266,7 @@ fn run(args: Args) -> Result<()> {
     if !(MIN_LEASE_MS..=MAX_LEASE_MS).contains(&args.lease_ms) {
         bail!("lease-ms is outside the supported bound")
     }
+    install_shutdown_handlers()?;
     let declaration = parse_declaration(&args.declaration)?;
     let deadline = monotonic_ms()?
         .checked_add(args.lease_ms)
@@ -253,14 +286,13 @@ fn run(args: Args) -> Result<()> {
     let mut child = match spawn_core(&args, &prepared.tun) {
         Ok(child) => child,
         Err(error) => {
-            let _ = netd.rollback();
+            rollback_or_report(&mut netd, "Candy Core start failed")?;
             return Err(error);
         }
     };
     if let Err(error) = netd.commit() {
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = netd.rollback();
+        stop_core(&mut child);
+        rollback_or_report(&mut netd, "netd commit failed")?;
         return Err(error.into());
     }
     eprintln!(
@@ -268,25 +300,38 @@ fn run(args: Args) -> Result<()> {
         owner.generation
     );
     let renew_every = Duration::from_millis((args.lease_ms / 3).max(1_000));
+    let mut next_renewal = Instant::now() + renew_every;
     loop {
+        if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+            stop_core(&mut child);
+            rollback_or_report(&mut netd, "SD-WAN agent shutdown")?;
+            eprintln!(
+                "level=info event=sdwan_stopped generation={} rollback_ok=true",
+                owner.generation
+            );
+            return Ok(());
+        }
         if let Some(status) = child.try_wait().context("wait for Candy Core")? {
             let code = status.code().unwrap_or(1);
-            let _ = netd.rollback();
+            rollback_or_report(&mut netd, "Candy Core SD-WAN exited")?;
             if code == 0 {
                 return Ok(());
             }
             bail!("Candy Core SD-WAN exited with status {}", code)
         }
-        thread::sleep(renew_every);
+        if Instant::now() < next_renewal {
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        }
         let next_deadline = monotonic_ms()?
             .checked_add(args.lease_ms)
             .context("lease deadline overflow")?;
         if let Err(error) = netd.renew_lease(next_deadline) {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = netd.rollback();
+            stop_core(&mut child);
+            rollback_or_report(&mut netd, "netd lease renewal failed")?;
             return Err(error).context("netd lease renewal");
         }
+        next_renewal = Instant::now() + renew_every;
     }
 }
 

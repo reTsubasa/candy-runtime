@@ -5,9 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStartPre=+/usr/local/libexec/candy-sdwan-runtime publish
 ExecStart=/usr/local/libexec/candy-client --config /etc/candy/client.toml
-ExecStopPost=+/usr/local/libexec/candy-sdwan-runtime fail-open service-stopped
 Restart=on-failure
 RestartSec=2s
 DynamicUser=yes

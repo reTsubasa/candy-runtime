@@ -1,0 +1,2 @@
+# Stable service identity used by candy-sdwan.service and netd socket ACLs.
+u candy-sdwan - "Candy SD-WAN agent" -

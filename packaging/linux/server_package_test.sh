@@ -23,7 +23,11 @@ dist=$tmp/dist
 agent=$tmp/candy-sdwan-agent
 printf '#!/bin/sh\nexit 0\n' >"$agent"
 chmod 0755 "$agent"
+netd=$tmp/candy-netd
+printf '#!/bin/sh\nexit 0\n' >"$netd"
+chmod 0755 "$netd"
 PATH="$fake_bin:$PATH" CANDY_LINUX_DIST_DIR="$dist" CANDY_SDWAN_AGENT_BINARY="$agent" \
+	CANDY_NETD_BINARY="$netd" \
 	"$root/packaging/linux/build.sh" x86_64-unknown-linux-gnu >/dev/null
 
 stage=$dist/server/x86_64
@@ -43,11 +47,17 @@ cmp "$root/linux/server/apps/candy-server/candy-server" \
 [ -x "$edge_stage/usr/local/libexec/candy-client" ] || fail "private Linux Edge process launcher was not staged"
 [ -x "$edge_stage/usr/local/libexec/candy-sdwan-runtime" ] || fail "Linux Edge SD-WAN Runtime helper was not staged"
 [ -x "$edge_stage/usr/local/libexec/candy-sdwan-agent" ] || fail "Linux Edge SD-WAN agent was not staged"
+[ -x "$edge_stage/usr/local/libexec/candy-netd" ] || fail "Linux Edge netd was not staged"
 [ -f "$edge_stage/systemd/candy-client.service" ] || fail "Linux Edge systemd unit was not staged"
+[ -f "$edge_stage/systemd/candy-netd.service" ] || fail "netd systemd unit was not staged"
+[ -f "$edge_stage/systemd/candy-sdwan.service" ] || fail "SD-WAN systemd unit was not staged"
+grep -F 'Requires=candy-netd.service' "$edge_stage/systemd/candy-sdwan.service" >/dev/null || fail "SD-WAN unit does not require netd"
+grep -F 'BindsTo=candy-netd.service' "$edge_stage/systemd/candy-sdwan.service" >/dev/null || fail "SD-WAN unit is not bound to netd"
+grep -F -- '--recover --journal' "$edge_stage/systemd/candy-netd.service" >/dev/null || fail "netd unit has no real orphan recovery hook"
 grep -F 'ExecStart=/usr/local/libexec/candy-client' "$edge_stage/systemd/candy-client.service" >/dev/null ||
 	fail "Linux Edge service exposes a private data-plane command"
-grep -F 'ExecStopPost=+/usr/local/libexec/candy-sdwan-runtime fail-open' "$edge_stage/systemd/candy-client.service" >/dev/null ||
-	fail "Linux Edge service has no fail-open lifecycle hook"
+grep -F 'ExecStopPost=+/usr/local/libexec/candy-sdwan-runtime fail-open' "$edge_stage/systemd/candy-sdwan.service" >/dev/null ||
+	fail "Linux Edge SD-WAN service has no fail-open lifecycle hook"
 grep -F 'CONGESTION_TEST_BYTES=52428800' "$stage/install/install-candy-server.sh" >/dev/null ||
 	fail "server installer does not provision the 50 MiB congestion test object"
 grep -F 'dd if=/dev/zero' "$stage/install/install-candy-server.sh" >/dev/null ||

@@ -1,0 +1,24 @@
+[Unit]
+Description=Candy privileged network transaction daemon
+After=network-online.target
+Wants=network-online.target
+Before=candy-sdwan.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/mkdir -p /run/candy-netd /var/lib/candy
+ExecStart=/usr/local/libexec/candy-netd --socket /run/candy-netd/netd.sock --allowed-user candy-sdwan --allowed-group candy-sdwan --journal /var/lib/candy/netd.journal
+# Recovery is deliberately a real netd transaction, not a status-file update.
+ExecStopPost=+/usr/local/libexec/candy-netd --recover --journal /var/lib/candy/netd.journal
+Restart=on-failure
+RestartSec=2s
+User=root
+Group=root
+NoNewPrivileges=no
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ReadWritePaths=/run/candy-netd /var/lib/candy
+
+[Install]
+WantedBy=multi-user.target

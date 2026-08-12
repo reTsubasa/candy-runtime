@@ -2,7 +2,7 @@
 set -eu
 
 runtime=${CANDY_SDWAN_RUNTIME:-/usr/local/libexec/candy-sdwan-runtime}
-service=${CANDY_EDGE_SERVICE:-candy-client.service}
+service=${CANDY_EDGE_SERVICE:-candy-sdwan.service}
 
 fail() {
 	printf '%s\n' "candy: $*" >&2
