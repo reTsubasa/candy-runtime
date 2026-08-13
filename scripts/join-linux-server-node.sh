@@ -31,11 +31,15 @@ Options:
 EOF
 }
 
-fail() { printf '%s\n' "join-linux-server-node: $*" >&2; exit 1; }
 event() {
 	timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 	printf '%s stage=%s result=%s%s\n' "$timestamp" "$1" "$2" "${3:+ detail=$3}" >&2
 	[ -z "$log_file" ] || printf '%s stage=%s result=%s%s\n' "$timestamp" "$1" "$2" "${3:+ detail=$3}" >>"$log_file"
+}
+fail() {
+	event failure failed "$*"
+	printf '%s\n' "join-linux-server-node: $*" >&2
+	exit 1
 }
 cleanup() {
 	access_token=
