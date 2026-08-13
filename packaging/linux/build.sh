@@ -80,7 +80,7 @@ install -m 0644 "$repo_root/linux/server/README.md" "$stage/README.md"
 install -m 0644 "$repo_root/VERSION" "$stage/VERSION"
 
 bundle=$dist_root/candy-server-runtime-$artifact_arch.tar.gz
-tar -C "$stage" -czf "$bundle" .
+COPYFILE_DISABLE=1 tar --no-xattrs -C "$stage" -czf "$bundle" .
 
 # Publish the product command as the architecture-qualified Runtime artifact.
 # Core remains a separate native artifact managed through the signed channel.

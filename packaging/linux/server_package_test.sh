@@ -12,12 +12,19 @@ fail() {
 
 fake_bin=$tmp/bin
 mkdir -p "$fake_bin"
+real_tar=$(command -v tar)
 cat >"$fake_bin/cargo" <<'EOF'
 #!/bin/sh
 printf '%s\n' "Runtime server package must not build or fetch Core source" >&2
 exit 99
 EOF
 chmod 0755 "$fake_bin/cargo"
+cat >"$fake_bin/tar" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>'$tmp/tar.args'
+exec '$real_tar' "\$@"
+EOF
+chmod 0755 "$fake_bin/tar"
 
 dist=$tmp/dist
 agent=$tmp/candy-sdwan-agent
@@ -49,8 +56,12 @@ edge_stage=$dist/client/x86_64
 [ -x "$stage/install/install-candy-server.sh" ] || fail "installer was not staged"
 [ -x "$dist/candy-server-x86_64" ] || fail "product release launcher artifact was not staged"
 [ -s "$dist/candy-server-runtime-x86_64.tar.gz" ] || fail "complete server Runtime bundle was not staged"
+grep -F -- '--no-xattrs' "$tmp/tar.args" >/dev/null || fail "server Runtime bundle does not suppress host extended attributes"
 tar -tzf "$dist/candy-server-runtime-x86_64.tar.gz" | grep -F './usr/local/libexec/candy-cloud-enroll' >/dev/null ||
 	fail "server Runtime bundle does not contain Cloud enrollment"
+if tar -tvzf "$dist/candy-server-runtime-x86_64.tar.gz" 2>&1 | grep -F 'LIBARCHIVE.xattr' >/dev/null; then
+	fail "server Runtime bundle contains macOS extended attributes"
+fi
 cmp "$root/linux/server/apps/candy-server/candy-server" \
 	"$stage/usr/local/bin/candy-server" >/dev/null || fail "staged product launcher differs from source"
 [ -x "$edge_stage/usr/local/bin/candy" ] || fail "public Linux Edge candy command was not staged"
