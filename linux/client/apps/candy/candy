@@ -44,7 +44,7 @@ case "$command_name" in
 		else
 			"$runtime" join "$cloud"
 		fi
-		printf '%s\n' "Join request saved. Candy will report registered only after Cloud validation succeeds."
+		printf '%s\n' "This node is registered with Candy Cloud. SD-WAN remains stopped until an authorized configuration is available."
 		;;
 	sdwan)
 		subcommand=${1:-}

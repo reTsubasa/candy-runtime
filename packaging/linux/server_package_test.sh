@@ -26,8 +26,12 @@ chmod 0755 "$agent"
 netd=$tmp/candy-netd
 printf '#!/bin/sh\nexit 0\n' >"$netd"
 chmod 0755 "$netd"
+enroll=$tmp/candy-cloud-enroll
+printf '#!/bin/sh\nexit 0\n' >"$enroll"
+chmod 0755 "$enroll"
 PATH="$fake_bin:$PATH" CANDY_LINUX_DIST_DIR="$dist" CANDY_SDWAN_AGENT_BINARY="$agent" \
 	CANDY_NETD_BINARY="$netd" \
+	CANDY_CLOUD_ENROLL_BINARY="$enroll" \
 	"$root/packaging/linux/build.sh" x86_64-unknown-linux-gnu >/dev/null
 
 stage=$dist/server/x86_64
@@ -48,6 +52,7 @@ cmp "$root/linux/server/apps/candy-server/candy-server" \
 [ -x "$edge_stage/usr/local/libexec/candy-sdwan-runtime" ] || fail "Linux Edge SD-WAN Runtime helper was not staged"
 [ -x "$edge_stage/usr/local/libexec/candy-sdwan-agent" ] || fail "Linux Edge SD-WAN agent was not staged"
 [ -x "$edge_stage/usr/local/libexec/candy-netd" ] || fail "Linux Edge netd was not staged"
+[ -x "$edge_stage/usr/local/libexec/candy-cloud-enroll" ] || fail "Linux Edge Cloud enrollment client was not staged"
 [ -f "$edge_stage/systemd/candy-client.service" ] || fail "Linux Edge systemd unit was not staged"
 [ -f "$edge_stage/systemd/candy-netd.service" ] || fail "netd systemd unit was not staged"
 [ -f "$edge_stage/systemd/candy-sdwan.service" ] || fail "SD-WAN systemd unit was not staged"

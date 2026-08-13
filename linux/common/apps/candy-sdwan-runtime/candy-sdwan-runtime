@@ -10,6 +10,8 @@ durable_status_file=${CANDY_SDWAN_STATUS_CACHE:-$state_dir/status-v1.json}
 published_status_file=${CANDY_SDWAN_STATUS_FILE:-$run_dir/sdwan-status.json}
 max_activation_bytes=${CANDY_SDWAN_MAX_ACTIVATION_BYTES:-4096}
 max_cloud_bytes=${CANDY_SDWAN_MAX_CLOUD_BYTES:-2048}
+enrollment_client=${CANDY_CLOUD_ENROLL_CLIENT:-/usr/local/libexec/candy-cloud-enroll}
+enrollment_dir=${CANDY_SDWAN_ENROLLMENT_DIR:-$state_dir/identity}
 
 fail() {
 	printf '%s\n' "candy: $*" >&2
@@ -93,10 +95,15 @@ validate_activation_file() {
 
 write_config() {
 	cloud=$1
+	join_state=$2
 	requested_at=$(date +%s)
 	cloud_json=$(json_string "$cloud")
+	identity_json=null
+	if [ "$join_state" = registered ] && [ -f "$enrollment_dir/device-identity-v1.json" ] && [ ! -L "$enrollment_dir/device-identity-v1.json" ]; then
+		identity_json=$(cat "$enrollment_dir/device-identity-v1.json")
+	fi
 	atomic_from_stdin "$config_file" 0600 <<EOF
-{"schema_version":1,"cloud_address":"$cloud_json","join_state":"join-pending","requested_at":$requested_at}
+{"schema_version":1,"cloud_address":"$cloud_json","join_state":"$join_state","requested_at":$requested_at,"identity":$identity_json}
 EOF
 }
 
@@ -132,7 +139,14 @@ EOF
 
 current_registration_state() {
 	if cloud=$(read_cloud 2>/dev/null) && [ -n "$cloud" ]; then
-		printf '%s\n' join-pending
+		if grep -q '"join_state":"registered"' "$config_file" &&
+			[ -f "$enrollment_dir/device-identity-v1.json" ] &&
+			[ -f "$enrollment_dir/operational-key.pem" ] &&
+			[ -f "$enrollment_dir/device-cert.pem" ]; then
+			printf '%s\n' registered
+		else
+			printf '%s\n' join-pending
+		fi
 	else
 		printf '%s\n' unregistered
 	fi
@@ -188,8 +202,37 @@ case "$action" in
 		validate_cloud_address "$1"
 		[ "$#" -lt 2 ] || validate_activation_file "$2"
 		ensure_directories
-		write_config "$1"
+		[ -x "$enrollment_client" ] || fail "Cloud enrollment client is not installed"
+		[ "$(current_registration_state)" != registered ] || fail "this node is already registered; leave the Cloud before replacing its identity"
+		cloud=$1
+		activation_file=${2:-}
+		if pending_cloud=$(read_cloud 2>/dev/null) && [ -n "$pending_cloud" ] && [ "$pending_cloud" != "$cloud" ]; then
+			fail "an enrollment transaction for another Cloud is already pending; leave it before joining a different Cloud"
+		fi
+		write_config "$cloud" join-pending
 		write_status join-pending stopped ""
+		output_file=$(mktemp "$run_dir/.candy-enrollment.XXXXXX") || fail "could not create enrollment result file"
+		trap 'rm -f "$output_file"' EXIT HUP INT TERM
+		if [ -n "$activation_file" ]; then
+			set -- "$enrollment_client" --cloud "$cloud" --state-dir "$enrollment_dir" --activation-file "$activation_file"
+		else
+			set -- "$enrollment_client" --cloud "$cloud" --state-dir "$enrollment_dir"
+		fi
+		if [ -n "${CANDY_CLOUD_CA_CERTIFICATE:-}" ]; then
+			set -- "$@" --ca-certificate "$CANDY_CLOUD_CA_CERTIFICATE"
+		fi
+		if "$@" >"$output_file"; then
+			write_config "$cloud" registered
+			write_status registered stopped ""
+			cat "$output_file"
+			rm -f "$output_file"
+			trap - EXIT HUP INT TERM
+		else
+			write_status join-pending stopped "Cloud enrollment failed; retry candy join to resume the same transaction"
+			rm -f "$output_file"
+			trap - EXIT HUP INT TERM
+			fail "Cloud enrollment failed; existing network state was not changed"
+		fi
 		;;
 	reconnect)
 		require_root
@@ -202,6 +245,10 @@ case "$action" in
 		require_root
 		ensure_directories
 		rm -f "$config_file"
+		if [ -d "$enrollment_dir" ] && [ ! -L "$enrollment_dir" ]; then
+			find "$enrollment_dir" -maxdepth 1 -type f -delete
+			rmdir "$enrollment_dir" 2>/dev/null || true
+		fi
 		write_status unregistered stopped ""
 		;;
 	fail-open)

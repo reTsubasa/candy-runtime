@@ -11,25 +11,56 @@ fail() { printf '%s\n' "candy_sdwan_runtime_test: $*" >&2; exit 1; }
 state=$tmp/state
 run=$tmp/run
 activation=$tmp/activation
-printf '%s\n' 'join-secret-must-not-be-stored' >"$activation"
+printf '%s\n' 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' >"$activation"
+chmod 0600 "$activation"
+fake_enroll=$tmp/fake-enroll
+cat >"$fake_enroll" <<'EOF'
+#!/bin/sh
+set -eu
+state_dir=
+activation_file=
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--state-dir) shift; state_dir=$1 ;;
+		--activation-file) shift; activation_file=$1 ;;
+	esac
+	shift
+done
+[ -n "$state_dir" ] && [ -n "$activation_file" ]
+if [ "${FAKE_ENROLL_FAIL:-0}" = 1 ]; then
+	exit 1
+fi
+mkdir -p "$state_dir"
+chmod 0700 "$state_dir"
+printf '%s\n' '{"schema_version":1,"cloud_address":"https://cloud.example.test","organization_id":"00000000-0000-0000-0000-000000000001","device_id":"00000000-0000-0000-0000-000000000002","device_key_id":"00000000-0000-0000-0000-000000000003","not_after":"2030-01-01T00:00:00Z"}' >"$state_dir/device-identity-v1.json"
+printf '%s\n' private >"$state_dir/operational-key.pem"
+printf '%s\n' certificate >"$state_dir/device-cert.pem"
+chmod 0600 "$state_dir"/*
+printf '%s\n' '{"schema_version":1,"state":"registered"}'
+EOF
+chmod 0755 "$fake_enroll"
 
 run_runtime() {
 	CANDY_SDWAN_TEST_MODE=1 CANDY_SDWAN_STATE_DIR="$state" CANDY_SDWAN_RUN_DIR="$run" \
 		CANDY_SDWAN_CONFIG_CACHE="$state/config-v1.json" \
 		CANDY_SDWAN_STATUS_CACHE="$state/status-v1.json" \
-		CANDY_SDWAN_STATUS_FILE="$run/sdwan-status.json" "$runtime" "$@"
+		CANDY_SDWAN_STATUS_FILE="$run/sdwan-status.json" \
+		CANDY_CLOUD_ENROLL_CLIENT="$fake_enroll" "$runtime" "$@"
 }
 
 run_runtime join https://cloud.example.test "$activation"
 [ -f "$state/config-v1.json" ] || fail "join did not atomically create config cache"
-[ "$(grep -o 'join-pending' "$state/config-v1.json")" = join-pending ] || fail "join state is not pending"
-if grep -F 'join-secret-must-not-be-stored' "$state/config-v1.json" "$state/status-v1.json" "$run/sdwan-status.json" >/dev/null; then
+[ "$(grep -o 'registered' "$state/config-v1.json" | head -1)" = registered ] || fail "join state is not registered"
+if grep -F 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' "$state/config-v1.json" "$state/status-v1.json" "$run/sdwan-status.json" "$state/identity"/* >/dev/null; then
 	fail "activation credential leaked into Runtime cache"
+fi
+if run_runtime join https://cloud.example.test "$activation" >/dev/null 2>&1; then
+	fail "registered identity was replaceable without leaving the Cloud"
 fi
 
 status_before=$(cat "$run/sdwan-status.json")
 case "$status_before" in
-	*'"schema_version":1'*'"site":null'*'"path":null'*) ;;
+	*'"schema_version":1'*'"state":"registered"'*'"site":null'*'"path":null'*) ;;
 	*) fail "unregistered status fabricated live SD-WAN data: $status_before" ;;
 esac
 config_mode=$(stat -c '%a' "$state/config-v1.json" 2>/dev/null || stat -f '%Lp' "$state/config-v1.json")
@@ -49,6 +80,12 @@ run_runtime fail-open core-exit
 grep -F '"state":"fail-open"' "$run/sdwan-status.json" >/dev/null || fail "fail-open state missing"
 [ -f "$state/config-v1.json" ] || fail "fail-open removed durable enrollment intent"
 
+run_runtime leave
+FAKE_ENROLL_FAIL=1 run_runtime join https://cloud.example.test "$activation" >/dev/null 2>&1 &&
+	fail "failed Cloud enrollment unexpectedly succeeded"
+grep -F '"state":"join-pending"' "$run/sdwan-status.json" >/dev/null || fail "failed enrollment did not remain diagnosable"
+grep -F '"state":"stopped"' "$run/sdwan-status.json" >/dev/null || fail "failed enrollment changed the network runtime state"
+
 if run_runtime join 'http://insecure.example.test' "$activation" >/dev/null 2>&1; then
 	fail "insecure Cloud address was accepted"
 fi
@@ -60,6 +97,7 @@ fi
 run_runtime leave
 grep -F '"state":"unregistered"' "$run/sdwan-status.json" >/dev/null || fail "leave did not publish unregistered state"
 [ ! -e "$state/config-v1.json" ] || fail "leave retained enrollment intent"
+[ ! -e "$state/identity" ] || fail "leave retained device identity material"
 
 fake_runtime=$tmp/fake-runtime
 fake_calls=$tmp/fake-runtime.calls
