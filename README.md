@@ -49,6 +49,6 @@ draft Release，然后发送 `candy-artifact-ready` 事件。中央发布 Action
 - OpenWrt client 已迁入 `openwrt/client`。
 - Linux/OpenWrt role 入口均为 Process API v1 薄启动器；协议实现不在本仓库。
 - `candy-netd` 和 `candy-cloud-enroll` 是 Runtime 原生 Rust 边界，均与 Core crate 完全解耦。
-- Linux `candy join` 已实现 Cloud activation/challenge/complete：设备 Ed25519 密钥、证书和稳定重试状态保存在 `/var/lib/candy/sdwan/identity`，激活凭据不会落盘。私有 CA 可通过 `CANDY_CLOUD_CA_CERTIFICATE` 指定。
+- Linux `candy join --cloud URL` 会从终端安全读取一次性节点加入码并完成 Cloud challenge/complete：设备 Ed25519 密钥、证书和稳定重试状态保存在 `/var/lib/candy/sdwan/identity`，加入码不会落盘。私有 CA 可通过 `CANDY_CLOUD_CA_CERTIFICATE` 指定。
 - OpenWrt server 目录已保留，不伪装成已实现；它将复用同一 Core process API。
 - Core 作为独立签名制品安装和更新；Runtime 构建不检出、链接或复制 Core 源码。

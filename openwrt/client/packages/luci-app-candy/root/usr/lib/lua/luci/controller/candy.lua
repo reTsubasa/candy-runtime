@@ -743,18 +743,18 @@ function action_sdwan_join()
 	if not require_post() then return end
 	local fs = require "nixio.fs"
 	local cloud = trim(luci.http.formvalue("cloud") or "")
-	local activation = luci.http.formvalue("activation") or ""
-	if #cloud == 0 or #cloud > 2048 or not cloud:match("^https://") or #activation == 0 or #activation > 4096 then
+	local join_code = luci.http.formvalue("join_code") or ""
+	if #cloud == 0 or #cloud > 2048 or not cloud:match("^https://") or #join_code == 0 or #join_code > 4096 then
 		luci.http.status(400, "Bad Request")
 		return
 	end
-	local made, temporary = process.capture({ "mktemp", "/tmp/candy-activation.XXXXXX" }, { timeout = 3 })
+	local made, temporary = process.capture({ "mktemp", "/tmp/candy-join-code.XXXXXX" }, { timeout = 3 })
 	temporary = trim(temporary or "")
-	if not made or not temporary:match("^/tmp/candy%-activation%.[A-Za-z0-9]+$") then
+	if not made or not temporary:match("^/tmp/candy%-join%-code%.[A-Za-z0-9]+$") then
 		luci.http.status(500, "Internal Server Error")
 		return
 	end
-	if not fs.writefile(temporary, activation) or not fs.chmod(temporary, 384) then
+	if not fs.writefile(temporary, join_code) or not fs.chmod(temporary, 384) then
 		fs.unlink(temporary)
 		luci.http.status(500, "Internal Server Error")
 		return
@@ -765,7 +765,7 @@ function action_sdwan_join()
 		redirect_sdwan("error")
 		return
 	end
-	redirect_sdwan("join-pending")
+	redirect_sdwan("joined")
 end
 
 function action_sdwan_reconnect()

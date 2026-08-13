@@ -1644,13 +1644,13 @@ msgstr "云端"
 msgid "Join state"
 msgstr "加入状态"
 
-msgid "Waiting for Cloud validation"
-msgstr "等待云端验证"
+msgid "Joining Candy Cloud"
+msgstr "正在加入 Candy Cloud"
 
 msgid "Registered"
 msgstr "已注册"
 
-msgid "Not enrolled"
+msgid "Not joined"
 msgstr "未加入"
 
 msgid "Network restored"
@@ -1686,8 +1686,8 @@ msgstr "运行时"
 msgid "Cloud address"
 msgstr "云端地址"
 
-msgid "Activation code"
-msgstr "激活码"
+msgid "Node join code"
+msgstr "节点加入码"
 
 msgid "Join"
 msgstr "加入"
@@ -1698,8 +1698,8 @@ msgstr "重新连接"
 msgid "Leave"
 msgstr "离开"
 
-msgid "Join request submitted; waiting for Cloud validation."
-msgstr "加入请求已提交，正在等待云端验证。"
+msgid "This node has joined Candy Cloud."
+msgstr "此节点已加入 Candy Cloud。"
 
 msgid "Reconnect requested."
 msgstr "已请求重新连接。"

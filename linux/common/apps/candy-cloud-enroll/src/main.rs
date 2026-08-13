@@ -32,6 +32,8 @@ struct Args {
     state_dir: PathBuf,
     #[arg(long)]
     activation_file: Option<PathBuf>,
+    #[arg(long, conflicts_with = "activation_file")]
+    join_code_stdin: bool,
     #[arg(long)]
     display_name: Option<String>,
     #[arg(long)]
@@ -203,7 +205,7 @@ fn run(args: Args) -> Result<()> {
     let client = build_client(&args)?;
     let mut challenge_replayed = false;
     if state.challenge.is_none() {
-        let activation = read_activation(args.activation_file.as_deref())?;
+        let activation = read_join_code(args.activation_file.as_deref(), args.join_code_stdin)?;
         let response: ChallengeResponse = post_json(
             &client,
             endpoint(&args.cloud, "auth/v1/enrollment/challenges")?,
@@ -361,23 +363,41 @@ fn ensure_state_dir(path: &Path) -> Result<()> {
     set_path_owner(path, &parent_metadata)
 }
 
-fn read_activation(path: Option<&Path>) -> Result<String> {
-    let path = path.context("activation credential is required until Cloud returns a challenge")?;
-    let metadata = fs::symlink_metadata(path).context("inspect activation credential")?;
+fn read_join_code(path: Option<&Path>, from_stdin: bool) -> Result<String> {
+    if from_stdin {
+        return read_join_code_from_reader(std::io::stdin());
+    }
+
+    let path = path.context("node join code is required until Cloud returns a challenge")?;
+    let metadata = fs::symlink_metadata(path).context("inspect node join code")?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
         || metadata.len() == 0
         || metadata.len() > 4096
     {
-        bail!("activation credential must be a non-empty regular file of at most 4096 bytes")
+        bail!("node join code must be a non-empty regular file of at most 4096 bytes")
     }
     #[cfg(unix)]
     if metadata.mode() & 0o077 != 0 {
-        bail!("activation credential must not be accessible by group or other users")
+        bail!("node join code file must not be accessible by group or other users")
     }
-    let value = fs::read_to_string(path).context("read activation credential")?;
+    let value = fs::read_to_string(path).context("read node join code")?;
     let value = value.trim();
-    validate_base64url(value, 32, "activation credential")?;
+    validate_base64url(value, 32, "node join code")?;
+    Ok(value.to_owned())
+}
+
+fn read_join_code_from_reader(reader: impl Read) -> Result<String> {
+    let mut value = String::new();
+    reader
+        .take(4097)
+        .read_to_string(&mut value)
+        .context("read node join code")?;
+    if value.len() > 4096 {
+        bail!("node join code input exceeds 4096 bytes")
+    }
+    let value = value.trim();
+    validate_base64url(value, 32, "node join code")?;
     Ok(value.to_owned())
 }
 
@@ -754,5 +774,16 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn stdin_join_code_is_bounded_and_validated() {
+        let valid = format!("  {}\n", url_encode([11; 32]));
+        assert_eq!(
+            read_join_code_from_reader(valid.as_bytes()).unwrap(),
+            url_encode([11; 32])
+        );
+        assert!(read_join_code_from_reader(b"not-a-join-code".as_slice()).is_err());
+        assert!(read_join_code_from_reader(vec![b'A'; 4097].as_slice()).is_err());
     }
 }

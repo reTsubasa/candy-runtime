@@ -26,10 +26,10 @@ local function label(value)
 end
 local function state_label(value)
 	if value == "registered" then return translate("Registered") end
-	if value == "join-pending" then return translate("Waiting for Cloud validation") end
+	if value == "join-pending" then return translate("Joining Candy Cloud") end
 	if value == "disabled" then return translate("Disabled") end
 	if value == "fail-open" then return translate("Network restored") end
-	return translate("Not enrolled")
+	return translate("Not joined")
 end
 local function object_label(value, key)
 	if type(value) ~= "table" then return label(value) end
@@ -64,7 +64,7 @@ local result = luci.http.formvalue("result") or ""
 </style>
 
 <div class="cbi-map">
-	<% if result == "join-pending" then %><div class="candy-sdwan-result"><%:Join request submitted; waiting for Cloud validation.%></div><% end %>
+	<% if result == "joined" then %><div class="candy-sdwan-result"><%:This node has joined Candy Cloud.%></div><% end %>
 	<% if result == "reconnecting" then %><div class="candy-sdwan-result"><%:Reconnect requested.%></div><% end %>
 	<% if result == "left" then %><div class="candy-sdwan-result"><%:This node has left Candy Cloud.%></div><% end %>
 	<% if result == "error" then %><div class="candy-sdwan-result"><%:Operation failed. Check Logs for details.%></div><% end %>
@@ -80,7 +80,7 @@ local result = luci.http.formvalue("result") or ""
 		<form class="candy-sdwan-form" method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_join')%>">
 			<input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" />
 			<div class="cbi-value"><label for="candy-sdwan-cloud"><%:Cloud address%></label><input id="candy-sdwan-cloud" name="cloud" type="url" required maxlength="2048" placeholder="https://" value="<%=xml.pcdata(registration.cloud_address or '')%>" /></div>
-			<div class="cbi-value"><label for="candy-sdwan-activation"><%:Activation code%></label><input id="candy-sdwan-activation" name="activation" type="password" required maxlength="4096" autocomplete="one-time-code" /></div>
+			<div class="cbi-value"><label for="candy-sdwan-join-code"><%:Node join code%></label><input id="candy-sdwan-join-code" name="join_code" type="password" required maxlength="4096" autocomplete="one-time-code" /></div>
 			<div class="candy-sdwan-actions"><button class="cbi-button cbi-button-apply" type="submit"><%:Join%></button></div>
 		</form>
 	<% else %>

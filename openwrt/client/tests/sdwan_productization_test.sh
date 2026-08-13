@@ -79,17 +79,17 @@ grep -F 'tonumber(parsed.schema_version) == 1' "$sdwan" >/dev/null || fail "LuCI
 for label in 'Site' 'Segment' 'Cloud' 'Full duplex' 'Peer' 'Direct' 'Relay' 'Local egress' 'Remote egress' 'Internal DNS'; do
 	grep -F "$label" "$sdwan" >/dev/null || fail "SD-WAN page is missing $label"
 done
-for control in 'Cloud address' 'Activation code' 'Join' 'Reconnect' 'Leave'; do
+for control in 'Cloud address' 'Node join code' 'Join' 'Reconnect' 'Leave'; do
 	grep -F "$control" "$sdwan" >/dev/null || fail "SD-WAN page is missing $control control"
 done
-grep -F 'type="password"' "$sdwan" >/dev/null || fail "activation code is not protected as a password input"
+grep -F 'type="password"' "$sdwan" >/dev/null || fail "node join code is not protected as a password input"
 grep -F 'action_sdwan_join' "$controller" >/dev/null || fail "LuCI join action is missing"
 grep -F 'action_sdwan_reconnect' "$controller" >/dev/null || fail "LuCI reconnect action is missing"
 grep -F 'action_sdwan_leave' "$controller" >/dev/null || fail "LuCI leave action is missing"
-grep -F 'fs.unlink(temporary)' "$controller" >/dev/null || fail "temporary activation input is not removed"
-grep -F '{ SDWAN_RUNTIME, "join", cloud, temporary }' "$controller" >/dev/null || fail "activation code is not passed through a private file"
-if grep -F '{ SDWAN_RUNTIME, "join", cloud, activation }' "$controller" >/dev/null; then
-	fail "activation code is exposed in the process argument list"
+grep -F 'fs.unlink(temporary)' "$controller" >/dev/null || fail "temporary node join code input is not removed"
+grep -F '{ SDWAN_RUNTIME, "join", cloud, temporary }' "$controller" >/dev/null || fail "node join code is not passed through a private file"
+if grep -F '{ SDWAN_RUNTIME, "join", cloud, join_code }' "$controller" >/dev/null; then
+	fail "node join code is exposed in the process argument list"
 fi
 if grep -Eiq 'grant|signature|route generation|attachment epoch|hash|queue|mtu|drop' "$sdwan"; then
 	fail "ordinary SD-WAN page exposes Diagnostics evidence"

@@ -216,7 +216,7 @@ case "$action" in
 		if [ -n "$activation_file" ]; then
 			set -- "$enrollment_client" --cloud "$cloud" --state-dir "$enrollment_dir" --activation-file "$activation_file"
 		else
-			set -- "$enrollment_client" --cloud "$cloud" --state-dir "$enrollment_dir"
+			set -- "$enrollment_client" --cloud "$cloud" --state-dir "$enrollment_dir" --join-code-stdin
 		fi
 		if [ -n "${CANDY_CLOUD_CA_CERTIFICATE:-}" ]; then
 			set -- "$@" --ca-certificate "$CANDY_CLOUD_CA_CERTIFICATE"

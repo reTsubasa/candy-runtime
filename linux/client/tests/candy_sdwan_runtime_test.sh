@@ -19,14 +19,22 @@ cat >"$fake_enroll" <<'EOF'
 set -eu
 state_dir=
 activation_file=
+join_code_stdin=0
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--state-dir) shift; state_dir=$1 ;;
 		--activation-file) shift; activation_file=$1 ;;
+		--join-code-stdin) join_code_stdin=1 ;;
 	esac
 	shift
 done
-[ -n "$state_dir" ] && [ -n "$activation_file" ]
+[ -n "$state_dir" ]
+if [ "$join_code_stdin" -eq 1 ]; then
+	IFS= read -r join_code
+	[ "$join_code" = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA ]
+else
+	[ -n "$activation_file" ]
+fi
 if [ "${FAKE_ENROLL_FAIL:-0}" = 1 ]; then
 	exit 1
 fi
@@ -48,7 +56,7 @@ run_runtime() {
 		CANDY_CLOUD_ENROLL_CLIENT="$fake_enroll" "$runtime" "$@"
 }
 
-run_runtime join https://cloud.example.test "$activation"
+printf '%s\n' 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' | run_runtime join https://cloud.example.test
 [ -f "$state/config-v1.json" ] || fail "join did not atomically create config cache"
 [ "$(grep -o 'registered' "$state/config-v1.json" | head -1)" = registered ] || fail "join state is not registered"
 if grep -F 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' "$state/config-v1.json" "$state/status-v1.json" "$run/sdwan-status.json" "$state/identity"/* >/dev/null; then
@@ -81,7 +89,7 @@ grep -F '"state":"fail-open"' "$run/sdwan-status.json" >/dev/null || fail "fail-
 [ -f "$state/config-v1.json" ] || fail "fail-open removed durable enrollment intent"
 
 run_runtime leave
-FAKE_ENROLL_FAIL=1 run_runtime join https://cloud.example.test "$activation" >/dev/null 2>&1 &&
+printf '%s\n' 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' | FAKE_ENROLL_FAIL=1 run_runtime join https://cloud.example.test >/dev/null 2>&1 &&
 	fail "failed Cloud enrollment unexpectedly succeeded"
 grep -F '"state":"join-pending"' "$run/sdwan-status.json" >/dev/null || fail "failed enrollment did not remain diagnosable"
 grep -F '"state":"stopped"' "$run/sdwan-status.json" >/dev/null || fail "failed enrollment changed the network runtime state"
@@ -115,9 +123,38 @@ exit "${FAKE_SYSTEMCTL_EXIT:-0}"
 EOF
 chmod 0755 "$fake_runtime" "$fake_bin/systemctl"
 product=$root/linux/client/apps/candy/candy
-FAKE_RUNTIME_CALLS="$fake_calls" CANDY_SDWAN_RUNTIME="$fake_runtime" PATH="$fake_bin:$PATH" \
-	"$product" join --cloud https://cloud.example.test --activation-file "$activation" >"$tmp/join.out"
-grep -F '<join><https://cloud.example.test>' "$fake_calls" >/dev/null || fail "public candy join did not use Runtime boundary"
+if printf '%s\n' 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' | \
+	FAKE_RUNTIME_CALLS="$fake_calls" CANDY_SDWAN_RUNTIME="$fake_runtime" PATH="$fake_bin:$PATH" \
+	"$product" join --cloud https://cloud.example.test >"$tmp/join.out" 2>&1; then
+	fail "public candy join accepted a node join code from a non-interactive input"
+fi
+grep -F 'interactive terminal' "$tmp/join.out" >/dev/null || fail "non-interactive join failure is not actionable"
+if FAKE_RUNTIME_CALLS="$fake_calls" CANDY_SDWAN_RUNTIME="$fake_runtime" PATH="$fake_bin:$PATH" \
+	"$product" join --cloud https://cloud.example.test --activation-file "$activation" >/dev/null 2>&1; then
+	fail "legacy activation-file option remains public"
+fi
+if "$product" --help | grep -F 'activation-file' >/dev/null; then
+	fail "public help exposes the legacy activation-file option"
+fi
+if command -v expect >/dev/null 2>&1; then
+	CANDY_JOIN_PRODUCT="$product" CANDY_JOIN_RUNTIME="$fake_runtime" CANDY_JOIN_CALLS="$fake_calls" expect <<'EOF' >"$tmp/join-tty.out"
+log_user 1
+set timeout 10
+set env(CANDY_SDWAN_RUNTIME) $env(CANDY_JOIN_RUNTIME)
+set env(FAKE_RUNTIME_CALLS) $env(CANDY_JOIN_CALLS)
+spawn $env(CANDY_JOIN_PRODUCT) join --cloud https://cloud.example.test
+expect "Node join code: "
+send "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r"
+expect "This node is registered with Candy Cloud."
+expect eof
+catch wait result
+exit [lindex $result 3]
+EOF
+	if grep -F 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' "$tmp/join-tty.out" >/dev/null; then
+		fail "node join code was echoed to the interactive terminal"
+	fi
+	grep -F '<join><https://cloud.example.test>' "$fake_calls" >/dev/null || fail "interactive candy join did not use Runtime boundary"
+fi
 FAKE_RUNTIME_CALLS="$fake_calls" CANDY_SDWAN_RUNTIME="$fake_runtime" PATH="$fake_bin:$PATH" \
 	"$product" sdwan status >"$tmp/status.out"
 grep -F '"schema_version":1' "$tmp/status.out" >/dev/null || fail "public candy status did not return V1 Runtime state"
