@@ -72,8 +72,8 @@ fn run_linux(args: Args) -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    let socket = args.socket.expect("clap requires --socket");
     let (allowed_uid, allowed_gid) = resolve_allowed_identity(&args)?;
+    let socket = args.socket.expect("clap requires --socket");
     let listener = bind_private_socket_for(&socket, allowed_uid, allowed_gid)?;
     listener.set_nonblocking(true)?;
     let network = NetworkTransaction::new(
