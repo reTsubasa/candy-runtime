@@ -28,7 +28,7 @@ json_string() {
 	{
 		if (NR > 1) printf "\\n"
 		gsub(/\\/, "\\\\")
-		gsub(/\"/, "\\\"")
+		gsub(/"/, "\\\"")
 		gsub(/\t/, "\\t")
 		gsub(/\r/, "\\r")
 		printf "%s", $0

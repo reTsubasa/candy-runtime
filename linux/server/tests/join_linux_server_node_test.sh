@@ -14,7 +14,14 @@ cat >"$bin/ssh" <<'EOF'
 #!/bin/sh
 printf 'ssh' >>"$FAKE_CALLS"; printf ' <%s>' "$@" >>"$FAKE_CALLS"; printf '\n' >>"$FAKE_CALLS"
 case "$*" in
-	*'sdwan status'*) printf '%s\n' '{"schema_version":1,"registration":{"state":"registered"},"runtime":{"state":"stopped"}}' ;;
+	*'sdwan status'*)
+		status_calls=$(grep -c 'sdwan status' "$FAKE_CALLS")
+		if [ "${FAKE_ALREADY_REGISTERED:-0}" = 1 ] || [ "$status_calls" -gt 1 ]; then
+			printf '%s\n' '{"schema_version":1,"registration":{"state":"registered","cloud_address":"https://cloud.example.test"},"runtime":{"state":"stopped"}}'
+		else
+			printf '%s\n' '{"schema_version":1,"registration":{"state":"unregistered"},"runtime":{"state":"unavailable"}}'
+		fi
+		;;
 esac
 EOF
 cat >"$bin/curl" <<'EOF'
@@ -52,6 +59,16 @@ grep -F 'https://cloud.example.test/identity/v1/auth/login' "$calls" >/dev/null 
 grep -F 'https://cloud.example.test/api/v1/tenants/tenant-1/enrollment/activations' "$calls" >/dev/null ||
 	fail "scoped node join code endpoint was not used"
 grep -F '<operator@192.0.2.10>' "$calls" >/dev/null || fail "requested SSH target was not used"
+
+before_calls=$(wc -l <"$calls")
+FAKE_ALREADY_REGISTERED=1 FAKE_CALLS="$calls" PATH="$bin:$PATH" \
+	CANDY_CLOUD_EMAIL=owner@example.test CANDY_CLOUD_PASSWORD=secret-password \
+	"$product" --cloud https://cloud.example.test --node 192.0.2.10 --user operator --log "$log" >"$tmp/already.json"
+jq -e '.registration.state == "registered" and .runtime.state == "stopped"' "$tmp/already.json" >/dev/null ||
+	fail "already registered node was not returned idempotently"
+after_calls=$(wc -l <"$calls")
+[ "$after_calls" -eq $((before_calls + 3)) ] || fail "idempotent join contacted Cloud or executed enrollment"
+grep -F 'already_registered=true' "$log" >/dev/null || fail "idempotent verification was not recorded"
 
 if FAKE_CALLS="$calls" PATH="$bin:$PATH" CANDY_CLOUD_EMAIL=owner@example.test CANDY_CLOUD_PASSWORD=secret-password \
 	"$product" --cloud http://cloud.example.test --node 192.0.2.10 >/dev/null 2>&1; then

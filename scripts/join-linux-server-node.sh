@@ -90,6 +90,16 @@ event preflight started "node=$node_host"
 ssh -p "$node_port" "$ssh_target" 'test "$(uname -s)" = Linux; test "$(uname -m)" = aarch64; command -v sudo >/dev/null; sudo -n true; command -v systemctl >/dev/null' ||
 	fail "remote Linux ARM64 preflight failed"
 
+existing_status=$(ssh -p "$node_port" "$ssh_target" 'sudo /usr/local/bin/candy-server sdwan status 2>/dev/null' || true)
+if printf '%s' "$existing_status" | jq -e --arg cloud "$cloud_url" \
+	'.schema_version == 1 and .registration.state == "registered" and .registration.cloud_address == $cloud and .runtime.state == "stopped"' >/dev/null 2>&1; then
+	ssh -p "$node_port" "$ssh_target" 'sudo systemctl is-active --quiet candy-netd; sudo systemctl is-active --quiet candy-server' ||
+		fail "registered node services are not healthy"
+	event verification succeeded "already_registered=true ordinary_service=active sdwan=registered/stopped"
+	printf '%s\n' "$existing_status"
+	exit 0
+fi
+
 if [ -n "$runtime_bundle" ]; then
 	[ -f "$runtime_bundle" ] || fail "Runtime bundle does not exist"
 	case "$runtime_sha256" in
