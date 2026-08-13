@@ -9,6 +9,7 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 fail() { printf '%s\n' "candy_server_product_command_test: $*" >&2; exit 1; }
 
 fake_core=$tmp/data-plane
+fake_runtime=$tmp/sdwan-runtime
 args=$tmp/args
 calls=$tmp/calls
 cat >"$fake_core" <<'EOF'
@@ -22,6 +23,17 @@ case "${1:-}" in
 esac
 EOF
 chmod 0755 "$fake_core"
+cat >"$fake_runtime" <<'EOF'
+#!/bin/sh
+printf '<%s>' "$@" >>"${FAKE_SDWAN_CALLS:?}"
+printf '\n' >>"$FAKE_SDWAN_CALLS"
+case "${1:-}" in
+	status) printf '%s\n' '{"schema_version":1,"registration":{"state":"unregistered"}}' ;;
+	join) IFS= read -r code; [ "$code" = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA ] ;;
+	*) : ;;
+esac
+EOF
+chmod 0755 "$fake_runtime"
 
 FAKE_CALLS="$calls" FAKE_ARGS="$args" CANDY_CORE_BINARY="$fake_core" "$launcher" --check-config --config /tmp/server.toml
 grep -Fx '<--check-config>' "$args" >/dev/null || fail "--check-config was not preserved"
@@ -47,5 +59,12 @@ grep -F 'requires process API 1' "$tmp/api.out" >/dev/null || fail "process API 
 if grep -F 'candy-core' "$tmp/api.out" >/dev/null; then
 	fail "public candy-server output exposed the internal executable"
 fi
+
+FAKE_SDWAN_CALLS="$calls" CANDY_SDWAN_RUNTIME="$fake_runtime" "$launcher" sdwan status >"$tmp/status.out"
+grep -F '<status>' "$calls" >/dev/null || fail "SD-WAN status did not use the Runtime boundary"
+if FAKE_SDWAN_CALLS="$calls" CANDY_SDWAN_RUNTIME="$fake_runtime" "$launcher" join --cloud https://cloud.example.test >"$tmp/join.out" 2>&1; then
+	fail "server join accepted a node join code without an interactive terminal"
+fi
+grep -F 'interactive terminal' "$tmp/join.out" >/dev/null || fail "server join failure is not actionable"
 
 printf '%s\n' "Candy server product command passed"

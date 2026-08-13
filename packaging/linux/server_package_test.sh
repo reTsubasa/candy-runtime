@@ -39,12 +39,18 @@ edge_stage=$dist/client/x86_64
 [ -x "$stage/usr/local/bin/candy-server" ] || fail "public candy-server command was not staged"
 [ -x "$stage/usr/local/libexec/serverd-linux" ] || fail "internal compatibility launcher was not staged"
 [ -x "$stage/usr/local/libexec/candy-sdwan-runtime" ] || fail "SD-WAN Runtime helper was not staged"
+[ -x "$stage/usr/local/libexec/candy-sdwan-agent" ] || fail "server SD-WAN agent was not staged"
+[ -x "$stage/usr/local/libexec/candy-netd" ] || fail "server netd was not staged"
+[ -x "$stage/usr/local/libexec/candy-cloud-enroll" ] || fail "server Cloud enrollment client was not staged"
 [ -x "$stage/usr/local/bin/candy-core-manager" ] || fail "Core bundle manager was not staged"
 [ -x "$stage/usr/local/libexec/candy-server-health-check" ] || fail "server health check was not staged"
 [ -f "$stage/etc/candy/server.toml.example" ] || fail "server example config was not staged"
 [ -f "$stage/systemd/candy-server.service" ] || fail "systemd unit was not staged"
 [ -x "$stage/install/install-candy-server.sh" ] || fail "installer was not staged"
 [ -x "$dist/candy-server-x86_64" ] || fail "product release launcher artifact was not staged"
+[ -s "$dist/candy-server-runtime-x86_64.tar.gz" ] || fail "complete server Runtime bundle was not staged"
+tar -tzf "$dist/candy-server-runtime-x86_64.tar.gz" | grep -F './usr/local/libexec/candy-cloud-enroll' >/dev/null ||
+	fail "server Runtime bundle does not contain Cloud enrollment"
 cmp "$root/linux/server/apps/candy-server/candy-server" \
 	"$stage/usr/local/bin/candy-server" >/dev/null || fail "staged product launcher differs from source"
 [ -x "$edge_stage/usr/local/bin/candy" ] || fail "public Linux Edge candy command was not staged"

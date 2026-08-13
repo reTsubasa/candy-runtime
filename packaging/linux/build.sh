@@ -55,18 +55,32 @@ mkdir -p "$stage/usr/local/bin" "$stage/usr/local/libexec" "$stage/etc/candy" "$
 install -m 0755 "$product_launcher" "$stage/usr/local/bin/candy-server"
 install -m 0755 "$launcher" "$stage/usr/local/libexec/serverd-linux"
 install -m 0755 "$sdwan_runtime" "$stage/usr/local/libexec/candy-sdwan-runtime"
+install -m 0755 "$sdwan_agent" "$stage/usr/local/libexec/candy-sdwan-agent"
+install -m 0755 "$netd_binary" "$stage/usr/local/libexec/candy-netd"
+install -m 0755 "$enroll_binary" "$stage/usr/local/libexec/candy-cloud-enroll"
 install -m 0755 "$core_manager" "$stage/usr/local/bin/candy-core-manager"
 install -m 0755 "$health_check" "$stage/usr/local/libexec/candy-server-health-check"
 install -m 0644 "$repo_root/linux/server/docker/server.example.toml" \
 	"$stage/etc/candy/server.toml.example"
 install -m 0644 "$repo_root/linux/server/packaging/candy-server.service" \
 	"$stage/systemd/candy-server.service"
+install -m 0644 "$repo_root/linux/client/packaging/candy-netd.service" \
+	"$stage/systemd/candy-netd.service"
+install -m 0644 "$repo_root/linux/client/packaging/candy-sdwan.service" \
+	"$stage/systemd/candy-sdwan.service"
+install -m 0644 "$repo_root/linux/client/packaging/sdwan-agent.env.example" \
+	"$stage/etc/candy/sdwan-agent.env.example"
+install -m 0644 "$repo_root/linux/client/packaging/candy.sysusers" "$stage/systemd/candy.sysusers"
+install -m 0644 "$repo_root/linux/client/packaging/candy.tmpfiles" "$stage/systemd/candy.tmpfiles"
 install -m 0755 "$repo_root/linux/server/packaging/install-candy-server.sh" \
 	"$stage/install/install-candy-server.sh"
 install -m 0755 "$repo_root/linux/server/packaging/upgrade-candy-server.sh" \
 	"$stage/install/upgrade-candy-server.sh"
 install -m 0644 "$repo_root/linux/server/README.md" "$stage/README.md"
 install -m 0644 "$repo_root/VERSION" "$stage/VERSION"
+
+bundle=$dist_root/candy-server-runtime-$artifact_arch.tar.gz
+tar -C "$stage" -czf "$bundle" .
 
 # Publish the product command as the architecture-qualified Runtime artifact.
 # Core remains a separate native artifact managed through the signed channel.
@@ -90,5 +104,6 @@ install -m 0644 "$repo_root/linux/client/packaging/candy.tmpfiles" "$edge_stage/
 install -m 0644 "$repo_root/VERSION" "$edge_stage/VERSION"
 
 printf '%s\n' "Linux server Runtime package staged in $stage"
+printf '%s\n' "Linux server Runtime bundle staged in $bundle"
 printf '%s\n' "Linux Edge Runtime package staged in $edge_stage"
 printf '%s\n' "Core binary intentionally excluded; activate it under /opt/candy/cores/current"

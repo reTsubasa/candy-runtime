@@ -5,6 +5,8 @@ readonly_runtime_api=1
 core_root=${CANDY_CORE_ROOT:-/opt/candy/cores}
 core_current=${CANDY_CORE_CURRENT_LINK:-$core_root/current}
 core_candidate=${CANDY_CORE_BINARY:-$core_current/candy-core}
+sdwan_runtime=${CANDY_SDWAN_RUNTIME:-/usr/local/libexec/candy-sdwan-runtime}
+sdwan_service=${CANDY_SDWAN_SERVICE:-candy-sdwan.service}
 
 fail() {
 	status=$1
@@ -12,6 +14,112 @@ fail() {
 	printf '%s\n' "candy-server: $*" >&2
 	exit "$status"
 }
+
+require_sdwan_runtime() {
+	[ -x "$sdwan_runtime" ] || fail 69 "SD-WAN Runtime is not installed"
+}
+
+restore_terminal() {
+	if [ "${echo_disabled:-0}" -eq 1 ]; then
+		stty echo 2>/dev/null || true
+		echo_disabled=0
+	fi
+}
+
+node_usage() {
+	cat <<'EOF'
+usage:
+  candy-server join --cloud URL
+  candy-server sdwan status
+  candy-server sdwan reconnect
+  candy-server leave [--yes]
+  candy-server [server options]
+EOF
+}
+
+case "${1:-}" in
+	join)
+		shift
+		cloud=
+		while [ "$#" -gt 0 ]; do
+			case "$1" in
+				--cloud) shift; [ "$#" -gt 0 ] || fail 64 "--cloud requires a URL"; cloud=$1 ;;
+				*) fail 64 "unknown join option: $1" ;;
+			esac
+			shift
+		done
+		[ -n "$cloud" ] || fail 64 "--cloud is required"
+		[ -t 0 ] || fail 64 "node join code must be entered from an interactive terminal"
+		[ "$(id -u)" = 0 ] || fail 77 "join requires root privileges"
+		require_sdwan_runtime
+		echo_disabled=0
+		trap 'restore_terminal' EXIT
+		trap 'restore_terminal; exit 130' HUP INT TERM
+		stty -echo
+		echo_disabled=1
+		printf '%s' "Node join code: " >&2
+		if ! IFS= read -r join_code; then
+			restore_terminal
+			printf '\n' >&2
+			fail 64 "node join code is required"
+		fi
+		restore_terminal
+		trap - EXIT HUP INT TERM
+		printf '\n' >&2
+		[ -n "$join_code" ] || fail 64 "node join code is required"
+		printf '%s\n' "$join_code" | "$sdwan_runtime" join "$cloud"
+		join_code=
+		printf '%s\n' "This server has joined Candy Cloud. Its existing Candy service remains unchanged until an authorized SD-WAN configuration is available."
+		exit 0
+		;;
+	sdwan)
+		shift
+		subcommand=${1:-}
+		[ "$#" -eq 0 ] || shift
+		[ "$#" -eq 0 ] || fail 64 "unexpected SD-WAN argument: $1"
+		require_sdwan_runtime
+		case "$subcommand" in
+			status) "$sdwan_runtime" status ;;
+			reconnect)
+				[ "$(id -u)" = 0 ] || fail 77 "reconnect requires root privileges"
+				"$sdwan_runtime" reconnect
+				if command -v systemctl >/dev/null 2>&1 && systemctl restart "$sdwan_service"; then
+					printf '%s\n' "SD-WAN reconnect requested."
+				else
+					"$sdwan_runtime" fail-open "reconnect failed; Candy-owned network state removed" || true
+					fail 1 "reconnect failed; the network was restored to the Candy-stopped state"
+				fi
+				;;
+			*) node_usage >&2; exit 64 ;;
+		esac
+		exit 0
+		;;
+	leave)
+		shift
+		[ "$(id -u)" = 0 ] || fail 77 "leave requires root privileges"
+		confirmed=0
+		case "${1:-}" in --yes) confirmed=1; shift ;; '') ;; *) fail 64 "unknown leave option: $1" ;; esac
+		[ "$#" -eq 0 ] || fail 64 "unexpected leave argument: $1"
+		if [ "$confirmed" -ne 1 ]; then
+			[ -t 0 ] || fail 64 "leave requires --yes when input is not interactive"
+			printf '%s' "Leave Candy Cloud and remove local SD-WAN enrollment intent? [y/N] " >&2
+			read -r answer
+			case "$answer" in y|Y|yes|YES) ;; *) exit 1 ;; esac
+		fi
+		require_sdwan_runtime
+		if command -v systemctl >/dev/null 2>&1; then
+			systemctl stop "$sdwan_service" 2>/dev/null || true
+		fi
+		"$sdwan_runtime" fail-open "node left Candy Cloud"
+		"$sdwan_runtime" leave
+		printf '%s\n' "This server has left Candy Cloud. Its ordinary Candy service was not changed."
+		exit 0
+		;;
+	-h|--help|help)
+		node_usage
+		exit 0
+		;;
+esac
 
 command -v readlink >/dev/null 2>&1 ||
 	fail 69 "cannot resolve the managed data plane: required command 'readlink' is missing"
