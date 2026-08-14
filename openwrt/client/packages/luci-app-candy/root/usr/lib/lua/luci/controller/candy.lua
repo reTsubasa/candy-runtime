@@ -742,6 +742,16 @@ local function redirect_sdwan(result)
 	luci.http.redirect(url)
 end
 
+local function allocate_sdwan_bootstrap_path(fs)
+	local nixio = require "nixio"
+	local prefix = string.format("%s/bootstrap-%d-%d", SDWAN_BOOTSTRAP_ROOT, nixio.getpid(), os.time())
+	for suffix = 0, 99 do
+		local path = string.format("%s-%d.json", prefix, suffix)
+		if not fs.lstat(path) then return path end
+	end
+	return nil
+end
+
 function action_sdwan_join()
 	local fs = require "nixio.fs"
 	local content_length = tonumber(luci.http.getenv("CONTENT_LENGTH") or "")
@@ -780,9 +790,8 @@ function action_sdwan_join()
 				failure = "unexpected upload field"
 				return
 			end
-			local made, path = process.capture({ "mktemp", SDWAN_BOOTSTRAP_ROOT .. "/bootstrap.XXXXXX" }, { timeout = 3 })
-			temporary = trim(path or "")
-			if not made or not temporary:match("^" .. SDWAN_BOOTSTRAP_ROOT:gsub("([^%w])", "%%%1") .. "/bootstrap%.[A-Za-z0-9]+$") then
+			temporary = allocate_sdwan_bootstrap_path(fs)
+			if not temporary then
 				failure = "could not allocate bootstrap upload"
 				return
 			end

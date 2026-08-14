@@ -29,11 +29,11 @@ function fs.mkdirr() return true end
 function fs.chmod() return true end
 function fs.unlink(path) return os.remove(path) end
 package.preload["nixio.fs"] = function() return fs end
+package.preload["nixio"] = function() return { getpid = function() return 4242 end } end
 package.preload["luci.candy.process"] = function()
 	return {
 		run = function() return true end,
 		capture = function(arguments)
-			if arguments[1] == "mktemp" then return true, upload_root .. "/bootstrap.ABC123\n" end
 			if arguments[1] == "/usr/libexec/candy-sdwan-runtime" then
 				runtime_called = true
 				return false, "invalid bootstrap fixture"
