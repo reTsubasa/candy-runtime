@@ -1683,14 +1683,14 @@ msgstr "内部 DNS"
 msgid "Runtime"
 msgstr "运行时"
 
-msgid "Cloud address"
-msgstr "云端地址"
+msgid "Node join file"
+msgstr "节点加入文件"
 
-msgid "Node join code"
-msgstr "节点加入码"
+msgid "Download the short-lived node join file from Candy Cloud, then import it here. It already contains the Cloud address and one-time authorization; no code needs to be copied."
+msgstr "从 Candy Cloud 下载短时有效的节点加入文件，然后在这里导入。文件已包含 Cloud 地址和一次性授权，无需复制任何代码。"
 
-msgid "Join"
-msgstr "加入"
+msgid "Import and join"
+msgstr "导入并加入"
 
 msgid "Reconnect"
 msgstr "重新连接"

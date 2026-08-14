@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-cloud_url=
+bootstrap_file=
 node_host=
 node_user=
 node_port=22
@@ -11,17 +11,13 @@ log_file=
 
 usage() {
 	cat <<'EOF'
-usage: join-linux-server-node.sh --cloud URL --node HOST [options]
-
-Required environment variables:
-  CANDY_CLOUD_EMAIL       Cloud account email
-  CANDY_CLOUD_PASSWORD    Cloud account password
+usage: join-linux-server-node.sh --bootstrap-file FILE --node HOST [options]
 
 The SSH client performs authentication normally. Prefer an authorized SSH key;
 this script never accepts or stores an SSH password.
 
 Options:
-  --cloud URL             Public HTTPS Candy Cloud base URL.
+  --bootstrap-file FILE   Short-lived, single-use JSON downloaded from Cloud.
   --node HOST             Linux server hostname or IP.
   --user USER             SSH user, default current user.
   --port PORT             SSH port, default 22.
@@ -42,19 +38,14 @@ fail() {
 	exit 1
 }
 cleanup() {
-	access_token=
-	join_code=
-	login_payload=
-	login_response=
-	join_response=
-	[ -z "${curl_config:-}" ] || rm -f "$curl_config"
 	[ -z "${remote_bundle:-}" ] || ssh -p "$node_port" "$ssh_target" "rm -f '$remote_bundle'" >/dev/null 2>&1 || true
+	[ -z "${remote_bootstrap:-}" ] || ssh -p "$node_port" "$ssh_target" "rm -f '$remote_bootstrap'" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT HUP INT TERM
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
-		--cloud) shift; [ "$#" -gt 0 ] || fail "--cloud requires a URL"; cloud_url=$1 ;;
+		--bootstrap-file) shift; [ "$#" -gt 0 ] || fail "--bootstrap-file requires a file"; bootstrap_file=$1 ;;
 		--node) shift; [ "$#" -gt 0 ] || fail "--node requires a host"; node_host=$1 ;;
 		--user) shift; [ "$#" -gt 0 ] || fail "--user requires a value"; node_user=$1 ;;
 		--port) shift; [ "$#" -gt 0 ] || fail "--port requires a value"; node_port=$1 ;;
@@ -67,17 +58,23 @@ while [ "$#" -gt 0 ]; do
 	shift
 done
 
-case "$cloud_url" in https://*) ;; *) fail "--cloud must use public HTTPS" ;; esac
+[ -n "$bootstrap_file" ] || fail "--bootstrap-file is required"
+[ -f "$bootstrap_file" ] && [ ! -L "$bootstrap_file" ] || fail "Bootstrap input must be a regular file"
+bootstrap_bytes=$(wc -c <"$bootstrap_file" | tr -d ' ')
+[ "$bootstrap_bytes" -gt 0 ] && [ "$bootstrap_bytes" -le 16384 ] || fail "Bootstrap input must be at most 16 KiB"
 [ -n "$node_host" ] || fail "--node is required"
 [ -n "$node_user" ] || node_user=$(id -un)
 case "$node_port" in ''|*[!0-9]*) fail "--port must be numeric" ;; esac
 [ "$node_port" -ge 1 ] && [ "$node_port" -le 65535 ] || fail "--port is outside 1..65535"
-[ -n "${CANDY_CLOUD_EMAIL:-}" ] || fail "CANDY_CLOUD_EMAIL is required"
-[ -n "${CANDY_CLOUD_PASSWORD:-}" ] || fail "CANDY_CLOUD_PASSWORD is required"
-command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v jq >/dev/null 2>&1 || fail "jq is required"
-command -v expect >/dev/null 2>&1 || fail "expect is required"
 command -v ssh >/dev/null 2>&1 || fail "ssh is required"
+command -v scp >/dev/null 2>&1 || fail "scp is required"
+cloud_url=$(jq -er 'select(.schema_version == 1) | .cloud_address | select(startswith("https://"))' "$bootstrap_file") ||
+	fail "Bootstrap file is not a supported HTTPS Candy Cloud document"
+jq -e '.bootstrap_code | type == "string" and length >= 32' "$bootstrap_file" >/dev/null ||
+	fail "Bootstrap file lacks a valid single-use code"
+jq -e '.expires_at | type == "string" and length > 0' "$bootstrap_file" >/dev/null ||
+	fail "Bootstrap file lacks an expiration"
 ssh_target=$node_user@$node_host
 if [ -n "$log_file" ]; then
 	umask 077
@@ -119,55 +116,12 @@ fi
 ssh -p "$node_port" "$ssh_target" 'test -x /usr/local/bin/candy-server; test -x /usr/local/libexec/candy-sdwan-runtime; test -x /usr/local/libexec/candy-cloud-enroll; test -x /usr/local/libexec/candy-sdwan-agent; test -x /usr/local/libexec/candy-netd; sudo systemctl is-active --quiet candy-netd; sudo systemctl is-active --quiet candy-server' ||
 	fail "node lacks a complete Runtime or ordinary Candy service is not active"
 
-login_payload=$(jq -cn --arg email "$CANDY_CLOUD_EMAIL" --arg password "$CANDY_CLOUD_PASSWORD" \
-	'{email:$email,password:$password,device_label:"node-enrollment-script"}')
-login_response=$(printf '%s' "$login_payload" | curl --fail-with-body --silent --show-error --max-time 30 \
-	-H 'Accept: application/json' -H 'Content-Type: application/json' \
-	--data-binary @- \
-	"$cloud_url/identity/v1/auth/login") || fail "Cloud login failed"
-login_payload=
-access_token=$(printf '%s' "$login_response" | jq -er '.access_token') || fail "Cloud login response lacks an access token"
-tenant_id=$(printf '%s' "$login_response" | jq -er '.membership.tenant_id') || fail "Cloud login response lacks a tenant"
-login_response=
-event cloud_login succeeded "tenant_id=$tenant_id"
-
-curl_config=$(mktemp)
-chmod 0600 "$curl_config"
-printf '%s\n' \
-	'header = "Accept: application/json"' \
-	'header = "Content-Type: application/json"' \
-	"header = \"Authorization: Bearer $access_token\"" >"$curl_config"
-join_response=$(printf '%s' '{"expires_in_seconds":600}' | curl --fail-with-body --silent --show-error --max-time 30 \
-	--config "$curl_config" --data-binary @- \
-	"$cloud_url/api/v1/tenants/$tenant_id/enrollment/activations") || {
-	rm -f "$curl_config"
-	fail "node join code creation failed"
-}
-rm -f "$curl_config"
-curl_config=
-join_code=$(printf '%s' "$join_response" | jq -er '.credential') || fail "Cloud response lacks a node join code"
-join_code_id=$(printf '%s' "$join_response" | jq -er '.id') || fail "Cloud response lacks a join-code record ID"
-join_response=
-access_token=
-event join_code created "id=$join_code_id"
-
-CANDY_JOIN_CODE=$join_code CANDY_JOIN_TARGET=$ssh_target CANDY_JOIN_PORT=$node_port CANDY_JOIN_CLOUD=$cloud_url expect <<'EOF'
-log_user 1
-set timeout 90
-spawn ssh -tt -p $env(CANDY_JOIN_PORT) $env(CANDY_JOIN_TARGET) sudo /usr/local/bin/candy-server join --cloud $env(CANDY_JOIN_CLOUD)
-expect {
-  "Node join code: " { send -- "$env(CANDY_JOIN_CODE)\r" }
-  timeout { exit 124 }
-  eof { catch wait result; exit [lindex $result 3] }
-}
-expect {
-  "This server has joined Candy Cloud." { exp_continue }
-  eof { catch wait result; exit [lindex $result 3] }
-  timeout { exit 124 }
-}
-EOF
-join_code=
-event enrollment succeeded "join_code_id=$join_code_id"
+remote_bootstrap=/tmp/candy-node-bootstrap.$$.json
+scp -q -P "$node_port" "$bootstrap_file" "$ssh_target:$remote_bootstrap" || fail "Bootstrap upload failed"
+ssh -p "$node_port" "$ssh_target" "set -eu; chmod 0600 '$remote_bootstrap'; test \"\$(stat -c '%a' '$remote_bootstrap')\" = 600; sudo /usr/local/bin/candy-server bootstrap '$remote_bootstrap'" ||
+	fail "Cloud bootstrap exchange failed; the local Bootstrap file remains available for an idempotent retry"
+remote_bootstrap=
+event enrollment succeeded "cloud=$cloud_url"
 
 status=$(ssh -p "$node_port" "$ssh_target" 'sudo /usr/local/bin/candy-server sdwan status') || fail "node status query failed"
 printf '%s' "$status" | jq -e '.schema_version == 1 and .registration.state == "registered" and .runtime.state == "stopped"' >/dev/null ||

@@ -276,7 +276,8 @@ docker run --rm --platform linux/amd64 \
       for executable in \
         "$payload/client/etc/init.d/candy" \
         "$payload/client/usr/bin/candy-netd" \
-        "$payload/client/usr/bin/candy-sdwan-agent"; do
+        "$payload/client/usr/bin/candy-sdwan-agent" \
+        "$payload/client/usr/libexec/candy-cloud-enroll"; do
         [ -x "$executable" ] || { echo "OpenWrt package is missing executable ${executable#$payload/}" >&2; exit 1; }
       done
       for asset in \

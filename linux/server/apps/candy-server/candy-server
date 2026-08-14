@@ -19,17 +19,10 @@ require_sdwan_runtime() {
 	[ -x "$sdwan_runtime" ] || fail 69 "SD-WAN Runtime is not installed"
 }
 
-restore_terminal() {
-	if [ "${echo_disabled:-0}" -eq 1 ]; then
-		stty echo 2>/dev/null || true
-		echo_disabled=0
-	fi
-}
-
 node_usage() {
 	cat <<'EOF'
 usage:
-  candy-server join --cloud URL
+  candy-server bootstrap FILE
   candy-server sdwan status
   candy-server sdwan reconnect
   candy-server leave [--yes]
@@ -39,36 +32,17 @@ EOF
 
 case "${1:-}" in
 	join)
+		node_usage >&2
+		fail 64 "node enrollment uses a short-lived Bootstrap file: candy-server bootstrap FILE"
+		;;
+	bootstrap)
 		shift
-		cloud=
-		while [ "$#" -gt 0 ]; do
-			case "$1" in
-				--cloud) shift; [ "$#" -gt 0 ] || fail 64 "--cloud requires a URL"; cloud=$1 ;;
-				*) fail 64 "unknown join option: $1" ;;
-			esac
-			shift
-		done
-		[ -n "$cloud" ] || fail 64 "--cloud is required"
-		[ -t 0 ] || fail 64 "node join code must be entered from an interactive terminal"
-		[ "$(id -u)" = 0 ] || fail 77 "join requires root privileges"
+		[ "$#" -eq 1 ] || fail 64 "bootstrap requires one bootstrap file"
+		[ "$(id -u)" = 0 ] || fail 77 "bootstrap requires root privileges"
+		[ -f "$1" ] && [ ! -L "$1" ] || fail 66 "bootstrap input must be a regular file"
+		chmod 0600 "$1" || fail 77 "could not protect the bootstrap file"
 		require_sdwan_runtime
-		echo_disabled=0
-		trap 'restore_terminal' EXIT
-		trap 'restore_terminal; exit 130' HUP INT TERM
-		stty -echo
-		echo_disabled=1
-		printf '%s' "Node join code: " >&2
-		if ! IFS= read -r join_code; then
-			restore_terminal
-			printf '\n' >&2
-			fail 64 "node join code is required"
-		fi
-		restore_terminal
-		trap - EXIT HUP INT TERM
-		printf '\n' >&2
-		[ -n "$join_code" ] || fail 64 "node join code is required"
-		printf '%s\n' "$join_code" | "$sdwan_runtime" join "$cloud"
-		join_code=
+		"$sdwan_runtime" bootstrap "$1"
 		printf '%s\n' "This server has joined Candy Cloud. Its existing Candy service remains unchanged until an authorized SD-WAN configuration is available."
 		exit 0
 		;;

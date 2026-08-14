@@ -58,6 +58,7 @@ local result = luci.http.formvalue("result") or ""
 .candy-sdwan-actions form { margin:0; }
 .candy-sdwan-form { max-width:42em; margin-top:1.2em; }
 .candy-sdwan-form .cbi-value { display:grid; grid-template-columns:minmax(9em,.8fr) minmax(0,1.8fr); gap:.8em; align-items:center; }
+.candy-sdwan-join-help { color:#666; margin:.5em 0 0; line-height:1.65; }
 .candy-sdwan-result { padding:.7em .9em; margin-bottom:1em; border-left:4px solid #b26a00; background:#fff8e8; }
 @media (max-width: 640px) { .candy-sdwan-grid { grid-template-columns:1fr; } }
 @media (max-width: 480px) { .candy-sdwan-form .cbi-value { grid-template-columns:1fr; gap:.25em; } }
@@ -77,11 +78,11 @@ local result = luci.http.formvalue("result") or ""
 			<div><dt><%:Cloud%></dt><dd><%=label(registration.cloud_address)%></dd></div>
 			<div><dt><%:Join state%></dt><dd><%=state_label(enabled and registration_state or "disabled")%></dd></div>
 		</dl>
-		<form class="candy-sdwan-form" method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_join')%>">
+		<form class="candy-sdwan-form" method="post" enctype="multipart/form-data" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_join')%>">
 			<input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" />
-			<div class="cbi-value"><label for="candy-sdwan-cloud"><%:Cloud address%></label><input id="candy-sdwan-cloud" name="cloud" type="url" required maxlength="2048" placeholder="https://" value="<%=xml.pcdata(registration.cloud_address or '')%>" /></div>
-			<div class="cbi-value"><label for="candy-sdwan-join-code"><%:Node join code%></label><input id="candy-sdwan-join-code" name="join_code" type="password" required maxlength="4096" autocomplete="one-time-code" /></div>
-			<div class="candy-sdwan-actions"><button class="cbi-button cbi-button-apply" type="submit"><%:Join%></button></div>
+			<div class="cbi-value"><label for="candy-sdwan-bootstrap"><%:Node join file%></label><input id="candy-sdwan-bootstrap" name="bootstrap_file" type="file" accept="application/json,.json" required="required" /></div>
+			<p class="candy-sdwan-join-help"><%:Download the short-lived node join file from Candy Cloud, then import it here. It already contains the Cloud address and one-time authorization; no code needs to be copied.%></p>
+			<div class="candy-sdwan-actions"><button class="cbi-button cbi-button-apply" type="submit"><%:Import and join%></button></div>
 		</form>
 	<% else %>
 		<dl class="candy-sdwan-grid">

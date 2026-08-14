@@ -81,6 +81,7 @@ grep -Fq 'incoming-$tag' "$workflow" || fail "release workflow does not isolate 
 grep -Fq 'candy-artifact-ready' "$workflow" || fail "release workflow does not request central finalization"
 grep -Fq '"$payload/client/usr/bin/candy-sdwan-agent"' "$sdk_gate" || fail "SDK gate does not verify the packaged SD-WAN agent"
 grep -Fq '"$payload/client/usr/bin/candy-netd"' "$sdk_gate" || fail "SDK gate does not verify the packaged netd"
+grep -Fq '"$payload/client/usr/libexec/candy-cloud-enroll"' "$sdk_gate" || fail "SDK gate does not verify the packaged enrollment client"
 grep -Fq '"$payload/luci/usr/lib/lua/luci/view/candy/sdwan.htm"' "$sdk_gate" || fail "SDK gate does not verify the packaged LuCI SD-WAN view"
 grep -Fq 'repos/$RELEASE_REPOSITORY/dispatches' "$workflow" || fail "release workflow dispatches to the wrong repository"
 if grep -Fq -- '--draft=false' "$workflow"; then

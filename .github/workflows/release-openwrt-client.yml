@@ -6,6 +6,10 @@ on:
       - main
     paths:
       - VERSION
+      - Cargo.lock
+      - Cargo.toml
+      - linux/**
+      - packaging/linux/**
       - openwrt/client/packages/candy-client/Makefile
       - openwrt/client/packages/luci-app-candy/Makefile
       - .github/workflows/release-openwrt-client.yml
@@ -20,12 +24,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-openwrt-client-0.4.0-r24
+  group: release-openwrt-client-0.4.0-r25
   cancel-in-progress: false
 
 env:
   CANDY_RELEASE_VERSION: "0.4.0"
-  CANDY_RELEASE_REVISION: "24"
+  CANDY_RELEASE_REVISION: "25"
   OPENWRT_RELEASE: "25.12.4"
   OPENWRT_GCC_VERSION: "14.3.0"
   RELEASE_REPOSITORY: reTsubasa/candy-release
@@ -56,10 +60,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl,armv7-unknown-linux-musleabihf
+          targets: x86_64-unknown-linux-musl,armv7-unknown-linux-musleabihf,aarch64-unknown-linux-gnu
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y musl-tools jq ripgrep lua5.4 curl zstd
+        run: sudo apt-get update && sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu jq ripgrep lua5.4 curl zstd
 
       - name: Install pinned ARMv7 musl toolchain
         shell: bash
@@ -69,10 +73,12 @@ jobs:
           set -euo pipefail
           arm_bin=$(scripts/install_pinned_arm_musl_toolchain.sh)
           echo "$arm_bin" >> "$GITHUB_PATH"
-          echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=$arm_bin/armv7l-linux-musleabihf-gcc" >> "$GITHUB_ENV"
-          echo "CC_armv7_unknown_linux_musleabihf=$arm_bin/armv7l-linux-musleabihf-gcc" >> "$GITHUB_ENV"
-          echo "CXX_armv7_unknown_linux_musleabihf=$arm_bin/armv7l-linux-musleabihf-g++" >> "$GITHUB_ENV"
-          echo "AR_armv7_unknown_linux_musleabihf=$arm_bin/armv7l-linux-musleabihf-ar" >> "$GITHUB_ENV"
+          {
+            echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=$arm_bin/armv7l-linux-musleabihf-gcc"
+            echo "CC_armv7_unknown_linux_musleabihf=$arm_bin/armv7l-linux-musleabihf-gcc"
+            echo "CXX_armv7_unknown_linux_musleabihf=$arm_bin/armv7l-linux-musleabihf-g++"
+            echo "AR_armv7_unknown_linux_musleabihf=$arm_bin/armv7l-linux-musleabihf-ar"
+          } >> "$GITHUB_ENV"
 
       - name: Run full Runtime verification
         run: scripts/verify.sh
@@ -83,6 +89,16 @@ jobs:
           set -euo pipefail
           packaging/openwrt/build/build_runtime.sh x86_64-unknown-linux-musl
           packaging/openwrt/build/build_runtime.sh armv7-unknown-linux-musleabihf
+
+      - name: Build Linux server Runtime bundles
+        shell: bash
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+        run: |
+          set -euo pipefail
+          packaging/linux/build.sh x86_64-unknown-linux-musl
+          packaging/linux/build.sh aarch64-unknown-linux-gnu
 
       - name: Build x86_64 OpenWrt client APKs
         env:
@@ -113,6 +129,9 @@ jobs:
           rm -rf dist/openwrt/merged
           packaging/openwrt/build/merge_runtime_release.sh \
             dist/openwrt/x86_64/apk dist/openwrt/ipq40xx-generic/apk dist/openwrt/merged
+          packaging/linux/prepare_release.sh \
+            dist/linux dist/openwrt/merged "$CANDY_RELEASE_VERSION" "$CANDY_RELEASE_REVISION" \
+            "$GITHUB_REPOSITORY" "$source_commit"
           (cd dist/openwrt/merged && sha256sum -c SHA256SUMS)
 
       - name: Stage Runtime release and request central finalization
@@ -130,8 +149,8 @@ jobs:
           Candy Runtime $CANDY_RELEASE_VERSION-r$CANDY_RELEASE_REVISION
 
           - Source: $GITHUB_REPOSITORY@$(git rev-parse HEAD)
-          - Targets: OpenWrt $OPENWRT_RELEASE x86_64 and ipq40xx/generic
-          - Package format: APK (target-qualified assets)
+          - Targets: OpenWrt $OPENWRT_RELEASE x86_64 and ipq40xx/generic; Linux x86_64 and ARM64
+          - Package formats: APK and architecture-bound Linux tar.gz bundles
           EOF
           if gh release view "$staging_tag" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
             gh release delete "$staging_tag" --repo "$RELEASE_REPOSITORY" --yes

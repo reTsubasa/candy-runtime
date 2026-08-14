@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
+use chrono::{DateTime, Utc};
 use clap::Parser;
 use ed25519_dalek::{pkcs8::EncodePrivateKey, Signer, SigningKey};
 use rand::rngs::OsRng;
@@ -27,13 +28,13 @@ const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 )]
 struct Args {
     #[arg(long)]
-    cloud: Url,
-    #[arg(long)]
     state_dir: PathBuf,
     #[arg(long)]
-    activation_file: Option<PathBuf>,
-    #[arg(long, conflicts_with = "activation_file")]
-    join_code_stdin: bool,
+    bootstrap_file: Option<PathBuf>,
+    #[arg(long, default_value = "LINUX")]
+    expected_platform: String,
+    #[arg(long)]
+    expected_architecture: Option<String>,
     #[arg(long)]
     display_name: Option<String>,
     #[arg(long)]
@@ -79,6 +80,38 @@ struct ChallengeRequest<'a> {
     operational_public_key: &'a str,
     metadata_hash: &'a str,
     attestation_hash: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapDocument {
+    schema_version: u8,
+    cloud_address: String,
+    bootstrap_code: String,
+    expires_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BootstrapExchangeRequest<'a> {
+    bootstrap_code: &'a str,
+    installation_instance_id: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapManifest {
+    schema_version: u8,
+    activation_id: Uuid,
+    tenant_id: Uuid,
+    site_id: Uuid,
+    display_name: String,
+    platform: String,
+    architecture: String,
+    enrollment_endpoint: String,
+    enrollment_authorization: String,
+    signing_key_id: String,
+    expires_at: String,
+    replayed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,9 +173,16 @@ fn main() {
 }
 
 fn run(args: Args) -> Result<()> {
-    validate_cloud(&args.cloud)?;
+    let bootstrap_path = args
+        .bootstrap_file
+        .as_deref()
+        .context("--bootstrap-file is required")?;
+    let bootstrap = read_bootstrap_document(bootstrap_path)?;
+    let cloud = Url::parse(&bootstrap.cloud_address).context("parse bootstrap Cloud address")?;
+    validate_cloud(&cloud)?;
     ensure_state_dir(&args.state_dir)?;
     let state_path = args.state_dir.join("enrollment-v1.json");
+    let installation_instance_path = args.state_dir.join("installation-instance-id");
     let root_key_path = args.state_dir.join("root-key.pem");
     let operational_key_path = args.state_dir.join("operational-key.pem");
     if !state_path.exists() && args.state_dir.join("device-identity-v1.json").exists() {
@@ -150,7 +190,11 @@ fn run(args: Args) -> Result<()> {
     }
     let mut state = if state_path.exists() {
         let existing: EnrollmentState = read_bounded_json(&state_path, 64 * 1024)?;
-        if existing.cloud_address != args.cloud.as_str().trim_end_matches('/') {
+        persist_installation_instance_id(
+            &installation_instance_path,
+            &existing.enrollment_instance_id,
+        )?;
+        if existing.cloud_address != cloud.as_str().trim_end_matches('/') {
             bail!("an enrollment transaction for another Cloud is already pending; leave it before joining a different Cloud")
         }
         existing
@@ -165,21 +209,22 @@ fn run(args: Args) -> Result<()> {
         let operational_key = SigningKey::generate(&mut OsRng);
         write_private_key(&root_key_path, &root_key)?;
         write_private_key(&operational_key_path, &operational_key)?;
-        let enrollment_instance_id = format!("linux-{}", Uuid::new_v4());
+        let enrollment_instance_id =
+            load_or_create_installation_instance_id(&installation_instance_path)?;
         let root_public_key = url_encode(root_key.verifying_key().to_bytes());
         let operational_public_key = url_encode(operational_key.verifying_key().to_bytes());
         let metadata_hash = url_encode(hash_fields(&[
-            b"candy/linux-enrollment-metadata/v1",
+            b"candy/device-enrollment-metadata/v1",
             enrollment_instance_id.as_bytes(),
             display_name.as_bytes(),
         ]));
         let attestation_hash = url_encode(hash_fields(&[
-            b"candy/software-attestation/unavailable/v1",
+            b"candy/device-software-attestation/unavailable/v1",
             enrollment_instance_id.as_bytes(),
         ]));
         let created = EnrollmentState {
             schema_version: 1,
-            cloud_address: args.cloud.as_str().trim_end_matches('/').to_owned(),
+            cloud_address: cloud.as_str().trim_end_matches('/').to_owned(),
             enrollment_instance_id,
             display_name,
             challenge_request_id: format!("challenge-{}", Uuid::new_v4()),
@@ -202,15 +247,36 @@ fn run(args: Args) -> Result<()> {
     if url_encode(operational_key.verifying_key().to_bytes()) != state.operational_public_key {
         bail!("persisted operational key does not match the pending enrollment transaction")
     }
+    validate_installation_instance_id(&state.enrollment_instance_id)?;
     let client = build_client(&args)?;
     let mut challenge_replayed = false;
     if state.challenge.is_none() {
-        let activation = read_join_code(args.activation_file.as_deref(), args.join_code_stdin)?;
+        let manifest: BootstrapManifest = post_json(
+            &client,
+            endpoint(&cloud, "auth/v1/bootstrap/exchange")?,
+            &BootstrapExchangeRequest {
+                bootstrap_code: &bootstrap.bootstrap_code,
+                installation_instance_id: &state.enrollment_instance_id,
+            },
+            &[StatusCode::OK],
+        )?;
+        validate_bootstrap_manifest(
+            &manifest,
+            &args.expected_platform,
+            args.expected_architecture.as_deref(),
+        )?;
+        state.display_name = manifest.display_name;
+        state.metadata_hash = url_encode(hash_fields(&[
+            b"candy/device-enrollment-metadata/v1",
+            state.enrollment_instance_id.as_bytes(),
+            state.display_name.as_bytes(),
+        ]));
+        atomic_json(&state_path, &state, 0o600)?;
         let response: ChallengeResponse = post_json(
             &client,
-            endpoint(&args.cloud, "auth/v1/enrollment/challenges")?,
+            bootstrap_endpoint(&cloud, &manifest.enrollment_endpoint)?,
             &ChallengeRequest {
-                activation_credential: &activation,
+                activation_credential: &manifest.enrollment_authorization,
                 request_id: &state.challenge_request_id,
                 enrollment_instance_id: &state.enrollment_instance_id,
                 display_name: &state.display_name,
@@ -239,7 +305,7 @@ fn run(args: Args) -> Result<()> {
     let proof = url_encode(operational_key.sign(&transcript).to_bytes());
     let completed: CompleteResponse = post_json(
         &client,
-        endpoint(&args.cloud, "auth/v1/enrollment/complete")?,
+        endpoint(&cloud, "auth/v1/enrollment/complete")?,
         &CompleteRequest {
             challenge_id: challenge.challenge_id,
             request_id: &state.completion_request_id,
@@ -304,6 +370,7 @@ fn run(args: Args) -> Result<()> {
         0o600,
     )?;
     fs::remove_file(&state_path).context("remove completed enrollment transaction")?;
+    fs::remove_file(bootstrap_path).context("remove consumed bootstrap file")?;
     println!(
         "{}",
         serde_json::to_string(&EnrollmentResult {
@@ -343,6 +410,121 @@ fn endpoint(cloud: &Url, path: &str) -> Result<Url> {
     .context("construct Cloud enrollment endpoint")
 }
 
+fn bootstrap_endpoint(cloud: &Url, path: &str) -> Result<Url> {
+    if !path.starts_with('/') || path.starts_with("//") || path.contains(['?', '#']) {
+        bail!("Cloud returned an invalid enrollment endpoint")
+    }
+    endpoint(cloud, path.trim_start_matches('/'))
+}
+
+fn read_bootstrap_document(path: &Path) -> Result<BootstrapDocument> {
+    let metadata = fs::symlink_metadata(path).context("inspect bootstrap file")?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > 16 * 1024
+    {
+        bail!("bootstrap file must be a non-empty regular file of at most 16384 bytes")
+    }
+    #[cfg(unix)]
+    if metadata.mode() & 0o077 != 0 {
+        bail!("bootstrap file must not be accessible by group or other users")
+    }
+    let document: BootstrapDocument = read_bounded_json(path, 16 * 1024)?;
+    if document.schema_version != 1 {
+        bail!("unsupported bootstrap document schema")
+    }
+    let cloud = Url::parse(&document.cloud_address).context("parse bootstrap Cloud address")?;
+    validate_cloud(&cloud)?;
+    validate_base64url(&document.bootstrap_code, 32, "bootstrap code")?;
+    if document.expires_at.is_empty() || document.expires_at.len() > 64 {
+        bail!("bootstrap expiration is invalid")
+    }
+    validate_future_expiration(&document.expires_at, "bootstrap file")?;
+    Ok(document)
+}
+
+fn validate_bootstrap_manifest(
+    manifest: &BootstrapManifest,
+    expected_platform: &str,
+    expected_architecture: Option<&str>,
+) -> Result<()> {
+    if manifest.schema_version != 1
+        || manifest.activation_id.is_nil()
+        || manifest.tenant_id.is_nil()
+        || manifest.site_id.is_nil()
+        || !matches!(expected_platform, "LINUX" | "OPEN_WRT")
+        || manifest.platform != expected_platform
+        || manifest.architecture.is_empty()
+        || manifest.architecture.len() > 80
+        || manifest.signing_key_id.is_empty()
+        || manifest.signing_key_id.len() > 64
+        || manifest.expires_at.is_empty()
+    {
+        bail!("Cloud returned an invalid bootstrap manifest")
+    }
+    if expected_architecture.is_some_and(|expected| manifest.architecture != expected) {
+        bail!("bootstrap file was created for a different processor architecture")
+    }
+    validate_display_name(&manifest.display_name)?;
+    validate_base64url(
+        &manifest.enrollment_authorization,
+        32,
+        "enrollment authorization",
+    )?;
+    validate_future_expiration(&manifest.expires_at, "bootstrap authorization")?;
+    let _ = manifest.replayed;
+    Ok(())
+}
+
+fn validate_future_expiration(value: &str, subject: &str) -> Result<()> {
+    let expires_at = DateTime::parse_from_rfc3339(value)
+        .with_context(|| format!("{subject} expiration is not RFC 3339"))?
+        .with_timezone(&Utc);
+    if expires_at <= Utc::now() {
+        bail!("{subject} has expired")
+    }
+    Ok(())
+}
+
+fn validate_installation_instance_id(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 120
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+    {
+        bail!("persisted installation instance ID is invalid")
+    }
+    Ok(())
+}
+
+fn load_or_create_installation_instance_id(path: &Path) -> Result<String> {
+    if path.exists() {
+        let value = fs::read_to_string(path)
+            .context("read persistent installation instance ID")?
+            .trim()
+            .to_owned();
+        validate_installation_instance_id(&value)?;
+        return Ok(value);
+    }
+    let value = format!("candy-{}", Uuid::new_v4());
+    atomic_bytes(path, format!("{value}\n").as_bytes(), 0o600)?;
+    Ok(value)
+}
+
+fn persist_installation_instance_id(path: &Path, expected: &str) -> Result<()> {
+    validate_installation_instance_id(expected)?;
+    if path.exists() {
+        let persisted = load_or_create_installation_instance_id(path)?;
+        if persisted != expected {
+            bail!("persistent installation instance ID does not match the pending enrollment transaction")
+        }
+        return Ok(());
+    }
+    atomic_bytes(path, format!("{expected}\n").as_bytes(), 0o600)
+}
+
 fn ensure_state_dir(path: &Path) -> Result<()> {
     let parent = path
         .parent()
@@ -361,44 +543,6 @@ fn ensure_state_dir(path: &Path) -> Result<()> {
     }
     set_mode(path, 0o700)?;
     set_path_owner(path, &parent_metadata)
-}
-
-fn read_join_code(path: Option<&Path>, from_stdin: bool) -> Result<String> {
-    if from_stdin {
-        return read_join_code_from_reader(std::io::stdin());
-    }
-
-    let path = path.context("node join code is required until Cloud returns a challenge")?;
-    let metadata = fs::symlink_metadata(path).context("inspect node join code")?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() == 0
-        || metadata.len() > 4096
-    {
-        bail!("node join code must be a non-empty regular file of at most 4096 bytes")
-    }
-    #[cfg(unix)]
-    if metadata.mode() & 0o077 != 0 {
-        bail!("node join code file must not be accessible by group or other users")
-    }
-    let value = fs::read_to_string(path).context("read node join code")?;
-    let value = value.trim();
-    validate_base64url(value, 32, "node join code")?;
-    Ok(value.to_owned())
-}
-
-fn read_join_code_from_reader(reader: impl Read) -> Result<String> {
-    let mut value = String::new();
-    reader
-        .take(4097)
-        .read_to_string(&mut value)
-        .context("read node join code")?;
-    if value.len() > 4096 {
-        bail!("node join code input exceeds 4096 bytes")
-    }
-    let value = value.trim();
-    validate_base64url(value, 32, "node join code")?;
-    Ok(value.to_owned())
 }
 
 fn validate_display_name(value: &str) -> Result<()> {
@@ -758,6 +902,112 @@ mod tests {
         assert!(validate_cloud(&Url::parse("https://cloud.example.test").unwrap()).is_ok());
     }
 
+    fn bootstrap_manifest(platform: &str, architecture: &str) -> BootstrapManifest {
+        BootstrapManifest {
+            schema_version: 1,
+            activation_id: Uuid::from_bytes([1; 16]),
+            tenant_id: Uuid::from_bytes([2; 16]),
+            site_id: Uuid::from_bytes([3; 16]),
+            display_name: "test node".into(),
+            platform: platform.into(),
+            architecture: architecture.into(),
+            enrollment_endpoint: "/auth/v1/enrollment/challenge".into(),
+            enrollment_authorization: url_encode([4; 32]),
+            signing_key_id: "enrollment-v1".into(),
+            expires_at: "2030-01-01T00:00:00Z".into(),
+            replayed: false,
+        }
+    }
+
+    #[test]
+    fn bootstrap_manifest_is_bound_to_the_runtime_platform() {
+        assert!(validate_bootstrap_manifest(
+            &bootstrap_manifest("LINUX", "x86_64"),
+            "LINUX",
+            Some("x86_64")
+        )
+        .is_ok());
+        assert!(validate_bootstrap_manifest(
+            &bootstrap_manifest("OPEN_WRT", "x86_64"),
+            "LINUX",
+            Some("x86_64")
+        )
+        .is_err());
+        assert!(validate_bootstrap_manifest(
+            &bootstrap_manifest("LINUX", "x86_64"),
+            "OPEN_WRT",
+            Some("x86_64")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn bootstrap_manifest_is_bound_to_the_processor_architecture() {
+        assert!(validate_bootstrap_manifest(
+            &bootstrap_manifest("LINUX", "aarch64"),
+            "LINUX",
+            Some("x86_64")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn persisted_installation_instance_id_is_strict_and_bounded() {
+        assert!(
+            validate_installation_instance_id("candy-7e5f78c4-7a11-4c96-a97d-ef11ea842caa").is_ok()
+        );
+        assert!(validate_installation_instance_id("contains space").is_err());
+        assert!(validate_installation_instance_id("../escape").is_err());
+        assert!(validate_installation_instance_id(&"a".repeat(121)).is_err());
+    }
+
+    #[test]
+    fn installation_instance_id_is_created_once_and_reused() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("installation-instance-id");
+        let first = load_or_create_installation_instance_id(&path).unwrap();
+        let second = load_or_create_installation_instance_id(&path).unwrap();
+        assert_eq!(first, second);
+        assert!(first.starts_with("candy-"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_expiration_is_validated_locally() {
+        assert!(validate_future_expiration("2000-01-01T00:00:00Z", "bootstrap file").is_err());
+        assert!(validate_future_expiration("not-a-time", "bootstrap file").is_err());
+        assert!(validate_future_expiration("2999-01-01T00:00:00Z", "bootstrap file").is_ok());
+    }
+
+    #[test]
+    fn bootstrap_file_requires_private_permissions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bootstrap.json");
+        fs::write(
+            &path,
+            format!(
+                "{{\"schema_version\":1,\"cloud_address\":\"https://cloud.example.test\",\"bootstrap_code\":\"{}\",\"expires_at\":\"2030-01-01T00:00:00Z\"}}",
+                url_encode([5; 32])
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(read_bootstrap_document(&path).is_err());
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(read_bootstrap_document(&path).is_ok());
+    }
+
     #[test]
     fn private_key_round_trip_preserves_operational_identity() {
         let directory = tempfile::tempdir().unwrap();
@@ -774,16 +1024,5 @@ mod tests {
                 0o600
             );
         }
-    }
-
-    #[test]
-    fn stdin_join_code_is_bounded_and_validated() {
-        let valid = format!("  {}\n", url_encode([11; 32]));
-        assert_eq!(
-            read_join_code_from_reader(valid.as_bytes()).unwrap(),
-            url_encode([11; 32])
-        );
-        assert!(read_join_code_from_reader(b"not-a-join-code".as_slice()).is_err());
-        assert!(read_join_code_from_reader(vec![b'A'; 4097].as_slice()).is_err());
     }
 }

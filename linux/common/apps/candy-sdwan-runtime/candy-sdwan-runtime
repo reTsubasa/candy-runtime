@@ -8,9 +8,28 @@ run_dir=${CANDY_SDWAN_RUN_DIR:-/run/candy}
 config_file=${CANDY_SDWAN_CONFIG_CACHE:-$state_dir/config-v1.json}
 durable_status_file=${CANDY_SDWAN_STATUS_CACHE:-$state_dir/status-v1.json}
 published_status_file=${CANDY_SDWAN_STATUS_FILE:-$run_dir/sdwan-status.json}
-max_activation_bytes=${CANDY_SDWAN_MAX_ACTIVATION_BYTES:-4096}
+max_bootstrap_bytes=${CANDY_SDWAN_MAX_BOOTSTRAP_BYTES:-16384}
 max_cloud_bytes=${CANDY_SDWAN_MAX_CLOUD_BYTES:-2048}
-enrollment_client=${CANDY_CLOUD_ENROLL_CLIENT:-/usr/local/libexec/candy-cloud-enroll}
+if [ -n "${CANDY_CLOUD_ENROLL_CLIENT:-}" ]; then
+	enrollment_client=$CANDY_CLOUD_ENROLL_CLIENT
+elif [ -x /usr/libexec/candy-cloud-enroll ]; then
+	enrollment_client=/usr/libexec/candy-cloud-enroll
+else
+	enrollment_client=/usr/local/libexec/candy-cloud-enroll
+fi
+if [ -n "${CANDY_CLOUD_ENROLL_PLATFORM:-}" ]; then
+	enrollment_platform=$CANDY_CLOUD_ENROLL_PLATFORM
+elif [ -f /etc/openwrt_release ]; then
+	enrollment_platform=OPEN_WRT
+else
+	enrollment_platform=LINUX
+fi
+case "$(uname -m 2>/dev/null || true)" in
+	x86_64) enrollment_architecture=x86_64 ;;
+	aarch64|arm64) enrollment_architecture=aarch64 ;;
+	armv7*) enrollment_architecture=armv7 ;;
+	*) enrollment_architecture= ;;
+esac
 enrollment_dir=${CANDY_SDWAN_ENROLLMENT_DIR:-$state_dir/identity}
 
 fail() {
@@ -84,13 +103,13 @@ validate_cloud_address() {
 	case "$authority" in *@*) fail "Cloud address must not contain user information" ;; esac
 }
 
-validate_activation_file() {
-	activation_file=$1
-	[ -f "$activation_file" ] && [ ! -L "$activation_file" ] ||
-		fail "activation input must be a regular file"
-	bytes=$(wc -c <"$activation_file" | tr -d ' ')
-	[ "$bytes" -gt 0 ] && [ "$bytes" -le "$max_activation_bytes" ] ||
-		fail "activation input must be between 1 and $max_activation_bytes bytes"
+validate_bootstrap_file() {
+	bootstrap_input=$1
+	[ -f "$bootstrap_input" ] && [ ! -L "$bootstrap_input" ] ||
+		fail "bootstrap input must be a regular file"
+	bytes=$(wc -c <"$bootstrap_input" | tr -d ' ')
+	[ "$bytes" -gt 0 ] && [ "$bytes" -le "$max_bootstrap_bytes" ] ||
+		fail "bootstrap input must be between 1 and $max_bootstrap_bytes bytes"
 }
 
 write_config() {
@@ -183,7 +202,7 @@ usage() {
 usage: candy-sdwan-runtime ACTION [arguments]
 
 Runtime internal actions:
-  join CLOUD [ACTIVATION_FILE]
+  bootstrap BOOTSTRAP_FILE
   reconnect
   leave
   fail-open [REASON]
@@ -196,27 +215,23 @@ EOF
 action=${1:-}
 [ "$#" -eq 0 ] || shift
 case "$action" in
-	join)
+	bootstrap)
 		require_root
-		[ "$#" -ge 1 ] && [ "$#" -le 2 ] || fail "join requires a Cloud address and optional activation file"
-		validate_cloud_address "$1"
-		[ "$#" -lt 2 ] || validate_activation_file "$2"
+		[ "$#" -eq 1 ] || fail "bootstrap requires one bootstrap file"
+		validate_bootstrap_file "$1"
 		ensure_directories
 		[ -x "$enrollment_client" ] || fail "Cloud enrollment client is not installed"
 		[ "$(current_registration_state)" != registered ] || fail "this node is already registered; leave the Cloud before replacing its identity"
-		cloud=$1
-		activation_file=${2:-}
-		if pending_cloud=$(read_cloud 2>/dev/null) && [ -n "$pending_cloud" ] && [ "$pending_cloud" != "$cloud" ]; then
-			fail "an enrollment transaction for another Cloud is already pending; leave it before joining a different Cloud"
-		fi
+		bootstrap_file=$1
+		cloud=$(sed -n 's/^.*"cloud_address"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*$/\1/p' "$bootstrap_file")
+		validate_cloud_address "$cloud"
 		write_config "$cloud" join-pending
 		write_status join-pending stopped ""
 		output_file=$(mktemp "$run_dir/.candy-enrollment.XXXXXX") || fail "could not create enrollment result file"
 		trap 'rm -f "$output_file"' EXIT HUP INT TERM
-		if [ -n "$activation_file" ]; then
-			set -- "$enrollment_client" --cloud "$cloud" --state-dir "$enrollment_dir" --activation-file "$activation_file"
-		else
-			set -- "$enrollment_client" --cloud "$cloud" --state-dir "$enrollment_dir" --join-code-stdin
+		set -- "$enrollment_client" --state-dir "$enrollment_dir" --bootstrap-file "$bootstrap_file" --expected-platform "$enrollment_platform"
+		if [ -n "$enrollment_architecture" ]; then
+			set -- "$@" --expected-architecture "$enrollment_architecture"
 		fi
 		if [ -n "${CANDY_CLOUD_CA_CERTIFICATE:-}" ]; then
 			set -- "$@" --ca-certificate "$CANDY_CLOUD_CA_CERTIFICATE"
@@ -228,10 +243,10 @@ case "$action" in
 			rm -f "$output_file"
 			trap - EXIT HUP INT TERM
 		else
-			write_status join-pending stopped "Cloud enrollment failed; retry candy join to resume the same transaction"
+			write_status join-pending stopped "Cloud bootstrap failed; retry candy bootstrap with the same file to resume the same installation"
 			rm -f "$output_file"
 			trap - EXIT HUP INT TERM
-			fail "Cloud enrollment failed; existing network state was not changed"
+			fail "Cloud bootstrap failed; existing network state was not changed"
 		fi
 		;;
 	reconnect)
@@ -246,8 +261,7 @@ case "$action" in
 		ensure_directories
 		rm -f "$config_file"
 		if [ -d "$enrollment_dir" ] && [ ! -L "$enrollment_dir" ]; then
-			find "$enrollment_dir" -maxdepth 1 -type f -delete
-			rmdir "$enrollment_dir" 2>/dev/null || true
+			find "$enrollment_dir" -maxdepth 1 -type f ! -name installation-instance-id -delete
 		fi
 		write_status unregistered stopped ""
 		;;

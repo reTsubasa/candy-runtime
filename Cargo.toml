@@ -18,6 +18,7 @@ rust-version = "1.88"
 [workspace.dependencies]
 anyhow = "1"
 base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 ed25519-dalek = { version = "2", features = ["pem", "pkcs8", "rand_core"] }
 futures-util = "0.3"

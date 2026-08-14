@@ -51,6 +51,7 @@ sh -n "$edge_launcher"
 sh -n "$core_manager"
 sh -n "$health_check"
 
+rm -rf "$stage"
 mkdir -p "$stage/usr/local/bin" "$stage/usr/local/libexec" "$stage/etc/candy" "$stage/systemd" "$stage/install"
 install -m 0755 "$product_launcher" "$stage/usr/local/bin/candy-server"
 install -m 0755 "$launcher" "$stage/usr/local/libexec/serverd-linux"
@@ -87,6 +88,7 @@ COPYFILE_DISABLE=1 tar --no-xattrs -C "$stage" -czf "$bundle" .
 install -m 0755 "$product_launcher" "$dist_root/candy-server-$artifact_arch"
 
 edge_stage=$dist_root/client/$artifact_arch
+rm -rf "$edge_stage"
 mkdir -p "$edge_stage/usr/local/bin" "$edge_stage/usr/local/libexec" "$edge_stage/etc/candy" "$edge_stage/systemd"
 install -m 0755 "$edge_product" "$edge_stage/usr/local/bin/candy"
 install -m 0755 "$edge_launcher" "$edge_stage/usr/local/libexec/candy-client"

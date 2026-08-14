@@ -22,6 +22,7 @@ grep -F '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-netd $(1)/usr/bin/candy-netd' "$m
 grep -F '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan-agent $(1)/usr/bin/candy-sdwan-agent' "$makefile" >/dev/null || fail "candy-sdwan-agent is not packaged as a Runtime binary"
 grep -F '$(INSTALL_BIN) ./candy-sdwan $(1)/usr/bin/candy-sdwan' "$makefile" >/dev/null || fail "candy-sdwan Runtime launcher is not packaged"
 grep -F '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan-runtime $(1)/usr/libexec/candy-sdwan-runtime' "$makefile" >/dev/null || fail "Runtime SD-WAN V1 state helper is not packaged"
+grep -F '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-cloud-enroll $(1)/usr/libexec/candy-cloud-enroll' "$makefile" >/dev/null || fail "Cloud bootstrap exchange client is not packaged"
 grep -F 'exec "$core_bin" client sdwan "$@"' "$root/candy-client/candy-sdwan" >/dev/null || fail "candy-sdwan does not use the Core process API"
 grep -F 'runtime-api-version' "$root/candy-client/candy-sdwan" >/dev/null || fail "candy-sdwan does not bootstrap the Core process API"
 if grep -F '/usr/lib/candy/cores/current/candy-' "$makefile" >/dev/null; then
@@ -79,17 +80,20 @@ grep -F 'tonumber(parsed.schema_version) == 1' "$sdwan" >/dev/null || fail "LuCI
 for label in 'Site' 'Segment' 'Cloud' 'Full duplex' 'Peer' 'Direct' 'Relay' 'Local egress' 'Remote egress' 'Internal DNS'; do
 	grep -F "$label" "$sdwan" >/dev/null || fail "SD-WAN page is missing $label"
 done
-for control in 'Cloud address' 'Node join code' 'Join' 'Reconnect' 'Leave'; do
+for control in 'Node join file' 'Import and join' 'Reconnect' 'Leave'; do
 	grep -F "$control" "$sdwan" >/dev/null || fail "SD-WAN page is missing $control control"
 done
-grep -F 'type="password"' "$sdwan" >/dev/null || fail "node join code is not protected as a password input"
+grep -F 'enctype="multipart/form-data"' "$sdwan" >/dev/null || fail "node bootstrap import is not multipart"
+grep -F 'name="bootstrap_file"' "$sdwan" >/dev/null || fail "node bootstrap file control is missing"
 grep -F 'action_sdwan_join' "$controller" >/dev/null || fail "LuCI join action is missing"
 grep -F 'action_sdwan_reconnect' "$controller" >/dev/null || fail "LuCI reconnect action is missing"
 grep -F 'action_sdwan_leave' "$controller" >/dev/null || fail "LuCI leave action is missing"
-grep -F 'fs.unlink(temporary)' "$controller" >/dev/null || fail "temporary node join code input is not removed"
-grep -F '{ SDWAN_RUNTIME, "join", cloud, temporary }' "$controller" >/dev/null || fail "node join code is not passed through a private file"
-if grep -F '{ SDWAN_RUNTIME, "join", cloud, join_code }' "$controller" >/dev/null; then
-	fail "node join code is exposed in the process argument list"
+grep -F 'MAX_SDWAN_BOOTSTRAP_BYTES = 16 * 1024' "$controller" >/dev/null || fail "node bootstrap upload is unbounded"
+grep -F 'fs.chmod(temporary, "0600")' "$controller" >/dev/null || fail "node bootstrap upload is not private"
+grep -F 'fs.unlink(temporary)' "$controller" >/dev/null || fail "temporary node bootstrap input is not removed"
+grep -F '{ SDWAN_RUNTIME, "bootstrap", temporary }' "$controller" >/dev/null || fail "node bootstrap file is not passed to Runtime"
+if grep -E 'join_code|Node join code|name="cloud"' "$controller" "$sdwan" >/dev/null; then
+	fail "ordinary OpenWrt enrollment still exposes raw bootstrap credentials"
 fi
 if grep -Eiq 'grant|signature|route generation|attachment epoch|hash|queue|mtu|drop' "$sdwan"; then
 	fail "ordinary SD-WAN page exposes Diagnostics evidence"

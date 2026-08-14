@@ -4,7 +4,7 @@ PKG_NAME:=candy-client
 PKG_VERSION:=0.4.0
 # OpenWrt requires a package revision. This is internal metadata, not part of
 # the Candy product version shown to users.
-PKG_RELEASE:=24
+PKG_RELEASE:=25
 CANDY_RUNTIME_BIN_DIR?=
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
@@ -33,9 +33,11 @@ define Build/Prepare
 	[ -n "$(CANDY_RUNTIME_BIN_DIR)" ] || { echo "CANDY_RUNTIME_BIN_DIR is required"; exit 1; }
 	[ -x "$(CANDY_RUNTIME_BIN_DIR)/candy-netd" ] || { echo "missing Runtime binary: candy-netd"; exit 1; }
 	[ -x "$(CANDY_RUNTIME_BIN_DIR)/candy-sdwan-agent" ] || { echo "missing Runtime binary: candy-sdwan-agent"; exit 1; }
+	[ -x "$(CANDY_RUNTIME_BIN_DIR)/candy-cloud-enroll" ] || { echo "missing Runtime binary: candy-cloud-enroll"; exit 1; }
 	[ -x "./candy-sdwan-runtime" ] || { echo "missing Runtime binary: candy-sdwan-runtime"; exit 1; }
 	cp "$(CANDY_RUNTIME_BIN_DIR)/candy-netd" "$(PKG_BUILD_DIR)/candy-netd"
 	cp "$(CANDY_RUNTIME_BIN_DIR)/candy-sdwan-agent" "$(PKG_BUILD_DIR)/candy-sdwan-agent"
+	cp "$(CANDY_RUNTIME_BIN_DIR)/candy-cloud-enroll" "$(PKG_BUILD_DIR)/candy-cloud-enroll"
 	cp "./candy-sdwan-runtime" "$(PKG_BUILD_DIR)/candy-sdwan-runtime"
 endef
 
@@ -51,6 +53,7 @@ define Package/candy-client/install
 	ln -sf candy-client $(1)/usr/bin/client-cli
 	$(INSTALL_DIR) $(1)/usr/libexec
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan-runtime $(1)/usr/libexec/candy-sdwan-runtime
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-cloud-enroll $(1)/usr/libexec/candy-cloud-enroll
 	$(INSTALL_BIN) ./candy-core-manager $(1)/usr/libexec/candy-core-manager
 	$(INSTALL_BIN) ./candy-update-manager $(1)/usr/libexec/candy-update-manager
 	$(INSTALL_BIN) ./candy-runtime-health-check $(1)/usr/libexec/candy-runtime-health-check

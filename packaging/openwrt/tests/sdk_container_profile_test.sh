@@ -10,6 +10,8 @@ printf '#!/bin/sh\nexit 0\n' > "$tmp/runtime-bin/candy-netd"
 chmod 0755 "$tmp/runtime-bin/candy-netd"
 printf '#!/bin/sh\nexit 0\n' > "$tmp/runtime-bin/candy-sdwan-agent"
 chmod 0755 "$tmp/runtime-bin/candy-sdwan-agent"
+printf '#!/bin/sh\nexit 0\n' > "$tmp/runtime-bin/candy-cloud-enroll"
+chmod 0755 "$tmp/runtime-bin/candy-cloud-enroll"
 cat > "$tmp/bin/docker" <<'EOF'
 #!/bin/sh
 exit 1

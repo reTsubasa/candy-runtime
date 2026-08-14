@@ -16,7 +16,7 @@ require_runtime() {
 usage() {
 	cat <<'EOF'
 usage:
-  candy join --cloud URL
+  candy bootstrap FILE
   candy sdwan status
   candy sdwan reconnect
   candy leave [--yes]
@@ -26,41 +26,12 @@ EOF
 command_name=${1:-}
 [ "$#" -eq 0 ] || shift
 case "$command_name" in
-	join)
-		cloud=
-		while [ "$#" -gt 0 ]; do
-			case "$1" in
-				--cloud) shift; [ "$#" -gt 0 ] || fail "--cloud requires a URL"; cloud=$1 ;;
-				*) fail "unknown join option: $1" ;;
-			esac
-			shift
-		done
-		[ -n "$cloud" ] || fail "--cloud is required"
+	bootstrap)
+		[ "$#" -eq 1 ] || fail "bootstrap requires one bootstrap file"
+		[ -f "$1" ] && [ ! -L "$1" ] || fail "bootstrap input must be a regular file"
+		chmod 0600 "$1" || fail "could not protect the bootstrap file"
 		require_runtime
-		[ -t 0 ] || fail "node join code must be entered from an interactive terminal"
-		echo_disabled=0
-		restore_terminal() {
-			if [ "$echo_disabled" -eq 1 ]; then
-				stty echo 2>/dev/null || true
-				echo_disabled=0
-			fi
-		}
-		trap 'restore_terminal' EXIT
-		trap 'restore_terminal; exit 130' HUP INT TERM
-		stty -echo
-		echo_disabled=1
-		printf '%s' "Node join code: " >&2
-		if ! IFS= read -r join_code; then
-			restore_terminal
-			printf '\n' >&2
-			fail "node join code is required"
-		fi
-		restore_terminal
-		trap - EXIT HUP INT TERM
-		printf '\n' >&2
-		[ -n "$join_code" ] || fail "node join code is required"
-		printf '%s\n' "$join_code" | "$runtime" join "$cloud"
-		join_code=
+		"$runtime" bootstrap "$1"
 		printf '%s\n' "This node is registered with Candy Cloud. SD-WAN remains stopped until an authorized configuration is available."
 		;;
 	sdwan)
