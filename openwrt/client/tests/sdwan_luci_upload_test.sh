@@ -58,7 +58,7 @@ luci = {
 			if not parsed then
 				parsed = true
 				handler({ name = "bootstrap_file", file = "candy-node-bootstrap.json" }, '{"schema_version":1,', false)
-				handler(nil, '"cloud_address":"https://cloud.example.test"}', true)
+				handler({ name = "bootstrap_file", file = "candy-node-bootstrap.json" }, '"cloud_address":"https://cloud.example.test"}', true)
 			end
 			if name == "token" then return "csrf-token" end
 		end,

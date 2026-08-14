@@ -781,7 +781,7 @@ function action_sdwan_join()
 	local failure
 	luci.http.setfilehandler(function(meta, chunk, eof)
 		if failure then return end
-		if complete or (upload and meta) then
+		if complete then
 			failure = "only one bootstrap file is allowed"
 			return
 		end
