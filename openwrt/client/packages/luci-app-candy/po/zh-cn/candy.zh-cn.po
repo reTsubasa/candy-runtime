@@ -1707,6 +1707,12 @@ msgstr "已请求重新连接。"
 msgid "This node has left Candy Cloud."
 msgstr "此节点已离开 Candy Cloud。"
 
+msgid "The node join file could not be read. Choose the JSON file downloaded from Candy Cloud and try again."
+msgstr "无法读取节点加入文件。请选择从 Candy Cloud 下载的 JSON 文件后重试。"
+
+msgid "The node join file is too large. Generate a new join file in Candy Cloud and try again."
+msgstr "节点加入文件过大。请在 Candy Cloud 重新生成后重试。"
+
 msgid "Operation failed. Check Logs for details."
 msgstr "操作失败，请查看日志。"
 

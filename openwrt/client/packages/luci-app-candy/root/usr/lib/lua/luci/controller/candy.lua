@@ -10,9 +10,9 @@ local MAX_PASSIVE_STATUS_BYTES = 262144
 local SDWAN_STATUS_FILE = "/var/run/candy/sdwan-status.json"
 local MAX_SDWAN_STATUS_BYTES = 65536
 local SDWAN_RUNTIME = "/usr/libexec/candy-sdwan-runtime"
-local SDWAN_BOOTSTRAP_ROOT = "/tmp/candy-sdwan-bootstrap"
+local SDWAN_BOOTSTRAP_ROOT = os.getenv("CANDY_SDWAN_BOOTSTRAP_ROOT") or "/tmp/candy-sdwan-bootstrap"
 local MAX_SDWAN_BOOTSTRAP_BYTES = 16 * 1024
-local SERVICE_LOG_FILE = "/tmp/candy.log"
+local SERVICE_LOG_FILE = os.getenv("CANDY_SERVICE_LOG_FILE") or "/tmp/candy.log"
 local FAULT_STATUS_FILE = "/var/lib/candy/runtime-fault.json"
 local MAX_FAULT_STATUS_BYTES = 16384
 local CONGESTION_TEST_LOCK_DIR = "/tmp/candy-congestion-test.lock"
@@ -771,15 +771,15 @@ function action_sdwan_join()
 	local failure
 	luci.http.setfilehandler(function(meta, chunk, eof)
 		if failure then return end
-		if not meta or meta.name ~= "bootstrap_file" then
-			failure = "unexpected upload field"
-			return
-		end
-		if complete then
+		if complete or (upload and meta) then
 			failure = "only one bootstrap file is allowed"
 			return
 		end
 		if not upload then
+			if not meta or meta.name ~= "bootstrap_file" then
+				failure = "unexpected upload field"
+				return
+			end
 			local made, path = process.capture({ "mktemp", SDWAN_BOOTSTRAP_ROOT .. "/bootstrap.XXXXXX" }, { timeout = 3 })
 			temporary = trim(path or "")
 			if not made or not temporary:match("^" .. SDWAN_BOOTSTRAP_ROOT:gsub("([^%w])", "%%%1") .. "/bootstrap%.[A-Za-z0-9]+$") then
@@ -815,10 +815,22 @@ function action_sdwan_join()
 	end)
 
 	local parsed, authorized = pcall(require_post)
-	if not parsed or not authorized or failure or not complete or not temporary or uploaded == 0 then
+	if not parsed then failure = "malformed multipart upload" end
+	if not authorized then
 		if upload then pcall(function() upload:close() end) end
 		if temporary then fs.unlink(temporary) end
-		luci.http.status(not authorized and 403 or 400, not authorized and "Forbidden" or "Invalid bootstrap upload")
+		return
+	end
+	if failure or not complete or not temporary or uploaded == 0 then
+		if upload then pcall(function() upload:close() end) end
+		if temporary then fs.unlink(temporary) end
+		local detail = failure or "empty bootstrap upload"
+		local log = io.open(SERVICE_LOG_FILE, "a")
+		if log then
+			log:write(os.date("%Y-%m-%d %H:%M:%S"), " level=warn event=sdwan_bootstrap pid=luci result=upload-rejected detail=", detail, "\n")
+			log:close()
+		end
+		redirect_sdwan(detail == "bootstrap file is too large" and "file-too-large" or "invalid-file")
 		return
 	end
 	local ok, output = process.capture({ SDWAN_RUNTIME, "bootstrap", temporary }, { timeout = 90 })

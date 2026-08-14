@@ -68,6 +68,8 @@ local result = luci.http.formvalue("result") or ""
 	<% if result == "joined" then %><div class="candy-sdwan-result"><%:This node has joined Candy Cloud.%></div><% end %>
 	<% if result == "reconnecting" then %><div class="candy-sdwan-result"><%:Reconnect requested.%></div><% end %>
 	<% if result == "left" then %><div class="candy-sdwan-result"><%:This node has left Candy Cloud.%></div><% end %>
+	<% if result == "invalid-file" then %><div class="candy-sdwan-result"><%:The node join file could not be read. Choose the JSON file downloaded from Candy Cloud and try again.%></div><% end %>
+	<% if result == "file-too-large" then %><div class="candy-sdwan-result"><%:The node join file is too large. Generate a new join file in Candy Cloud and try again.%></div><% end %>
 	<% if result == "error" then %><div class="candy-sdwan-result"><%:Operation failed. Check Logs for details.%></div><% end %>
 	<div class="candy-sdwan-head">
 		<h2><%:SD-WAN%></h2>
