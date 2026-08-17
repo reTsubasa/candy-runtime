@@ -32,6 +32,7 @@ for runtime_source in \
   linux/server/apps/candy-server/candy-server-health-check \
   linux/common/apps/candy-netd/Cargo.toml \
   linux/common/apps/candy-sdwan-agent/Cargo.toml \
+  linux/common/apps/candy-cloud-sync/Cargo.toml \
   linux/common/crates/candy-netd-client/Cargo.toml \
   linux/common/crates/candy-netd-proto/Cargo.toml \
   openwrt/client/packages/candy-client/Makefile \
@@ -68,6 +69,8 @@ grep -Fq '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan-agent' "$client_makefile" 
   fail "OpenWrt client does not package runtime-owned candy-sdwan-agent"
 grep -Fq '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan-runtime $(1)/usr/libexec/candy-sdwan-runtime' "$client_makefile" ||
   fail "OpenWrt client does not package the Runtime-owned SD-WAN state helper"
+grep -Fq '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-cloud-sync $(1)/usr/libexec/candy-cloud-sync' "$client_makefile" ||
+  fail "OpenWrt client does not package the Runtime-owned Cloud synchronizer"
 if grep -Eq '/usr/lib/candy/cores/current/(candy-client|candy-netd|candy-sdwan)' "$client_makefile"; then
   fail "Runtime executable is still owned by a Core bundle"
 fi

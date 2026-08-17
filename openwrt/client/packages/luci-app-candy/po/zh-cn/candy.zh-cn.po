@@ -1876,3 +1876,21 @@ msgstr "通过经过认证的 Candy QUIC 数据面运行有上限的拥塞对比
 
 msgid "Encrypts the TLS ClientHello server name when ECH is configured."
 msgstr "配置 ECH 后加密 TLS ClientHello 中的服务器名称。"
+
+msgid "Applying network configuration"
+msgstr "正在应用网络配置"
+
+msgid "Applying SD-WAN configuration"
+msgstr "正在应用 SD-WAN 配置"
+
+msgid "SD-WAN pending"
+msgstr "SD-WAN 等待配置"
+
+msgid "Activation is automatic after Cloud publishes a complete configuration"
+msgstr "Cloud 发布完整配置后将自动激活，无需本地设置"
+
+msgid "Configuration could not be applied"
+msgstr "配置未能应用"
+
+msgid "Open Logs for details; ordinary Candy traffic is unaffected"
+msgstr "请打开日志查看详情；普通 Candy 流量不受影响"

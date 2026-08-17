@@ -4,11 +4,11 @@
 local fs = require "nixio.fs"
 local jsonc = require "luci.jsonc"
 local xml = require "luci.xml"
-local uci = require "luci.model.uci".cursor()
 local status_file = "/var/run/candy/sdwan-status.json"
 local identity_file = "/var/lib/candy/sdwan/identity/device-identity-v1.json"
+local profile_file = "/var/lib/candy/sdwan/profile-v1.json"
+local sync_status_file = "/var/lib/candy/sdwan/cloud-sync-status-v1.json"
 local max_bytes = 65536
-local enabled = uci:get("candy", "sdwan", "enabled") == "1"
 local status = nil
 local stat = fs.stat(status_file)
 if stat and stat.type == "reg" and tonumber(stat.size or 0) <= max_bytes then
@@ -16,6 +16,24 @@ if stat and stat.type == "reg" and tonumber(stat.size or 0) <= max_bytes then
 	local parsed = jsonc.parse(text)
 	if #text <= max_bytes and type(parsed) == "table" and tonumber(parsed.schema_version) == 1 then
 		status = parsed
+	end
+end
+local sync_status = {}
+local sync_stat = fs.stat(sync_status_file)
+if sync_stat and sync_stat.type == "reg" and tonumber(sync_stat.size or 0) <= 8192 then
+	local text = fs.readfile(sync_status_file) or ""
+	local parsed = jsonc.parse(text)
+	if #text <= 8192 and type(parsed) == "table" and tonumber(parsed.schema_version) == 1 then
+		sync_status = parsed
+	end
+end
+local profile = {}
+local profile_stat = fs.stat(profile_file)
+if profile_stat and profile_stat.type == "reg" and tonumber(profile_stat.size or 0) <= max_bytes then
+	local text = fs.readfile(profile_file) or ""
+	local parsed = jsonc.parse(text)
+	if #text <= max_bytes and type(parsed) == "table" then
+		profile = parsed
 	end
 end
 local identity = {}
@@ -71,13 +89,20 @@ local cloud_name = cloud_address:gsub("^https://", ""):gsub("/.*$", "")
 local organization_id = safe_identity_value("organization_id", 64)
 local tenant_id = safe_identity_value("tenant_id", 64)
 local device_id = safe_identity_value("device_id", 64)
-local display_name = safe_identity_value("display_name", 200)
-local site_value = object_value(status and status.site, "name")
-local segment_value = object_value(status and status.segment, "name")
+local display_name = type(profile.device_name) == "string" and profile.device_name or safe_identity_value("display_name", 200)
+local organization_name = type(profile.organization_name) == "string" and profile.organization_name or nil
+local tenant_name = type(profile.tenant_name) == "string" and profile.tenant_name or nil
+organization_id = type(profile.organization_id) == "string" and profile.organization_id or organization_id
+tenant_id = type(profile.tenant_id) == "string" and profile.tenant_id or tenant_id
+device_id = type(profile.device_id) == "string" and profile.device_id or device_id
+local site_value = type(profile.site_name) == "string" and profile.site_name or object_value(status and status.site, "name")
+local segment_value = type(profile.segment_name) == "string" and profile.segment_name or object_value(status and status.segment, "name")
 local network_ready = registration_state == "registered" and site_value ~= nil and site_value ~= "" and segment_value ~= nil and segment_value ~= ""
-local profile_state = registration_state ~= "registered" and "disconnected" or (not network_ready and "waiting" or (enabled and "active" or "ready"))
-local profile_state_label = profile_state == "active" and translate("Active") or (profile_state == "ready" and translate("Ready to activate") or (profile_state == "waiting" and translate("Waiting for network configuration") or translate("Not connected")))
-local scope_kind = tenant_id and translate("Tenant") or (organization_id and translate("Organization") or translate("Cloud account"))
+local runtime_active = runtime.state == "running" and tun.state ~= "unavailable"
+local sync_failed = sync_status.state == "error"
+local profile_state = registration_state ~= "registered" and "disconnected" or (sync_failed and "error" or (not network_ready and "waiting" or (runtime_active and "active" or "applying")))
+local profile_state_label = profile_state == "active" and translate("Active") or (profile_state == "error" and translate("Configuration could not be applied") or (profile_state == "applying" and translate("Applying network configuration") or (profile_state == "waiting" and translate("Waiting for network configuration") or translate("Not connected"))))
+local scope_kind = tenant_name or (tenant_id and translate("Tenant")) or organization_name or (organization_id and translate("Organization")) or translate("Cloud account")
 local scope_id = short_id(tenant_id or organization_id)
 local peers = type(status and status.peers) == "table" and status.peers or {}
 local path = type(status and status.path) == "table" and status.path or nil
@@ -100,7 +125,9 @@ local result = luci.http.formvalue("result") or ""
 .candy-cloud-profile-title strong, .candy-cloud-profile-title span { display:block; overflow-wrap:anywhere; }
 .candy-cloud-profile-title span { color:#666; margin-top:.15em; }
 .candy-cloud-profile-state { display:inline-flex; align-items:center; min-height:1.9em; padding:.15em .65em; border-radius:999px; border:1px solid #b26a00; color:#7a4700; background:#fff8e8; font-weight:600; white-space:nowrap; }
-.candy-cloud-profile-state.active, .candy-cloud-profile-state.ready { border-color:#2e7d32; color:#1b5e20; background:#f1f8f2; }
+.candy-cloud-profile-state.active { border-color:#2e7d32; color:#1b5e20; background:#f1f8f2; }
+.candy-cloud-profile-state.applying { border-color:#2669a8; color:#174c7d; background:#eef6ff; }
+.candy-cloud-profile-state.error { border-color:#b42318; color:#8a1c13; background:#fff2f0; }
 .candy-cloud-profile-meta { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); padding:.95em 1.1em; gap:1em; }
 .candy-cloud-profile-meta > div { min-width:0; }
 .candy-cloud-profile-meta span, .candy-cloud-profile-meta small { display:block; color:#666; }
@@ -168,21 +195,21 @@ local result = luci.http.formvalue("result") or ""
 			</div>
 			<div class="candy-cloud-profile-meta">
 				<div><span><%:Cloud%></span><strong><%=label(cloud_name)%></strong><small><%=label(cloud_address)%></small></div>
-				<div><span><%:Cloud account%></span><strong><%=scope_kind%></strong><small><%=scope_id and label(scope_id) or translate("Pending synchronization")%></small></div>
+				<div><span><%:Cloud account%></span><strong><%=label(scope_kind)%></strong><small><%=organization_name and label(organization_name) or (scope_id and label(scope_id) or translate("Pending synchronization"))%></small></div>
 				<div><span><%:Node profile%></span><strong><%=label(display_name or translate("This device"))%></strong><small><%=device_id and label(short_id(device_id)) or translate("Pending synchronization")%></small></div>
 			</div>
 			<div class="candy-cloud-progress">
 				<div class="done"><strong><%:Identity authorized%></strong><span><%:Cloud trust established%></span></div>
 				<div class="<%=network_ready and "done" or "current"%>"><strong><%=network_ready and translate("Network configured") or translate("Network configuration pending")%></strong><span><%=network_ready and label(site_value) or translate("Assign this node to a Site and network in Cloud")%></span></div>
-				<div class="<%=enabled and "done" or ""%>"><strong><%=enabled and translate("SD-WAN active") or translate("SD-WAN not active")%></strong><span><%=enabled and runtime_state_label(runtime.state) or translate("Starts after an authorized network configuration is synchronized")%></span></div>
+				<div class="<%=runtime_active and "done" or (network_ready and "current" or "")%>"><strong><%=runtime_active and translate("SD-WAN active") or (sync_failed and translate("Configuration could not be applied") or (network_ready and translate("Applying SD-WAN configuration") or translate("SD-WAN pending")))%></strong><span><%=runtime_active and runtime_state_label(runtime.state) or (sync_failed and translate("Open Logs for details; ordinary Candy traffic is unaffected") or translate("Activation is automatic after Cloud publishes a complete configuration"))%></span></div>
 			</div>
 		</div>
 		<% if not network_ready then %>
 			<div class="candy-sdwan-next"><strong><%:Complete network setup in Candy Cloud%></strong><p><%:This node is securely authorized. Assign it to a Site and network in Candy Cloud; no additional local settings are required. Ordinary Candy traffic continues normally while configuration is pending.%></p><a class="cbi-button cbi-button-apply" href="<%=xml.pcdata(cloud_address)%>" target="_blank" rel="noopener noreferrer"><%:Open Candy Cloud%></a></div>
 		<% else %>
 			<div class="candy-sdwan-details"><h3><%:Network status%></h3><dl class="candy-sdwan-grid">
-				<div><dt><%:Site%></dt><dd><%=object_label(status.site, "name")%></dd></div>
-				<div><dt><%:Segment%></dt><dd><%=object_label(status.segment, "name")%></dd></div>
+				<div><dt><%:Site%></dt><dd><%=label(site_value)%></dd></div>
+				<div><dt><%:Segment%></dt><dd><%=label(segment_value)%></dd></div>
 				<div><dt><%:TUN%></dt><dd><%=runtime_state_label(tun.state)%><% if tun.full_duplex == true then %> / <%:Full duplex%><% end %></dd></div>
 				<div><dt><%:Peer%></dt><dd><% if #peers == 0 then %><%=translate("Unavailable")%><% else %><ul class="candy-sdwan-peers"><% for _, peer in ipairs(peers) do %><li><%=label(peer.name or peer.id)%> / <%=runtime_state_label(peer.state)%></li><% end %></ul><% end %></dd></div>
 				<div><dt><%:Path%></dt><dd><% if path and (path.kind == "direct" or path.kind == "relay") then %><%=path.kind == "direct" and translate("Direct") or translate("Relay")%><% else %><%=translate("Unavailable")%><% end %></dd></div>
@@ -191,7 +218,7 @@ local result = luci.http.formvalue("result") or ""
 				<div><dt><%:Internal DNS%></dt><dd><%=runtime_state_label(dns.state)%></dd></div>
 				<div><dt><%:Runtime%></dt><dd><%=runtime_state_label(runtime.state)%></dd></div>
 			</dl></div>
-			<% if enabled then %><div class="candy-sdwan-actions"><form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_reconnect')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-action" type="submit"><%:Reconnect%></button></form></div><% end %>
+			<% if network_ready then %><div class="candy-sdwan-actions"><form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_reconnect')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-action" type="submit"><%:Reconnect%></button></form></div><% end %>
 		<% end %>
 		<details class="candy-sdwan-connection"><summary><%:Cloud connection management%></summary><div class="candy-sdwan-actions"><form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_leave')%>" onsubmit="return confirm('<%=translate('Remove this node from Candy Cloud and erase its local Cloud identity?')%>');"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-negative" type="submit"><%:Remove from Cloud%></button></form></div></details>
 	<% end %>

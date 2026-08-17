@@ -32,7 +32,7 @@ case "$target" in
 esac
 
 cargo build --manifest-path "$repo_root/Cargo.toml" --release --locked \
-	--package candy-netd --package candy-sdwan-agent --package candy-cloud-enroll --target "$target"
+	--package candy-netd --package candy-sdwan-agent --package candy-cloud-enroll --package candy-cloud-sync --target "$target"
 
 command -v jq >/dev/null 2>&1 || {
 	printf '%s\n' "jq is required to locate the Cargo target directory" >&2
@@ -65,6 +65,9 @@ enroll_binary="$target_root/$target/release/candy-cloud-enroll"
 	exit 1
 }
 install -m 0755 "$enroll_binary" "$stage/candy-cloud-enroll"
+sync_binary="$target_root/$target/release/candy-cloud-sync"
+[ -x "$sync_binary" ] || { printf '%s\n' "candy-cloud-sync was not produced: $sync_binary" >&2; exit 1; }
+install -m 0755 "$sync_binary" "$stage/candy-cloud-sync"
 
 if command -v file >/dev/null 2>&1; then
 	case "$target" in
@@ -80,6 +83,10 @@ if command -v file >/dev/null 2>&1; then
 		x86_64-unknown-linux-musl) file "$stage/candy-cloud-enroll" | grep -Eq 'ELF.*x86-64' ;;
 		armv7-unknown-linux-musleabihf) file "$stage/candy-cloud-enroll" | grep -Eq 'ELF.*ARM' ;;
 	esac || { printf '%s\n' "candy-cloud-enroll has the wrong ELF architecture for $target" >&2; exit 1; }
+	case "$target" in
+		x86_64-unknown-linux-musl) file "$stage/candy-cloud-sync" | grep -Eq 'ELF.*x86-64' ;;
+		armv7-unknown-linux-musleabihf) file "$stage/candy-cloud-sync" | grep -Eq 'ELF.*ARM' ;;
+	esac || { printf '%s\n' "candy-cloud-sync has the wrong ELF architecture for $target" >&2; exit 1; }
 fi
 
 printf '%s\n' "$stage"

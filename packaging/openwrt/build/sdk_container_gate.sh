@@ -275,9 +275,11 @@ docker run --rm --platform linux/amd64 \
       "$apk_tool" extract --allow-untrusted --no-chown --destination "$payload/luci" "$luci_apk" >/dev/null
       for executable in \
         "$payload/client/etc/init.d/candy" \
+        "$payload/client/etc/init.d/candy-cloud-sync" \
         "$payload/client/usr/bin/candy-netd" \
         "$payload/client/usr/bin/candy-sdwan-agent" \
-        "$payload/client/usr/libexec/candy-cloud-enroll"; do
+        "$payload/client/usr/libexec/candy-cloud-enroll" \
+        "$payload/client/usr/libexec/candy-cloud-sync"; do
         [ -x "$executable" ] || { echo "OpenWrt package is missing executable ${executable#$payload/}" >&2; exit 1; }
       done
       for asset in \

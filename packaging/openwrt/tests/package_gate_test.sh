@@ -17,6 +17,8 @@ printf '#!/bin/sh\nexit 0\n' > "$runtime_bin_dir/candy-sdwan-agent"
 chmod 0755 "$runtime_bin_dir/candy-sdwan-agent"
 printf '#!/bin/sh\nexit 0\n' > "$runtime_bin_dir/candy-cloud-enroll"
 chmod 0755 "$runtime_bin_dir/candy-cloud-enroll"
+printf '#!/bin/sh\nexit 0\n' > "$runtime_bin_dir/candy-cloud-sync"
+chmod 0755 "$runtime_bin_dir/candy-cloud-sync"
 touch "$sdk/rules.mk"
 
 cat >"$fake_bin/make" <<'EOF'
@@ -67,6 +69,8 @@ test -f "$sdk/package/candy-client/candy-update-manager"
 test -f "$sdk/package/candy-client/candy-runtime-health-check"
 test -f "$sdk/package/candy-client/candy-sdwan-agent"
 test -f "$sdk/package/candy-client/candy-cloud-enroll"
+test -f "$sdk/package/candy-client/candy-cloud-sync"
+test -f "$sdk/package/candy-client/candy-cloud-sync.init"
 test -f "$sdk/package/candy-client/catalog-release.pub"
 test -f "$sdk/package/candy-client/core-release.pub"
 grep -Fx 'untrusted comment: Candy Core release 2026' "$sdk/package/candy-client/core-release.pub" >/dev/null

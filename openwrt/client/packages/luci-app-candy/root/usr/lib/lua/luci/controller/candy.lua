@@ -128,11 +128,10 @@ local function read_multi_node_passive_status()
 	return status
 end
 
-local function read_sdwan_status(uci)
+local function read_sdwan_status(_uci)
 	local fs = require "nixio.fs"
 	local jsonc = require "luci.jsonc"
-	local enabled = uci:get("candy", "sdwan", "enabled") == "1"
-	local unavailable = { enabled = enabled, schema_version = 1, phase = enabled and "unavailable" or "disabled", registration = { state = "unregistered", cloud_address = "" }, runtime = { state = "unavailable" }, site = nil, segment = nil, tun = { state = "unavailable", full_duplex = nil }, peers = {}, path = nil, egress = { ["local"] = nil, remote = nil }, dns = { state = "unavailable" } }
+	local unavailable = { active = false, schema_version = 1, phase = "unavailable", registration = { state = "unregistered", cloud_address = "" }, runtime = { state = "unavailable" }, site = nil, segment = nil, tun = { state = "unavailable", full_duplex = nil }, peers = {}, path = nil, egress = { ["local"] = nil, remote = nil }, dns = { state = "unavailable" } }
 	local stat = fs.stat(SDWAN_STATUS_FILE)
 	local status
 	if not stat or stat.type ~= "reg" or tonumber(stat.size or 0) > MAX_SDWAN_STATUS_BYTES then
@@ -159,9 +158,9 @@ local function read_sdwan_status(uci)
 		registration_state = "unavailable"
 	end
 	local result = {
-		enabled = enabled,
+		active = runtime.state == "running",
 		schema_version = 1,
-		phase = enabled and registration_state or "disabled",
+		phase = registration_state,
 		registration = { state = registration_state, cloud_address = safe_string(registration.cloud_address, 2048) or "", last_error = safe_string(registration.last_error, 512) or "" },
 		runtime = { state = safe_string(runtime.state, 32) or "unavailable", updated_at = tonumber(runtime.updated_at), last_error = safe_string(runtime.last_error, 512) or "" },
 		site = safe_string(status.site, 128),
@@ -859,16 +858,12 @@ end
 
 function action_sdwan_reconnect()
 	if not require_post() then return end
-	local uci = require "luci.model.uci".cursor()
-	local status = read_sdwan_status(uci)
+	local status = read_sdwan_status(require "luci.model.uci".cursor())
 	if not status.registration or status.registration.state ~= "registered" then
 		luci.http.status(409, "Conflict")
 		return
 	end
-	if uci:get("candy", "sdwan", "enabled") ~= "1" then
-		redirect_sdwan("not-enabled")
-		return
-	end
+	process.run({ "/etc/init.d/candy-cloud-sync", "restart" }, { background = true, timeout = 10 })
 	if not process.run({ "/etc/init.d/candy", "sdwan_reconnect" }, { background = true, timeout = 30 }) then
 		redirect_sdwan("error")
 		return
@@ -878,9 +873,6 @@ end
 
 function action_sdwan_leave()
 	if not require_post() then return end
-	local uci = require "luci.model.uci".cursor()
-	uci:set("candy", "sdwan", "enabled", "0")
-	uci:commit("candy")
 	process.run({ "/etc/init.d/candy", "sdwan_stop", "user_leave" }, { timeout = 30 })
 	if not process.run({ SDWAN_RUNTIME, "leave" }, { timeout = 10 }) then
 		redirect_sdwan("error")

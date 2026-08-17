@@ -92,6 +92,8 @@ if printf '%s' "$existing_status" | jq -e --arg cloud "$cloud_url" \
 	'.schema_version == 1 and .registration.state == "registered" and .registration.cloud_address == $cloud and .runtime.state == "stopped"' >/dev/null 2>&1; then
 	ssh -p "$node_port" "$ssh_target" 'sudo systemctl is-active --quiet candy-netd; sudo systemctl is-active --quiet candy-server' ||
 		fail "registered node services are not healthy"
+	ssh -p "$node_port" "$ssh_target" 'sudo systemctl enable --now candy-cloud-sync.timer >/dev/null; sudo systemctl start candy-cloud-sync.service; sudo systemctl is-active --quiet candy-cloud-sync.timer' ||
+		fail "registered node Cloud synchronization is not healthy"
 	event verification succeeded "already_registered=true ordinary_service=active sdwan=registered/stopped"
 	printf '%s\n' "$existing_status"
 	exit 0
@@ -108,12 +110,12 @@ if [ -n "$runtime_bundle" ]; then
 	[ "$actual_sha256" = "$runtime_sha256" ] || fail "Runtime bundle SHA-256 mismatch"
 	remote_bundle=/tmp/candy-server-runtime-aarch64.$$.tar.gz
 	scp -P "$node_port" "$runtime_bundle" "$ssh_target:$remote_bundle"
-	ssh -p "$node_port" "$ssh_target" "set -eu; test \"\$(sha256sum '$remote_bundle' | awk '{print \$1}')\" = '$runtime_sha256'; stage=\$(mktemp -d); trap 'rm -rf \"\$stage\"' EXIT; tar -xzf '$remote_bundle' -C \"\$stage\"; for path in usr/local/bin/candy-server usr/local/libexec/candy-sdwan-runtime usr/local/libexec/candy-cloud-enroll usr/local/libexec/candy-sdwan-agent usr/local/libexec/candy-netd systemd/candy-netd.service systemd/candy-sdwan.service systemd/candy.sysusers systemd/candy.tmpfiles; do test -f \"\$stage/\$path\"; done; sudo install -d -m 0755 /usr/local/bin /usr/local/libexec; sudo install -m 0755 \"\$stage/usr/local/bin/candy-server\" /usr/local/bin/candy-server; for name in candy-sdwan-runtime candy-cloud-enroll candy-sdwan-agent candy-netd; do sudo install -m 0755 \"\$stage/usr/local/libexec/\$name\" \"/usr/local/libexec/\$name\"; sudo test -x \"/usr/local/libexec/\$name\"; done; sudo install -m 0644 \"\$stage/systemd/candy-netd.service\" /etc/systemd/system/candy-netd.service; sudo install -m 0644 \"\$stage/systemd/candy-sdwan.service\" /etc/systemd/system/candy-sdwan.service; sudo install -d -m 0755 /usr/lib/sysusers.d /usr/lib/tmpfiles.d; sudo install -m 0644 \"\$stage/systemd/candy.sysusers\" /usr/lib/sysusers.d/candy.conf; sudo install -m 0644 \"\$stage/systemd/candy.tmpfiles\" /usr/lib/tmpfiles.d/candy.conf; sudo systemd-sysusers /usr/lib/sysusers.d/candy.conf; sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/candy.conf; sudo systemctl daemon-reload; sudo systemctl enable --now candy-netd.service; sudo systemctl is-active --quiet candy-netd.service; rm -f '$remote_bundle'"
+	ssh -p "$node_port" "$ssh_target" "set -eu; test \"\$(sha256sum '$remote_bundle' | awk '{print \$1}')\" = '$runtime_sha256'; stage=\$(mktemp -d); trap 'rm -rf \"\$stage\"' EXIT; tar -xzf '$remote_bundle' -C \"\$stage\"; for path in usr/local/bin/candy-server usr/local/libexec/candy-sdwan-runtime usr/local/libexec/candy-cloud-enroll usr/local/libexec/candy-cloud-sync usr/local/libexec/candy-sdwan-agent usr/local/libexec/candy-netd systemd/candy-netd.service systemd/candy-sdwan.service systemd/candy-cloud-sync.service systemd/candy-cloud-sync.timer systemd/candy.sysusers systemd/candy.tmpfiles; do test -f \"\$stage/\$path\"; done; sudo install -d -m 0755 /usr/local/bin /usr/local/libexec; sudo install -m 0755 \"\$stage/usr/local/bin/candy-server\" /usr/local/bin/candy-server; for name in candy-sdwan-runtime candy-cloud-enroll candy-cloud-sync candy-sdwan-agent candy-netd; do sudo install -m 0755 \"\$stage/usr/local/libexec/\$name\" \"/usr/local/libexec/\$name\"; sudo test -x \"/usr/local/libexec/\$name\"; done; for unit in candy-netd.service candy-sdwan.service candy-cloud-sync.service candy-cloud-sync.timer; do sudo install -m 0644 \"\$stage/systemd/\$unit\" \"/etc/systemd/system/\$unit\"; done; sudo install -d -m 0755 /usr/lib/sysusers.d /usr/lib/tmpfiles.d; sudo install -m 0644 \"\$stage/systemd/candy.sysusers\" /usr/lib/sysusers.d/candy.conf; sudo install -m 0644 \"\$stage/systemd/candy.tmpfiles\" /usr/lib/tmpfiles.d/candy.conf; sudo systemd-sysusers /usr/lib/sysusers.d/candy.conf; sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/candy.conf; sudo systemctl daemon-reload; sudo systemctl enable --now candy-netd.service; sudo systemctl is-active --quiet candy-netd.service; rm -f '$remote_bundle'"
 	remote_bundle=
 	event runtime_install succeeded
 fi
 
-ssh -p "$node_port" "$ssh_target" 'test -x /usr/local/bin/candy-server; test -x /usr/local/libexec/candy-sdwan-runtime; test -x /usr/local/libexec/candy-cloud-enroll; test -x /usr/local/libexec/candy-sdwan-agent; test -x /usr/local/libexec/candy-netd; sudo systemctl is-active --quiet candy-netd; sudo systemctl is-active --quiet candy-server' ||
+ssh -p "$node_port" "$ssh_target" 'test -x /usr/local/bin/candy-server; test -x /usr/local/libexec/candy-sdwan-runtime; test -x /usr/local/libexec/candy-cloud-enroll; test -x /usr/local/libexec/candy-cloud-sync; test -x /usr/local/libexec/candy-sdwan-agent; test -x /usr/local/libexec/candy-netd; test -f /etc/systemd/system/candy-cloud-sync.service; test -f /etc/systemd/system/candy-cloud-sync.timer; sudo systemctl is-active --quiet candy-netd; sudo systemctl is-active --quiet candy-server' ||
 	fail "node lacks a complete Runtime or ordinary Candy service is not active"
 
 remote_bootstrap=/tmp/candy-node-bootstrap.$$.json
@@ -122,6 +124,9 @@ ssh -p "$node_port" "$ssh_target" "set -eu; chmod 0600 '$remote_bootstrap'; test
 	fail "Cloud bootstrap exchange failed; the local Bootstrap file remains available for an idempotent retry"
 remote_bootstrap=
 event enrollment succeeded "cloud=$cloud_url"
+
+ssh -p "$node_port" "$ssh_target" 'sudo systemctl enable --now candy-cloud-sync.timer >/dev/null; sudo systemctl start candy-cloud-sync.service; sudo systemctl is-active --quiet candy-cloud-sync.timer' ||
+	fail "Cloud synchronization did not start after enrollment"
 
 status=$(ssh -p "$node_port" "$ssh_target" 'sudo /usr/local/bin/candy-server sdwan status') || fail "node status query failed"
 printf '%s' "$status" | jq -e '.schema_version == 1 and .registration.state == "registered" and .runtime.state == "stopped"' >/dev/null ||

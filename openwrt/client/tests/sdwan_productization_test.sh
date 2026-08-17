@@ -23,6 +23,9 @@ grep -F '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan-agent $(1)/usr/bin/candy-sd
 grep -F '$(INSTALL_BIN) ./candy-sdwan $(1)/usr/bin/candy-sdwan' "$makefile" >/dev/null || fail "candy-sdwan Runtime launcher is not packaged"
 grep -F '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan-runtime $(1)/usr/libexec/candy-sdwan-runtime' "$makefile" >/dev/null || fail "Runtime SD-WAN V1 state helper is not packaged"
 grep -F '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-cloud-enroll $(1)/usr/libexec/candy-cloud-enroll' "$makefile" >/dev/null || fail "Cloud bootstrap exchange client is not packaged"
+grep -F '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-cloud-sync $(1)/usr/libexec/candy-cloud-sync' "$makefile" >/dev/null || fail "Cloud Runtime synchronizer is not packaged"
+grep -F '$(INSTALL_BIN) ./candy-cloud-sync.init $(1)/etc/init.d/candy-cloud-sync' "$makefile" >/dev/null || fail "Cloud synchronization service is not packaged"
+grep -F 'event=cloud_sync' "$root/candy-client/candy-cloud-sync.init" >/dev/null || fail "Cloud synchronization service has no structured lifecycle log"
 grep -F 'exec "$core_bin" client sdwan "$@"' "$root/candy-client/candy-sdwan" >/dev/null || fail "candy-sdwan does not use the Core process API"
 grep -F 'runtime-api-version' "$root/candy-client/candy-sdwan" >/dev/null || fail "candy-sdwan does not bootstrap the Core process API"
 if grep -F '/usr/lib/candy/cores/current/candy-' "$makefile" >/dev/null; then
@@ -87,7 +90,9 @@ grep -F 'enctype="multipart/form-data"' "$sdwan" >/dev/null || fail "node bootst
 grep -F 'name="bootstrap_file"' "$sdwan" >/dev/null || fail "node bootstrap file control is missing"
 grep -F 'action_sdwan_join' "$controller" >/dev/null || fail "LuCI join action is missing"
 grep -F 'action_sdwan_reconnect' "$controller" >/dev/null || fail "LuCI reconnect action is missing"
-grep -F 'uci:get("candy", "sdwan", "enabled") ~= "1"' "$controller" >/dev/null || fail "LuCI reconnect does not reject a disabled SD-WAN service"
+if grep -F 'uci:get("candy", "sdwan", "enabled")' "$controller" >/dev/null; then
+	fail "LuCI still treats a local UCI switch as Cloud SD-WAN authority"
+fi
 grep -F 'action_sdwan_leave' "$controller" >/dev/null || fail "LuCI leave action is missing"
 grep -F 'MAX_SDWAN_BOOTSTRAP_BYTES = 16 * 1024' "$controller" >/dev/null || fail "node bootstrap upload is unbounded"
 grep -F 'fs.chmod(temporary, "0600")' "$controller" >/dev/null || fail "node bootstrap upload is not private"
@@ -110,7 +115,7 @@ grep -F 'Cloud network profile' "$sdwan" >/dev/null || fail "LuCI does not prese
 grep -F 'Waiting for network configuration' "$sdwan" >/dev/null || fail "LuCI does not distinguish enrollment from network readiness"
 grep -F 'no additional local settings are required' "$sdwan" >/dev/null || fail "LuCI does not explain the Cloud-managed activation flow"
 grep -F 'Remove from Cloud' "$sdwan" >/dev/null || fail "LuCI Cloud identity removal is not explicit"
-grep -F 'if enabled then %><div class="candy-sdwan-actions"><form method="post" action="<%=luci.dispatcher.build_url('\''admin/services/candy/sdwan_reconnect'\'')%>"' "$sdwan" >/dev/null || fail "LuCI reconnect is not gated by SD-WAN enablement"
+grep -F 'if network_ready then %><div class="candy-sdwan-actions"><form method="post" action="<%=luci.dispatcher.build_url('\''admin/services/candy/sdwan_reconnect'\'')%>"' "$sdwan" >/dev/null || fail "LuCI reconnect is not gated by a synchronized Cloud network profile"
 if grep -F 'The node identity has joined Candy Cloud. The SD-WAN data plane is not enabled' "$sdwan" >/dev/null; then
 	fail "LuCI still exposes the ambiguous data-plane-disabled message"
 fi

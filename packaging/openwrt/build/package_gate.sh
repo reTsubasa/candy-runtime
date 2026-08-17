@@ -19,8 +19,8 @@ if [ -z "$sdk" ] || [ ! -f "$sdk/rules.mk" ] || [ ! -d "$sdk/package" ]; then
   exit 2
 fi
 
-[ -n "$runtime_bin_dir" ] && [ -x "$runtime_bin_dir/candy-netd" ] && [ -x "$runtime_bin_dir/candy-sdwan-agent" ] && [ -x "$runtime_bin_dir/candy-cloud-enroll" ] || {
-  printf '%s\n' "CANDY_RUNTIME_BIN_DIR must contain runtime-owned candy-netd, candy-sdwan-agent and candy-cloud-enroll" >&2
+[ -n "$runtime_bin_dir" ] && [ -x "$runtime_bin_dir/candy-netd" ] && [ -x "$runtime_bin_dir/candy-sdwan-agent" ] && [ -x "$runtime_bin_dir/candy-cloud-enroll" ] && [ -x "$runtime_bin_dir/candy-cloud-sync" ] || {
+  printf '%s\n' "CANDY_RUNTIME_BIN_DIR must contain runtime-owned candy-netd, candy-sdwan-agent, candy-cloud-enroll and candy-cloud-sync" >&2
   exit 2
 }
 
@@ -28,7 +28,8 @@ if [ -n "$target_arch" ] && command -v file >/dev/null 2>&1; then
   netd_file=$(file "$runtime_bin_dir/candy-netd")
   agent_file=$(file "$runtime_bin_dir/candy-sdwan-agent")
   enroll_file=$(file "$runtime_bin_dir/candy-cloud-enroll")
-  for runtime_file in "$netd_file" "$agent_file" "$enroll_file"; do
+  sync_file=$(file "$runtime_bin_dir/candy-cloud-sync")
+  for runtime_file in "$netd_file" "$agent_file" "$enroll_file" "$sync_file"; do
     case "$target_arch:$runtime_file" in
       x86_64:*ELF*x86-64*|aarch64:*ELF*aarch64*|aarch64:*ELF*ARM\ aarch64*|arm:*ELF*ARM*) ;;
       *)
@@ -50,6 +51,7 @@ client_package="$repo_root/openwrt/client/packages/candy-client"
 cp "$client_package/Makefile" "$pkg_dir/Makefile"
 cp "$client_package/candy-client" "$pkg_dir/candy-client"
 cp "$client_package/candy-sdwan" "$pkg_dir/candy-sdwan"
+cp "$client_package/candy-cloud-sync.init" "$pkg_dir/candy-cloud-sync.init"
 cp "$client_package/candy.init" "$pkg_dir/candy.init"
 cp "$client_package/candy.config" "$pkg_dir/candy.config"
 cp "$client_package/candy-core-manager" "$pkg_dir/candy-core-manager"
@@ -58,6 +60,7 @@ cp "$client_package/candy-runtime-health-check" "$pkg_dir/candy-runtime-health-c
 cp "$repo_root/linux/common/apps/candy-sdwan-runtime/candy-sdwan-runtime" "$pkg_dir/candy-sdwan-runtime"
 cp "$runtime_bin_dir/candy-sdwan-agent" "$pkg_dir/candy-sdwan-agent"
 cp "$runtime_bin_dir/candy-cloud-enroll" "$pkg_dir/candy-cloud-enroll"
+cp "$runtime_bin_dir/candy-cloud-sync" "$pkg_dir/candy-cloud-sync"
 chmod 0755 "$pkg_dir/candy-sdwan-runtime"
 cp "$client_package/catalog-release.pub" "$pkg_dir/catalog-release.pub"
 cp "$client_package/core-release.pub" "$pkg_dir/core-release.pub"

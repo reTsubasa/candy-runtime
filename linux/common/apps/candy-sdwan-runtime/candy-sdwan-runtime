@@ -240,6 +240,12 @@ case "$action" in
 		if "$@" >"$output_file"; then
 			write_config "$cloud" registered
 			write_status registered stopped ""
+			if [ -x /etc/init.d/candy-cloud-sync ]; then
+				/etc/init.d/candy-cloud-sync restart >/dev/null 2>&1 || true
+			elif command -v systemctl >/dev/null 2>&1; then
+				systemctl enable --now candy-cloud-sync.timer >/dev/null 2>&1 || true
+				systemctl start candy-cloud-sync.service >/dev/null 2>&1 || true
+			fi
 			cat "$output_file"
 			rm -f "$output_file"
 			trap - EXIT HUP INT TERM
@@ -263,6 +269,11 @@ case "$action" in
 		rm -f "$config_file"
 		if [ -d "$enrollment_dir" ] && [ ! -L "$enrollment_dir" ]; then
 			find "$enrollment_dir" -maxdepth 1 -type f ! -name installation-instance-id -delete
+		fi
+		if [ -x /etc/init.d/candy-cloud-sync ]; then
+			/etc/init.d/candy-cloud-sync stop >/dev/null 2>&1 || true
+		elif command -v systemctl >/dev/null 2>&1; then
+			systemctl stop candy-cloud-sync.timer candy-cloud-sync.service >/dev/null 2>&1 || true
 		fi
 		write_status unregistered stopped ""
 		;;

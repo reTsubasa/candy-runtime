@@ -36,9 +36,13 @@ chmod 0755 "$netd"
 enroll=$tmp/candy-cloud-enroll
 printf '#!/bin/sh\nexit 0\n' >"$enroll"
 chmod 0755 "$enroll"
+sync=$tmp/candy-cloud-sync
+printf '#!/bin/sh\nexit 0\n' >"$sync"
+chmod 0755 "$sync"
 PATH="$fake_bin:$PATH" CANDY_LINUX_DIST_DIR="$dist" CANDY_SDWAN_AGENT_BINARY="$agent" \
 	CANDY_NETD_BINARY="$netd" \
 	CANDY_CLOUD_ENROLL_BINARY="$enroll" \
+	CANDY_CLOUD_SYNC_BINARY="$sync" \
 	"$root/packaging/linux/build.sh" x86_64-unknown-linux-gnu >/dev/null
 
 stage=$dist/server/x86_64
@@ -49,6 +53,7 @@ edge_stage=$dist/client/x86_64
 [ -x "$stage/usr/local/libexec/candy-sdwan-agent" ] || fail "server SD-WAN agent was not staged"
 [ -x "$stage/usr/local/libexec/candy-netd" ] || fail "server netd was not staged"
 [ -x "$stage/usr/local/libexec/candy-cloud-enroll" ] || fail "server Cloud enrollment client was not staged"
+[ -x "$stage/usr/local/libexec/candy-cloud-sync" ] || fail "server Cloud Runtime synchronizer was not staged"
 [ -x "$stage/usr/local/bin/candy-core-manager" ] || fail "Core bundle manager was not staged"
 [ -x "$stage/usr/local/libexec/candy-server-health-check" ] || fail "server health check was not staged"
 [ -f "$stage/etc/candy/server.toml.example" ] || fail "server example config was not staged"
@@ -59,6 +64,8 @@ edge_stage=$dist/client/x86_64
 grep -F -- '--no-xattrs' "$tmp/tar.args" >/dev/null || fail "server Runtime bundle does not suppress host extended attributes"
 tar -tzf "$dist/candy-server-runtime-x86_64.tar.gz" | grep -F './usr/local/libexec/candy-cloud-enroll' >/dev/null ||
 	fail "server Runtime bundle does not contain Cloud enrollment"
+tar -tzf "$dist/candy-server-runtime-x86_64.tar.gz" | grep -F './usr/local/libexec/candy-cloud-sync' >/dev/null ||
+	fail "server Runtime bundle does not contain Cloud synchronization"
 if tar -tvzf "$dist/candy-server-runtime-x86_64.tar.gz" 2>&1 | grep -F 'LIBARCHIVE.xattr' >/dev/null; then
 	fail "server Runtime bundle contains macOS extended attributes"
 fi
@@ -70,9 +77,16 @@ cmp "$root/linux/server/apps/candy-server/candy-server" \
 [ -x "$edge_stage/usr/local/libexec/candy-sdwan-agent" ] || fail "Linux Edge SD-WAN agent was not staged"
 [ -x "$edge_stage/usr/local/libexec/candy-netd" ] || fail "Linux Edge netd was not staged"
 [ -x "$edge_stage/usr/local/libexec/candy-cloud-enroll" ] || fail "Linux Edge Cloud enrollment client was not staged"
+[ -x "$edge_stage/usr/local/libexec/candy-cloud-sync" ] || fail "Linux Edge Cloud Runtime synchronizer was not staged"
 [ -f "$edge_stage/systemd/candy-client.service" ] || fail "Linux Edge systemd unit was not staged"
 [ -f "$edge_stage/systemd/candy-netd.service" ] || fail "netd systemd unit was not staged"
 [ -f "$edge_stage/systemd/candy-sdwan.service" ] || fail "SD-WAN systemd unit was not staged"
+[ -f "$edge_stage/systemd/candy-cloud-sync.service" ] || fail "Cloud synchronization systemd unit was not staged"
+[ -f "$edge_stage/systemd/candy-cloud-sync.timer" ] || fail "Cloud synchronization timer was not staged"
+grep -F 'ConditionPathExists=/var/lib/candy/sdwan/identity/device-identity-v1.json' "$edge_stage/systemd/candy-cloud-sync.service" >/dev/null ||
+	fail "Cloud synchronization does not wait for an enrolled identity"
+grep -F 'OnUnitActiveSec=30s' "$edge_stage/systemd/candy-cloud-sync.timer" >/dev/null ||
+	fail "Cloud synchronization timer has the wrong cadence"
 grep -F 'Requires=candy-netd.service' "$edge_stage/systemd/candy-sdwan.service" >/dev/null || fail "SD-WAN unit does not require netd"
 grep -F 'BindsTo=candy-netd.service' "$edge_stage/systemd/candy-sdwan.service" >/dev/null || fail "SD-WAN unit is not bound to netd"
 grep -F -- '--recover --journal' "$edge_stage/systemd/candy-netd.service" >/dev/null || fail "netd unit has no real orphan recovery hook"

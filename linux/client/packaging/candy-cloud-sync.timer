@@ -1,0 +1,14 @@
+[Unit]
+Description=Refresh Candy Cloud configuration
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=30s
+RandomizedDelaySec=6s
+AccuracySec=1s
+Persistent=true
+Unit=candy-cloud-sync.service
+
+[Install]
+WantedBy=timers.target
+

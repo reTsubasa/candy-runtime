@@ -34,10 +34,12 @@ define Build/Prepare
 	[ -x "$(CANDY_RUNTIME_BIN_DIR)/candy-netd" ] || { echo "missing Runtime binary: candy-netd"; exit 1; }
 	[ -x "$(CANDY_RUNTIME_BIN_DIR)/candy-sdwan-agent" ] || { echo "missing Runtime binary: candy-sdwan-agent"; exit 1; }
 	[ -x "$(CANDY_RUNTIME_BIN_DIR)/candy-cloud-enroll" ] || { echo "missing Runtime binary: candy-cloud-enroll"; exit 1; }
+	[ -x "$(CANDY_RUNTIME_BIN_DIR)/candy-cloud-sync" ] || { echo "missing Runtime binary: candy-cloud-sync"; exit 1; }
 	[ -x "./candy-sdwan-runtime" ] || { echo "missing Runtime binary: candy-sdwan-runtime"; exit 1; }
 	cp "$(CANDY_RUNTIME_BIN_DIR)/candy-netd" "$(PKG_BUILD_DIR)/candy-netd"
 	cp "$(CANDY_RUNTIME_BIN_DIR)/candy-sdwan-agent" "$(PKG_BUILD_DIR)/candy-sdwan-agent"
 	cp "$(CANDY_RUNTIME_BIN_DIR)/candy-cloud-enroll" "$(PKG_BUILD_DIR)/candy-cloud-enroll"
+	cp "$(CANDY_RUNTIME_BIN_DIR)/candy-cloud-sync" "$(PKG_BUILD_DIR)/candy-cloud-sync"
 	cp "./candy-sdwan-runtime" "$(PKG_BUILD_DIR)/candy-sdwan-runtime"
 endef
 
@@ -54,12 +56,14 @@ define Package/candy-client/install
 	$(INSTALL_DIR) $(1)/usr/libexec
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan-runtime $(1)/usr/libexec/candy-sdwan-runtime
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-cloud-enroll $(1)/usr/libexec/candy-cloud-enroll
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-cloud-sync $(1)/usr/libexec/candy-cloud-sync
 	$(INSTALL_BIN) ./candy-core-manager $(1)/usr/libexec/candy-core-manager
 	$(INSTALL_BIN) ./candy-update-manager $(1)/usr/libexec/candy-update-manager
 	$(INSTALL_BIN) ./candy-runtime-health-check $(1)/usr/libexec/candy-runtime-health-check
 	$(SED) 's|^RUNTIME_VERSION=.*|RUNTIME_VERSION=$$$${CANDY_RUNTIME_VERSION:-$(PKG_VERSION)}|' $(1)/usr/libexec/candy-update-manager
 	$(SED) 's|^RUNTIME_RELEASE=.*|RUNTIME_RELEASE=$$$${CANDY_RUNTIME_RELEASE:-$(PKG_RELEASE)}|' $(1)/usr/libexec/candy-update-manager
 	$(INSTALL_DIR) $(1)/etc/init.d
+	$(INSTALL_BIN) ./candy-cloud-sync.init $(1)/etc/init.d/candy-cloud-sync
 	$(INSTALL_BIN) ./candy.init $(1)/etc/init.d/candy
 	$(SED) 's|^CANDY_VERSION=.*|CANDY_VERSION=$$$${CANDY_VERSION:-$(PKG_VERSION)}|' $(1)/etc/init.d/candy
 	$(SED) 's|^CANDY_RELEASE=.*|CANDY_RELEASE=$$$${CANDY_RELEASE:-$(PKG_RELEASE)}|' $(1)/etc/init.d/candy
