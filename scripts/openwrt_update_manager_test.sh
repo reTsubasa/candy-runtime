@@ -86,7 +86,7 @@ chmod 0755 "$bin/usign"
 cat > "$bin/candy-core-manager" <<'EOF'
 #!/bin/sh
 case "$1" in
-	status) printf '%s\n' '{"schema_version":1,"current_version":"0.3.4","installed":[{"version":"0.3.4","active":true,"rollback":false,"managed":true},{"version":"0.3.5","active":false,"rollback":false,"managed":false}]}' ;;
+	status) printf '%s\n' '{"schema_version":1,"current_version":"0.3.4","installed":[{"version":"0.3.4","active":true,"rollback":false,"managed":true},{"version":"0.3.5","active":false,"rollback":false,"managed":false}],"operation":{"state":"completed","action":"remove","version":"0.3.9"}}' ;;
 	install)
 		printf '%s\n' "$*" >> "$FAKE_CORE_LOG"
 		case "$3" in file:///*) [ -f "${3#file://}" ] ;; *) exit 1 ;; esac
@@ -220,7 +220,10 @@ EOF
 					url: "https://github.com/reTsubasa/candy-release/releases/download/core-cloud-module-v0.3.10/candy-core-cloud-module-0.3.10-x86_64-unknown-linux-gnu.tar.gz"
 				}
 			}
-		}
+		} |
+		.core.releases.v0_3_9 = (.core.releases[$key] |
+			.version = "0.3.9" |
+			.targets.linux_musl_x86_64.url = "https://github.com/reTsubasa/candy-release/releases/download/core-v0.3.9/candy-core-0.3.9-x86_64-unknown-linux-musl.tar.gz")
 	' "$FAKE_CATALOG" > "$FAKE_CATALOG.next"
 	mv "$FAKE_CATALOG.next" "$FAKE_CATALOG"
 	printf '%s\n' trusted-signature > "$FAKE_CATALOG_SIGNATURE"
@@ -279,6 +282,11 @@ EOF
 grep -q '"version":"0.3.5"' <<EOF
 $("$manager" status)
 EOF
+status_json=$("$manager" status)
+[ "$(printf '%s' "$status_json" | jq -r '.core_candidates[] | select(.version == "0.3.9") | .installed')" = false ] || {
+	echo "Core operation history incorrectly marked an uninstalled version as installed" >&2
+	exit 1
+}
 
 "$manager" check >/dev/null
 sed 's/2026-08-05T02:00:00Z/2026-08-05T02:00:01Z/' "$FAKE_CATALOG" > "$tmp/changed.json"

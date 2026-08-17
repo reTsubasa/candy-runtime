@@ -49,16 +49,26 @@ chmod 0600 "$state_dir"/*
 printf '%s\n' '{"schema_version":1,"state":"registered"}'
 EOF
 chmod 0755 "$fake_enroll"
+fake_sync_init=$tmp/fake-cloud-sync-init
+fake_sync_calls=$tmp/fake-cloud-sync.calls
+cat >"$fake_sync_init" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$1" >>"$FAKE_SYNC_CALLS"
+EOF
+chmod 0755 "$fake_sync_init"
 
 run_runtime() {
 	CANDY_SDWAN_TEST_MODE=1 CANDY_CLOUD_ENROLL_PLATFORM=LINUX CANDY_SDWAN_STATE_DIR="$state" CANDY_SDWAN_RUN_DIR="$run" \
 		CANDY_SDWAN_CONFIG_CACHE="$state/config-v1.json" \
 		CANDY_SDWAN_STATUS_CACHE="$state/status-v1.json" \
 		CANDY_SDWAN_STATUS_FILE="$run/sdwan-status.json" \
-		CANDY_CLOUD_ENROLL_CLIENT="$fake_enroll" "$runtime" "$@"
+		CANDY_CLOUD_ENROLL_CLIENT="$fake_enroll" CANDY_CLOUD_SYNC_INIT="$fake_sync_init" \
+		FAKE_SYNC_CALLS="$fake_sync_calls" "$runtime" "$@"
 }
 
 run_runtime bootstrap "$bootstrap"
+[ "$(sed -n '1p' "$fake_sync_calls")" = enable ] || fail "join did not enable Cloud synchronization across reboot"
+[ "$(sed -n '2p' "$fake_sync_calls")" = restart ] || fail "join did not start Cloud synchronization immediately"
 [ -f "$state/config-v1.json" ] || fail "join did not atomically create config cache"
 grep -F '"action":"join","outcome":"completed"' "$state/events-v1.log" >/dev/null || fail "completed enrollment was not durably audited"
 [ "$(grep -o 'registered' "$state/config-v1.json" | head -1)" = registered ] || fail "join state is not registered"
@@ -100,6 +110,8 @@ printf '%s\n' sync >"$state/sync-state-v1.json"
 printf '%s\n' status >"$state/cloud-sync-status-v1.json"
 ln -s generations/test-generation "$state/configuration"
 run_runtime leave
+grep -Fx stop "$fake_sync_calls" >/dev/null || fail "leave did not stop Cloud synchronization"
+grep -Fx disable "$fake_sync_calls" >/dev/null || fail "leave did not disable Cloud synchronization"
 [ ! -e "$state/profile-v1.json" ] || fail "leave retained Cloud profile"
 [ ! -e "$state/sync-state-v1.json" ] || fail "leave retained Cloud synchronization state"
 [ ! -e "$state/cloud-sync-status-v1.json" ] || fail "leave retained Cloud synchronization status"
