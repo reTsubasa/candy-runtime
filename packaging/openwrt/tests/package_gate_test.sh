@@ -71,6 +71,7 @@ test -f "$sdk/package/candy-client/candy-sdwan-agent"
 test -f "$sdk/package/candy-client/candy-cloud-enroll"
 test -f "$sdk/package/candy-client/candy-cloud-sync"
 test -f "$sdk/package/candy-client/candy-cloud-sync.init"
+test -f "$sdk/package/candy-client/candy-cloud-sync-loop"
 test -f "$sdk/package/candy-client/catalog-release.pub"
 test -f "$sdk/package/candy-client/core-release.pub"
 grep -Fx 'untrusted comment: Candy Core release 2026' "$sdk/package/candy-client/core-release.pub" >/dev/null

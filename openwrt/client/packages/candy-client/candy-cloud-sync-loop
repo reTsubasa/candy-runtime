@@ -1,0 +1,46 @@
+#!/bin/sh
+
+set -u
+
+SYNC_BIN=${CANDY_CLOUD_SYNC_BIN:-/usr/libexec/candy-cloud-sync}
+STATE_DIR=${CANDY_SDWAN_STATE_DIR:-/var/lib/candy/sdwan}
+IDENTITY_FILE=${CANDY_CLOUD_IDENTITY_FILE:-$STATE_DIR/identity/device-identity-v1.json}
+INTERVAL=${CANDY_CLOUD_SYNC_INTERVAL:-30}
+RUN_USER=${CANDY_CLOUD_SYNC_USER:-candy-sdwan}
+CANDY_INIT=${CANDY_INIT:-/etc/init.d/candy}
+
+reconcile_sdwan() {
+	if "$CANDY_INIT" sdwan_reconcile >/dev/null 2>&1; then
+		logger -t candy -- "level=info event=cloud_sync_reconcile result=ok"
+		return 0
+	fi
+	logger -t candy -- "level=error event=cloud_sync_reconcile result=failed reason=activation_rejected"
+	return 1
+}
+
+identity_available() {
+	[ -s "$IDENTITY_FILE" ] && [ -f "$IDENTITY_FILE" ] && [ ! -L "$IDENTITY_FILE" ]
+}
+
+case "$INTERVAL" in ''|*[!0-9]*|0) INTERVAL=30 ;; esac
+[ -x "$SYNC_BIN" ] || exit 1
+[ -x "$CANDY_INIT" ] || exit 1
+command -v start-stop-daemon >/dev/null 2>&1 || exit 1
+[ "$(id -u 2>/dev/null || printf 1)" = 0 ] || exit 1
+
+trap 'exit 0' TERM INT
+while identity_available; do
+	if output=$(start-stop-daemon -S -c "$RUN_USER" -x "$SYNC_BIN" -- --state-dir "$STATE_DIR" sync-once 2>&1); then
+		state=$(printf '%s' "$output" | jsonfilter -e '@.state' 2>/dev/null || true)
+		case "$state" in
+			waiting_for_network_configuration|configuration_unchanged|configuration_updated|activation_pending|activation_rejected) ;;
+			*) state=unknown ;;
+		esac
+		logger -t candy -- "level=info event=cloud_sync result=ok state=$state"
+		reconcile_sdwan || true
+	else
+		rc=$?
+		logger -t candy -- "level=warn event=cloud_sync result=failed exit=$rc activation=unchanged"
+	fi
+	sleep "$INTERVAL"
+done

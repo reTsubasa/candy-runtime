@@ -9,6 +9,8 @@ controller="$root/luci-app-candy/root/usr/lib/lua/luci/controller/candy.lua"
 status="$root/luci-app-candy/root/usr/lib/lua/luci/view/candy/status.htm"
 sdwan="$root/luci-app-candy/root/usr/lib/lua/luci/view/candy/sdwan.htm"
 po="$root/luci-app-candy/po/zh-cn/candy.zh-cn.po"
+cloud_sync_init="$root/candy-client/candy-cloud-sync.init"
+cloud_sync_loop="$root/candy-client/candy-cloud-sync-loop"
 
 fail() {
 	printf 'openwrt_sdwan_productization_test: %s\n' "$*" >&2
@@ -25,8 +27,15 @@ grep -F '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan-runtime $(1)/usr/libexec/ca
 grep -F '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-cloud-enroll $(1)/usr/libexec/candy-cloud-enroll' "$makefile" >/dev/null || fail "Cloud bootstrap exchange client is not packaged"
 grep -F '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-cloud-sync $(1)/usr/libexec/candy-cloud-sync' "$makefile" >/dev/null || fail "Cloud Runtime synchronizer is not packaged"
 grep -F '$(INSTALL_BIN) ./candy-cloud-sync.init $(1)/etc/init.d/candy-cloud-sync' "$makefile" >/dev/null || fail "Cloud synchronization service is not packaged"
-grep -F 'event=cloud_sync' "$root/candy-client/candy-cloud-sync.init" >/dev/null || fail "Cloud synchronization service has no structured lifecycle log"
-grep -F 'EXTRA_COMMANDS="run_sync_loop"' "$root/candy-client/candy-cloud-sync.init" >/dev/null || fail "Cloud synchronization foreground command is not registered with rc.common"
+grep -F '$(INSTALL_BIN) ./candy-cloud-sync-loop $(1)/usr/libexec/candy-cloud-sync-loop' "$makefile" >/dev/null || fail "Cloud synchronization supervisor is not packaged"
+grep -F 'procd_set_param command "$SYNC_LOOP"' "$cloud_sync_init" >/dev/null || fail "Cloud synchronization does not use the independent supervisor"
+if grep -F 'procd_set_param command "$initscript"' "$cloud_sync_init" >/dev/null; then
+	fail "Cloud synchronization still executes rc.common as a procd worker"
+fi
+grep -F 'start-stop-daemon -S -c "$RUN_USER" -x "$SYNC_BIN"' "$cloud_sync_loop" >/dev/null || fail "Cloud synchronization is not dropped to the dedicated user"
+grep -F '"$CANDY_INIT" sdwan_reconcile' "$cloud_sync_loop" >/dev/null || fail "root supervisor does not retain activation reconciliation"
+grep -F '"$(id -u 2>/dev/null || printf 1)" = 0' "$cloud_sync_loop" >/dev/null || fail "Cloud synchronization supervisor has no root boundary"
+grep -F 'activation=unchanged' "$cloud_sync_loop" >/dev/null || fail "failed Cloud synchronization can disturb the last-good activation"
 grep -F 'exec "$core_bin" client sdwan "$@"' "$root/candy-client/candy-sdwan" >/dev/null || fail "candy-sdwan does not use the Core process API"
 grep -F 'runtime-api-version' "$root/candy-client/candy-sdwan" >/dev/null || fail "candy-sdwan does not bootstrap the Core process API"
 if grep -F '/usr/lib/candy/cores/current/candy-' "$makefile" >/dev/null; then
@@ -76,8 +85,29 @@ grep -F -- '--allowed-uid "$sdwan_uid"' "$init" >/dev/null || fail "netd caller 
 if grep -F -- '--client-args' "$init" >/dev/null || grep -F -- '--netd-socket' "$init" >/dev/null; then
 	fail "legacy SD-WAN supervisor arguments remain"
 fi
-grep -F '"$CANDY_INIT" sdwan_reconcile' "$root/candy-client/candy-cloud-sync.init" >/dev/null || fail "successful Cloud synchronization does not trigger activation reconcile"
-grep -F 'activation=unchanged' "$root/candy-client/candy-cloud-sync.init" >/dev/null || fail "failed Cloud synchronization can disturb the last-good activation"
+procd_tmp=$(mktemp -d)
+trap 'rm -rf "$procd_tmp"' EXIT HUP INT TERM
+mkdir -p "$procd_tmp/state/identity"
+printf '%s\n' '{}' > "$procd_tmp/state/identity/device-identity-v1.json"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$procd_tmp/sync"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$procd_tmp/loop"
+chmod 0755 "$procd_tmp/sync" "$procd_tmp/loop"
+: > "$procd_tmp/procd.log"
+procd_open_instance() { printf 'instance %s\n' "${1:-default}" >> "$procd_tmp/procd.log"; }
+procd_set_param() { printf 'param %s\n' "$*" >> "$procd_tmp/procd.log"; }
+procd_close_instance() { printf '%s\n' close >> "$procd_tmp/procd.log"; }
+procd_add_reload_trigger() { :; }
+CANDY_CLOUD_SYNC_BIN="$procd_tmp/sync"
+CANDY_CLOUD_SYNC_LOOP="$procd_tmp/loop"
+CANDY_SDWAN_STATE_DIR="$procd_tmp/state"
+. "$cloud_sync_init"
+start_service
+grep -Fx "param command $procd_tmp/loop" "$procd_tmp/procd.log" >/dev/null || fail "procd command is not the independent Cloud supervisor"
+if grep -Eq '^param (user|group) ' "$procd_tmp/procd.log"; then
+	fail "root reconciliation supervisor was incorrectly demoted as a whole"
+fi
+rm -rf "$procd_tmp"
+trap - EXIT HUP INT TERM
 grep -F 'chown root:root /var/lib/candy' "$init" >/dev/null || fail "netd journal parent is not root-owned"
 grep -F 'chmod 0770 "$RUNTIME_DIR"' "$init" >/dev/null || fail "SD-WAN application runtime is not writable by its dedicated user"
 grep -F 'chmod 0750 "$CANDY_NETD_RUNTIME_DIR"' "$init" >/dev/null || fail "netd socket parent permits replacement by the SD-WAN caller"

@@ -57,6 +57,7 @@ define Package/candy-client/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan-runtime $(1)/usr/libexec/candy-sdwan-runtime
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-cloud-enroll $(1)/usr/libexec/candy-cloud-enroll
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-cloud-sync $(1)/usr/libexec/candy-cloud-sync
+	$(INSTALL_BIN) ./candy-cloud-sync-loop $(1)/usr/libexec/candy-cloud-sync-loop
 	$(INSTALL_BIN) ./candy-core-manager $(1)/usr/libexec/candy-core-manager
 	$(INSTALL_BIN) ./candy-update-manager $(1)/usr/libexec/candy-update-manager
 	$(INSTALL_BIN) ./candy-runtime-health-check $(1)/usr/libexec/candy-runtime-health-check

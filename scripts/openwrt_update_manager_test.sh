@@ -155,6 +155,25 @@ esac
 EOF
 chmod 0755 "$bin/candy-service"
 
+cat > "$bin/candy-cloud-sync-service" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$1" >> "$FAKE_CLOUD_SYNC_LOG"
+case "$1" in
+	enabled) [ "$(cat "$FAKE_CLOUD_SYNC_ENABLED")" = 1 ] ;;
+	enable) printf '%s\n' 1 > "$FAKE_CLOUD_SYNC_ENABLED" ;;
+	restart)
+		if [ "${FAKE_FAIL_TARGET_CLOUD_SYNC:-0}" = 1 ] && [ "$(cat "$FAKE_INSTALLED_VERSION")" = 0.4.0-r3 ]; then
+			exit 1
+		fi
+		printf '%s\n' 1 > "$FAKE_CLOUD_SYNC_RUNNING"
+		;;
+	running) [ "$(cat "$FAKE_CLOUD_SYNC_RUNNING")" = 1 ] ;;
+	stop) printf '%s\n' 0 > "$FAKE_CLOUD_SYNC_RUNNING" ;;
+	*) exit 1 ;;
+esac
+EOF
+chmod 0755 "$bin/candy-cloud-sync-service"
+
 cat > "$bin/candy-health" <<'EOF'
 #!/bin/sh
 [ "$1" = client ] || exit 1
@@ -253,9 +272,14 @@ export FAKE_APK_LOG="$tmp/apk.log"
 export FAKE_SERVICE_LOG="$tmp/service.log"
 export FAKE_SERVICE_ENABLED="$tmp/service.enabled"
 export FAKE_SERVICE_RUNNING="$tmp/service.running"
+export FAKE_CLOUD_SYNC_LOG="$tmp/cloud-sync.log"
+export FAKE_CLOUD_SYNC_ENABLED="$tmp/cloud-sync.enabled"
+export FAKE_CLOUD_SYNC_RUNNING="$tmp/cloud-sync.running"
 export FAKE_INSTALLED_VERSION="$tmp/installed-version"
 export FAKE_APK_AUTOSTART=0
 export CANDY_UPDATE_SERVICE_INIT="$bin/candy-service"
+export CANDY_UPDATE_CLOUD_SYNC_INIT="$bin/candy-cloud-sync-service"
+export CANDY_UPDATE_CLOUD_IDENTITY_FILE="$tmp/sdwan/identity/device-identity-v1.json"
 export CANDY_UPDATE_HEALTH_CHECK="$bin/candy-health"
 export CANDY_UPDATE_CONFIG_FILE="$tmp/candy.config"
 # Keep this fixture independent from the package revision used by the caller
@@ -265,6 +289,8 @@ export CANDY_RUNTIME_RELEASE=2
 export CANDY_UPDATE_HEALTH_WAIT_SECONDS=1
 printf '%s\n' 1 > "$FAKE_SERVICE_ENABLED"
 printf '%s\n' 1 > "$FAKE_SERVICE_RUNNING"
+printf '%s\n' 0 > "$FAKE_CLOUD_SYNC_ENABLED"
+printf '%s\n' 0 > "$FAKE_CLOUD_SYNC_RUNNING"
 printf '%s\n' 0.4.0-r2 > "$FAKE_INSTALLED_VERSION"
 printf '%s\n' test-config > "$CANDY_UPDATE_CONFIG_FILE"
 
@@ -412,6 +438,44 @@ grep -Fx disable "$FAKE_SERVICE_LOG" >/dev/null
 grep -Fx enable "$FAKE_SERVICE_LOG" >/dev/null
 grep -Fx start "$FAKE_SERVICE_LOG" >/dev/null
 [ "$(cat "$CANDY_UPDATE_CONFIG_FILE")" = test-config ]
+[ ! -s "$FAKE_CLOUD_SYNC_LOG" ]
+
+# A disabled Cloud sync service must remain disabled even when an identity is
+# present. Runtime update ownership is limited to services already enabled by
+# an explicit Cloud enrollment.
+mkdir -p "$(dirname "$CANDY_UPDATE_CLOUD_IDENTITY_FILE")"
+cat > "$CANDY_UPDATE_CLOUD_IDENTITY_FILE" <<'EOF'
+{"schema_version":1,"cloud_address":"https://cloud.example.test","organization_id":"11111111-1111-1111-1111-111111111111","device_id":"22222222-2222-2222-2222-222222222222","device_key_id":"33333333-3333-3333-3333-333333333333"}
+EOF
+: > "$FAKE_CLOUD_SYNC_LOG"
+"$manager" install-runtime v0_4_0_r3 >/dev/null
+if grep -Eq '^(enable|restart)$' "$FAKE_CLOUD_SYNC_LOG"; then
+	echo "disabled Cloud sync service was unexpectedly enabled" >&2
+	exit 1
+fi
+
+# An enrolled and enabled node must have Cloud sync explicitly restored after
+# APK replacement, even when ordinary Candy itself has already recovered.
+printf '%s\n' 1 > "$FAKE_CLOUD_SYNC_ENABLED"
+: > "$FAKE_CLOUD_SYNC_LOG"
+"$manager" install-runtime v0_4_0_r3 >/dev/null
+grep -Fx enable "$FAKE_CLOUD_SYNC_LOG" >/dev/null
+grep -Fx restart "$FAKE_CLOUD_SYNC_LOG" >/dev/null
+grep -Fx running "$FAKE_CLOUD_SYNC_LOG" >/dev/null
+[ "$(cat "$FAKE_CLOUD_SYNC_RUNNING")" = 1 ]
+
+# A target Runtime that cannot restore Cloud sync is rejected and rolled back;
+# the rollback must also restore the previously enabled Cloud sync service.
+: > "$FAKE_CLOUD_SYNC_LOG"
+apk_lines_before=$(wc -l < "$FAKE_APK_LOG" | tr -d ' ')
+if FAKE_FAIL_TARGET_CLOUD_SYNC=1 "$manager" install-runtime v0_4_0_r3 >/dev/null 2>&1; then
+	echo "Runtime update with failed Cloud sync restart was accepted" >&2
+	exit 1
+fi
+tail -n +$((apk_lines_before + 1)) "$FAKE_APK_LOG" | grep -F -- '--force-old-apk' >/dev/null
+[ "$(cat "$FAKE_INSTALLED_VERSION")" = 0.4.0-r2 ]
+[ "$(cat "$FAKE_CLOUD_SYNC_RUNNING")" = 1 ]
+grep -q '"error_code":"cloud_sync_restart_failed"' "$CANDY_UPDATE_OPERATION_FILE"
 
 # OpenWrt's default APK post-upgrade hook starts init scripts. The update
 # manager must adopt that healthy instance instead of starting it a second

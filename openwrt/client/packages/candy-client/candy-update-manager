@@ -19,6 +19,8 @@ CORE_OPERATION_FILE=${CANDY_CORE_OPERATION_FILE:-/tmp/candy-core-operation.json}
 LOCK_DIR=${CANDY_UPDATE_LOCK_DIR:-/var/lock/candy-update-manager.lock}
 CORE_MANAGER=${CANDY_CORE_MANAGER:-/usr/libexec/candy-core-manager}
 SERVICE_INIT=${CANDY_UPDATE_SERVICE_INIT:-/etc/init.d/candy}
+CLOUD_SYNC_INIT=${CANDY_UPDATE_CLOUD_SYNC_INIT:-/etc/init.d/candy-cloud-sync}
+CLOUD_IDENTITY_FILE=${CANDY_UPDATE_CLOUD_IDENTITY_FILE:-/var/lib/candy/sdwan/identity/device-identity-v1.json}
 HEALTH_CHECK=${CANDY_UPDATE_HEALTH_CHECK:-/usr/libexec/candy-runtime-health-check}
 CONFIG_FILE=${CANDY_UPDATE_CONFIG_FILE:-/etc/config/candy}
 HEALTH_WAIT_SECONDS=${CANDY_UPDATE_HEALTH_WAIT_SECONDS:-20}
@@ -564,6 +566,44 @@ restore_service_state() {
 	fi
 }
 
+cloud_identity_valid() {
+	local schema cloud organization device key
+	regular_bounded_file "$CLOUD_IDENTITY_FILE" 65536 || return 1
+	schema=$(jsonfilter -i "$CLOUD_IDENTITY_FILE" -e '@.schema_version' 2>/dev/null || true)
+	cloud=$(jsonfilter -i "$CLOUD_IDENTITY_FILE" -e '@.cloud_address' 2>/dev/null || true)
+	organization=$(jsonfilter -i "$CLOUD_IDENTITY_FILE" -e '@.organization_id' 2>/dev/null || true)
+	device=$(jsonfilter -i "$CLOUD_IDENTITY_FILE" -e '@.device_id' 2>/dev/null || true)
+	key=$(jsonfilter -i "$CLOUD_IDENTITY_FILE" -e '@.device_key_id' 2>/dev/null || true)
+	[ "$schema" = 1 ] || return 1
+	case "$cloud" in https://*) ;; *) return 1 ;; esac
+	for value in "$organization" "$device" "$key"; do
+		[ -n "$value" ] && [ "$value" != null ] || return 1
+	done
+}
+
+cloud_sync_action_retry() {
+	local action="$1" attempt
+	for attempt in 1 2 3 4 5; do
+		"$CLOUD_SYNC_INIT" "$action" >/dev/null 2>&1 && return 0
+		sleep 1
+	done
+	return 1
+}
+
+restore_cloud_sync_state() {
+	local should_run="$1" attempt
+	[ "$should_run" = 1 ] || return 0
+	[ -x "$CLOUD_SYNC_INIT" ] || return 1
+	cloud_identity_valid || return 1
+	cloud_sync_action_retry enable || return 1
+	cloud_sync_action_retry restart || return 1
+	for attempt in 1 2 3 4 5; do
+		"$CLOUD_SYNC_INIT" running >/dev/null 2>&1 && return 0
+		sleep 1
+	done
+	return 1
+}
+
 service_action_retry() {
 	local action="$1" attempt
 	# Runtime replacement briefly overlaps procd lifecycle transitions. Retry
@@ -587,7 +627,7 @@ runtime_healthy() {
 }
 
 install_runtime() {
-	local key="$1" version revision display current_key current_display target_dir rollback_dir client_package luci_package old_client old_luci config_backup was_enabled=0 was_running=0
+	local key="$1" version revision display current_key current_display target_dir rollback_dir client_package luci_package old_client old_luci config_backup was_enabled=0 was_running=0 cloud_sync_should_run=0
 	require_supported_platform || fail "this Runtime package does not support the current OpenWrt platform"
 	cached_catalog_valid || fail "no valid checked catalog is available"
 	validate_runtime_entry "$CATALOG_FILE" "$key" || fail "requested Runtime release is invalid or incompatible"
@@ -617,21 +657,40 @@ install_runtime() {
 	[ -x "$SERVICE_INIT" ] || fail "Candy service controller is unavailable"
 	"$SERVICE_INIT" enabled >/dev/null 2>&1 && was_enabled=1
 	"$SERVICE_INIT" running >/dev/null 2>&1 && was_running=1
+	if [ -x "$CLOUD_SYNC_INIT" ] && cloud_identity_valid && "$CLOUD_SYNC_INIT" enabled >/dev/null 2>&1; then
+		cloud_sync_should_run=1
+	fi
 	"$SERVICE_INIT" stop >/dev/null 2>&1 || fail "cannot stop Candy before Runtime update"
 	"$SERVICE_INIT" disable >/dev/null 2>&1 || fail "cannot disable Candy during Runtime update"
 	if ! apk add --allow-untrusted "$client_package" "$luci_package"; then
 		apk add --allow-untrusted --force-old-apk "$old_client" "$old_luci" >/dev/null 2>&1 || true
 		restore_config "$config_backup" || true
 		restore_service_state "$was_enabled" "$was_running" || true
-		fail "Runtime APK transaction failed; previous packages were restored"
+		if ! restore_cloud_sync_state "$cloud_sync_should_run"; then
+			fail_stage rollback cloud_sync_restore_failed "Runtime APK transaction failed and Candy Cloud sync could not be restored"
+		fi
+		fail_stage install apk_transaction_failed "Runtime APK transaction failed; previous packages were restored"
 	fi
 	restore_config "$config_backup" || fail "Runtime installed but Candy configuration could not be restored"
 	restore_service_state "$was_enabled" "$was_running" || fail "Runtime installed but Candy service state could not be restored"
+	if ! restore_cloud_sync_state "$cloud_sync_should_run"; then
+		log_update error runtime_update health cloud_sync_restart_failed "Target Runtime could not restore Candy Cloud sync; starting rollback"
+		"$CLOUD_SYNC_INIT" stop >/dev/null 2>&1 || true
+		"$SERVICE_INIT" stop >/dev/null 2>&1 || true
+		apk add --allow-untrusted --force-old-apk "$old_client" "$old_luci" >/dev/null 2>&1 || fail_stage rollback package_restore_failed "Candy Cloud sync restart failed and rollback package installation also failed"
+		restore_config "$config_backup" || fail_stage rollback config_restore_failed "Runtime rollback could not restore Candy configuration"
+		restore_service_state "$was_enabled" "$was_running" || fail_stage rollback service_restore_failed "Runtime rollback could not restore Candy service state"
+		restore_cloud_sync_state "$cloud_sync_should_run" || fail_stage rollback cloud_sync_restore_failed "Runtime rollback could not restore Candy Cloud sync"
+		[ "$was_running" = 0 ] || runtime_healthy || fail_stage rollback health_check_failed "Runtime rollback health check failed"
+		fail_stage health cloud_sync_restart_failed "Runtime $display could not restore Candy Cloud sync and was rolled back to $current_display"
+	fi
 	if [ "$was_running" = 1 ] && ! runtime_healthy; then
+		[ "$cloud_sync_should_run" = 0 ] || "$CLOUD_SYNC_INIT" stop >/dev/null 2>&1 || true
 		"$SERVICE_INIT" stop >/dev/null 2>&1 || true
 		apk add --allow-untrusted --force-old-apk "$old_client" "$old_luci" >/dev/null 2>&1 || fail "Runtime health check failed and rollback package installation also failed"
 		restore_config "$config_backup" || fail "Runtime rollback could not restore Candy configuration"
 		restore_service_state "$was_enabled" "$was_running" || fail "Runtime rollback could not restore Candy service state"
+		restore_cloud_sync_state "$cloud_sync_should_run" || fail_stage rollback cloud_sync_restore_failed "Runtime rollback could not restore Candy Cloud sync"
 		runtime_healthy || fail "Runtime update and rollback health checks both failed"
 		fail "Runtime $display failed its health check and was rolled back to $current_display"
 	fi

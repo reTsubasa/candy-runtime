@@ -3,59 +3,17 @@
 START=94
 STOP=11
 USE_PROCD=1
-EXTRA_COMMANDS="run_sync_loop"
-EXTRA_HELP="\trun_sync_loop\tRun the foreground Candy Cloud synchronization loop"
-
 SYNC_BIN=${CANDY_CLOUD_SYNC_BIN:-/usr/libexec/candy-cloud-sync}
+SYNC_LOOP=${CANDY_CLOUD_SYNC_LOOP:-/usr/libexec/candy-cloud-sync-loop}
 STATE_DIR=${CANDY_SDWAN_STATE_DIR:-/var/lib/candy/sdwan}
 IDENTITY_FILE=$STATE_DIR/identity/device-identity-v1.json
-INTERVAL=${CANDY_CLOUD_SYNC_INTERVAL:-30}
-CANDY_INIT=${CANDY_INIT:-/etc/init.d/candy}
-
-reconcile_sdwan() {
-	if [ ! -x "$CANDY_INIT" ]; then
-		logger -t candy -- "level=error event=cloud_sync_reconcile result=failed reason=init_missing"
-		return 1
-	fi
-	if "$CANDY_INIT" sdwan_reconcile >/dev/null 2>&1; then
-		logger -t candy -- "level=info event=cloud_sync_reconcile result=ok"
-		return 0
-	fi
-	logger -t candy -- "level=error event=cloud_sync_reconcile result=failed reason=activation_rejected"
-	return 1
-}
-
-run_sync_loop() {
-	local output state rc
-	trap 'exit 0' TERM INT
-	while [ -f "$IDENTITY_FILE" ] && [ ! -L "$IDENTITY_FILE" ]; do
-		if output=$($SYNC_BIN --state-dir "$STATE_DIR" sync-once 2>&1); then
-			state=$(printf '%s' "$output" | jsonfilter -e '@.state' 2>/dev/null || true)
-			case "$state" in
-				waiting_for_network_configuration|configuration_unchanged|configuration_updated|activation_pending|activation_rejected) ;;
-				*) state=unknown ;;
-			esac
-			logger -t candy -- "level=info event=cloud_sync result=ok state=$state"
-			reconcile_sdwan || true
-		else
-			rc=$?
-			logger -t candy -- "level=warn event=cloud_sync result=failed exit=$rc activation=unchanged"
-		fi
-		sleep "$INTERVAL"
-	done
-	# A local leave removes identity and candidate before stopping this loop.
-	# Reconcile once more so only the SD-WAN data plane is withdrawn.
-	reconcile_sdwan || true
-}
 
 start_service() {
 	[ -x "$SYNC_BIN" ] || return 0
+	[ -x "$SYNC_LOOP" ] || return 0
 	[ -f "$IDENTITY_FILE" ] && [ ! -L "$IDENTITY_FILE" ] || return 0
-	case "$INTERVAL" in ''|*[!0-9]*|0) INTERVAL=30 ;; esac
-	procd_open_instance
-	procd_set_param command "$initscript" run_sync_loop
-	procd_set_param user candy-sdwan
-	procd_set_param group candy-sdwan
+	procd_open_instance sync
+	procd_set_param command "$SYNC_LOOP"
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1
