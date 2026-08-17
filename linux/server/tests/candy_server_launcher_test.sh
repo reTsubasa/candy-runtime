@@ -5,6 +5,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 launcher=$root/linux/server/apps/candy-server/candy-server
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/candy-server-launcher-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+tmp=$(CDPATH= cd -P -- "$tmp" && pwd -P)
 
 fail() {
 	printf '%s\n' "candy_server_launcher_test: $*" >&2
@@ -48,6 +49,25 @@ case "${1:-}" in
 esac
 EOF
 chmod 0755 "$fake_core"
+
+fake_agent=$tmp/candy-sdwan-agent
+cat >"$fake_agent" <<'EOF'
+#!/bin/sh
+set -eu
+: "${FAKE_AGENT_ARGS:?}"
+: "${FAKE_AGENT_CALLS:?}"
+agent_command=
+for argument in "$@"; do
+	case "$argument" in run|validate-activation) agent_command=$argument ;; esac
+done
+[ -n "$agent_command" ] || exit 64
+printf '<%s>\n' "$agent_command" >>"$FAKE_AGENT_CALLS"
+: >"$FAKE_AGENT_ARGS"
+for argument in "$@"; do
+	printf '<%s>\n' "$argument" >>"$FAKE_AGENT_ARGS"
+done
+EOF
+chmod 0755 "$fake_agent"
 
 managed_core=$tmp/cores/releases/v1/candy-core
 mkdir -p "$(dirname -- "$managed_core")"
@@ -106,6 +126,81 @@ EOF
 cmp "$tmp/expected.args" "$args_file" >/dev/null || fail "server arguments changed at the process boundary"
 [ "$(cat "$args_file.api")" = 1 ] || fail "Runtime API environment was not published"
 [ "$(cat "$args_file.role")" = server ] || fail "Runtime role environment was not published"
+
+activation_id=$(printf 'ab%.0s' $(seq 1 32))
+activation_dir=$tmp/sdwan/activations/$activation_id
+mkdir -p "$activation_dir"
+printf '%s\n' '{"schema_version":1,"core_role":"server"}' >"$activation_dir/activation-v1.json"
+ln -s "activations/$activation_id" "$tmp/sdwan/candidate"
+agent_args=$tmp/agent.args
+agent_calls=$tmp/agent.calls
+: >"$args_file"
+CANDY_CORE_BINARY="$tmp//candy-core" CANDY_SDWAN_AGENT="$fake_agent" \
+	CANDY_SDWAN_STATE_ROOT="$tmp/sdwan" \
+	CANDY_SDWAN_ACTIVATION_LINK="$tmp/sdwan/candidate" \
+	FAKE_AGENT_ARGS="$agent_args" FAKE_AGENT_CALLS="$agent_calls" \
+	FAKE_ARGS_FILE="$args_file" FAKE_PID_FILE="$pid_file" \
+	"$launcher" --config /tmp/server.toml
+cat >"$tmp/expected.agent.args" <<EOF
+<--activation>
+<$tmp/sdwan/candidate/activation-v1.json>
+<--activation-ready>
+<$tmp/sdwan/activation-ready-v1.json>
+<--core>
+<$fake_core>
+<--ordinary-config>
+</tmp/server.toml>
+<--socket>
+</run/candy-netd/netd.sock>
+<run>
+EOF
+cmp "$tmp/expected.agent.args" "$agent_args" >/dev/null ||
+	fail "authenticated server activation did not use the frozen agent contract"
+[ "$(grep -Fc '<validate-activation>' "$agent_calls")" -eq 1 ] ||
+	fail "server activation was not validated exactly once"
+[ "$(grep -Fc '<run>' "$agent_calls")" -eq 1 ] ||
+	fail "server activation did not start exactly one transaction agent"
+[ ! -s "$args_file" ] || fail "launcher started an ordinary Core before the server-role agent"
+
+printf '%s\n' "{\"schema_version\":1,\"activation_id\":\"$activation_id\",\"candidate_target\":\"activations/$activation_id\",\"generation\":1,\"agent_pid\":1,\"state\":\"rejected\",\"error_code\":\"core_exit\"}" >"$tmp/sdwan/activation-ready-v1.json"
+: >"$args_file"
+CANDY_CORE_BINARY="$fake_core" CANDY_SDWAN_AGENT="$fake_agent" \
+	CANDY_SDWAN_STATE_ROOT="$tmp/sdwan" \
+	CANDY_SDWAN_ACTIVATION_LINK="$tmp/sdwan/candidate" \
+	FAKE_AGENT_ARGS="$agent_args" FAKE_AGENT_CALLS="$agent_calls" \
+	FAKE_ARGS_FILE="$args_file" FAKE_PID_FILE="$pid_file" \
+	"$launcher" --config /tmp/server.toml 2>"$tmp/rejected-activation.err"
+grep -F 'already rejected; starting ordinary Candy only' "$tmp/rejected-activation.err" >/dev/null ||
+	fail "rejected activation did not produce an actionable warning"
+grep -Fx '</tmp/server.toml>' "$args_file" >/dev/null ||
+	fail "rejected activation did not preserve the ordinary server"
+[ "$(grep -Fc '<run>' "$agent_calls")" -eq 1 ] ||
+	fail "rejected activation was submitted to the agent again"
+rm -f "$tmp/sdwan/activation-ready-v1.json"
+
+rm -f "$tmp/sdwan/candidate"
+CANDY_CORE_BINARY="$fake_core" CANDY_SDWAN_AGENT="$fake_agent" \
+	CANDY_SDWAN_STATE_ROOT="$tmp/sdwan" \
+	CANDY_SDWAN_ACTIVATION_LINK="$tmp/sdwan/candidate" \
+	FAKE_AGENT_ARGS="$agent_args" FAKE_AGENT_CALLS="$agent_calls" \
+	FAKE_ARGS_FILE="$args_file" FAKE_PID_FILE="$pid_file" \
+	"$launcher" --config /tmp/server.toml
+grep -Fx '</tmp/server.toml>' "$args_file" >/dev/null ||
+	fail "Cloud activation withdrawal did not preserve the ordinary server"
+
+ln -s "$tmp/outside-activation.json" "$tmp/sdwan/candidate"
+printf '%s\n' '{"schema_version":1,"core_role":"server"}' >"$tmp/outside-activation.json"
+CANDY_CORE_BINARY="$fake_core" CANDY_SDWAN_AGENT="$fake_agent" \
+	CANDY_SDWAN_STATE_ROOT="$tmp/sdwan" \
+	CANDY_SDWAN_ACTIVATION_LINK="$tmp/sdwan/candidate" \
+	FAKE_AGENT_ARGS="$agent_args" FAKE_AGENT_CALLS="$agent_calls" \
+	FAKE_ARGS_FILE="$args_file" FAKE_PID_FILE="$pid_file" \
+	"$launcher" --config /tmp/server.toml 2>"$tmp/invalid-activation.err"
+grep -F 'ignored an invalid SD-WAN activation pointer' "$tmp/invalid-activation.err" >/dev/null ||
+	fail "invalid activation did not produce an actionable warning"
+grep -Fx '</tmp/server.toml>' "$args_file" >/dev/null ||
+	fail "invalid activation prevented ordinary server startup"
+rm -f "$tmp/sdwan/candidate"
 
 signal_args=$tmp/signal.args
 signal_pid=$tmp/signal.pid

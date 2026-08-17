@@ -6,7 +6,14 @@ core_root=${CANDY_CORE_ROOT:-/opt/candy/cores}
 core_current=${CANDY_CORE_CURRENT_LINK:-$core_root/current}
 core_candidate=${CANDY_CORE_BINARY:-$core_current/candy-core}
 sdwan_runtime=${CANDY_SDWAN_RUNTIME:-/usr/local/libexec/candy-sdwan-runtime}
-sdwan_service=${CANDY_SDWAN_SERVICE:-candy-sdwan.service}
+server_service=${CANDY_SERVER_SERVICE:-candy-server.service}
+sdwan_agent=${CANDY_SDWAN_AGENT:-/usr/local/libexec/candy-sdwan-agent}
+sdwan_state_root=${CANDY_SDWAN_STATE_ROOT:-/var/lib/candy/sdwan}
+sdwan_candidate=${CANDY_SDWAN_ACTIVATION_LINK:-$sdwan_state_root/candidate}
+activation_ready=${CANDY_SDWAN_ACTIVATION_READY:-$sdwan_state_root/activation-ready-v1.json}
+netd_socket=${CANDY_NETD_SOCKET:-/run/candy-netd/netd.sock}
+export CANDY_SDWAN_SERVICE_USER=${CANDY_SDWAN_SERVICE_USER:-candy}
+export CANDY_SDWAN_SERVICE_GROUP=${CANDY_SDWAN_SERVICE_GROUP:-candy}
 
 fail() {
 	status=$1
@@ -17,6 +24,58 @@ fail() {
 
 require_sdwan_runtime() {
 	[ -x "$sdwan_runtime" ] || fail 69 "SD-WAN Runtime is not installed"
+}
+
+warn() {
+	printf '%s\n' "candy-server: warning: $*" >&2
+}
+
+canonical_file() {
+	path=$1
+	hops=0
+	while [ -L "$path" ]; do
+		[ "$hops" -lt 40 ] || return 1
+		target=$(readlink "$path" 2>/dev/null) || return 1
+		case "$target" in
+			/*) path=$target ;;
+			*) path=$(dirname -- "$path")/$target ;;
+		esac
+		hops=$((hops + 1))
+	done
+	parent=$(CDPATH= cd -P -- "$(dirname -- "$path")" 2>/dev/null && pwd -P) || return 1
+	printf '%s/%s\n' "$parent" "$(basename -- "$path")"
+}
+
+resolve_server_activation() {
+	[ -L "$sdwan_candidate" ] || return 1
+	candidate_target=$(readlink "$sdwan_candidate" 2>/dev/null) || return 1
+	case "$candidate_target" in
+		activations/*) ;;
+		*) return 1 ;;
+	esac
+	activation_id=${candidate_target#activations/}
+	[ "${#activation_id}" -eq 64 ] || return 1
+	case "$activation_id" in *[!0-9a-f]*) return 1 ;; esac
+	[ -d "$sdwan_state_root" ] && [ ! -L "$sdwan_state_root" ] || return 1
+	state_root_real=$(CDPATH= cd -P -- "$sdwan_state_root" 2>/dev/null && pwd -P) || return 1
+	candidate_parent=$(CDPATH= cd -P -- "$(dirname -- "$sdwan_candidate")" 2>/dev/null && pwd -P) || return 1
+	[ "$candidate_parent" = "$state_root_real" ] || return 1
+	[ -d "$state_root_real/activations" ] && [ ! -L "$state_root_real/activations" ] || return 1
+	activation_directory=$state_root_real/activations/$activation_id
+	[ -d "$activation_directory" ] && [ ! -L "$activation_directory" ] || return 1
+	activation_descriptor=$candidate_parent/$(basename -- "$sdwan_candidate")/activation-v1.json
+	[ -f "$activation_descriptor" ] && [ ! -L "$activation_descriptor" ] || return 1
+	printf '%s\n' "$activation_descriptor"
+}
+
+activation_was_rejected() {
+	[ -f "$activation_ready" ] && [ ! -L "$activation_ready" ] || return 1
+	bytes=$(wc -c <"$activation_ready" | tr -d ' ')
+	[ "$bytes" -gt 0 ] && [ "$bytes" -le 65536 ] || return 1
+	target=$(readlink "$sdwan_candidate" 2>/dev/null) || return 1
+	activation_id=${target#activations/}
+	grep -F "\"activation_id\":\"$activation_id\"" "$activation_ready" >/dev/null &&
+		grep -F '"state":"rejected"' "$activation_ready" >/dev/null
 }
 
 node_usage() {
@@ -57,7 +116,7 @@ case "${1:-}" in
 			reconnect)
 				[ "$(id -u)" = 0 ] || fail 77 "reconnect requires root privileges"
 				"$sdwan_runtime" reconnect
-				if command -v systemctl >/dev/null 2>&1 && systemctl restart "$sdwan_service"; then
+				if command -v systemctl >/dev/null 2>&1 && systemctl restart "$server_service"; then
 					printf '%s\n' "SD-WAN reconnect requested."
 				else
 					"$sdwan_runtime" fail-open "reconnect failed; Candy-owned network state removed" || true
@@ -81,11 +140,11 @@ case "${1:-}" in
 			case "$answer" in y|Y|yes|YES) ;; *) exit 1 ;; esac
 		fi
 		require_sdwan_runtime
-		if command -v systemctl >/dev/null 2>&1; then
-			systemctl stop "$sdwan_service" 2>/dev/null || true
-		fi
 		"$sdwan_runtime" fail-open "node left Candy Cloud"
 		"$sdwan_runtime" leave
+		if command -v systemctl >/dev/null 2>&1; then
+			systemctl try-restart "$server_service" 2>/dev/null || true
+		fi
 		printf '%s\n' "This server has left Candy Cloud. Its ordinary Candy service was not changed."
 		exit 0
 		;;
@@ -103,12 +162,12 @@ command -v readlink >/dev/null 2>&1 ||
 [ -f "$core_candidate" ] && [ -x "$core_candidate" ] ||
 	fail 69 "the managed data plane is invalid"
 
-core_binary=$(readlink -f "$core_candidate" 2>/dev/null) ||
+core_binary=$(canonical_file "$core_candidate") ||
 	fail 69 "cannot resolve the managed data plane"
 [ -n "$core_binary" ] && [ -f "$core_binary" ] && [ -x "$core_binary" ] ||
 	fail 69 "the managed data plane is not executable"
 
-launcher_binary=$(readlink -f "$0" 2>/dev/null || true)
+launcher_binary=$(canonical_file "$0" 2>/dev/null || true)
 [ -z "$launcher_binary" ] || [ "$core_binary" != "$launcher_binary" ] ||
 	fail 78 "the managed data-plane selection points back to candy-server"
 
@@ -124,8 +183,44 @@ fi
 export CANDY_RUNTIME_PROCESS_API_VERSION=$readonly_runtime_api
 export CANDY_RUNTIME_ROLE=server
 
-# Ordinary Candy and the optional SD-WAN capability are owned by this one
-# Core server process and one validated server configuration. Runtime keeps
-# the process boundary single so listeners, grants, and failure cleanup cannot
-# diverge between two independent servers.
+# Only the service's canonical run shape may consume an authenticated
+# activation. Diagnostics and manually supplied server options always remain
+# side-effect free at this boundary.
+ordinary_config=
+if [ "$#" -eq 2 ] && [ "$1" = --config ]; then
+	ordinary_config=$2
+elif [ "$#" -eq 1 ]; then
+	case "$1" in --config=*) ordinary_config=${1#--config=} ;; esac
+fi
+
+if [ -n "$ordinary_config" ] && [ -e "$sdwan_candidate" ]; then
+	if activation=$(resolve_server_activation); then
+		if activation_was_rejected; then
+			warn "the current server SD-WAN activation was already rejected; starting ordinary Candy only"
+		elif [ -x "$sdwan_agent" ]; then
+			if "$sdwan_agent" validate-activation \
+				--activation "$activation" \
+				--expected-core-role server \
+				--ordinary-config "$ordinary_config"
+			then
+				exec "$sdwan_agent" \
+					--activation "$activation" \
+					--activation-ready "$activation_ready" \
+					--core "$core_binary" \
+					--ordinary-config "$ordinary_config" \
+					--socket "$netd_socket" \
+					run
+			fi
+			warn "rejected an invalid server SD-WAN activation; starting ordinary Candy only"
+		else
+			warn "authenticated SD-WAN activation is present but the transaction agent is unavailable; starting ordinary Candy only"
+		fi
+	else
+		warn "ignored an invalid SD-WAN activation pointer; starting ordinary Candy only"
+	fi
+fi
+
+# Ordinary Candy and optional SD-WAN are always owned by one Core server
+# process. After an SD-WAN activation failure the agent replaces the merged
+# child with an ordinary-config child only after rolling back Candy-owned state.
 exec "$core_binary" server "$@"

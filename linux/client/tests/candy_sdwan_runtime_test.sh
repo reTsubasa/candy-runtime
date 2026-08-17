@@ -164,4 +164,182 @@ if grep -R -F 'candy-core' "$tmp/join.out" "$tmp/status.out" "$tmp/reconnect.out
 	fail "public candy output exposed the internal executable"
 fi
 
+privileged_bin=$tmp/privileged-bin
+privileged_state=$tmp/root-owned-state
+privileged_run=$tmp/root-owned-run
+privileged_calls=$tmp/privileged.calls
+mkdir -p "$privileged_bin" "$privileged_state/identity"
+printf '%s\n' legacy >"$privileged_state/identity/device-identity-v1.json"
+printf '%s\n' outside >"$tmp/outside-state"
+ln -s "$tmp/outside-state" "$privileged_state/outside-link"
+chmod 0755 "$privileged_state" "$privileged_state/identity"
+chmod 0644 "$privileged_state/identity/device-identity-v1.json" "$tmp/outside-state"
+cat >"$privileged_bin/id" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+	-u) printf '%s\n' 0 ;;
+	*) exit 0 ;;
+esac
+EOF
+cat >"$privileged_bin/chown" <<'EOF'
+#!/bin/sh
+printf '<%s>' "$@" >>"$FAKE_PRIVILEGED_CALLS"
+printf '\n' >>"$FAKE_PRIVILEGED_CALLS"
+EOF
+chmod 0755 "$privileged_bin/id" "$privileged_bin/chown"
+PATH="$privileged_bin:$PATH" FAKE_PRIVILEGED_CALLS="$privileged_calls" \
+	CANDY_SDWAN_TEST_MODE=0 CANDY_SDWAN_SERVICE_USER=candy-service \
+	CANDY_SDWAN_SERVICE_GROUP=candy-service CANDY_SDWAN_STATE_DIR="$privileged_state" \
+	CANDY_SDWAN_RUN_DIR="$privileged_run" "$runtime" stopped
+[ "$(stat -c '%a' "$privileged_state/identity" 2>/dev/null || stat -f '%Lp' "$privileged_state/identity")" = 700 ] ||
+	fail "legacy SD-WAN state directory was not restored to mode 0700"
+[ "$(stat -c '%a' "$privileged_state/identity/device-identity-v1.json" 2>/dev/null || stat -f '%Lp' "$privileged_state/identity/device-identity-v1.json")" = 600 ] ||
+	fail "legacy SD-WAN state file was not restored to mode 0600"
+[ "$(stat -c '%a' "$tmp/outside-state" 2>/dev/null || stat -f '%Lp' "$tmp/outside-state")" = 644 ] ||
+	fail "state delegation followed a symbolic link outside the state root"
+grep -F '<candy-service:candy-service>' "$privileged_calls" >/dev/null ||
+	fail "root-owned SD-WAN state was not delegated to the configured service identity"
+
+systemd_bin=$tmp/systemd-bin
+systemd_state=$tmp/systemd-state
+systemd_calls=$tmp/systemd.calls
+mkdir -p "$systemd_bin" "$systemd_state"
+cat >"$systemd_bin/systemctl" <<'EOF'
+#!/bin/sh
+set -eu
+action=${1:-}
+service=
+for argument in "$@"; do service=$argument; done
+case "$action" in
+	is-active) [ -f "$FAKE_SYSTEMD_STATE/$service" ] ;;
+	start|restart|stop)
+		printf '%s %s\n' "$action" "$service" >>"$FAKE_SYSTEMD_CALLS"
+		[ "${FAKE_SYSTEMD_FAIL_ACTION:-}" != "$action" ] || exit 1
+		case "$action" in
+			start|restart) : >"$FAKE_SYSTEMD_STATE/$service" ;;
+			stop) rm -f "$FAKE_SYSTEMD_STATE/$service" ;;
+		esac
+		;;
+	*) exit 64 ;;
+esac
+EOF
+chmod 0755 "$systemd_bin/systemctl"
+run_reconcile() {
+	role_state=$1
+	service=$2
+	shift 2
+	PATH="$systemd_bin:$PATH" FAKE_SYSTEMD_STATE="$systemd_state" \
+		FAKE_SYSTEMD_CALLS="$systemd_calls" CANDY_SDWAN_TEST_MODE=1 \
+		CANDY_SDWAN_STATE_DIR="$role_state" CANDY_SDWAN_RUN_DIR="$tmp/reconcile-run" \
+		"$@" "$runtime" reconcile "$service"
+}
+
+client_reconcile=$tmp/client-reconcile
+mkdir -p "$client_reconcile/activations"
+run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
+[ ! -s "$systemd_calls" ] || fail "empty initial candidate changed the Linux client service"
+activation_a=$(printf 'a%.0s' $(seq 1 64))
+mkdir "$client_reconcile/activations/$activation_a"
+ln -s "activations/$activation_a" "$client_reconcile/candidate"
+run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
+grep -Fx 'start candy-sdwan.service' "$systemd_calls" >/dev/null || fail "new candidate did not start the Linux client"
+calls_before=$(wc -l <"$systemd_calls")
+run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
+[ "$(wc -l <"$systemd_calls")" -eq "$calls_before" ] || fail "unchanged candidate restarted the Linux client"
+rm -f "$systemd_state/candy-sdwan.service"
+run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
+[ "$(tail -n 1 "$systemd_calls")" = 'start candy-sdwan.service' ] || fail "inactive client was not restored for an unchanged candidate"
+
+activation_b=$(printf 'b%.0s' $(seq 1 64))
+mkdir "$client_reconcile/activations/$activation_b"
+ln -sfn "activations/$activation_b" "$client_reconcile/candidate"
+if run_reconcile "$client_reconcile" candy-sdwan.service env FAKE_SYSTEMD_FAIL_ACTION=restart >/dev/null 2>&1; then
+	fail "failed candidate restart unexpectedly succeeded"
+fi
+[ "$(cat "$client_reconcile/reconcile-target-v1")" = "activations/$activation_a" ] ||
+	fail "failed restart committed the new reconciliation marker"
+run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
+[ "$(cat "$client_reconcile/reconcile-target-v1")" = "activations/$activation_b" ] ||
+	fail "successful retry did not commit the replacement candidate marker"
+rm -f "$client_reconcile/candidate"
+if run_reconcile "$client_reconcile" candy-sdwan.service env FAKE_SYSTEMD_FAIL_ACTION=stop >/dev/null 2>&1; then
+	fail "failed candidate withdrawal unexpectedly succeeded"
+fi
+[ "$(cat "$client_reconcile/reconcile-target-v1")" = "activations/$activation_b" ] ||
+	fail "failed stop committed the withdrawal marker"
+run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
+[ "$(tail -n 1 "$systemd_calls")" = 'stop candy-sdwan.service' ] || fail "candidate withdrawal did not stop the Linux client"
+calls_before=$(wc -l <"$systemd_calls")
+run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
+[ "$(wc -l <"$systemd_calls")" -eq "$calls_before" ] || fail "stable withdrawal repeated a Linux client lifecycle action"
+
+activation_c=$(printf 'c%.0s' $(seq 1 64))
+mkdir "$client_reconcile/activations/$activation_c"
+ln -s "activations/$activation_c" "$client_reconcile/candidate"
+run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
+rm -f "$systemd_state/candy-sdwan.service"
+printf '%s\n' "{\"activation_id\":\"$activation_c\",\"state\":\"rejected\"}" >"$client_reconcile/activation-ready-v1.json"
+calls_before=$(wc -l <"$systemd_calls")
+run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
+run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
+[ "$(wc -l <"$systemd_calls")" -eq "$calls_before" ] || fail "rejected candidate was started again"
+
+server_reconcile=$tmp/server-reconcile
+mkdir -p "$server_reconcile/activations"
+: >"$systemd_state/candy-server.service"
+calls_before=$(wc -l <"$systemd_calls")
+run_reconcile "$server_reconcile" candy-server.service env >/dev/null
+[ "$(wc -l <"$systemd_calls")" -eq "$calls_before" ] || fail "initial withdrawal restarted the ordinary server"
+cold_server_reconcile=$tmp/cold-server-reconcile
+mkdir -p "$cold_server_reconcile/activations"
+rm -f "$systemd_state/candy-server.service"
+run_reconcile "$cold_server_reconcile" candy-server.service env >/dev/null
+[ "$(tail -n 1 "$systemd_calls")" = 'start candy-server.service' ] || fail "initial sync did not restore an inactive ordinary server"
+: >"$systemd_state/candy-server.service"
+activation_d=$(printf 'd%.0s' $(seq 1 64))
+mkdir "$server_reconcile/activations/$activation_d"
+ln -s "activations/$activation_d" "$server_reconcile/candidate"
+run_reconcile "$server_reconcile" candy-server.service env >/dev/null
+[ "$(tail -n 1 "$systemd_calls")" = 'restart candy-server.service' ] || fail "server candidate did not restart the unified service"
+calls_before=$(wc -l <"$systemd_calls")
+run_reconcile "$server_reconcile" candy-server.service env >/dev/null
+[ "$(wc -l <"$systemd_calls")" -eq "$calls_before" ] || fail "unchanged server candidate caused a restart"
+rm -f "$systemd_state/candy-server.service"
+run_reconcile "$server_reconcile" candy-server.service env >/dev/null
+[ "$(tail -n 1 "$systemd_calls")" = 'start candy-server.service' ] || fail "inactive merged server was not restored"
+rm -f "$server_reconcile/candidate"
+run_reconcile "$server_reconcile" candy-server.service env >/dev/null
+[ "$(tail -n 1 "$systemd_calls")" = 'restart candy-server.service' ] || fail "server withdrawal did not restore ordinary Candy"
+calls_before=$(wc -l <"$systemd_calls")
+run_reconcile "$server_reconcile" candy-server.service env >/dev/null
+[ "$(wc -l <"$systemd_calls")" -eq "$calls_before" ] || fail "stable server withdrawal repeated a restart"
+rm -f "$systemd_state/candy-server.service"
+run_reconcile "$server_reconcile" candy-server.service env >/dev/null
+[ "$(tail -n 1 "$systemd_calls")" = 'start candy-server.service' ] || fail "inactive ordinary server was not restored"
+
+if [ -n "${CANDY_SDWAN_AGENT_BINARY:-}" ]; then
+	agent=$CANDY_SDWAN_AGENT_BINARY
+	[ -x "$agent" ] || fail "configured SD-WAN agent binary is not executable"
+else
+	command -v cargo >/dev/null 2>&1 || fail "cargo is required to verify the real SD-WAN agent CLI contract"
+	cargo build --quiet --manifest-path "$root/Cargo.toml" --package candy-sdwan-agent
+	agent=$root/target/debug/candy-sdwan-agent
+fi
+if "$agent" run --core "$tmp/missing-core" --activation "$tmp/missing-candidate" >"$tmp/documented-agent-order.out" 2>&1; then
+	fail "agent unexpectedly accepted a missing activation"
+fi
+if grep -F 'unexpected argument' "$tmp/documented-agent-order.out" >/dev/null; then
+	fail "documented run-first agent argument order is incompatible with the real CLI"
+fi
+grep -F 'inspect activation pointer' "$tmp/documented-agent-order.out" >/dev/null ||
+	fail "real agent did not parse the documented run-first contract"
+if "$agent" --core "$tmp/missing-core" --activation "$tmp/missing-candidate" run >"$tmp/new-agent-order.out" 2>&1; then
+	fail "agent unexpectedly accepted a missing activation"
+fi
+if grep -F 'unexpected argument' "$tmp/new-agent-order.out" >/dev/null; then
+	fail "Runtime service argument order is incompatible with the real agent CLI"
+fi
+grep -F 'inspect activation pointer' "$tmp/new-agent-order.out" >/dev/null ||
+	fail "real agent did not parse the activation-first run contract"
+
 printf '%s\n' "Candy SD-WAN Runtime cache behavior passed"

@@ -58,6 +58,9 @@ edge_stage=$dist/client/x86_64
 [ -x "$stage/usr/local/libexec/candy-server-health-check" ] || fail "server health check was not staged"
 [ -f "$stage/etc/candy/server.toml.example" ] || fail "server example config was not staged"
 [ -f "$stage/systemd/candy-server.service" ] || fail "systemd unit was not staged"
+[ -f "$stage/systemd/candy-netd.service" ] || fail "server netd unit was not staged"
+[ -f "$stage/systemd/candy-cloud-sync.service" ] || fail "server Cloud sync unit was not staged"
+[ ! -e "$stage/systemd/candy-sdwan.service" ] || fail "server package must not stage a second SD-WAN service"
 [ -x "$stage/install/install-candy-server.sh" ] || fail "installer was not staged"
 [ -x "$dist/candy-server-x86_64" ] || fail "product release launcher artifact was not staged"
 [ -s "$dist/candy-server-runtime-x86_64.tar.gz" ] || fail "complete server Runtime bundle was not staged"
@@ -66,6 +69,9 @@ tar -tzf "$dist/candy-server-runtime-x86_64.tar.gz" | grep -F './usr/local/libex
 	fail "server Runtime bundle does not contain Cloud enrollment"
 tar -tzf "$dist/candy-server-runtime-x86_64.tar.gz" | grep -F './usr/local/libexec/candy-cloud-sync' >/dev/null ||
 	fail "server Runtime bundle does not contain Cloud synchronization"
+if tar -tzf "$dist/candy-server-runtime-x86_64.tar.gz" | grep -F './systemd/candy-sdwan.service' >/dev/null; then
+	fail "server Runtime bundle contains a duplicate SD-WAN service"
+fi
 if tar -tvzf "$dist/candy-server-runtime-x86_64.tar.gz" 2>&1 | grep -F 'LIBARCHIVE.xattr' >/dev/null; then
 	fail "server Runtime bundle contains macOS extended attributes"
 fi
@@ -94,8 +100,54 @@ grep -F 'ExecStart=/usr/local/libexec/candy-client' "$edge_stage/systemd/candy-c
 	fail "Linux Edge service exposes a private data-plane command"
 grep -F 'ExecStopPost=+/usr/local/libexec/candy-sdwan-runtime fail-open' "$edge_stage/systemd/candy-sdwan.service" >/dev/null ||
 	fail "Linux Edge SD-WAN service has no fail-open lifecycle hook"
+grep -F 'ConditionPathIsSymbolicLink=/var/lib/candy/sdwan/candidate' "$edge_stage/systemd/candy-sdwan.service" >/dev/null ||
+	fail "Linux Edge SD-WAN service starts without a Cloud candidate"
+if grep -F 'ConditionPathExists=/etc/candy/sdwan-agent.env' "$edge_stage/systemd/candy-sdwan.service" >/dev/null; then
+	fail "Linux Edge SD-WAN activation requires an example-only environment file"
+fi
+grep -F 'EnvironmentFile=-/etc/candy/sdwan-agent.env' "$edge_stage/systemd/candy-sdwan.service" >/dev/null ||
+	fail "Linux Edge SD-WAN service does not support optional deployment overrides"
+grep -F 'Environment=CANDY_CORE_BIN=/opt/candy/cores/current/candy-core' "$edge_stage/systemd/candy-sdwan.service" >/dev/null ||
+	fail "Linux Edge SD-WAN service has no product Core default"
+grep -F 'Restart=no' "$edge_stage/systemd/candy-sdwan.service" >/dev/null ||
+	fail "Linux Edge SD-WAN service can loop on a rejected candidate"
+grep -F 'ExecStartPost=+/usr/local/libexec/candy-sdwan-runtime reconcile candy-sdwan.service' "$edge_stage/systemd/candy-cloud-sync.service" >/dev/null ||
+	fail "Linux Edge Cloud sync does not reconcile candidate lifecycle changes"
+grep -F 'candy-sdwan-agent --socket ${CANDY_NETD_SOCKET}' "$edge_stage/systemd/candy-sdwan.service" >/dev/null ||
+	fail "Linux Edge SD-WAN service does not place agent options before the run subcommand"
+if grep -F 'candy-sdwan-agent run --socket' "$edge_stage/systemd/candy-sdwan.service" >/dev/null; then
+	fail "Linux Edge SD-WAN service does not use the canonical agent argument order"
+fi
+grep -F -- '--allowed-user candy --allowed-group candy' "$stage/systemd/candy-netd.service" >/dev/null ||
+	fail "server netd socket is not bound to the Candy server identity"
+grep -F -- '--server-config /etc/candy/server.toml' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||
+	fail "server Cloud sync does not request a server activation"
+grep -F 'ExecStartPost=+/usr/local/libexec/candy-sdwan-runtime reconcile candy-server.service' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||
+	fail "server Cloud sync does not reconcile candidate lifecycle changes"
+grep -F 'Environment=CANDY_SDWAN_SERVICE_USER=candy' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||
+	fail "server Cloud reconciliation does not retain the candy service identity"
+grep -F 'Wants=network-online.target candy-netd.service' "$stage/systemd/candy-server.service" >/dev/null ||
+	fail "ordinary server does not order optional netd startup"
+if grep -Eq 'Requires=candy-netd|BindsTo=candy-netd|candy-sdwan\.service' "$stage/systemd/candy-server.service"; then
+	fail "ordinary server is incorrectly coupled to optional SD-WAN infrastructure"
+fi
 grep -F 'CONGESTION_TEST_BYTES=52428800' "$stage/install/install-candy-server.sh" >/dev/null ||
 	fail "server installer does not provision the 50 MiB congestion test object"
+grep -F 'Z /var/lib/candy/sdwan - candy candy -' "$stage/systemd/candy.tmpfiles" >/dev/null ||
+	fail "server package does not migrate existing SD-WAN state to the candy service identity"
+grep -F 'd /var/lib/candy 0711 root root -' "$stage/systemd/candy.tmpfiles" >/dev/null ||
+	fail "server package exposes the root netd journal through a candy-owned state root"
+grep -F 'chown root:root "$STATE_DIR"' "$stage/install/install-candy-server.sh" >/dev/null ||
+	fail "server installer does not protect the shared state root"
+if grep -F 'chown "$SERVICE_USER:$SERVICE_USER" "$STATE_DIR"' "$stage/install/install-candy-server.sh" >/dev/null; then
+	fail "server installer delegates the root netd journal directory to candy"
+fi
+grep -F 'find "$sdwan_state" -xdev -type f -exec chmod 0600' "$stage/install/install-candy-server.sh" >/dev/null ||
+	fail "server installer does not protect migrated SD-WAN state files"
+grep -F 'Z /var/lib/candy/sdwan - candy-sdwan candy-sdwan -' "$edge_stage/systemd/candy.tmpfiles" >/dev/null ||
+	fail "Linux Edge package does not migrate existing SD-WAN state to its service identity"
+grep -F 'd /var/lib/candy 0711 root root -' "$edge_stage/systemd/candy.tmpfiles" >/dev/null ||
+	fail "Linux Edge package has an unsafe shared state root"
 grep -F 'dd if=/dev/zero' "$stage/install/install-candy-server.sh" >/dev/null ||
 	fail "server installer does not generate congestion test data locally"
 

@@ -1,0 +1,5 @@
+d /var/lib/candy 0711 root root -
+d /var/lib/candy/sdwan 0700 candy candy -
+Z /var/lib/candy/sdwan - candy candy -
+d /run/candy 0755 candy candy -
+d /run/candy-netd 0755 root candy -

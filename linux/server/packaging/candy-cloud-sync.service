@@ -1,0 +1,20 @@
+[Unit]
+Description=Candy server Cloud configuration synchronization
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/candy/sdwan/identity/device-identity-v1.json
+
+[Service]
+Type=oneshot
+User=candy
+Group=candy
+UMask=0077
+Environment=CANDY_SDWAN_SERVICE_USER=candy
+Environment=CANDY_SDWAN_SERVICE_GROUP=candy
+ExecStart=/usr/local/libexec/candy-cloud-sync --core /opt/candy/cores/current/candy-core --server-config /etc/candy/server.toml sync-once
+ExecStartPost=+/usr/local/libexec/candy-sdwan-runtime reconcile candy-server.service
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/candy/sdwan /run/candy

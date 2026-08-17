@@ -4,17 +4,23 @@ After=network-online.target candy-netd.service
 Wants=network-online.target
 Requires=candy-netd.service
 BindsTo=candy-netd.service
-ConditionPathExists=/etc/candy/sdwan-agent.env
+ConditionPathIsSymbolicLink=/var/lib/candy/sdwan/candidate
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/candy/sdwan-agent.env
+UMask=0077
+Environment=CANDY_SDWAN_READINESS_TIMEOUT_MS=20000
+Environment=CANDY_NETD_SOCKET=/run/candy-netd/netd.sock
+Environment=CANDY_CORE_BIN=/opt/candy/cores/current/candy-core
+Environment=CANDY_SDWAN_ACTIVATION=/var/lib/candy/sdwan/candidate
+Environment=CANDY_SDWAN_ACTIVATION_READY=/var/lib/candy/sdwan/activation-ready-v1.json
+Environment=CANDY_SDWAN_LEASE_MS=30000
+EnvironmentFile=-/etc/candy/sdwan-agent.env
 ExecStartPre=+/usr/local/libexec/candy-sdwan-runtime publish
-ExecStart=/usr/local/libexec/candy-sdwan-agent run --socket ${CANDY_NETD_SOCKET} --core ${CANDY_CORE_BIN} --config ${CANDY_SDWAN_CORE_CONFIG} --declaration ${CANDY_SDWAN_DECLARATION} --status ${CANDY_SDWAN_STATUS_FILE} --instance-id ${CANDY_SDWAN_INSTANCE_ID} --generation ${CANDY_SDWAN_GENERATION} --lease-ms ${CANDY_SDWAN_LEASE_MS}
+ExecStart=/usr/local/libexec/candy-sdwan-agent --socket ${CANDY_NETD_SOCKET} --core ${CANDY_CORE_BIN} --activation ${CANDY_SDWAN_ACTIVATION} --activation-ready ${CANDY_SDWAN_ACTIVATION_READY} --lease-ms ${CANDY_SDWAN_LEASE_MS} --readiness-timeout-ms ${CANDY_SDWAN_READINESS_TIMEOUT_MS} run
 # The agent rolls back through netd before exit; this hook only publishes state.
 ExecStopPost=+/usr/local/libexec/candy-sdwan-runtime fail-open service-stopped
-Restart=on-failure
-RestartSec=2s
+Restart=no
 TimeoutStopSec=20s
 User=candy-sdwan
 Group=candy-sdwan

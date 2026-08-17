@@ -94,10 +94,14 @@ if [ -f /etc/init.d/candy.apk-new ]; then
 	chmod 0755 /etc/init.d/candy
 	rm -f /etc/init.d/candy.apk-new
 fi
-mkdir -p /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache /var/lib/candy/update
-	chown root:root /var/lib/candy
-	chmod 0711 /var/lib/candy
-	chmod 0700 /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache /var/lib/candy/update
+[ ! -L /var/lib/candy/sdwan ] || exit 1
+mkdir -p /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache /var/lib/candy/update /var/lib/candy/sdwan
+chown root:root /var/lib/candy
+chmod 0711 /var/lib/candy
+chmod 0700 /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache /var/lib/candy/update
+find /var/lib/candy/sdwan -xdev -type d -exec chmod 0700 {} \;
+find /var/lib/candy/sdwan -xdev -type f -exec chmod 0600 {} \;
+find /var/lib/candy/sdwan -xdev ! -type l -exec chown candy-sdwan:candy-sdwan {} \;
 exit 0
 endef
 

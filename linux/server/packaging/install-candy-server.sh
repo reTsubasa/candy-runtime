@@ -275,6 +275,15 @@ create_service_user() {
 	fi
 }
 
+prepare_sdwan_state() {
+	sdwan_state=$STATE_DIR/sdwan
+	[ ! -L "$sdwan_state" ] || die "refusing symbolic-link SD-WAN state directory: $sdwan_state"
+	run mkdir -p "$sdwan_state"
+	run find "$sdwan_state" -xdev -type d -exec chmod 0700 {} \;
+	run find "$sdwan_state" -xdev -type f -exec chmod 0600 {} \;
+	run find "$sdwan_state" -xdev ! -type l -exec chown "$SERVICE_USER:$SERVICE_USER" {} \;
+}
+
 random_secret() {
 	if command -v openssl >/dev/null 2>&1; then
 		openssl rand -hex 32
@@ -387,22 +396,31 @@ install_unit() {
 	cat >"$SERVICE_PATH" <<EOF
 [Unit]
 Description=Candy server
-After=network-online.target
-Wants=network-online.target
+After=network-online.target candy-netd.service
+Wants=network-online.target candy-netd.service
 
 [Service]
 Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_USER
+UMask=0077
 WorkingDirectory=$STATE_DIR
 Environment=CANDY_CORE_BINARY=$CORE_BINARY
+Environment=CANDY_SDWAN_AGENT=/usr/local/libexec/candy-sdwan-agent
+Environment=CANDY_SDWAN_ACTIVATION_LINK=$STATE_DIR/sdwan/candidate
+Environment=CANDY_SDWAN_ACTIVATION_READY=$STATE_DIR/sdwan/activation-ready-v1.json
+Environment=CANDY_NETD_SOCKET=/run/candy-netd/netd.sock
 ExecStart=$current_link/candy-server --config $config_file
 Restart=on-failure
 RestartSec=2s
 LimitNOFILE=1048576
 NoNewPrivileges=yes
-CapabilityBoundingSet=CAP_NET_ADMIN
-AmbientCapabilities=CAP_NET_ADMIN
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=$STATE_DIR /run/candy
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target
@@ -474,7 +492,10 @@ run chmod 0755 "$artifact_path"
 
 create_service_user
 run mkdir -p "$INSTALL_PREFIX/releases" "$CONFIG_DIR" "$tls_dir" "$STATE_DIR/candy-data" "$BACKUP_DIR"
-run chown "$SERVICE_USER:$SERVICE_USER" "$STATE_DIR" "$STATE_DIR/candy-data" "$tls_dir"
+run chown root:root "$STATE_DIR"
+run chmod 0711 "$STATE_DIR"
+run chown "$SERVICE_USER:$SERVICE_USER" "$STATE_DIR/candy-data" "$tls_dir"
+prepare_sdwan_state
 ensure_congestion_test_object
 
 if [ -L "$current_link" ]; then

@@ -59,7 +59,11 @@ FAKE_ALREADY_REGISTERED=1 FAKE_CALLS="$calls" PATH="$bin:$PATH" \
 jq -e '.registration.state == "registered" and .runtime.state == "stopped"' "$tmp/already.json" >/dev/null ||
 	fail "already registered node was not returned idempotently"
 after_calls=$(wc -l <"$calls")
-[ "$after_calls" -eq $((before_calls + 3)) ] || fail "idempotent bootstrap transported or exchanged the file"
+[ "$after_calls" -eq $((before_calls + 4)) ] || fail "idempotent bootstrap performed an unexpected remote action"
+tail -n 4 "$calls" >"$tmp/idempotent.calls"
+if grep -E '^scp|candy-server bootstrap' "$tmp/idempotent.calls" >/dev/null; then
+	fail "idempotent bootstrap transported or exchanged the Bootstrap file"
+fi
 grep -F 'already_registered=true' "$log" >/dev/null || fail "idempotent verification was not recorded"
 
 insecure=$tmp/insecure.json

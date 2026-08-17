@@ -8,6 +8,8 @@ run_dir=${CANDY_SDWAN_RUN_DIR:-/run/candy}
 config_file=${CANDY_SDWAN_CONFIG_CACHE:-$state_dir/config-v1.json}
 durable_status_file=${CANDY_SDWAN_STATUS_CACHE:-$state_dir/status-v1.json}
 published_status_file=${CANDY_SDWAN_STATUS_FILE:-$run_dir/sdwan-status.json}
+reconcile_marker=${CANDY_SDWAN_RECONCILE_MARKER:-$state_dir/reconcile-target-v1}
+activation_receipt=${CANDY_SDWAN_ACTIVATION_READY:-$state_dir/activation-ready-v1.json}
 max_bootstrap_bytes=${CANDY_SDWAN_MAX_BOOTSTRAP_BYTES:-16384}
 max_cloud_bytes=${CANDY_SDWAN_MAX_CLOUD_BYTES:-2048}
 if [ -n "${CANDY_CLOUD_ENROLL_CLIENT:-}" ]; then
@@ -31,6 +33,8 @@ case "$(uname -m 2>/dev/null || true)" in
 	*) enrollment_architecture= ;;
 esac
 enrollment_dir=${CANDY_SDWAN_ENROLLMENT_DIR:-$state_dir/identity}
+state_user=${CANDY_SDWAN_SERVICE_USER:-candy-sdwan}
+state_group=${CANDY_SDWAN_SERVICE_GROUP:-$state_user}
 
 fail() {
 	printf '%s\n' "candy: $*" >&2
@@ -62,6 +66,17 @@ ensure_directories() {
 	mkdir -p "$state_dir" "$run_dir"
 	chmod 0700 "$state_dir"
 	chmod 0755 "$run_dir"
+}
+
+delegate_state() {
+	[ "${CANDY_SDWAN_TEST_MODE:-0}" != 1 ] || return 0
+	[ "$(id -u)" = 0 ] || return 0
+	id "$state_user" >/dev/null 2>&1 || fail "SD-WAN service user does not exist: $state_user"
+	[ -d "$state_dir" ] && [ ! -L "$state_dir" ] || fail "SD-WAN state directory is invalid"
+	find "$state_dir" -xdev -type d -exec chmod 0700 {} \; || fail "could not protect SD-WAN state directories"
+	find "$state_dir" -xdev -type f -exec chmod 0600 {} \; || fail "could not protect SD-WAN state files"
+	find "$state_dir" -xdev ! -type l -exec chown "$state_user:$state_group" {} \; ||
+		fail "could not delegate SD-WAN state to $state_user"
 }
 
 atomic_from_stdin() {
@@ -197,6 +212,143 @@ show_status() {
 	printf '%s\n' '{"schema_version":1,"registration":{"state":"unregistered","cloud_address":"","last_error":""},"runtime":{"state":"unavailable","updated_at":null,"last_error":""},"site":null,"segment":null,"tun":{"state":"unavailable","full_duplex":null},"peers":[],"path":null,"egress":{"local":null,"remote":null},"dns":{"state":"unavailable"}}'
 }
 
+read_reconcile_marker() {
+	[ -f "$reconcile_marker" ] && [ ! -L "$reconcile_marker" ] || return 1
+	bytes=$(wc -c <"$reconcile_marker" | tr -d ' ')
+	[ "$bytes" -gt 0 ] && [ "$bytes" -le 256 ] || return 1
+	cat "$reconcile_marker"
+}
+
+candidate_reconcile_state() {
+	if [ -L "$state_dir/candidate" ]; then
+		target=$(readlink "$state_dir/candidate" 2>/dev/null || true)
+		case "$target" in
+			activations/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]* )
+				activation_id=${target#activations/}
+				case "$activation_id" in
+					*[!0-9a-f]*|'') printf '%s\n' invalid ;;
+					*)
+						if [ "${#activation_id}" -ne 64 ]; then
+							printf '%s\n' invalid
+						elif [ ! -d "$state_dir/$target" ] || [ -L "$state_dir/$target" ]; then
+							printf '%s\n' invalid
+						elif [ -f "$activation_receipt" ] && [ ! -L "$activation_receipt" ] &&
+							[ "$(wc -c <"$activation_receipt" | tr -d ' ')" -le 65536 ] &&
+							grep -F "\"activation_id\":\"$activation_id\"" "$activation_receipt" >/dev/null 2>&1 &&
+							grep -F '"state":"rejected"' "$activation_receipt" >/dev/null 2>&1; then
+							printf 'rejected:%s\n' "$target"
+						else
+							printf '%s\n' "$target"
+						fi
+						;;
+				esac
+				;;
+			*) printf '%s\n' invalid ;;
+		esac
+		return
+	fi
+	[ -e "$state_dir/candidate" ] && printf '%s\n' invalid || printf '%s\n' withdrawn
+}
+
+reconcile_control() {
+	service=$1
+	state=$2
+	changed=$3
+	command -v systemctl >/dev/null 2>&1 || fail "systemctl is required for SD-WAN reconciliation"
+	case "$service" in
+		candy-sdwan.service|candy-server.service) ;;
+		*) fail "unsupported SD-WAN reconciliation service: $service" ;;
+	esac
+	acted=0
+	case "$state" in
+		withdrawn|invalid)
+			if [ "$service" = candy-server.service ]; then
+				if systemctl is-active --quiet "$service"; then
+					if [ "$changed" = 1 ]; then
+						systemctl restart "$service"
+						acted=1
+					fi
+				else
+					systemctl start "$service"
+					acted=1
+				fi
+			else
+				if systemctl is-active --quiet "$service"; then
+					systemctl stop "$service"
+					acted=1
+				fi
+			fi
+			if [ "$acted" = 1 ] || [ "$changed" = 1 ]; then
+				case "$state" in
+					withdrawn) reason="Cloud SD-WAN candidate withdrawn" ;;
+					*) reason="Invalid Cloud SD-WAN candidate pointer" ;;
+				esac
+				write_status "$(current_registration_state)" fail-open "$reason"
+			fi
+			;;
+		rejected:*)
+			if [ "$service" = candy-server.service ]; then
+				if ! systemctl is-active --quiet "$service"; then
+					systemctl start "$service"
+					acted=1
+				fi
+			else
+				if systemctl is-active --quiet "$service"; then
+					systemctl stop "$service"
+					acted=1
+				fi
+			fi
+			if [ "$acted" = 1 ] || [ "$changed" = 1 ]; then
+				write_status "$(current_registration_state)" fail-open "Cloud SD-WAN candidate rejected"
+			fi
+			;;
+		*)
+			if systemctl is-active --quiet "$service"; then
+				if [ "$changed" = 1 ]; then
+					systemctl restart "$service"
+					acted=1
+				fi
+			else
+				systemctl start "$service"
+				acted=1
+			fi
+			if [ "$acted" = 1 ]; then
+				write_status "$(current_registration_state)" reconnecting "Cloud SD-WAN candidate changed"
+			fi
+			;;
+	esac
+}
+
+reconcile_sdwan() {
+	require_root
+	[ "$#" -eq 1 ] || fail "reconcile requires a systemd service name"
+	service=$1
+	ensure_directories
+	state=$(candidate_reconcile_state)
+	previous=$(read_reconcile_marker 2>/dev/null || true)
+	if [ -z "$previous" ] && [ "$state" = withdrawn ]; then
+		reconcile_control "$service" "$state" 0
+		atomic_from_stdin "$reconcile_marker" 0600 <<EOF
+$state
+EOF
+		delegate_state
+		printf '%s\n' "SD-WAN reconciliation initialized without a candidate; service state verified."
+		return 0
+	fi
+	changed=0
+	if [ "$state" != "$previous" ]; then
+		changed=1
+		printf '%s\n' "SD-WAN reconciliation target changed: ${previous:-none} -> $state"
+	fi
+	reconcile_control "$service" "$state" "$changed"
+	if [ "$changed" = 1 ]; then
+		atomic_from_stdin "$reconcile_marker" 0600 <<EOF
+$state
+EOF
+	fi
+	delegate_state
+}
+
 usage() {
 	cat <<'EOF'
 usage: candy-sdwan-runtime ACTION [arguments]
@@ -209,6 +361,7 @@ Runtime internal actions:
   running
   stopped
   publish
+  reconcile SERVICE
   status
 EOF
 }
@@ -228,8 +381,9 @@ case "$action" in
 		validate_cloud_address "$cloud"
 		write_config "$cloud" join-pending
 		write_status join-pending stopped ""
+		delegate_state
 		output_file=$(mktemp "$run_dir/.candy-enrollment.XXXXXX") || fail "could not create enrollment result file"
-		trap 'rm -f "$output_file"' EXIT HUP INT TERM
+		trap 'rm -f "$output_file"; delegate_state >/dev/null 2>&1 || true' EXIT HUP INT TERM
 		set -- "$enrollment_client" --state-dir "$enrollment_dir" --bootstrap-file "$bootstrap_file" --expected-platform "$enrollment_platform"
 		if [ -n "$enrollment_architecture" ]; then
 			set -- "$@" --expected-architecture "$enrollment_architecture"
@@ -240,6 +394,7 @@ case "$action" in
 		if "$@" >"$output_file"; then
 			write_config "$cloud" registered
 			write_status registered stopped ""
+			delegate_state
 			if [ -x /etc/init.d/candy-cloud-sync ]; then
 				/etc/init.d/candy-cloud-sync restart >/dev/null 2>&1 || true
 			elif command -v systemctl >/dev/null 2>&1; then
@@ -251,6 +406,7 @@ case "$action" in
 			trap - EXIT HUP INT TERM
 		else
 			write_status join-pending stopped "Cloud bootstrap failed; retry candy bootstrap with the same file to resume the same installation"
+			delegate_state
 			rm -f "$output_file"
 			trap - EXIT HUP INT TERM
 			fail "Cloud bootstrap failed; existing network state was not changed"
@@ -262,6 +418,7 @@ case "$action" in
 		state=$(current_registration_state)
 		[ "$state" != unregistered ] || fail "this node has not joined a Cloud"
 		write_status "$state" reconnecting ""
+		delegate_state
 		;;
 	leave)
 		require_root
@@ -281,28 +438,36 @@ case "$action" in
 			find "$state_dir/generations" -mindepth 1 -delete
 		fi
 		write_status unregistered stopped ""
+		delegate_state
 		;;
 	fail-open)
 		require_root
 		ensure_directories
 		write_status "$(current_registration_state)" fail-open "${1:-Candy-owned network state removed}"
+		delegate_state
 		;;
 	running)
 		require_root
 		ensure_directories
 		write_status "$(current_registration_state)" running ""
+		delegate_state
 		;;
 	stopped)
 		require_root
 		ensure_directories
 		write_status "$(current_registration_state)" stopped ""
+		delegate_state
 		;;
 	publish)
 		require_root
 		publish_status
+		delegate_state
 		;;
 	status)
 		show_status
+		;;
+	reconcile)
+		reconcile_sdwan "$@"
 		;;
 	-h|--help|help)
 		usage
