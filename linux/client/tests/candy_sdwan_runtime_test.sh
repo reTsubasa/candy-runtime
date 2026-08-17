@@ -93,7 +93,17 @@ run_runtime fail-open core-exit
 grep -F '"state":"fail-open"' "$run/sdwan-status.json" >/dev/null || fail "fail-open state missing"
 [ -f "$state/config-v1.json" ] || fail "fail-open removed durable enrollment intent"
 
+mkdir -p "$state/generations/test-generation"
+printf '%s\n' profile >"$state/profile-v1.json"
+printf '%s\n' sync >"$state/sync-state-v1.json"
+printf '%s\n' status >"$state/cloud-sync-status-v1.json"
+ln -s generations/test-generation "$state/configuration"
 run_runtime leave
+[ ! -e "$state/profile-v1.json" ] || fail "leave retained Cloud profile"
+[ ! -e "$state/sync-state-v1.json" ] || fail "leave retained Cloud synchronization state"
+[ ! -e "$state/cloud-sync-status-v1.json" ] || fail "leave retained Cloud synchronization status"
+[ ! -e "$state/configuration" ] || fail "leave retained active Cloud configuration pointer"
+[ -z "$(find "$state/generations" -mindepth 1 -print -quit)" ] || fail "leave retained immutable Cloud generations"
 FAKE_ENROLL_FAIL=1 run_runtime bootstrap "$bootstrap" >/dev/null 2>&1 &&
 	fail "failed Cloud enrollment unexpectedly succeeded"
 grep -F '"state":"join-pending"' "$run/sdwan-status.json" >/dev/null || fail "failed enrollment did not remain diagnosable"

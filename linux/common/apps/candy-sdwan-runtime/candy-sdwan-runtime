@@ -266,14 +266,19 @@ case "$action" in
 	leave)
 		require_root
 		ensure_directories
-		rm -f "$config_file"
-		if [ -d "$enrollment_dir" ] && [ ! -L "$enrollment_dir" ]; then
-			find "$enrollment_dir" -maxdepth 1 -type f ! -name installation-instance-id -delete
-		fi
 		if [ -x /etc/init.d/candy-cloud-sync ]; then
 			/etc/init.d/candy-cloud-sync stop >/dev/null 2>&1 || true
 		elif command -v systemctl >/dev/null 2>&1; then
 			systemctl stop candy-cloud-sync.timer candy-cloud-sync.service >/dev/null 2>&1 || true
+		fi
+		rm -f "$config_file"
+		if [ -d "$enrollment_dir" ] && [ ! -L "$enrollment_dir" ]; then
+			find "$enrollment_dir" -maxdepth 1 -type f ! -name installation-instance-id -delete
+		fi
+		rm -f "$state_dir/profile-v1.json" "$state_dir/sync-state-v1.json" \
+			"$state_dir/cloud-sync-status-v1.json" "$state_dir/configuration"
+		if [ -d "$state_dir/generations" ] && [ ! -L "$state_dir/generations" ]; then
+			find "$state_dir/generations" -mindepth 1 -delete
 		fi
 		write_status unregistered stopped ""
 		;;
