@@ -34,6 +34,7 @@ MAX_SIGNATURE_BYTES=${CANDY_UPDATE_MAX_SIGNATURE_BYTES:-4096}
 MAX_RUNTIME_PACKAGE_BYTES=${CANDY_UPDATE_MAX_RUNTIME_PACKAGE_BYTES:-16777216}
 MAX_CORE_BYTES=${CANDY_UPDATE_MAX_CORE_BYTES:-134217728}
 UPLOAD_ROOT=${CANDY_UPDATE_UPLOAD_ROOT:-/tmp/candy-core-upload}
+CORE_STAGING_ROOT=${CANDY_UPDATE_CORE_STAGING_ROOT:-/tmp/candy-core-update}
 OPERATION_ACTION=
 OPERATION_VERSION=
 TEMPORARY=
@@ -99,9 +100,19 @@ fail_stage() {
 }
 
 cleanup() {
-	[ -n "$TEMPORARY" ] && [ -d "$TEMPORARY" ] && rm -rf "$TEMPORARY"
+	case "$TEMPORARY" in
+		"$STATE_ROOT"/.check-*|"$STATE_ROOT"/.runtime-*|"$CORE_STAGING_ROOT"/.core-*)
+			if [ -L "$TEMPORARY" ]; then
+				rm -f "$TEMPORARY" 2>/dev/null || true
+			elif [ -d "$TEMPORARY" ]; then
+				rm -rf "$TEMPORARY" 2>/dev/null || true
+			fi
+		;;
+	esac
 	[ -n "$UPLOAD_FILE" ] && rm -f "$UPLOAD_FILE" 2>/dev/null || true
-	if [ -f "$LOCK_DIR/pid" ] && [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
+	if [ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] &&
+		[ -f "$LOCK_DIR/pid" ] && [ ! -L "$LOCK_DIR/pid" ] &&
+		[ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
 		rm -f "$LOCK_DIR/pid" 2>/dev/null || true
 		rmdir "$LOCK_DIR" 2>/dev/null || true
 	fi
@@ -111,6 +122,8 @@ acquire_lock() {
 	local lock_pid
 	mkdir -p "$(dirname "$LOCK_DIR")" || return 1
 	if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+		[ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] || return 1
+		[ -f "$LOCK_DIR/pid" ] && [ ! -L "$LOCK_DIR/pid" ] || return 1
 		lock_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
 		case "$lock_pid" in ''|*[!0-9]*) return 1 ;; esac
 		kill -0 "$lock_pid" 2>/dev/null && return 1
@@ -118,8 +131,59 @@ acquire_lock() {
 		rmdir "$LOCK_DIR" 2>/dev/null || return 1
 		mkdir "$LOCK_DIR" 2>/dev/null || return 1
 	fi
-	printf '%s\n' "$$" > "$LOCK_DIR/pid" || return 1
-	trap cleanup EXIT HUP INT TERM
+	if ! printf '%s\n' "$$" > "$LOCK_DIR/pid"; then
+		rmdir "$LOCK_DIR" 2>/dev/null || true
+		return 1
+	fi
+	trap cleanup EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+}
+
+safe_absolute_directory_path() {
+	local path="$1" remaining component current=
+	printf '%s' "$path" | grep -Eq '^/[A-Za-z0-9._/-]+$' || return 1
+	case "$path" in
+		/|*/|*//*|*/./*|*/.|*/../*|*/..) return 1 ;;
+	esac
+	remaining=${path#/}
+	while [ -n "$remaining" ]; do
+		component=${remaining%%/*}
+		if [ "$remaining" = "$component" ]; then
+			remaining=
+		else
+			remaining=${remaining#*/}
+		fi
+		current=$current/$component
+		[ ! -L "$current" ] || return 1
+	done
+}
+
+directory_mode() {
+	stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
+}
+
+directory_owner() {
+	stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1" 2>/dev/null
+}
+
+prepare_core_staging_root() {
+	local parent mode owner current_owner
+	safe_absolute_directory_path "$CORE_STAGING_ROOT" || return 1
+	case "$CORE_STAGING_ROOT" in
+		"$STATE_ROOT"|"$STATE_ROOT"/*) return 1 ;;
+	esac
+	if [ ! -e "$CORE_STAGING_ROOT" ]; then
+		parent=$(dirname "$CORE_STAGING_ROOT")
+		[ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+		mkdir -m 0700 "$CORE_STAGING_ROOT" 2>/dev/null || return 1
+	fi
+	[ -d "$CORE_STAGING_ROOT" ] && [ ! -L "$CORE_STAGING_ROOT" ] || return 1
+	mode=$(directory_mode "$CORE_STAGING_ROOT") || return 1
+	owner=$(directory_owner "$CORE_STAGING_ROOT") || return 1
+	current_owner=$(id -u 2>/dev/null) || return 1
+	[ "$mode" = 700 ] && [ "$owner" = "$current_owner" ]
 }
 
 regular_bounded_file() {
@@ -390,7 +454,8 @@ install_core() {
 	url=$(core_entry_field "$CATALOG_FILE" "$key" "targets.$CORE_TARGET_KEY.url")
 	sha=$(core_entry_field "$CATALOG_FILE" "$key" "targets.$CORE_TARGET_KEY.sha256")
 	size=$(core_entry_field "$CATALOG_FILE" "$key" "targets.$CORE_TARGET_KEY.size")
-	TEMPORARY="$STATE_ROOT/.core-$$"
+	prepare_core_staging_root || fail "Core staging root is unsafe or unavailable"
+	TEMPORARY="$CORE_STAGING_ROOT/.core-$$"
 	mkdir -m 0700 "$TEMPORARY" || fail "cannot create Core staging directory"
 	archive=$TEMPORARY/core.tar.gz
 	fetch_https "$url" "$archive" || fail "Core download failed"

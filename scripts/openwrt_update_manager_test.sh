@@ -3,6 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/candy-update-manager-test.XXXXXX")
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 bin=$tmp/bin
 state=$tmp/state
@@ -44,6 +45,15 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 printf '%s\n' "$url" >> "$FAKE_FETCH_LOG"
+[ -z "${FAKE_FETCH_DEST_LOG:-}" ] || printf '%s %s\n' "$url" "$destination" >> "$FAKE_FETCH_DEST_LOG"
+case "$url" in
+	*/candy-core-*.tar.gz)
+		if [ "${FAKE_FETCH_FAIL_CORE:-0}" = 1 ]; then
+			printf '%s\n' partial-core-download > "$destination"
+			exit 95
+		fi
+	;;
+esac
 case "$url" in
 	https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json) source=$FAKE_CATALOG ;;
 	https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json.sig) source=$FAKE_CATALOG_SIGNATURE ;;
@@ -80,6 +90,10 @@ case "$1" in
 	install)
 		printf '%s\n' "$*" >> "$FAKE_CORE_LOG"
 		case "$3" in file:///*) [ -f "${3#file://}" ] ;; *) exit 1 ;; esac
+		if [ "${FAKE_CORE_INSTALL_FAIL:-0}" = 1 ]; then
+			printf '%s\n' '{"schema_version":2,"state":"error","action":"install","version":"0.3.5","message":"failed","phase":"install","error_code":"test_failure","detail":"simulated Core manager failure","updated_at":1}' > "$CANDY_CORE_OPERATION_FILE"
+			exit 96
+		fi
 		;;
 	install-local)
 		printf '%s\n' "$*" >> "$FAKE_CORE_LOG"
@@ -220,6 +234,7 @@ export CANDY_UPDATE_OPERATION_FILE="$tmp/operation.json"
 export CANDY_CORE_OPERATION_FILE="$tmp/core-operation.json"
 export CANDY_UPDATE_LOCK_DIR="$tmp/update.lock"
 export CANDY_UPDATE_UPLOAD_ROOT="$tmp/uploads"
+export CANDY_UPDATE_CORE_STAGING_ROOT="$tmp/core-staging"
 export CANDY_CORE_MANAGER="$bin/candy-core-manager"
 export CANDY_UPDATE_TEST_PLATFORM=1
 export CANDY_UPDATE_TEST_OPENWRT_RELEASE=25.12.4
@@ -229,6 +244,7 @@ export FAKE_CATALOG="$tmp/stable.json"
 export FAKE_CATALOG_SIGNATURE="$tmp/stable.json.sig"
 export FAKE_ASSET_DIR="$assets"
 export FAKE_FETCH_LOG="$tmp/fetch.log"
+export FAKE_FETCH_DEST_LOG="$tmp/fetch-destination.log"
 export FAKE_CORE_LOG="$tmp/core.log"
 export FAKE_APK_LOG="$tmp/apk.log"
 export FAKE_SERVICE_LOG="$tmp/service.log"
@@ -319,8 +335,59 @@ CANDY_UPDATE_TEST_TARGET=ipq40xx/generic CANDY_UPDATE_TEST_ARCH=armv7l "$manager
 CANDY_UPDATE_TEST_TARGET=ipq40xx/generic CANDY_UPDATE_TEST_ARCH=arm_cortex-a7_neon-vfpv4 "$manager" check >/dev/null
 
 "$manager" check >/dev/null
+
+# A live update lock must block before any volatile Core staging is created.
+mkdir "$CANDY_UPDATE_LOCK_DIR"
+printf '%s\n' "$$" > "$CANDY_UPDATE_LOCK_DIR/pid"
+if "$manager" install-core v0_3_5 >/dev/null 2>&1; then
+	echo "concurrent Core update bypassed the live update lock" >&2
+	exit 1
+fi
+[ ! -e "$CANDY_UPDATE_CORE_STAGING_ROOT" ]
+rm -f "$CANDY_UPDATE_LOCK_DIR/pid"
+rmdir "$CANDY_UPDATE_LOCK_DIR"
+
+# Configured staging roots must be private real directories outside persistent
+# update state. A symlink or a state-backed path is rejected before download.
+mkdir -m 0700 "$tmp/staging-target"
+ln -s "$tmp/staging-target" "$tmp/staging-link"
+if CANDY_UPDATE_CORE_STAGING_ROOT="$tmp/staging-link" "$manager" install-core v0_3_5 >/dev/null 2>&1; then
+	echo "symbolic-link Core staging root was accepted" >&2
+	exit 1
+fi
+[ -z "$(find "$tmp/staging-target" -mindepth 1 -print 2>/dev/null | sed -n '1p')" ]
+mkdir -m 0755 "$tmp/staging-open"
+if CANDY_UPDATE_CORE_STAGING_ROOT="$tmp/staging-open" "$manager" install-core v0_3_5 >/dev/null 2>&1; then
+	echo "non-private Core staging root was accepted" >&2
+	exit 1
+fi
+if CANDY_UPDATE_CORE_STAGING_ROOT="$state/core-staging" "$manager" install-core v0_3_5 >/dev/null 2>&1; then
+	echo "persistent update state was accepted as the Core staging root" >&2
+	exit 1
+fi
+
+# Partial downloads and downstream Core-manager failures must leave the
+# volatile staging root empty.
+if FAKE_FETCH_FAIL_CORE=1 "$manager" install-core v0_3_5 >/dev/null 2>&1; then
+	echo "failed Core download was accepted" >&2
+	exit 1
+fi
+[ -d "$CANDY_UPDATE_CORE_STAGING_ROOT" ]
+[ -z "$(find "$CANDY_UPDATE_CORE_STAGING_ROOT" -mindepth 1 -print 2>/dev/null | sed -n '1p')" ]
+if FAKE_CORE_INSTALL_FAIL=1 "$manager" install-core v0_3_5 >/dev/null 2>&1; then
+	echo "failed Core manager installation was accepted" >&2
+	exit 1
+fi
+[ -z "$(find "$CANDY_UPDATE_CORE_STAGING_ROOT" -mindepth 1 -print 2>/dev/null | sed -n '1p')" ]
+
 "$manager" install-core v0_3_5 >/dev/null
 grep -Eq '^install 0\.3\.5 file:///.+ [0-9a-f]{64}$' "$FAKE_CORE_LOG"
+grep -E "^install 0\\.3\\.5 file://$CANDY_UPDATE_CORE_STAGING_ROOT/\\.core-[0-9]+/core\\.tar\\.gz [0-9a-f]{64}$" "$FAKE_CORE_LOG" >/dev/null
+grep -E "candy-core-0\\.3\\.5-x86_64-unknown-linux-musl\\.tar\\.gz $CANDY_UPDATE_CORE_STAGING_ROOT/\\.core-[0-9]+/core\\.tar\\.gz$" "$FAKE_FETCH_DEST_LOG" >/dev/null
+[ -z "$(find "$CANDY_UPDATE_CORE_STAGING_ROOT" -mindepth 1 -print 2>/dev/null | sed -n '1p')" ]
+for residual in "$state"/.core-*; do
+	[ ! -e "$residual" ] && [ ! -L "$residual" ] || { echo "Core download was staged in persistent update state" >&2; exit 1; }
+done
 ! grep -F 'activate' "$FAKE_CORE_LOG" >/dev/null
 grep -F 'releases/download/core-v0.3.5/candy-core-0.3.5-x86_64-unknown-linux-musl.tar.gz' "$FAKE_FETCH_LOG" >/dev/null
 if grep -E 'core-cloud-module-v|cloud-abi' "$FAKE_FETCH_LOG" >/dev/null; then
