@@ -1,6 +1,9 @@
 use std::{
+    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::Write,
+    net::{SocketAddr, ToSocketAddrs},
+    os::fd::AsRawFd,
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -9,6 +12,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use clap::{Parser, Subcommand};
+use ed25519_dalek::{pkcs8::DecodePrivateKey, SigningKey};
 use reqwest::{
     blocking::{Client, Response},
     header::{CONTENT_TYPE, ETAG, IF_MATCH, IF_NONE_MATCH},
@@ -18,6 +22,9 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
+
+mod grant;
+mod transport_identity;
 
 const MAX_PROFILE_BYTES: u64 = 64 * 1024;
 const MAX_CONFIGURATION_BYTES: u64 = 3 * 1024 * 1024;
@@ -39,6 +46,10 @@ struct Args {
     ca_certificate: Option<PathBuf>,
     #[arg(long)]
     core: Option<PathBuf>,
+    #[arg(long)]
+    server_config: Option<PathBuf>,
+    #[arg(long = "public-endpoint")]
+    public_endpoints: Vec<SocketAddr>,
     #[command(subcommand)]
     command: Command,
 }
@@ -48,32 +59,18 @@ enum Command {
     SyncOnce,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct DeviceIdentity {
     schema_version: u8,
     cloud_address: String,
     organization_id: Uuid,
     tenant_id: Option<Uuid>,
-    device_id: Uuid,
-    device_key_id: Uuid,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct RuntimeProfile {
-    organization_id: Uuid,
-    organization_name: String,
-    tenant_id: Uuid,
-    tenant_name: String,
-    device_id: Uuid,
-    device_key_id: Uuid,
-    device_name: String,
     site_id: Option<Uuid>,
-    site_name: Option<String>,
-    segment_id: Option<Uuid>,
-    segment_name: Option<String>,
-    attachment_id: Option<Uuid>,
+    display_name: String,
+    device_id: Uuid,
+    device_key_id: Uuid,
+    not_after: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -91,9 +88,29 @@ struct RuntimeConfiguration {
     route_signing_public_key: String,
     segment_snapshot: String,
     site_projection: String,
+    peer_projection_catalog: Vec<RuntimePeerProjection>,
+    grant_verification_keys: Vec<RuntimeGrantVerificationKey>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimePeerProjection {
+    projection_id: Uuid,
+    projection_generation: u64,
+    projection_content_hash: String,
+    site_projection: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeGrantVerificationKey {
+    key_id: String,
+    ed25519_public_key: String,
+    issuer_id: Uuid,
+    environment_id: Uuid,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct VerifiedControlReport {
     schema_version: u16,
@@ -110,12 +127,94 @@ struct VerifiedControlReport {
     projection_content_hash: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DiscoveredControlReport {
+    schema_version: u16,
+    ok: bool,
+    tenant_id: String,
+    segment_id: String,
+    site_id: String,
+    attachment_id: String,
+    device_id: String,
+    device_key_id: String,
+    segment_generation: u64,
+    projection_generation: u64,
+    route_policy: CorePolicyRef,
+    netd: DiscoveredNetd,
+    outbound_candidates: Vec<DiscoveredCandidate>,
+    inbound_expected: Vec<DiscoveredInbound>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CorePolicyRef {
+    policy_id: String,
+    generation: u64,
+    content_hash: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DiscoveredNetd {
+    table_id: u32,
+    overlay_router_ipv4: String,
+    max_inner_mtu: u16,
+    local_prefixes: Vec<String>,
+    remote_routes: Vec<DiscoveredRoute>,
+    underlay_ipv4_exclusions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DiscoveredRoute {
+    destination: String,
+    owner_attachment_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DiscoveredCandidate {
+    candidate_id: String,
+    peer_site_id: String,
+    peer_attachment_id: String,
+    kind: String,
+    priority: u16,
+    endpoint: String,
+    node_pool_id: String,
+    transport_node_id: String,
+    transport_node_key_id: String,
+    server_name: String,
+    server_cert_sha256: String,
+    transport_preset: String,
+    authorization: CorePolicyRef,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DiscoveredInbound {
+    candidate_id: String,
+    peer_attachment_id: String,
+    endpoint: String,
+    node_pool_id: String,
+    transport_node_id: String,
+    transport_node_key_id: String,
+    server_name: String,
+    server_cert_sha256: String,
+    transport_preset: String,
+    authorization_generation: u64,
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SyncState {
     schema_version: u8,
     etag: Option<String>,
     configuration_sha256: Option<String>,
+    #[serde(default)]
+    activation_required: bool,
+    #[serde(default)]
+    activation_rejected_etag: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -123,7 +222,6 @@ struct SyncResult<'a> {
     schema_version: u8,
     state: &'a str,
     network_ready: bool,
-    profile_changed: bool,
     configuration_changed: bool,
     etag: Option<&'a str>,
 }
@@ -142,6 +240,81 @@ struct ConfigurationStatus<'a> {
     projection_content_hash: &'a str,
     state: &'a str,
     error_code: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActivationReadyReceipt {
+    schema_version: u8,
+    activation_id: String,
+    candidate_target: String,
+    generation: u64,
+    agent_pid: u32,
+    state: String,
+    error_code: Option<String>,
+}
+
+#[derive(Debug)]
+struct ActivationOutcome {
+    receipt: ActivationReadyReceipt,
+    descriptor: ActivationDescriptor,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ActivationDescriptor {
+    schema_version: u8,
+    activation_id: String,
+    delivery_etag: String,
+    delivery_sha256: String,
+    projection_publication_id: Uuid,
+    projection_content_hash: String,
+    segment_generation: u64,
+    projection_generation: u64,
+    core_role: String,
+    core_config: String,
+    netd_declaration: String,
+    grant_refresh_after_unix: u64,
+    grant_expires_at_unix: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ActivationGrantManifest {
+    node_pool_id: Uuid,
+    grant_id: Uuid,
+    grant_sha256: String,
+    refresh_after_unix: u64,
+    expires_at_unix: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct NetdDeclaration {
+    table_id: u32,
+    overlay_router_ipv4: String,
+    effective_mtu: u16,
+    routes: Vec<NetdRoute>,
+    exclusions: Vec<NetdExclusion>,
+    firewall: NetdFirewall,
+}
+
+#[derive(Debug, Serialize)]
+struct NetdRoute {
+    prefix: String,
+    kind: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct NetdExclusion {
+    prefix: String,
+    kind: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct NetdFirewall {
+    allow_forward: bool,
+    clamp_tcp_mss: bool,
+    require_ipv4_forwarding: bool,
+    manage_rp_filter: bool,
 }
 
 fn main() {
@@ -169,7 +342,23 @@ fn run(args: Args) -> Result<()> {
 }
 
 fn sync_once(args: &Args) -> Result<()> {
-    ensure_private_directory(&args.state_dir)?;
+    sync_once_with_retry(args, true)
+}
+
+fn activation_required(
+    server_mode: bool,
+    configuration: &RuntimeConfiguration,
+    discovery: &DiscoveredControlReport,
+) -> bool {
+    if server_mode {
+        !configuration.peer_projection_catalog.is_empty() || !discovery.inbound_expected.is_empty()
+    } else {
+        !discovery.outbound_candidates.is_empty()
+    }
+}
+
+fn sync_once_with_retry(args: &Args, allow_unconditional_retry: bool) -> Result<()> {
+    ensure_private_state_root(&args.state_dir)?;
     let identity_dir = args
         .identity_dir
         .clone()
@@ -181,19 +370,7 @@ fn sync_once(args: &Args) -> Result<()> {
     validate_identity(&identity)?;
     let cloud = validate_cloud(&identity.cloud_address)?;
     let client = build_client(&identity_dir, args.ca_certificate.as_deref())?;
-
-    let profile: RuntimeProfile = get_json(
-        &client,
-        endpoint(&cloud, "auth/v1/runtime/profile")?,
-        MAX_PROFILE_BYTES,
-    )?;
-    validate_profile(&identity, &profile)?;
-    let profile_bytes = serde_json::to_vec(&profile)?;
-    let profile_path = args.state_dir.join("profile-v1.json");
-    let profile_changed = !same_file(&profile_path, &profile_bytes)?;
-    if profile_changed {
-        atomic_bytes(&profile_path, &profile_bytes, 0o600)?;
-    }
+    reconcile_transport_identity(args, &client, &cloud)?;
 
     let state_path = args.state_dir.join("sync-state-v1.json");
     let mut state: SyncState = if state_path.exists() {
@@ -208,6 +385,39 @@ fn sync_once(args: &Args) -> Result<()> {
         bail!("unsupported Cloud synchronization state schema")
     }
 
+    // The agent is the only component allowed to publish a committed receipt.
+    // Promote that exact immutable candidate before making any Cloud status
+    // assertion. If the receipt is absent, the normal configuration request
+    // below remains responsible for obtaining or renewing a candidate.
+    if state.activation_required {
+        if let Some(activation) = read_activation_ready_receipt(&args.state_dir)? {
+            if state.etag.as_deref() == Some(activation.descriptor.delivery_etag.as_str()) {
+                match activation.receipt.state.as_str() {
+                    "committed" => {
+                        promote_committed_activation(&args.state_dir, &activation)?;
+                        report_activation_status(&client, &cloud, &activation, "active", None)?;
+                        state.activation_rejected_etag = None;
+                    }
+                    "rejected" => {
+                        report_activation_status(
+                            &client,
+                            &cloud,
+                            &activation,
+                            "rejected",
+                            activation.receipt.error_code.as_deref(),
+                        )?;
+                        remove_candidate_if_matches(&args.state_dir, &activation)?;
+                        state.activation_rejected_etag =
+                            Some(activation.descriptor.delivery_etag.clone());
+                    }
+                    _ => unreachable!("validated activation receipt state"),
+                }
+                clear_activation_ready_receipt(&args.state_dir)?;
+                atomic_json(&state_path, &state, 0o600)?;
+            }
+        }
+    }
+
     let mut request = client.get(endpoint(&cloud, "auth/v1/runtime/configuration")?);
     if let Some(etag) = state.etag.as_deref() {
         validate_etag(etag)?;
@@ -216,6 +426,12 @@ fn sync_once(args: &Args) -> Result<()> {
     let response = request.send().context("request Runtime configuration")?;
     match response.status() {
         StatusCode::NO_CONTENT => {
+            withdraw_local_activation(&args.state_dir)?;
+            state.etag = None;
+            state.configuration_sha256 = None;
+            state.activation_required = false;
+            state.activation_rejected_etag = None;
+            atomic_json(&state_path, &state, 0o600)?;
             write_local_sync_status(&args.state_dir, "waiting_for_network_configuration", None)?;
             println!(
                 "{}",
@@ -223,7 +439,6 @@ fn sync_once(args: &Args) -> Result<()> {
                     schema_version: 1,
                     state: "waiting_for_network_configuration",
                     network_ready: false,
-                    profile_changed,
                     configuration_changed: false,
                     etag: state.etag.as_deref(),
                 })?
@@ -234,14 +449,42 @@ fn sync_once(args: &Args) -> Result<()> {
             if state.etag.as_deref() != Some(etag.as_str()) {
                 bail!("Cloud returned 304 with an unexpected ETag")
             }
-            write_local_sync_status(&args.state_dir, "configuration_unchanged", None)?;
+            if state.activation_required
+                && state.activation_rejected_etag.as_deref() != Some(etag.as_str())
+                && (!candidate_matches_delivery(&args.state_dir, &etag)?
+                    || candidate_grant_refresh_due(&args.state_dir)?)
+            {
+                if !allow_unconditional_retry {
+                    bail!("Cloud returned 304 but the local activation needs revalidation")
+                }
+                state.etag = None;
+                state.configuration_sha256 = None;
+                atomic_json(&state_path, &state, 0o600)?;
+                write_local_sync_status(
+                    &args.state_dir,
+                    "configuration_revalidation_required",
+                    None,
+                )?;
+                return sync_once_with_retry(args, false);
+            }
+            let activation_rejected =
+                state.activation_rejected_etag.as_deref() == Some(etag.as_str());
+            let result_state = if activation_rejected {
+                "activation_rejected"
+            } else {
+                "configuration_unchanged"
+            };
+            write_local_sync_status(
+                &args.state_dir,
+                result_state,
+                activation_rejected.then_some("local_activation_failed"),
+            )?;
             println!(
                 "{}",
                 serde_json::to_string(&SyncResult {
                     schema_version: 1,
-                    state: "configuration_unchanged",
-                    network_ready: true,
-                    profile_changed,
+                    state: result_state,
+                    network_ready: !activation_rejected,
                     configuration_changed: false,
                     etag: state.etag.as_deref(),
                 })?
@@ -253,10 +496,17 @@ fn sync_once(args: &Args) -> Result<()> {
             let bytes = bounded_response(response, MAX_CONFIGURATION_BYTES)?;
             let configuration: RuntimeConfiguration =
                 serde_json::from_slice(&bytes).context("parse Runtime configuration")?;
-            validate_configuration(&configuration, &profile)?;
+            validate_configuration(&configuration, &identity)?;
             let segment = decode_envelope(&configuration.segment_snapshot, "segment snapshot")?;
             let projection = decode_envelope(&configuration.site_projection, "site projection")?;
-            let digest = configuration_digest(&segment, &projection);
+            let peer_projections = decode_peer_projections(&configuration.peer_projection_catalog)?;
+            let signed_objects_hash = configuration_objects_digest(
+                &segment,
+                &projection,
+                &configuration.peer_projection_catalog,
+                &peer_projections,
+            );
+            let digest = configuration_delivery_digest(&configuration, &signed_objects_hash)?;
             let expected = etag
                 .strip_prefix("\"sha256-")
                 .and_then(|value| value.strip_suffix('"'))
@@ -269,7 +519,6 @@ fn sync_once(args: &Args) -> Result<()> {
                 args.core.as_deref(),
                 &configuration,
                 &identity,
-                &profile,
                 &segment,
                 &projection,
             ) {
@@ -284,13 +533,61 @@ fn sync_once(args: &Args) -> Result<()> {
                 .context("report rejected Core verification to Cloud")?;
                 return Err(error);
             }
+            let discovery = match discover_control_with_core(
+                &args.state_dir,
+                args.core.as_deref(),
+                &configuration,
+                &identity,
+                &segment,
+                &projection,
+            ) {
+                Ok(report) => report,
+                Err(error) => {
+                    report_configuration_status(
+                        &client,
+                        &cloud,
+                        &configuration,
+                        &etag,
+                        "rejected",
+                        Some("core_discovery_failed"),
+                    )?;
+                    return Err(error);
+                }
+            };
+            let core = resolve_core(args.core.as_deref())?;
+            let resolved_grants = match resolve_grants(
+                &args.state_dir,
+                &core,
+                &client,
+                &cloud,
+                &identity,
+                &configuration,
+                &discovery,
+            ) {
+                Ok(grants) => grants,
+                Err(error) => {
+                    report_configuration_status(
+                        &client,
+                        &cloud,
+                        &configuration,
+                        &etag,
+                        "rejected",
+                        Some("grant_resolution_failed"),
+                    )?;
+                    return Err(error);
+                }
+            };
+            let discovery_bytes = serde_json::to_vec(&discovery)?;
             if let Err(error) = publish_configuration_generation(
                 &args.state_dir,
                 &digest,
                 &segment,
                 &projection,
+                &configuration.peer_projection_catalog,
+                &peer_projections,
                 configuration.route_signing_public_key.as_bytes(),
                 &bytes,
+                &discovery_bytes,
             ) {
                 report_configuration_status(
                     &client,
@@ -303,17 +600,74 @@ fn sync_once(args: &Args) -> Result<()> {
                 .context("report rejected local publication to Cloud")?;
                 return Err(error);
             }
+            let activation_result = if let Some(server_config) = args.server_config.as_deref() {
+                activation_required(true, &configuration, &discovery).then(|| {
+                    publish_server_activation(
+                        &args.state_dir,
+                        &core,
+                        server_config,
+                        &cloud,
+                        &etag,
+                        &digest,
+                        &configuration,
+                        &segment,
+                        &projection,
+                        &peer_projections,
+                        &discovery,
+                    )
+                })
+            } else {
+                activation_required(false, &configuration, &discovery).then(|| {
+                    publish_client_activation(
+                        &args.state_dir,
+                        &identity_dir,
+                        &core,
+                        &cloud,
+                        &etag,
+                        &digest,
+                        &configuration,
+                        &identity,
+                        &segment,
+                        &projection,
+                        &discovery,
+                        &resolved_grants,
+                    )
+                })
+            };
+            if let Some(result) = activation_result {
+                if let Err(error) = result {
+                    report_configuration_status(
+                        &client,
+                        &cloud,
+                        &configuration,
+                        &etag,
+                        "rejected",
+                        Some("local_activation_failed"),
+                    )?;
+                    return Err(error);
+                }
+                state.activation_required = true;
+                state.activation_rejected_etag = None;
+            } else {
+                withdraw_local_activation(&args.state_dir)?;
+                state.activation_required = false;
+                state.activation_rejected_etag = None;
+            }
             state.etag = Some(etag);
             state.configuration_sha256 = Some(digest);
             atomic_json(&state_path, &state, 0o600)?;
-            write_local_sync_status(&args.state_dir, "configuration_verified", None)?;
+            let result_state = if state.activation_required {
+                "activation_pending"
+            } else {
+                "configuration_updated"
+            };
+            write_local_sync_status(&args.state_dir, result_state, None)?;
             println!(
                 "{}",
                 serde_json::to_string(&SyncResult {
                     schema_version: 1,
-                    state: "configuration_updated",
-                    network_ready: true,
-                    profile_changed,
+                    state: result_state,
+                    network_ready: !state.activation_required,
                     configuration_changed: true,
                     etag: state.etag.as_deref(),
                 })?
@@ -321,6 +675,35 @@ fn sync_once(args: &Args) -> Result<()> {
         }
         status => bail!("Cloud Runtime configuration request failed with HTTP {status}"),
     }
+    Ok(())
+}
+
+fn reconcile_transport_identity(args: &Args, client: &Client, cloud: &Url) -> Result<()> {
+    if args.public_endpoints.is_empty() {
+        return Ok(());
+    }
+    let server_config = args
+        .server_config
+        .as_deref()
+        .context("explicit public-endpoint requires --server-config")?;
+    let core = resolve_core(args.core.as_deref())?;
+    let inspected = transport_identity::inspect_core(&core, server_config)?;
+    let desired = transport_identity::build_registration(&inspected, &args.public_endpoints)?;
+    let outcome = transport_identity::reconcile(
+        &args.state_dir.join("transport-identity-state-v1.json"),
+        desired,
+        |request| {
+            transport_identity::put_to_cloud(
+                client,
+                endpoint(cloud, "auth/v1/runtime/transport-identity")?,
+                request,
+            )
+        },
+    )?;
+    eprintln!(
+        "level=info event=transport_identity_reconciled outcome={outcome:?} endpoint_count={}",
+        args.public_endpoints.len()
+    );
     Ok(())
 }
 
@@ -339,6 +722,260 @@ fn write_local_sync_status(state_dir: &Path, state: &str, error_code: Option<&st
         },
         0o600,
     )
+}
+
+fn candidate_activation_directory(state_dir: &Path) -> Result<Option<PathBuf>> {
+    let candidate = state_dir.join("candidate");
+    let metadata = match fs::symlink_metadata(&candidate) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect Runtime candidate pointer"),
+    };
+    if !metadata.file_type().is_symlink() {
+        bail!("Runtime candidate pointer must be a symbolic link")
+    }
+    let target = fs::read_link(&candidate).context("read Runtime candidate pointer")?;
+    let components = target.components().collect::<Vec<_>>();
+    if components.len() != 2
+        || components[0] != std::path::Component::Normal("activations".as_ref())
+        || !matches!(components[1], std::path::Component::Normal(_))
+    {
+        bail!("Runtime candidate pointer has an invalid target")
+    }
+    let id = components[1]
+        .as_os_str()
+        .to_str()
+        .context("Runtime candidate id is not UTF-8")?;
+    validate_hex(id, 32, "Runtime candidate id")?;
+    let directory = state_dir.join(target);
+    let directory_metadata =
+        fs::symlink_metadata(&directory).context("inspect Runtime candidate activation")?;
+    if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+        bail!("Runtime candidate activation must be a real directory")
+    }
+    Ok(Some(directory))
+}
+
+fn candidate_descriptor(state_dir: &Path) -> Result<Option<ActivationDescriptor>> {
+    let Some(directory) = candidate_activation_directory(state_dir)? else {
+        return Ok(None);
+    };
+    let descriptor: ActivationDescriptor =
+        read_bounded_json(&directory.join("activation-v1.json"), MAX_PROFILE_BYTES)?;
+    validate_hex(&descriptor.activation_id, 32, "activation id")?;
+    validate_hex(
+        &descriptor.delivery_sha256,
+        32,
+        "activation delivery digest",
+    )?;
+    if descriptor.schema_version != 1
+        || directory.file_name().and_then(|name| name.to_str())
+            != Some(descriptor.activation_id.as_str())
+        || descriptor.delivery_etag != format!("\"sha256-{}\"", descriptor.delivery_sha256)
+        || descriptor.segment_generation == 0
+        || descriptor.projection_generation == 0
+        || descriptor.grant_refresh_after_unix > descriptor.grant_expires_at_unix
+    {
+        bail!("Runtime candidate activation descriptor is invalid")
+    }
+    Ok(Some(descriptor))
+}
+
+fn candidate_matches_delivery(state_dir: &Path, etag: &str) -> Result<bool> {
+    Ok(candidate_descriptor(state_dir)?.is_some_and(|descriptor| descriptor.delivery_etag == etag))
+}
+
+fn candidate_grant_refresh_due(state_dir: &Path) -> Result<bool> {
+    let Some(descriptor) = candidate_descriptor(state_dir)? else {
+        return Ok(true);
+    };
+    if descriptor.grant_refresh_after_unix == 0 && descriptor.grant_expires_at_unix == 0 {
+        return Ok(false);
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("read system time for candidate Grant refresh")?
+        .as_secs();
+    Ok(now >= descriptor.grant_refresh_after_unix || now >= descriptor.grant_expires_at_unix)
+}
+
+fn read_activation_ready_receipt(state_dir: &Path) -> Result<Option<ActivationOutcome>> {
+    let path = state_dir.join("activation-ready-v1.json");
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect SD-WAN activation receipt"),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("SD-WAN activation receipt must be a regular file")
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            bail!("SD-WAN activation receipt must have mode 0600")
+        }
+        let owner = fs::symlink_metadata(state_dir).context("inspect SD-WAN state owner")?;
+        if metadata.uid() != owner.uid() || metadata.gid() != owner.gid() {
+            bail!("SD-WAN activation receipt owner does not match the state owner")
+        }
+    }
+    let receipt: ActivationReadyReceipt = read_bounded_json(&path, MAX_PROFILE_BYTES)?;
+    validate_hex(&receipt.activation_id, 32, "activation receipt id")?;
+    let expected_target = format!("activations/{}", receipt.activation_id);
+    if receipt.schema_version != 1
+        || !matches!(receipt.state.as_str(), "committed" | "rejected")
+        || receipt.candidate_target != expected_target
+        || receipt.generation == 0
+        || receipt.agent_pid == 0
+    {
+        bail!("SD-WAN activation receipt metadata is invalid")
+    }
+    let candidate = state_dir.join("candidate");
+    match fs::read_link(&candidate) {
+        Ok(target) if target == Path::new(&receipt.candidate_target) => {}
+        Ok(_) => {
+            clear_activation_ready_receipt(state_dir)?;
+            return Ok(None);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            clear_activation_ready_receipt(state_dir)?;
+            return Ok(None);
+        }
+        Err(error) => return Err(error).context("inspect candidate for activation receipt"),
+    }
+    #[cfg(target_os = "linux")]
+    if receipt.state == "committed" {
+        use std::os::unix::fs::MetadataExt;
+        let process = PathBuf::from(format!("/proc/{}", receipt.agent_pid));
+        let process_metadata = fs::metadata(&process)
+            .with_context(|| format!("inspect SD-WAN agent process {}", receipt.agent_pid))?;
+        let owner = fs::symlink_metadata(state_dir).context("inspect SD-WAN state owner")?;
+        if process_metadata.uid() != owner.uid() {
+            bail!("SD-WAN activation receipt process owner does not match the state owner")
+        }
+    }
+    #[cfg(unix)]
+    if receipt.state == "committed"
+        && unsafe { nix::libc::kill(receipt.agent_pid as nix::libc::pid_t, 0) } != 0
+    {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(nix::libc::EPERM) {
+            return Err(error).context("verify SD-WAN agent process is alive");
+        }
+    }
+    let descriptor = candidate_descriptor(state_dir)?
+        .context("SD-WAN activation receipt has no matching candidate")?;
+    if descriptor.activation_id != receipt.activation_id
+        || descriptor.projection_generation != receipt.generation
+    {
+        bail!("SD-WAN activation receipt does not match the candidate")
+    }
+    if (receipt.state == "committed" && receipt.error_code.is_some())
+        || (receipt.state == "rejected"
+            && receipt
+                .error_code
+                .as_deref()
+                .is_none_or(|value| value.is_empty() || value.len() > 80 || !value.is_ascii()))
+    {
+        bail!("SD-WAN activation receipt result is invalid")
+    }
+    Ok(Some(ActivationOutcome {
+        receipt,
+        descriptor,
+    }))
+}
+
+fn promote_committed_activation(state_dir: &Path, activation: &ActivationOutcome) -> Result<()> {
+    let candidate_target = fs::read_link(state_dir.join("candidate"))
+        .context("read SD-WAN candidate pointer before promotion")?;
+    if candidate_target != Path::new(&activation.receipt.candidate_target) {
+        bail!("SD-WAN candidate changed before activation promotion")
+    }
+    publish_pointer(state_dir, "active", candidate_target)
+}
+
+fn remove_candidate_if_matches(state_dir: &Path, activation: &ActivationOutcome) -> Result<()> {
+    let candidate = state_dir.join("candidate");
+    match fs::read_link(&candidate) {
+        Ok(target) if target == Path::new(&activation.receipt.candidate_target) => {
+            fs::remove_file(&candidate).context("remove rejected SD-WAN candidate")?;
+            File::open(state_dir)
+                .and_then(|directory| directory.sync_all())
+                .context("sync rejected SD-WAN candidate removal")?;
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspect rejected SD-WAN candidate"),
+    }
+    Ok(())
+}
+
+fn report_activation_status(
+    client: &Client,
+    cloud: &Url,
+    activation: &ActivationOutcome,
+    state: &str,
+    error_code: Option<&str>,
+) -> Result<()> {
+    let response = client
+        .put(endpoint(cloud, "auth/v1/runtime/configuration/status")?)
+        .header(IF_MATCH, &activation.descriptor.delivery_etag)
+        .json(&ConfigurationStatus {
+            projection_publication_id: activation.descriptor.projection_publication_id,
+            projection_content_hash: &activation.descriptor.projection_content_hash,
+            state,
+            error_code,
+        })
+        .send()
+        .context("report SD-WAN activation status")?;
+    if response.status() != StatusCode::NO_CONTENT {
+        bail!(
+            "Cloud rejected SD-WAN activation status with HTTP {}",
+            response.status()
+        )
+    }
+    Ok(())
+}
+
+fn clear_activation_ready_receipt(state_dir: &Path) -> Result<()> {
+    let path = state_dir.join("activation-ready-v1.json");
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("SD-WAN activation receipt must be a regular file")
+            }
+            fs::remove_file(&path).context("remove committed SD-WAN activation receipt")?;
+            File::open(state_dir)
+                .and_then(|directory| directory.sync_all())
+                .context("sync removed SD-WAN activation receipt")?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspect SD-WAN activation receipt"),
+    }
+    Ok(())
+}
+
+fn withdraw_local_activation(state_dir: &Path) -> Result<()> {
+    for name in ["candidate", "active"] {
+        let path = state_dir.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_symlink() {
+                    bail!("Runtime {name} pointer must be a symbolic link")
+                }
+                fs::remove_file(&path)
+                    .with_context(|| format!("withdraw Runtime {name} pointer"))?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspect Runtime {name} pointer"))
+            }
+        }
+    }
+    File::open(state_dir)
+        .and_then(|directory| directory.sync_all())
+        .context("sync withdrawn Runtime activation pointers")
 }
 
 fn report_configuration_status(
@@ -374,25 +1011,10 @@ fn verify_control_with_core(
     requested_core: Option<&Path>,
     configuration: &RuntimeConfiguration,
     identity: &DeviceIdentity,
-    profile: &RuntimeProfile,
     segment: &[u8],
     projection: &[u8],
 ) -> Result<()> {
-    let core = requested_core
-        .map(Path::to_path_buf)
-        .or_else(|| {
-            [
-                PathBuf::from("/usr/lib/candy/cores/current/candy-core"),
-                PathBuf::from("/opt/candy/cores/current/candy-core"),
-            ]
-            .into_iter()
-            .find(|candidate| candidate.exists())
-        })
-        .context("Candy Core is not installed; signed SD-WAN configuration was not activated")?;
-    let metadata = fs::metadata(&core).context("inspect active Candy Core")?;
-    if !metadata.is_file() {
-        bail!("active Candy Core is not a regular file")
-    }
+    let core = resolve_core(requested_core)?;
     let verification = state_dir.join(format!(".verify.{}", Uuid::new_v4()));
     ensure_private_directory(&verification)?;
     let result = (|| {
@@ -423,24 +1045,368 @@ fn verify_control_with_core(
         }
         let report: VerifiedControlReport = serde_json::from_slice(&output.stdout)
             .context("parse Candy Core verification report")?;
-        validate_verified_report(&report, configuration, identity, profile)
+        validate_verified_report(&report, configuration, identity)
     })();
     let cleanup = fs::remove_dir_all(&verification).context("remove Core verification staging");
     result.and(cleanup)
+}
+
+fn render_core_control_config(
+    directory: &Path,
+    configuration: &RuntimeConfiguration,
+    peers: &[(&DiscoveredCandidate, u64, &Path)],
+) -> Result<String> {
+    let path = |name: &str| -> Result<String> {
+        Ok(serde_json::to_string(
+            directory
+                .join(name)
+                .to_str()
+                .context("Runtime generation path is not UTF-8")?,
+        )?)
+    };
+    let mut output = String::new();
+    use std::fmt::Write as _;
+    writeln!(&mut output, "schema_version = 1")?;
+    writeln!(
+        &mut output,
+        "segment_snapshot = {}",
+        path("segment.snapshot")?
+    )?;
+    writeln!(
+        &mut output,
+        "site_projection = {}",
+        path("site.projection")?
+    )?;
+    writeln!(
+        &mut output,
+        "route_signing_public_key = {}",
+        serde_json::to_string(&configuration.route_signing_public_key)?
+    )?;
+    writeln!(
+        &mut output,
+        "route_signing_key_id = {}",
+        serde_json::to_string(&configuration.route_signing_key_id)?
+    )?;
+    writeln!(&mut output, "underlay_exclusions_locked = true")?;
+    writeln!(&mut output, "local_preflight_passed = true")?;
+    for key in &configuration.grant_verification_keys {
+        writeln!(&mut output, "\n[[grant_verification_keys]]")?;
+        writeln!(
+            &mut output,
+            "key_id = {}",
+            serde_json::to_string(&key.key_id)?
+        )?;
+        writeln!(
+            &mut output,
+            "public_key = {}",
+            serde_json::to_string(&key.ed25519_public_key)?
+        )?;
+        writeln!(
+            &mut output,
+            "issuer_id = {}",
+            serde_json::to_string(&key.issuer_id.to_string())?
+        )?;
+        writeln!(
+            &mut output,
+            "environment_id = {}",
+            serde_json::to_string(&key.environment_id.to_string())?
+        )?;
+    }
+    for (candidate, tunnel_id, transport) in peers {
+        writeln!(&mut output, "\n[[peers]]")?;
+        writeln!(
+            &mut output,
+            "candidate_id = {}",
+            serde_json::to_string(&candidate.candidate_id)?
+        )?;
+        writeln!(&mut output, "tunnel_id = {tunnel_id}")?;
+        writeln!(
+            &mut output,
+            "transport_config = {}",
+            serde_json::to_string(
+                transport
+                    .to_str()
+                    .context("transport config path is not UTF-8")?
+            )?
+        )?;
+    }
+    Ok(output)
+}
+
+fn discover_control_with_core(
+    state_dir: &Path,
+    requested_core: Option<&Path>,
+    configuration: &RuntimeConfiguration,
+    identity: &DeviceIdentity,
+    segment: &[u8],
+    projection: &[u8],
+) -> Result<DiscoveredControlReport> {
+    let core = resolve_core(requested_core)?;
+    let staging = state_dir.join(format!(".discover.{}", Uuid::new_v4()));
+    ensure_private_directory(&staging)?;
+    let result = (|| {
+        atomic_bytes(&staging.join("segment.snapshot"), segment, 0o600)?;
+        atomic_bytes(&staging.join("site.projection"), projection, 0o600)?;
+        let config = render_core_control_config(&staging, configuration, &[])?;
+        let config_path = staging.join("core.toml");
+        atomic_bytes(&config_path, config.as_bytes(), 0o600)?;
+        let output = ProcessCommand::new(&core)
+            .args(["client", "sdwan", "discover-control", "--config"])
+            .arg(&config_path)
+            .output()
+            .context("run Candy Core signed-control discovery")?;
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "Candy Core rejected SD-WAN control discovery: {}",
+                detail.chars().take(1024).collect::<String>()
+            )
+        }
+        if output.stdout.is_empty() || output.stdout.len() > 1024 * 1024 {
+            bail!("Candy Core returned an invalid control discovery report")
+        }
+        let report: DiscoveredControlReport = serde_json::from_slice(&output.stdout)
+            .context("parse Candy Core control discovery report")?;
+        validate_discovered_control(&report, configuration, identity)?;
+        Ok(report)
+    })();
+    let cleanup = fs::remove_dir_all(&staging).context("remove Core discovery staging");
+    match (result, cleanup) {
+        (Ok(report), Ok(())) => Ok(report),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+fn validate_discovered_control(
+    report: &DiscoveredControlReport,
+    configuration: &RuntimeConfiguration,
+    identity: &DeviceIdentity,
+) -> Result<()> {
+    let uuid_hex = |value: Uuid| value.simple().to_string();
+    if report.schema_version != 1
+        || !report.ok
+        || identity.tenant_id.map(uuid_hex).as_deref() != Some(report.tenant_id.as_str())
+        || report.segment_id != uuid_hex(configuration.segment_id)
+        || identity.site_id.map(uuid_hex).as_deref() != Some(report.site_id.as_str())
+        || report.attachment_id != uuid_hex(configuration.attachment_id)
+        || report.device_id != uuid_hex(identity.device_id)
+        || report.device_key_id != uuid_hex(identity.device_key_id)
+        || report.segment_generation != configuration.segment_generation
+        || report.projection_generation != configuration.projection_generation
+        || report.route_policy.policy_id != uuid_hex(configuration.projection_id)
+        || report.route_policy.generation != configuration.projection_generation
+        || report.route_policy.content_hash != configuration.projection_content_hash
+        || !(20_000..=20_999).contains(&report.netd.table_id)
+        || report.netd.max_inner_mtu < 576
+        || report.netd.local_prefixes.len() > 4096
+        || report.netd.remote_routes.len() > 4096
+        || report.netd.underlay_ipv4_exclusions.len() > 512
+        || report.outbound_candidates.len() > 256
+        || report.inbound_expected.len() > 256
+    {
+        bail!("Candy Core discovery report is not bound to the Cloud delivery")
+    }
+    report
+        .netd
+        .overlay_router_ipv4
+        .parse::<std::net::Ipv4Addr>()
+        .context("Core discovery returned an invalid overlay router address")?;
+    for candidate in &report.outbound_candidates {
+        validate_discovered_candidate(candidate, configuration)?;
+    }
+    for inbound in &report.inbound_expected {
+        validate_hex(&inbound.candidate_id, 16, "inbound candidate id")?;
+        validate_hex(&inbound.peer_attachment_id, 16, "inbound attachment id")?;
+        validate_hex(&inbound.node_pool_id, 16, "inbound node pool id")?;
+        validate_hex(&inbound.transport_node_id, 16, "inbound transport node id")?;
+        validate_hex(
+            &inbound.transport_node_key_id,
+            16,
+            "inbound transport node key id",
+        )?;
+        validate_hex(&inbound.server_cert_sha256, 32, "inbound certificate pin")?;
+        inbound.endpoint.parse::<SocketAddr>()?;
+        if inbound.server_name.is_empty()
+            || inbound.server_name.len() > 253
+            || !matches!(
+                inbound.transport_preset.as_str(),
+                "current" | "bbr_v1" | "aggressive"
+            )
+            || inbound.authorization_generation == 0
+        {
+            bail!("Core discovery returned an invalid inbound expectation")
+        }
+    }
+    Ok(())
+}
+
+fn validate_discovered_candidate(
+    candidate: &DiscoveredCandidate,
+    configuration: &RuntimeConfiguration,
+) -> Result<()> {
+    validate_hex(&candidate.candidate_id, 16, "candidate id")?;
+    validate_hex(&candidate.peer_site_id, 16, "peer Site id")?;
+    validate_hex(&candidate.peer_attachment_id, 16, "peer attachment id")?;
+    validate_hex(&candidate.node_pool_id, 16, "node pool id")?;
+    validate_hex(&candidate.transport_node_id, 16, "transport node id")?;
+    validate_hex(
+        &candidate.transport_node_key_id,
+        16,
+        "transport node key id",
+    )?;
+    validate_hex(&candidate.server_cert_sha256, 32, "server certificate pin")?;
+    candidate.endpoint.parse::<SocketAddr>()?;
+    if !matches!(candidate.kind.as_str(), "direct" | "relay")
+        || candidate.server_name.is_empty()
+        || candidate.server_name.len() > 253
+        || !matches!(
+            candidate.transport_preset.as_str(),
+            "current" | "bbr_v1" | "aggressive"
+        )
+        || candidate.authorization.policy_id != configuration.projection_id.simple().to_string()
+        || candidate.authorization.generation != configuration.projection_generation
+        || candidate.authorization.content_hash != configuration.projection_content_hash
+    {
+        bail!("Core discovery returned an invalid outbound candidate")
+    }
+    Ok(())
+}
+
+fn parse_hex_uuid(value: &str, label: &str) -> Result<Uuid> {
+    validate_hex(value, 16, label)?;
+    Uuid::parse_str(value).with_context(|| format!("parse {label}"))
+}
+
+fn verify_grant_with_core(
+    core: &Path,
+    grant_path: &Path,
+    subject: &grant::GrantSubject,
+    keys: &[RuntimeGrantVerificationKey],
+) -> Result<grant::VerifiedGrantReport> {
+    let mut attempted = 0_usize;
+    for key in keys {
+        attempted += 1;
+        let output = ProcessCommand::new(core)
+            .args(["client", "sdwan", "verify-grant", "--grant"])
+            .arg(grant_path)
+            .args(["--public-key", &key.ed25519_public_key])
+            .args(["--key-id", &key.key_id])
+            .args(["--issuer-id", &key.issuer_id.to_string()])
+            .args(["--environment-id", &key.environment_id.to_string()])
+            .args(["--tenant-id", &subject.tenant_id.to_string()])
+            .args(["--device-id", &subject.device_id.to_string()])
+            .args(["--device-key-id", &subject.device_key_id.to_string()])
+            .args(["--node-pool-id", &subject.node_pool_id.to_string()])
+            .args(["--projection-id", &subject.projection_id.to_string()])
+            .args([
+                "--projection-generation",
+                &subject.projection_generation.to_string(),
+            ])
+            .args([
+                "--projection-content-hash",
+                &subject.projection_content_hash,
+            ])
+            .output()
+            .context("run Candy Core Grant verification")?;
+        if !output.status.success() {
+            continue;
+        }
+        if output.stdout.is_empty() || output.stdout.len() > 64 * 1024 {
+            bail!("Candy Core returned an invalid Grant verification report")
+        }
+        return serde_json::from_slice(&output.stdout)
+            .context("parse Candy Core Grant verification report");
+    }
+    bail!("Candy Core rejected the Grant against all {attempted} trusted signing keys")
+}
+
+fn resolve_grants(
+    state_dir: &Path,
+    core: &Path,
+    client: &Client,
+    cloud: &Url,
+    identity: &DeviceIdentity,
+    configuration: &RuntimeConfiguration,
+    discovery: &DiscoveredControlReport,
+) -> Result<Vec<(grant::GrantSubject, grant::CachedGrant)>> {
+    let tenant_id = identity.tenant_id.context("Cloud identity has no tenant")?;
+    let mut pools = discovery
+        .outbound_candidates
+        .iter()
+        .map(|candidate| parse_hex_uuid(&candidate.node_pool_id, "node pool id"))
+        .collect::<Result<Vec<_>>>()?;
+    pools.sort_unstable();
+    pools.dedup();
+    if !pools.is_empty() && configuration.grant_verification_keys.is_empty() {
+        bail!("outbound SD-WAN candidates require Grant verification keys")
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("read system time for Grant renewal")?
+        .as_secs();
+    let store = grant::GrantStore::new(state_dir);
+    let grant_endpoint = endpoint(cloud, "auth/v1/access-grants")?;
+    let mut resolved = Vec::with_capacity(pools.len());
+    for node_pool_id in pools {
+        let subject = grant::GrantSubject {
+            node_pool_id,
+            tenant_id,
+            device_id: identity.device_id,
+            device_key_id: identity.device_key_id,
+            projection_id: configuration.projection_id,
+            projection_generation: configuration.projection_generation,
+            projection_content_hash: configuration.projection_content_hash.clone(),
+        };
+        let outcome = store.refresh(
+            &subject,
+            now,
+            |request| grant::fetch_from_cloud(client, grant_endpoint.clone(), request),
+            |path| {
+                verify_grant_with_core(core, path, &subject, &configuration.grant_verification_keys)
+            },
+        )?;
+        if let grant::RefreshOutcome::RetainedAfterTransientFailure { error, .. } = &outcome {
+            eprintln!(
+                "level=warn event=sdwan_grant_refresh_retained node_pool_id={} error={error:#}",
+                node_pool_id
+            );
+        }
+        resolved.push((subject, outcome.grant().clone()));
+    }
+    Ok(resolved)
+}
+
+fn resolve_core(requested_core: Option<&Path>) -> Result<PathBuf> {
+    let core = requested_core
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            [
+                PathBuf::from("/usr/lib/candy/cores/current/candy-core"),
+                PathBuf::from("/opt/candy/cores/current/candy-core"),
+            ]
+            .into_iter()
+            .find(|candidate| candidate.exists())
+        })
+        .context("Candy Core is not installed; signed SD-WAN state was not activated")?;
+    let metadata = fs::metadata(&core).context("inspect active Candy Core")?;
+    if !metadata.is_file() {
+        bail!("active Candy Core is not a regular file")
+    }
+    Ok(core)
 }
 
 fn validate_verified_report(
     report: &VerifiedControlReport,
     configuration: &RuntimeConfiguration,
     identity: &DeviceIdentity,
-    profile: &RuntimeProfile,
 ) -> Result<()> {
     let uuid_hex = |value: Uuid| value.simple().to_string();
     if report.schema_version != 1
         || !report.ok
-        || report.tenant_id != uuid_hex(profile.tenant_id)
+        || identity.tenant_id.map(uuid_hex).as_deref() != Some(report.tenant_id.as_str())
         || report.segment_id != uuid_hex(configuration.segment_id)
-        || profile.site_id.map(uuid_hex).as_deref() != Some(report.site_id.as_str())
+        || identity.site_id.map(uuid_hex).as_deref() != Some(report.site_id.as_str())
         || report.attachment_id != uuid_hex(configuration.attachment_id)
         || report.projection_id != uuid_hex(configuration.projection_id)
         || report.device_id != uuid_hex(identity.device_id)
@@ -457,37 +1423,21 @@ fn validate_verified_report(
 fn validate_identity(identity: &DeviceIdentity) -> Result<()> {
     if identity.schema_version != 1
         || identity.organization_id.is_nil()
+        || identity.tenant_id.is_none_or(|value| value.is_nil())
+        || identity.site_id.is_none_or(|value| value.is_nil())
+        || identity.display_name.trim().is_empty()
+        || identity.display_name.len() > 200
         || identity.device_id.is_nil()
         || identity.device_key_id.is_nil()
+        || identity.not_after.trim().is_empty()
+        || identity.not_after.len() > 64
     {
         bail!("invalid local Cloud device identity")
     }
     Ok(())
 }
 
-fn validate_profile(identity: &DeviceIdentity, profile: &RuntimeProfile) -> Result<()> {
-    if profile.organization_id != identity.organization_id
-        || profile.device_id != identity.device_id
-        || profile.device_key_id != identity.device_key_id
-        || identity
-            .tenant_id
-            .is_some_and(|value| value != profile.tenant_id)
-        || profile.organization_name.trim().is_empty()
-        || profile.tenant_name.trim().is_empty()
-        || profile.device_name.trim().is_empty()
-        || profile.organization_name.len() > 200
-        || profile.tenant_name.len() > 200
-        || profile.device_name.len() > 200
-        || profile.site_id.is_some() != profile.site_name.is_some()
-        || profile.segment_id.is_some() != profile.segment_name.is_some()
-        || profile.attachment_id.is_some() != profile.site_id.is_some()
-    {
-        bail!("Cloud Runtime profile does not match the local device identity")
-    }
-    Ok(())
-}
-
-fn validate_configuration(value: &RuntimeConfiguration, profile: &RuntimeProfile) -> Result<()> {
+fn validate_configuration(value: &RuntimeConfiguration, identity: &DeviceIdentity) -> Result<()> {
     if value.schema_version != 1
         || value.projection_publication_id.is_nil()
         || value.projection_id.is_nil()
@@ -495,12 +1445,13 @@ fn validate_configuration(value: &RuntimeConfiguration, profile: &RuntimeProfile
         || value.attachment_id.is_nil()
         || value.segment_generation == 0
         || value.projection_generation == 0
-        || profile.segment_id != Some(value.segment_id)
-        || profile.attachment_id != Some(value.attachment_id)
         || value.route_signing_key_id.is_empty()
         || value.route_signing_key_id.len() > 64
+        || !value.route_signing_key_id.is_ascii()
+        || value.peer_projection_catalog.len() > 4096
+        || value.grant_verification_keys.len() > 8
     {
-        bail!("Cloud Runtime configuration is not bound to the current profile")
+        bail!("Cloud Runtime configuration metadata is invalid")
     }
     validate_hex(
         &value.projection_content_hash,
@@ -512,6 +1463,11 @@ fn validate_configuration(value: &RuntimeConfiguration, profile: &RuntimeProfile
         32,
         "route signing public key",
     )?;
+    validate_catalog(&value.peer_projection_catalog)?;
+    validate_grant_verification_keys(&value.grant_verification_keys)?;
+    if identity.tenant_id.is_none() || identity.site_id.is_none() {
+        bail!("local Cloud identity has no assigned tenant or Site")
+    }
     Ok(())
 }
 
@@ -554,22 +1510,6 @@ fn build_client(identity_dir: &Path, ca_certificate: Option<&Path>) -> Result<Cl
         builder = builder.add_root_certificate(certificate);
     }
     builder.build().context("build Cloud Runtime client")
-}
-
-fn get_json<T: DeserializeOwned>(client: &Client, url: Url, maximum: u64) -> Result<T> {
-    let response = client
-        .get(url)
-        .send()
-        .context("request Cloud Runtime profile")?;
-    if response.status() != StatusCode::OK {
-        bail!(
-            "Cloud Runtime profile request failed with HTTP {}",
-            response.status()
-        )
-    }
-    require_content_type(&response, "application/json")?;
-    serde_json::from_slice(&bounded_response(response, maximum)?)
-        .context("parse Cloud Runtime profile")
 }
 
 fn bounded_response(response: Response, maximum: u64) -> Result<Vec<u8>> {
@@ -635,23 +1575,656 @@ fn decode_envelope(value: &str, label: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn configuration_digest(segment: &[u8], projection: &[u8]) -> String {
+fn decode_peer_projections(catalog: &[RuntimePeerProjection]) -> Result<Vec<Vec<u8>>> {
+    catalog
+        .iter()
+        .map(|projection| decode_envelope(&projection.site_projection, "peer Site projection"))
+        .collect()
+}
+
+fn validate_catalog(catalog: &[RuntimePeerProjection]) -> Result<()> {
+    let mut previous: Option<(Uuid, u64)> = None;
+    for projection in catalog {
+        if projection.projection_id.is_nil() || projection.projection_generation == 0 {
+            bail!("Peer projection catalog contains an invalid identity")
+        }
+        validate_hex(
+            &projection.projection_content_hash,
+            32,
+            "Peer projection content hash",
+        )?;
+        let current = (projection.projection_id, projection.projection_generation);
+        if previous.is_some_and(|value| value >= current) {
+            bail!("Peer projection catalog is not strictly ordered")
+        }
+        previous = Some(current);
+    }
+    Ok(())
+}
+
+fn validate_grant_verification_keys(keys: &[RuntimeGrantVerificationKey]) -> Result<()> {
+    let mut previous: Option<&str> = None;
+    for key in keys {
+        if key.key_id.is_empty()
+            || key.key_id.len() > 64
+            || !key.key_id.is_ascii()
+            || previous.is_some_and(|value| value >= key.key_id.as_str())
+            || key.issuer_id.is_nil()
+            || key.environment_id.is_nil()
+        {
+            bail!("Grant verification key set is invalid or not strictly ordered")
+        }
+        validate_hex(&key.ed25519_public_key, 32, "Grant verification public key")?;
+        previous = Some(&key.key_id);
+    }
+    Ok(())
+}
+
+fn configuration_objects_digest(
+    segment: &[u8],
+    projection: &[u8],
+    catalog: &[RuntimePeerProjection],
+    peer_projections: &[Vec<u8>],
+) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"candy/runtime-configuration-v1\0");
     digest.update((segment.len() as u64).to_be_bytes());
     digest.update(segment);
     digest.update((projection.len() as u64).to_be_bytes());
     digest.update(projection);
-    format!("{:x}", digest.finalize())
+    digest.update((catalog.len() as u64).to_be_bytes());
+    for (entry, envelope) in catalog.iter().zip(peer_projections) {
+        digest.update(entry.projection_id.as_bytes());
+        digest.update(entry.projection_generation.to_be_bytes());
+        digest.update(decode_hex_32(&entry.projection_content_hash).expect("validated catalog"));
+        digest.update((envelope.len() as u64).to_be_bytes());
+        digest.update(envelope);
+    }
+    digest.finalize().into()
 }
 
+fn configuration_delivery_digest(
+    configuration: &RuntimeConfiguration,
+    signed_objects_hash: &[u8; 32],
+) -> Result<String> {
+    let mut digest = Sha256::new();
+    digest.update(b"candy/runtime-delivery-v1\0");
+    digest.update(signed_objects_hash);
+    digest.update((configuration.route_signing_key_id.len() as u64).to_be_bytes());
+    digest.update(configuration.route_signing_key_id.as_bytes());
+    digest.update(decode_hex_32(&configuration.route_signing_public_key)?);
+    digest.update((configuration.grant_verification_keys.len() as u64).to_be_bytes());
+    for key in &configuration.grant_verification_keys {
+        digest.update((key.key_id.len() as u64).to_be_bytes());
+        digest.update(key.key_id.as_bytes());
+        digest.update(decode_hex_32(&key.ed25519_public_key)?);
+        digest.update(key.issuer_id.as_bytes());
+        digest.update(key.environment_id.as_bytes());
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn decode_hex_32(value: &str) -> Result<[u8; 32]> {
+    validate_hex(value, 32, "32-byte value")?;
+    let mut output = [0_u8; 32];
+    for (index, byte) in output.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)?;
+    }
+    Ok(output)
+}
+
+fn stable_tunnel_id(candidate_id: &str) -> Result<u64> {
+    let candidate = decode_hex(candidate_id, 16, "candidate id")?;
+    let mut digest = Sha256::new();
+    digest.update(b"candy/runtime-tunnel-id-v1\0");
+    digest.update(candidate);
+    let bytes: [u8; 8] = digest.finalize()[..8].try_into().unwrap();
+    let value = u64::from_be_bytes(bytes);
+    Ok(if value == 0 { 1 } else { value })
+}
+
+fn decode_hex(value: &str, bytes: usize, label: &str) -> Result<Vec<u8>> {
+    validate_hex(value, bytes, label)?;
+    (0..bytes)
+        .map(|index| {
+            u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+                .with_context(|| format!("decode {label}"))
+        })
+        .collect()
+}
+
+fn cloud_ipv4_exclusions(cloud: &Url) -> Result<Vec<String>> {
+    let host = cloud.host_str().context("Cloud URL has no host")?;
+    let port = cloud
+        .port_or_known_default()
+        .context("Cloud URL has no known port")?;
+    let mut addresses = (host, port)
+        .to_socket_addrs()
+        .context("resolve authenticated Cloud API host before SD-WAN activation")?
+        .filter_map(|address| match address {
+            SocketAddr::V4(value) if !value.ip().is_unspecified() && !value.ip().is_multicast() => {
+                Some(format!("{}/32", value.ip()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    addresses.sort();
+    addresses.dedup();
+    if addresses.is_empty() {
+        bail!("authenticated Cloud API host has no usable IPv4 address for netd exclusion")
+    }
+    Ok(addresses)
+}
+
+fn activation_grants(
+    grants: &[(grant::GrantSubject, grant::CachedGrant)],
+) -> Result<Vec<(ActivationGrantManifest, Vec<u8>)>> {
+    let mut output = Vec::with_capacity(grants.len());
+    for (subject, cached) in grants {
+        let raw = URL_SAFE_NO_PAD
+            .decode(cached.access_grant())
+            .context("decode verified Cloud Grant for activation")?;
+        if raw.is_empty() || raw.len() > 8 * 1024 {
+            bail!("verified Cloud Grant has an invalid activation size")
+        }
+        let grant_sha256 = format!("{:x}", Sha256::digest(&raw));
+        output.push((
+            ActivationGrantManifest {
+                node_pool_id: subject.node_pool_id,
+                grant_id: cached.grant_id(),
+                grant_sha256,
+                refresh_after_unix: cached.refresh_after_unix(),
+                expires_at_unix: cached.expires_at_unix(),
+            },
+            raw,
+        ));
+    }
+    output.sort_by_key(|(manifest, _)| manifest.node_pool_id);
+    Ok(output)
+}
+
+fn activation_digest(
+    delivery_digest: &str,
+    grants: &[(ActivationGrantManifest, Vec<u8>)],
+) -> Result<String> {
+    let mut digest = Sha256::new();
+    digest.update(b"candy/runtime-activation-v1\0");
+    digest.update(decode_hex_32(delivery_digest)?);
+    digest.update((grants.len() as u64).to_be_bytes());
+    for (manifest, raw) in grants {
+        digest.update(manifest.node_pool_id.as_bytes());
+        digest.update(manifest.grant_id.as_bytes());
+        digest.update(Sha256::digest(raw));
+        digest.update(manifest.refresh_after_unix.to_be_bytes());
+        digest.update(manifest.expires_at_unix.to_be_bytes());
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn render_transport_config(
+    candidate: &DiscoveredCandidate,
+    identity: &DeviceIdentity,
+    grant_path: &Path,
+    signing_key_path: &Path,
+) -> Result<String> {
+    let quote = |value: &str| serde_json::to_string(value).map_err(Into::into);
+    let path = |value: &Path| -> Result<String> {
+        quote(
+            value
+                .to_str()
+                .context("activation transport path is not UTF-8")?,
+        )
+    };
+    Ok(format!(
+        "server = {}\nserver_name = {}\nserver_pin = {}\nkey_id = {}\nsecret = \"\"\nauth_profile = \"cloud_grant_v1\"\n\n[cloud_auth]\ngrant_envelope_path = {}\ndevice_signing_key_path = {}\n\n[transport]\nprofile = \"linux\"\ncongestion = \"candy_bbr\"\ncandy_bbr_preset = {}\nautomatic_bbr_fallback = false\n",
+        quote(&candidate.endpoint)?,
+        quote(&candidate.server_name)?,
+        quote(&format!("sha256:{}", candidate.server_cert_sha256))?,
+        quote(&identity.device_key_id.to_string())?,
+        path(grant_path)?,
+        path(signing_key_path)?,
+        quote(&candidate.transport_preset)?,
+    ))
+}
+
+fn render_server_activation_config(
+    ordinary_config: &Path,
+    configuration: &RuntimeConfiguration,
+    segment_path: &Path,
+    local_projection_path: &Path,
+    peer_projection_paths: &[PathBuf],
+) -> Result<String> {
+    use std::str::FromStr;
+    use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
+
+    if configuration.grant_verification_keys.is_empty() {
+        bail!("server activation requires at least one scoped Grant verification key")
+    }
+    let text = String::from_utf8(read_bounded(ordinary_config, MAX_CONFIGURATION_BYTES)?)
+        .context("ordinary Candy Server config is not UTF-8")?;
+    let mut document = DocumentMut::from_str(&text).context("parse ordinary Candy Server TOML")?;
+    if document.as_table().contains_key("cloud_auth") {
+        bail!("ordinary Candy Server config already defines cloud_auth")
+    }
+    if document.as_table().contains_key("sdwan") {
+        bail!("ordinary Candy Server config already defines sdwan")
+    }
+
+    let path = |value: &Path| -> Result<String> {
+        Ok(value
+            .to_str()
+            .context("server activation path is not UTF-8")?
+            .to_owned())
+    };
+
+    let mut cloud_auth = Table::new();
+    cloud_auth.insert("enabled", value(true));
+    let mut verification_keys = ArrayOfTables::new();
+    for key in &configuration.grant_verification_keys {
+        let mut entry = Table::new();
+        entry.insert("key_id", value(&key.key_id));
+        entry.insert("public_key", value(&key.ed25519_public_key));
+        entry.insert("issuer_id", value(key.issuer_id.simple().to_string()));
+        entry.insert(
+            "environment_id",
+            value(key.environment_id.simple().to_string()),
+        );
+        verification_keys.push(entry);
+    }
+    cloud_auth.insert("verification_keys", Item::ArrayOfTables(verification_keys));
+    document["cloud_auth"] = Item::Table(cloud_auth);
+
+    let mut peers = Array::new();
+    for peer in peer_projection_paths {
+        peers.push(path(peer)?);
+    }
+    let mut sdwan = Table::new();
+    sdwan.insert("enabled", value(true));
+    sdwan.insert("segment_snapshot", value(path(segment_path)?));
+    sdwan.insert("peer_projections", value(peers));
+    sdwan.insert("local_projection", value(path(local_projection_path)?));
+    sdwan.insert(
+        "route_signing_public_key",
+        value(&configuration.route_signing_public_key),
+    );
+    document["sdwan"] = Item::Table(sdwan);
+    Ok(document.to_string())
+}
+
+fn build_netd_declaration(
+    discovery: &DiscoveredControlReport,
+    cloud: &Url,
+) -> Result<NetdDeclaration> {
+    let mut routes = discovery
+        .netd
+        .local_prefixes
+        .iter()
+        .map(|prefix| NetdRoute {
+            prefix: prefix.clone(),
+            kind: "local",
+        })
+        .chain(discovery.netd.remote_routes.iter().map(|route| NetdRoute {
+            prefix: route.destination.clone(),
+            kind: "remote",
+        }))
+        .collect::<Vec<_>>();
+    routes.sort_by(|left, right| {
+        left.prefix
+            .cmp(&right.prefix)
+            .then(left.kind.cmp(right.kind))
+    });
+    let mut exclusions = BTreeMap::<String, &'static str>::new();
+    for prefix in &discovery.netd.underlay_ipv4_exclusions {
+        exclusions.insert(prefix.clone(), "hub-endpoint");
+    }
+    for prefix in cloud_ipv4_exclusions(cloud)? {
+        exclusions.insert(prefix, "cloud-api");
+    }
+    Ok(NetdDeclaration {
+        table_id: discovery.netd.table_id,
+        overlay_router_ipv4: discovery.netd.overlay_router_ipv4.clone(),
+        effective_mtu: discovery.netd.max_inner_mtu,
+        routes,
+        exclusions: exclusions
+            .into_iter()
+            .map(|(prefix, kind)| NetdExclusion { prefix, kind })
+            .collect(),
+        firewall: NetdFirewall {
+            allow_forward: true,
+            clamp_tcp_mss: true,
+            require_ipv4_forwarding: true,
+            manage_rp_filter: true,
+        },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_client_activation(
+    state_dir: &Path,
+    identity_dir: &Path,
+    core: &Path,
+    cloud: &Url,
+    etag: &str,
+    delivery_digest: &str,
+    configuration: &RuntimeConfiguration,
+    identity: &DeviceIdentity,
+    segment: &[u8],
+    projection: &[u8],
+    discovery: &DiscoveredControlReport,
+    grants: &[(grant::GrantSubject, grant::CachedGrant)],
+) -> Result<String> {
+    let grants = activation_grants(grants)?;
+    let activation_id = activation_digest(delivery_digest, &grants)?;
+    let activations = state_dir.join("activations");
+    ensure_private_directory(&activations)?;
+    let generation = activations.join(&activation_id);
+    if !generation.exists() {
+        let staging = activations.join(format!(".{activation_id}.{}.tmp", Uuid::new_v4()));
+        ensure_private_directory(&staging)?;
+        let result = (|| {
+            atomic_bytes(&staging.join("segment.snapshot"), segment, 0o600)?;
+            atomic_bytes(&staging.join("site.projection"), projection, 0o600)?;
+            let key_pem = String::from_utf8(read_bounded(
+                &identity_dir.join("operational-key.pem"),
+                MAX_PROFILE_BYTES,
+            )?)
+            .context("operational private key PEM is not UTF-8")?;
+            let signing_key = SigningKey::from_pkcs8_pem(&key_pem)
+                .context("decode operational private key for SD-WAN activation")?;
+            let signing_key_path = staging.join("device-signing-key.raw");
+            atomic_bytes(&signing_key_path, &signing_key.to_bytes(), 0o600)?;
+
+            let grant_directory = staging.join("grants");
+            let transport_directory = staging.join("transports");
+            ensure_private_directory(&grant_directory)?;
+            ensure_private_directory(&transport_directory)?;
+            let mut grant_paths = BTreeMap::new();
+            for (manifest, raw) in &grants {
+                let path =
+                    grant_directory.join(format!("{}.grant", manifest.node_pool_id.simple()));
+                atomic_bytes(&path, raw, 0o600)?;
+                grant_paths.insert(manifest.node_pool_id, path);
+            }
+            let mut peer_configs = Vec::with_capacity(discovery.outbound_candidates.len());
+            for candidate in &discovery.outbound_candidates {
+                let pool = parse_hex_uuid(&candidate.node_pool_id, "node pool id")?;
+                let grant_path = grant_paths
+                    .get(&pool)
+                    .context("outbound candidate has no verified Grant")?;
+                let transport_path =
+                    transport_directory.join(format!("{}.toml", candidate.candidate_id));
+                let transport =
+                    render_transport_config(candidate, identity, grant_path, &signing_key_path)?;
+                atomic_bytes(&transport_path, transport.as_bytes(), 0o600)?;
+                peer_configs.push((
+                    candidate,
+                    stable_tunnel_id(&candidate.candidate_id)?,
+                    transport_path,
+                ));
+            }
+            let peers = peer_configs
+                .iter()
+                .map(|(candidate, tunnel_id, path)| (*candidate, *tunnel_id, path.as_path()))
+                .collect::<Vec<_>>();
+            let core_config = render_core_control_config(&staging, configuration, &peers)?;
+            let core_config_path = staging.join("core.toml");
+            atomic_bytes(&core_config_path, core_config.as_bytes(), 0o600)?;
+            let output = ProcessCommand::new(core)
+                .args(["client", "sdwan", "compile-control", "--config"])
+                .arg(&core_config_path)
+                .output()
+                .context("compile final Candy Core SD-WAN activation")?;
+            if !output.status.success() {
+                bail!(
+                    "Candy Core rejected final SD-WAN activation: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                        .chars()
+                        .take(1024)
+                        .collect::<String>()
+                )
+            }
+            let final_signing_key_path = generation.join("device-signing-key.raw");
+            let final_grant_directory = generation.join("grants");
+            let final_transport_directory = generation.join("transports");
+            let mut final_peers = Vec::with_capacity(discovery.outbound_candidates.len());
+            for candidate in &discovery.outbound_candidates {
+                let pool = parse_hex_uuid(&candidate.node_pool_id, "node pool id")?;
+                let final_grant_path =
+                    final_grant_directory.join(format!("{}.grant", pool.simple()));
+                let staged_transport_path =
+                    transport_directory.join(format!("{}.toml", candidate.candidate_id));
+                let final_transport_path =
+                    final_transport_directory.join(format!("{}.toml", candidate.candidate_id));
+                let transport = render_transport_config(
+                    candidate,
+                    identity,
+                    &final_grant_path,
+                    &final_signing_key_path,
+                )?;
+                atomic_bytes(&staged_transport_path, transport.as_bytes(), 0o600)?;
+                final_peers.push((
+                    candidate,
+                    stable_tunnel_id(&candidate.candidate_id)?,
+                    final_transport_path,
+                ));
+            }
+            let final_peer_refs = final_peers
+                .iter()
+                .map(|(candidate, tunnel_id, path)| (*candidate, *tunnel_id, path.as_path()))
+                .collect::<Vec<_>>();
+            let final_core_config =
+                render_core_control_config(&generation, configuration, &final_peer_refs)?;
+            atomic_bytes(&core_config_path, final_core_config.as_bytes(), 0o600)?;
+            let declaration = build_netd_declaration(discovery, cloud)?;
+            atomic_json(&staging.join("declaration.json"), &declaration, 0o600)?;
+            atomic_json(
+                &staging.join("grants-v1.json"),
+                &grants.iter().map(|v| &v.0).collect::<Vec<_>>(),
+                0o600,
+            )?;
+            let refresh_after = grants
+                .iter()
+                .map(|value| value.0.refresh_after_unix)
+                .min()
+                .unwrap_or(0);
+            let expires_at = grants
+                .iter()
+                .map(|value| value.0.expires_at_unix)
+                .min()
+                .unwrap_or(0);
+            atomic_json(
+                &staging.join("activation-v1.json"),
+                &ActivationDescriptor {
+                    schema_version: 1,
+                    activation_id: activation_id.clone(),
+                    delivery_etag: etag.to_owned(),
+                    delivery_sha256: delivery_digest.to_owned(),
+                    projection_publication_id: configuration.projection_publication_id,
+                    projection_content_hash: configuration.projection_content_hash.clone(),
+                    segment_generation: configuration.segment_generation,
+                    projection_generation: configuration.projection_generation,
+                    core_role: "client_sdwan".to_owned(),
+                    core_config: "core.toml".to_owned(),
+                    netd_declaration: "declaration.json".to_owned(),
+                    grant_refresh_after_unix: refresh_after,
+                    grant_expires_at_unix: expires_at,
+                },
+                0o600,
+            )?;
+            File::open(&staging).and_then(|directory| directory.sync_all())?;
+            fs::rename(&staging, &generation).context("publish immutable SD-WAN activation")?;
+            File::open(&activations).and_then(|directory| directory.sync_all())?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result?;
+    }
+    publish_pointer(
+        state_dir,
+        "candidate",
+        Path::new("activations").join(&activation_id),
+    )?;
+    Ok(activation_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_server_activation(
+    state_dir: &Path,
+    core: &Path,
+    ordinary_config: &Path,
+    cloud: &Url,
+    etag: &str,
+    delivery_digest: &str,
+    configuration: &RuntimeConfiguration,
+    segment: &[u8],
+    projection: &[u8],
+    peer_projections: &[Vec<u8>],
+    discovery: &DiscoveredControlReport,
+) -> Result<String> {
+    if peer_projections.is_empty() || peer_projections.len() > 256 {
+        bail!("server activation requires 1..=256 authenticated peer projections")
+    }
+    let ordinary = read_bounded(ordinary_config, MAX_CONFIGURATION_BYTES)?;
+    let mut activation_hash = Sha256::new();
+    activation_hash.update(b"candy/runtime-server-activation-v1\0");
+    activation_hash.update(decode_hex_32(delivery_digest)?);
+    activation_hash.update(Sha256::digest(&ordinary));
+    let activation_id = format!("{:x}", activation_hash.finalize());
+    let activations = state_dir.join("activations");
+    ensure_private_directory(&activations)?;
+    let generation = activations.join(&activation_id);
+    if !generation.exists() {
+        let staging = activations.join(format!(".{activation_id}.{}.tmp", Uuid::new_v4()));
+        ensure_private_directory(&staging)?;
+        let result = (|| {
+            let staged_segment = staging.join("segment.snapshot");
+            let staged_local = staging.join("site.projection");
+            atomic_bytes(&staged_segment, segment, 0o600)?;
+            atomic_bytes(&staged_local, projection, 0o600)?;
+            let staged_peers = staging.join("peer-projections");
+            ensure_private_directory(&staged_peers)?;
+            let mut staged_peer_paths = Vec::with_capacity(peer_projections.len());
+            let mut final_peer_paths = Vec::with_capacity(peer_projections.len());
+            for (entry, envelope) in configuration
+                .peer_projection_catalog
+                .iter()
+                .zip(peer_projections)
+            {
+                let name = format!(
+                    "{}-{}.projection",
+                    entry.projection_id.simple(),
+                    entry.projection_generation
+                );
+                atomic_bytes(&staged_peers.join(&name), envelope, 0o600)?;
+                staged_peer_paths.push(staged_peers.join(&name));
+                final_peer_paths.push(generation.join("peer-projections").join(name));
+            }
+            let core_config_path = staging.join("core.toml");
+            let staged_config = render_server_activation_config(
+                ordinary_config,
+                configuration,
+                &staged_segment,
+                &staged_local,
+                &staged_peer_paths,
+            )?;
+            atomic_bytes(&core_config_path, staged_config.as_bytes(), 0o600)?;
+            let output = ProcessCommand::new(core)
+                .args(["server", "--config"])
+                .arg(&core_config_path)
+                .arg("--check-config")
+                .output()
+                .context("validate unified Candy Server SD-WAN activation")?;
+            if !output.status.success() {
+                bail!(
+                    "Candy Core rejected unified Server SD-WAN activation: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                        .chars()
+                        .take(1024)
+                        .collect::<String>()
+                )
+            }
+            let final_config = render_server_activation_config(
+                ordinary_config,
+                configuration,
+                &generation.join("segment.snapshot"),
+                &generation.join("site.projection"),
+                &final_peer_paths,
+            )?;
+            atomic_bytes(&core_config_path, final_config.as_bytes(), 0o600)?;
+            atomic_json(
+                &staging.join("declaration.json"),
+                &build_netd_declaration(discovery, cloud)?,
+                0o600,
+            )?;
+            atomic_json(
+                &staging.join("activation-v1.json"),
+                &ActivationDescriptor {
+                    schema_version: 1,
+                    activation_id: activation_id.clone(),
+                    delivery_etag: etag.to_owned(),
+                    delivery_sha256: delivery_digest.to_owned(),
+                    projection_publication_id: configuration.projection_publication_id,
+                    projection_content_hash: configuration.projection_content_hash.clone(),
+                    segment_generation: configuration.segment_generation,
+                    projection_generation: configuration.projection_generation,
+                    core_role: "server".to_owned(),
+                    core_config: "core.toml".to_owned(),
+                    netd_declaration: "declaration.json".to_owned(),
+                    grant_refresh_after_unix: 0,
+                    grant_expires_at_unix: 0,
+                },
+                0o600,
+            )?;
+            File::open(&staging).and_then(|directory| directory.sync_all())?;
+            fs::rename(&staging, &generation)
+                .context("publish immutable Server SD-WAN activation")?;
+            File::open(&activations).and_then(|directory| directory.sync_all())?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result?;
+    }
+    publish_pointer(
+        state_dir,
+        "candidate",
+        Path::new("activations").join(&activation_id),
+    )?;
+    Ok(activation_id)
+}
+
+fn publish_pointer(state_dir: &Path, name: &str, target: PathBuf) -> Result<()> {
+    if !matches!(name, "candidate" | "active") {
+        bail!("invalid Runtime activation pointer name")
+    }
+    let destination = state_dir.join(name);
+    let temporary = state_dir.join(format!(".{name}.{}.tmp", Uuid::new_v4()));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &temporary).context("stage Runtime activation pointer")?;
+    #[cfg(not(unix))]
+    bail!("Runtime activation pointers require a Unix platform");
+    if let Err(error) = fs::rename(&temporary, &destination) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).context("publish Runtime activation pointer");
+    }
+    File::open(state_dir).and_then(|directory| directory.sync_all())?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn publish_configuration_generation(
     state_dir: &Path,
     digest: &str,
     segment: &[u8],
     projection: &[u8],
+    peer_catalog: &[RuntimePeerProjection],
+    peer_projections: &[Vec<u8>],
     route_key: &[u8],
     manifest: &[u8],
+    discovery: &[u8],
 ) -> Result<()> {
     validate_hex(digest, 32, "Runtime configuration digest")?;
     let generations = state_dir.join("generations");
@@ -663,8 +2236,22 @@ fn publish_configuration_generation(
         let write_result = (|| {
             atomic_bytes(&staging.join("segment.snapshot"), segment, 0o600)?;
             atomic_bytes(&staging.join("site.projection"), projection, 0o600)?;
+            let peers = staging.join("peer-projections");
+            ensure_private_directory(&peers)?;
+            for (entry, envelope) in peer_catalog.iter().zip(peer_projections) {
+                atomic_bytes(
+                    &peers.join(format!(
+                        "{}-{}.projection",
+                        entry.projection_id.simple(),
+                        entry.projection_generation
+                    )),
+                    envelope,
+                    0o600,
+                )?;
+            }
             atomic_bytes(&staging.join("route-signing-public-key"), route_key, 0o600)?;
             atomic_bytes(&staging.join("configuration-v1.json"), manifest, 0o600)?;
+            atomic_bytes(&staging.join("discovery-v1.json"), discovery, 0o600)?;
             File::open(&staging)
                 .and_then(|directory| directory.sync_all())
                 .context("sync staged Runtime configuration")?;
@@ -697,8 +2284,22 @@ fn publish_configuration_generation(
                 &generation.join("configuration-v1.json"),
                 MAX_CONFIGURATION_BYTES,
             )? != manifest
+            || read_bounded(&generation.join("discovery-v1.json"), 1024 * 1024)? != discovery
         {
             bail!("immutable Runtime configuration generation has conflicting content")
+        }
+        for (entry, envelope) in peer_catalog.iter().zip(peer_projections) {
+            if read_bounded(
+                &generation.join("peer-projections").join(format!(
+                    "{}-{}.projection",
+                    entry.projection_id.simple(),
+                    entry.projection_generation
+                )),
+                MAX_ROUTE_ENVELOPE_BYTES as u64,
+            )? != *envelope
+            {
+                bail!("immutable Peer projection has conflicting content")
+            }
         }
     }
 
@@ -730,10 +2331,40 @@ fn ensure_private_directory(path: &Path) -> Result<()> {
             bail!("Runtime state directory must be a real directory")
         }
     } else {
-        fs::create_dir_all(path).context("create Runtime state directory")?;
+        let parent = path
+            .parent()
+            .context("Runtime state directory has no parent")?;
+        if !parent.exists() {
+            fs::create_dir_all(parent).context("create Runtime state parent directory")?;
+        }
+        let parent_metadata =
+            fs::symlink_metadata(parent).context("inspect Runtime state parent directory")?;
+        if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+            bail!("Runtime state parent must be a real directory")
+        }
+        fs::create_dir(path).context("create Runtime state directory")?;
+        set_owner(path, &parent_metadata)?;
+        set_mode(path, 0o700)?;
     }
     set_mode(path, 0o700)?;
     Ok(())
+}
+
+fn ensure_private_state_root(path: &Path) -> Result<()> {
+    if path.exists() {
+        let metadata = fs::symlink_metadata(path).context("inspect Runtime state root")?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            bail!("Runtime state root must be a real directory")
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o777 != 0o700 {
+                bail!("Runtime state root must have mode 0700")
+            }
+        }
+    }
+    ensure_private_directory(path)
 }
 
 fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>> {
@@ -752,13 +2383,6 @@ fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>> {
 fn read_bounded_json<T: DeserializeOwned>(path: &Path, maximum: u64) -> Result<T> {
     serde_json::from_slice(&read_bounded(path, maximum)?)
         .with_context(|| format!("parse {}", path.display()))
-}
-
-fn same_file(path: &Path, value: &[u8]) -> Result<bool> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    Ok(read_bounded(path, MAX_CONFIGURATION_BYTES)? == value)
 }
 
 fn atomic_json(path: &Path, value: &impl Serialize, mode: u32) -> Result<()> {
@@ -783,6 +2407,8 @@ fn atomic_bytes(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     let mut file = options
         .open(&temporary)
         .context("create atomic state file")?;
+    let parent_metadata = fs::symlink_metadata(parent).context("inspect state file parent")?;
+    set_file_owner(&file, &parent_metadata)?;
     file.write_all(bytes).context("write atomic state file")?;
     file.sync_all().context("sync atomic state file")?;
     set_file_mode(&file, mode)?;
@@ -791,6 +2417,50 @@ fn atomic_bytes(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     File::open(parent)
         .and_then(|directory| directory.sync_all())
         .context("sync Runtime state directory")?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_file_owner(file: &File, owner: &fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let result = unsafe {
+        nix::libc::fchown(
+            file.as_raw_fd(),
+            owner.uid() as nix::libc::uid_t,
+            owner.gid() as nix::libc::gid_t,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error()).context("set state file owner");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_file_owner(_file: &File, _owner: &fs::Metadata) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_owner(path: &Path, owner: &fs::Metadata) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let result = unsafe {
+        nix::libc::chown(
+            path.as_ptr(),
+            owner.uid() as nix::libc::uid_t,
+            owner.gid() as nix::libc::gid_t,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error()).context("set state directory owner");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_owner(_path: &Path, _owner: &fs::Metadata) -> Result<()> {
     Ok(())
 }
 
@@ -822,79 +2492,27 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn configuration_digest_matches_cloud_domain_separation() {
-        let segment = [1, 2, 3];
-        let projection = [4, 5];
-        let digest = configuration_digest(&segment, &projection);
-        let mut expected = Sha256::new();
-        expected.update(b"candy/runtime-configuration-v1\0");
-        expected.update(3_u64.to_be_bytes());
-        expected.update(segment);
-        expected.update(2_u64.to_be_bytes());
-        expected.update(projection);
-        assert_eq!(digest, format!("{:x}", expected.finalize()));
-    }
-
-    #[test]
-    fn profile_must_match_local_device_identity() {
-        let identity = DeviceIdentity {
+    fn identity() -> DeviceIdentity {
+        DeviceIdentity {
             schema_version: 1,
             cloud_address: "https://cloud.example.test".into(),
             organization_id: Uuid::from_bytes([1; 16]),
             tenant_id: Some(Uuid::from_bytes([2; 16])),
-            device_id: Uuid::from_bytes([3; 16]),
-            device_key_id: Uuid::from_bytes([4; 16]),
-        };
-        let mut profile = RuntimeProfile {
-            organization_id: identity.organization_id,
-            organization_name: "Candy".into(),
-            tenant_id: identity.tenant_id.unwrap(),
-            tenant_name: "Default".into(),
-            device_id: identity.device_id,
-            device_key_id: identity.device_key_id,
-            device_name: "Router".into(),
-            site_id: None,
-            site_name: None,
-            segment_id: None,
-            segment_name: None,
-            attachment_id: None,
-        };
-        validate_profile(&identity, &profile).unwrap();
-        profile.device_id = Uuid::new_v4();
-        assert!(validate_profile(&identity, &profile).is_err());
-    }
-
-    #[test]
-    fn core_report_must_bind_every_runtime_identity_dimension() {
-        let identity = DeviceIdentity {
-            schema_version: 1,
-            cloud_address: "https://cloud.example.test".into(),
-            organization_id: Uuid::from_bytes([1; 16]),
-            tenant_id: Some(Uuid::from_bytes([2; 16])),
-            device_id: Uuid::from_bytes([3; 16]),
-            device_key_id: Uuid::from_bytes([4; 16]),
-        };
-        let profile = RuntimeProfile {
-            organization_id: identity.organization_id,
-            organization_name: "Candy".into(),
-            tenant_id: identity.tenant_id.unwrap(),
-            tenant_name: "Default".into(),
-            device_id: identity.device_id,
-            device_key_id: identity.device_key_id,
-            device_name: "Router".into(),
             site_id: Some(Uuid::from_bytes([5; 16])),
-            site_name: Some("Site A".into()),
-            segment_id: Some(Uuid::from_bytes([6; 16])),
-            segment_name: Some("Production".into()),
-            attachment_id: Some(Uuid::from_bytes([7; 16])),
-        };
-        let configuration = RuntimeConfiguration {
+            display_name: "Router".into(),
+            device_id: Uuid::from_bytes([3; 16]),
+            device_key_id: Uuid::from_bytes([4; 16]),
+            not_after: "2030-01-01T00:00:00Z".into(),
+        }
+    }
+
+    fn configuration() -> RuntimeConfiguration {
+        RuntimeConfiguration {
             schema_version: 1,
             projection_publication_id: Uuid::from_bytes([8; 16]),
             projection_id: Uuid::from_bytes([9; 16]),
-            segment_id: profile.segment_id.unwrap(),
-            attachment_id: profile.attachment_id.unwrap(),
+            segment_id: Uuid::from_bytes([6; 16]),
+            attachment_id: Uuid::from_bytes([7; 16]),
             segment_generation: 4,
             projection_generation: 5,
             projection_content_hash: "11".repeat(32),
@@ -902,13 +2520,84 @@ mod tests {
             route_signing_public_key: "22".repeat(32),
             segment_snapshot: "AA".into(),
             site_projection: "AA".into(),
-        };
+            peer_projection_catalog: Vec::new(),
+            grant_verification_keys: Vec::new(),
+        }
+    }
+
+    fn discovery() -> DiscoveredControlReport {
+        DiscoveredControlReport {
+            schema_version: 1,
+            ok: true,
+            tenant_id: "02".repeat(16),
+            segment_id: "06".repeat(16),
+            site_id: "05".repeat(16),
+            attachment_id: "07".repeat(16),
+            device_id: "03".repeat(16),
+            device_key_id: "04".repeat(16),
+            segment_generation: 4,
+            projection_generation: 5,
+            route_policy: CorePolicyRef {
+                policy_id: "09".repeat(16),
+                generation: 5,
+                content_hash: "11".repeat(32),
+            },
+            netd: DiscoveredNetd {
+                table_id: 100,
+                overlay_router_ipv4: "10.250.0.1".into(),
+                max_inner_mtu: 1180,
+                local_prefixes: vec!["10.0.0.0/24".into()],
+                remote_routes: vec![DiscoveredRoute {
+                    destination: "10.1.0.0/24".into(),
+                    owner_attachment_ids: vec!["12".repeat(16)],
+                }],
+                underlay_ipv4_exclusions: vec!["198.51.100.1/32".into()],
+            },
+            outbound_candidates: Vec::new(),
+            inbound_expected: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn delivery_digest_matches_cloud_domain_separation() {
+        let mut configuration = configuration();
+        configuration.peer_projection_catalog = vec![RuntimePeerProjection {
+            projection_id: Uuid::from_bytes([10; 16]),
+            projection_generation: 7,
+            projection_content_hash: "33".repeat(32),
+            site_projection: URL_SAFE_NO_PAD.encode([4, 5]),
+        }];
+        configuration.grant_verification_keys = vec![RuntimeGrantVerificationKey {
+            key_id: "grant-1".into(),
+            ed25519_public_key: "44".repeat(32),
+            issuer_id: Uuid::from_bytes([11; 16]),
+            environment_id: Uuid::from_bytes([12; 16]),
+        }];
+        validate_configuration(&configuration, &identity()).unwrap();
+        let peers = decode_peer_projections(&configuration.peer_projection_catalog).unwrap();
+        let objects = configuration_objects_digest(
+            &[1, 2, 3],
+            &[4, 5],
+            &configuration.peer_projection_catalog,
+            &peers,
+        );
+        let first = configuration_delivery_digest(&configuration, &objects).unwrap();
+        configuration.route_signing_key_id = "route-2".into();
+        let second = configuration_delivery_digest(&configuration, &objects).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 64);
+    }
+
+    #[test]
+    fn core_report_must_bind_every_runtime_identity_dimension() {
+        let identity = identity();
+        let configuration = configuration();
         let mut report = VerifiedControlReport {
             schema_version: 1,
             ok: true,
-            tenant_id: profile.tenant_id.simple().to_string(),
+            tenant_id: identity.tenant_id.unwrap().simple().to_string(),
             segment_id: configuration.segment_id.simple().to_string(),
-            site_id: profile.site_id.unwrap().simple().to_string(),
+            site_id: identity.site_id.unwrap().simple().to_string(),
             attachment_id: configuration.attachment_id.simple().to_string(),
             projection_id: configuration.projection_id.simple().to_string(),
             device_id: identity.device_id.simple().to_string(),
@@ -917,9 +2606,9 @@ mod tests {
             projection_generation: configuration.projection_generation,
             projection_content_hash: configuration.projection_content_hash.clone(),
         };
-        validate_verified_report(&report, &configuration, &identity, &profile).unwrap();
+        validate_verified_report(&report, &configuration, &identity).unwrap();
         report.device_id = Uuid::new_v4().simple().to_string();
-        assert!(validate_verified_report(&report, &configuration, &identity, &profile).is_err());
+        assert!(validate_verified_report(&report, &configuration, &identity).is_err());
     }
 
     #[test]
@@ -936,11 +2625,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         publish_configuration_generation(
             directory.path(),
-            &configuration_digest(b"segment-1", b"projection-1"),
+            &format!("{:x}", Sha256::digest(b"generation-1")),
             b"segment-1",
             b"projection-1",
+            &[],
+            &[],
             b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             br#"{"generation":1}"#,
+            br#"{"schema_version":1}"#,
         )
         .unwrap();
         let current = directory.path().join("configuration");
@@ -955,11 +2647,14 @@ mod tests {
 
         publish_configuration_generation(
             directory.path(),
-            &configuration_digest(b"segment-2", b"projection-2"),
+            &format!("{:x}", Sha256::digest(b"generation-2")),
             b"segment-2",
             b"projection-2",
+            &[],
+            &[],
             b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             br#"{"generation":2}"#,
+            br#"{"schema_version":1}"#,
         )
         .unwrap();
         assert_eq!(
@@ -972,5 +2667,265 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn cloud_underlay_requires_at_least_one_ipv4_address() {
+        assert_eq!(
+            cloud_ipv4_exclusions(&Url::parse("https://127.0.0.1").unwrap()).unwrap(),
+            vec!["127.0.0.1/32"]
+        );
+        assert!(cloud_ipv4_exclusions(&Url::parse("https://[::1]").unwrap()).is_err());
+    }
+
+    #[test]
+    fn activation_digest_changes_when_grant_material_changes() {
+        let manifest = |grant_id: u8, digest: &str| ActivationGrantManifest {
+            node_pool_id: Uuid::from_bytes([1; 16]),
+            grant_id: Uuid::from_bytes([grant_id; 16]),
+            grant_sha256: digest.to_owned(),
+            refresh_after_unix: 100,
+            expires_at_unix: 200,
+        };
+        let delivery = "11".repeat(32);
+        let first = activation_digest(&delivery, &[(manifest(2, "aa"), vec![1, 2, 3])]).unwrap();
+        let second = activation_digest(&delivery, &[(manifest(3, "bb"), vec![1, 2, 4])]).unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn withdrawal_removes_both_activation_pointers() {
+        let directory = tempfile::tempdir().unwrap();
+        let activations = directory.path().join("activations");
+        fs::create_dir(&activations).unwrap();
+        let id = "a".repeat(64);
+        fs::create_dir(activations.join(&id)).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                Path::new("activations").join(&id),
+                directory.path().join("candidate"),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(
+                Path::new("activations").join(&id),
+                directory.path().join("active"),
+            )
+            .unwrap();
+        }
+        withdraw_local_activation(directory.path()).unwrap();
+        assert!(!directory.path().join("candidate").exists());
+        assert!(!directory.path().join("active").exists());
+    }
+
+    #[test]
+    fn broad_runtime_state_root_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(ensure_private_state_root(directory.path()).is_err());
+    }
+
+    fn activation_outcome_fixture(
+        state: &str,
+        error_code: Option<&str>,
+        generation: u64,
+    ) -> (tempfile::TempDir, String) {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let activation_id = "a".repeat(64);
+        let delivery = "b".repeat(64);
+        let activations = directory.path().join("activations");
+        fs::create_dir(&activations).unwrap();
+        fs::set_permissions(&activations, fs::Permissions::from_mode(0o700)).unwrap();
+        let activation = activations.join(&activation_id);
+        fs::create_dir(&activation).unwrap();
+        fs::set_permissions(&activation, fs::Permissions::from_mode(0o700)).unwrap();
+        atomic_json(
+            &activation.join("activation-v1.json"),
+            &ActivationDescriptor {
+                schema_version: 1,
+                activation_id: activation_id.clone(),
+                delivery_etag: format!("\"sha256-{delivery}\""),
+                delivery_sha256: delivery,
+                projection_publication_id: Uuid::from_bytes([8; 16]),
+                projection_content_hash: "c".repeat(64),
+                segment_generation: 3,
+                projection_generation: 7,
+                core_role: "client_sdwan".into(),
+                core_config: "core.toml".into(),
+                netd_declaration: "declaration.json".into(),
+                grant_refresh_after_unix: 100,
+                grant_expires_at_unix: 200,
+            },
+            0o600,
+        )
+        .unwrap();
+        symlink(
+            Path::new("activations").join(&activation_id),
+            directory.path().join("candidate"),
+        )
+        .unwrap();
+        atomic_json(
+            &directory.path().join("activation-ready-v1.json"),
+            &serde_json::json!({
+                "schema_version": 1,
+                "activation_id": activation_id,
+                "candidate_target": format!("activations/{activation_id}"),
+                "generation": generation,
+                "agent_pid": if state == "committed" { std::process::id() } else { u32::MAX },
+                "state": state,
+                "error_code": error_code,
+            }),
+            0o600,
+        )
+        .unwrap();
+        (directory, activation_id)
+    }
+
+    #[test]
+    fn committed_receipt_is_bound_to_candidate_before_atomic_promotion() {
+        let (directory, activation_id) = activation_outcome_fixture("committed", None, 7);
+        let outcome = read_activation_ready_receipt(directory.path())
+            .unwrap()
+            .unwrap();
+        promote_committed_activation(directory.path(), &outcome).unwrap();
+        assert_eq!(
+            fs::read_link(directory.path().join("active")).unwrap(),
+            Path::new("activations").join(activation_id)
+        );
+    }
+
+    #[test]
+    fn rejected_receipt_removes_only_candidate_and_preserves_last_good_active() {
+        use std::os::unix::fs::symlink;
+        let (directory, _) =
+            activation_outcome_fixture("rejected", Some("core_readiness_failed"), 7);
+        let last_good = Path::new("activations").join("d".repeat(64));
+        symlink(&last_good, directory.path().join("active")).unwrap();
+        let outcome = read_activation_ready_receipt(directory.path())
+            .unwrap()
+            .unwrap();
+        remove_candidate_if_matches(directory.path(), &outcome).unwrap();
+        assert!(!directory.path().join("candidate").exists());
+        assert_eq!(
+            fs::read_link(directory.path().join("active")).unwrap(),
+            last_good
+        );
+    }
+
+    #[test]
+    fn receipt_generation_must_match_immutable_candidate() {
+        let (directory, _) = activation_outcome_fixture("committed", None, 8);
+        assert!(read_activation_ready_receipt(directory.path()).is_err());
+    }
+
+    #[test]
+    fn stale_receipt_is_discarded_after_candidate_withdrawal_or_replacement() {
+        use std::os::unix::fs::symlink;
+        let (directory, _) = activation_outcome_fixture("committed", None, 7);
+        fs::remove_file(directory.path().join("candidate")).unwrap();
+        assert!(read_activation_ready_receipt(directory.path())
+            .unwrap()
+            .is_none());
+        assert!(!directory.path().join("activation-ready-v1.json").exists());
+
+        let (directory, _) = activation_outcome_fixture("rejected", Some("core_exit"), 7);
+        fs::remove_file(directory.path().join("candidate")).unwrap();
+        symlink(
+            Path::new("activations").join("d".repeat(64)),
+            directory.path().join("candidate"),
+        )
+        .unwrap();
+        assert!(read_activation_ready_receipt(directory.path())
+            .unwrap()
+            .is_none());
+        assert!(!directory.path().join("activation-ready-v1.json").exists());
+    }
+
+    #[test]
+    fn legacy_sync_state_defaults_to_no_activation_requirement() {
+        let state: SyncState =
+            serde_json::from_str(r#"{"schema_version":1,"etag":null,"configuration_sha256":null}"#)
+                .unwrap();
+        assert!(!state.activation_required);
+        assert!(state.activation_rejected_etag.is_none());
+    }
+
+    #[test]
+    fn server_activation_is_driven_by_inbound_catalog_not_outbound_candidates() {
+        let mut configuration = configuration();
+        let discovery = discovery();
+        assert!(!activation_required(true, &configuration, &discovery));
+        configuration.peer_projection_catalog = vec![RuntimePeerProjection {
+            projection_id: Uuid::from_bytes([10; 16]),
+            projection_generation: 5,
+            projection_content_hash: "33".repeat(32),
+            site_projection: URL_SAFE_NO_PAD.encode(b"peer"),
+        }];
+        assert!(activation_required(true, &configuration, &discovery));
+        assert!(!activation_required(false, &configuration, &discovery));
+    }
+
+    #[test]
+    fn server_config_merge_preserves_ordinary_service_and_adds_scoped_cloud_auth() {
+        let directory = tempfile::tempdir().unwrap();
+        let ordinary = directory.path().join("server.toml");
+        fs::write(
+            &ordinary,
+            "listen = \"0.0.0.0:8443\"\ndevelopment_ephemeral_certificate = true\n\n[[users]]\nkey_id = \"ordinary-user\"\nsecret = \"ordinary-secret\"\n",
+        )
+        .unwrap();
+        let mut configuration = configuration();
+        configuration.grant_verification_keys = vec![RuntimeGrantVerificationKey {
+            key_id: "cloud-key-1".into(),
+            ed25519_public_key: "44".repeat(32),
+            issuer_id: Uuid::from_bytes([11; 16]),
+            environment_id: Uuid::from_bytes([12; 16]),
+        }];
+        let rendered = render_server_activation_config(
+            &ordinary,
+            &configuration,
+            Path::new("/secure/segment.snapshot"),
+            Path::new("/secure/local.projection"),
+            &[PathBuf::from("/secure/peer.projection")],
+        )
+        .unwrap();
+        let document = rendered.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(document["listen"].as_str(), Some("0.0.0.0:8443"));
+        assert_eq!(
+            document["users"][0]["key_id"].as_str(),
+            Some("ordinary-user")
+        );
+        assert_eq!(document["cloud_auth"]["enabled"].as_bool(), Some(true));
+        assert_eq!(
+            document["cloud_auth"]["verification_keys"][0]["key_id"].as_str(),
+            Some("cloud-key-1")
+        );
+        assert_eq!(document["sdwan"]["enabled"].as_bool(), Some(true));
+        assert_eq!(
+            document["sdwan"]["peer_projections"][0].as_str(),
+            Some("/secure/peer.projection")
+        );
+    }
+
+    #[test]
+    fn server_config_merge_rejects_preexisting_managed_sections() {
+        let directory = tempfile::tempdir().unwrap();
+        let ordinary = directory.path().join("server.toml");
+        fs::write(
+            &ordinary,
+            "listen = \"127.0.0.1:8443\"\n[cloud_auth]\nenabled = false\n",
+        )
+        .unwrap();
+        assert!(render_server_activation_config(
+            &ordinary,
+            &configuration(),
+            Path::new("segment"),
+            Path::new("local"),
+            &[PathBuf::from("peer")],
+        )
+        .is_err());
     }
 }
