@@ -1686,6 +1686,84 @@ msgstr "运行时"
 msgid "SD-WAN service"
 msgstr "SD-WAN 服务"
 
+msgid "Cloud network profile"
+msgstr "Cloud 网络 Profile"
+
+msgid "Cloud account"
+msgstr "Cloud 账户"
+
+msgid "Tenant"
+msgstr "租户"
+
+msgid "Organization"
+msgstr "组织"
+
+msgid "Node profile"
+msgstr "节点 Profile"
+
+msgid "This device"
+msgstr "本设备"
+
+msgid "Pending synchronization"
+msgstr "等待同步"
+
+msgid "Active"
+msgstr "运行中"
+
+msgid "Ready to activate"
+msgstr "配置已就绪"
+
+msgid "Waiting for network configuration"
+msgstr "等待网络配置"
+
+msgid "Not connected"
+msgstr "未连接 Cloud"
+
+msgid "Identity authorized"
+msgstr "身份已授权"
+
+msgid "Cloud trust established"
+msgstr "已建立 Cloud 信任"
+
+msgid "Network configured"
+msgstr "网络已配置"
+
+msgid "Network configuration pending"
+msgstr "网络待配置"
+
+msgid "Assign this node to a Site and network in Cloud"
+msgstr "请在 Cloud 中分配站点和网络"
+
+msgid "SD-WAN active"
+msgstr "SD-WAN 已启用"
+
+msgid "SD-WAN not active"
+msgstr "SD-WAN 未激活"
+
+msgid "Starts after an authorized network configuration is synchronized"
+msgstr "同步有效网络配置后自动启动"
+
+msgid "Complete network setup in Candy Cloud"
+msgstr "在 Candy Cloud 中完成网络配置"
+
+msgid "This node is securely authorized. Assign it to a Site and network in Candy Cloud; no additional local settings are required. Ordinary Candy traffic continues normally while configuration is pending."
+msgstr "此节点已完成安全授权。请在 Candy Cloud 中将它分配到站点和网络，无需再修改本地设置；等待期间普通 Candy 流量不受影响。"
+
+msgid "Open Candy Cloud"
+msgstr "打开 Candy Cloud"
+
+msgid "Network status"
+msgstr "网络状态"
+
+msgid "Cloud connection management"
+msgstr "Cloud 连接管理"
+
+msgid "Remove from Cloud"
+msgstr "从 Cloud 移除"
+
+msgid "Remove this node from Candy Cloud and erase its local Cloud identity?"
+msgstr "确认从 Candy Cloud 移除此节点，并清除本地 Cloud 身份？"
+
 msgid "Reconnecting"
 msgstr "正在重新连接"
 

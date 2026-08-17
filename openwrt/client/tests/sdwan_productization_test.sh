@@ -80,7 +80,7 @@ grep -F 'tonumber(parsed.schema_version) == 1' "$sdwan" >/dev/null || fail "LuCI
 for label in 'Site' 'Segment' 'Cloud' 'Full duplex' 'Peer' 'Direct' 'Relay' 'Local egress' 'Remote egress' 'Internal DNS'; do
 	grep -F "$label" "$sdwan" >/dev/null || fail "SD-WAN page is missing $label"
 done
-for control in 'Node join file' 'Import and join' 'Reconnect' 'Leave'; do
+for control in 'Node join file' 'Import and join' 'Reconnect' 'Remove from Cloud'; do
 	grep -F "$control" "$sdwan" >/dev/null || fail "SD-WAN page is missing $control control"
 done
 grep -F 'enctype="multipart/form-data"' "$sdwan" >/dev/null || fail "node bootstrap import is not multipart"
@@ -106,7 +106,14 @@ grep -F 'state_label(registration_state)' "$sdwan" >/dev/null || fail "LuCI regi
 if grep -F 'state_label(enabled and registration_state' "$sdwan" >/dev/null; then
 	fail "LuCI still conflates Cloud registration with SD-WAN enablement"
 fi
-grep -F '<% if enabled then %><form method="post" action="<%=luci.dispatcher.build_url('\''admin/services/candy/sdwan_reconnect'\'')%>"' "$sdwan" >/dev/null || fail "LuCI exposes reconnect while SD-WAN is disabled"
+grep -F 'Cloud network profile' "$sdwan" >/dev/null || fail "LuCI does not present the enrolled Cloud profile"
+grep -F 'Waiting for network configuration' "$sdwan" >/dev/null || fail "LuCI does not distinguish enrollment from network readiness"
+grep -F 'no additional local settings are required' "$sdwan" >/dev/null || fail "LuCI does not explain the Cloud-managed activation flow"
+grep -F 'Remove from Cloud' "$sdwan" >/dev/null || fail "LuCI Cloud identity removal is not explicit"
+grep -F 'if enabled then %><div class="candy-sdwan-actions"><form method="post" action="<%=luci.dispatcher.build_url('\''admin/services/candy/sdwan_reconnect'\'')%>"' "$sdwan" >/dev/null || fail "LuCI reconnect is not gated by SD-WAN enablement"
+if grep -F 'The node identity has joined Candy Cloud. The SD-WAN data plane is not enabled' "$sdwan" >/dev/null; then
+	fail "LuCI still exposes the ambiguous data-plane-disabled message"
+fi
 if grep -E 'candy-sdwan-(generation|epoch|mtu|drops|failover)|Active Hub|Route generation|Attachment epoch|Effective MTU' "$status"; then
 	fail "Overview duplicates professional SD-WAN evidence"
 fi

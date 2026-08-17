@@ -52,6 +52,10 @@ struct EnrollmentState {
     cloud_address: String,
     enrollment_instance_id: String,
     display_name: String,
+    #[serde(default)]
+    tenant_id: Option<Uuid>,
+    #[serde(default)]
+    site_id: Option<Uuid>,
     challenge_request_id: String,
     completion_request_id: String,
     root_public_key: String,
@@ -147,6 +151,11 @@ struct DeviceIdentity<'a> {
     schema_version: u8,
     cloud_address: &'a str,
     organization_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tenant_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    site_id: Option<Uuid>,
+    display_name: &'a str,
     device_id: Uuid,
     device_key_id: Uuid,
     not_after: &'a str,
@@ -158,6 +167,11 @@ struct EnrollmentResult<'a> {
     state: &'static str,
     cloud_address: &'a str,
     organization_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tenant_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    site_id: Option<Uuid>,
+    display_name: &'a str,
     device_id: Uuid,
     device_key_id: Uuid,
     not_after: &'a str,
@@ -227,6 +241,8 @@ fn run(args: Args) -> Result<()> {
             cloud_address: cloud.as_str().trim_end_matches('/').to_owned(),
             enrollment_instance_id,
             display_name,
+            tenant_id: None,
+            site_id: None,
             challenge_request_id: format!("challenge-{}", Uuid::new_v4()),
             completion_request_id: format!("complete-{}", Uuid::new_v4()),
             root_public_key,
@@ -266,6 +282,8 @@ fn run(args: Args) -> Result<()> {
             args.expected_architecture.as_deref(),
         )?;
         state.display_name = manifest.display_name;
+        state.tenant_id = Some(manifest.tenant_id);
+        state.site_id = Some(manifest.site_id);
         state.metadata_hash = url_encode(hash_fields(&[
             b"candy/device-enrollment-metadata/v1",
             state.enrollment_instance_id.as_bytes(),
@@ -360,6 +378,9 @@ fn run(args: Args) -> Result<()> {
         schema_version: 1,
         cloud_address: &state.cloud_address,
         organization_id: challenge.organization_id,
+        tenant_id: state.tenant_id,
+        site_id: state.site_id,
+        display_name: &state.display_name,
         device_id: completed.device_id,
         device_key_id: completed.device_key_id,
         not_after: &completed.not_after,
@@ -378,6 +399,9 @@ fn run(args: Args) -> Result<()> {
             state: "registered",
             cloud_address: &state.cloud_address,
             organization_id: challenge.organization_id,
+            tenant_id: state.tenant_id,
+            site_id: state.site_id,
+            display_name: &state.display_name,
             device_id: completed.device_id,
             device_key_id: completed.device_key_id,
             not_after: &completed.not_after,
@@ -850,6 +874,8 @@ mod tests {
             cloud_address: "https://cloud.example.test".into(),
             enrollment_instance_id: "linux-test".into(),
             display_name: "test node".into(),
+            tenant_id: Some(Uuid::from_bytes([2; 16])),
+            site_id: Some(Uuid::from_bytes([3; 16])),
             challenge_request_id: "challenge-test".into(),
             completion_request_id: "complete-test".into(),
             root_public_key: url_encode([8; 32]),
@@ -893,6 +919,27 @@ mod tests {
         let serialized = serde_json::to_string(&enrollment_state()).unwrap();
         assert!(!serialized.contains("activation"));
         assert!(!serialized.contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
+    }
+
+    #[test]
+    fn device_identity_retains_cloud_profile_scope() {
+        let tenant_id = Uuid::from_bytes([2; 16]);
+        let site_id = Uuid::from_bytes([3; 16]);
+        let identity = DeviceIdentity {
+            schema_version: 1,
+            cloud_address: "https://cloud.example.test",
+            organization_id: Uuid::from_bytes([1; 16]),
+            tenant_id: Some(tenant_id),
+            site_id: Some(site_id),
+            display_name: "branch router",
+            device_id: Uuid::from_bytes([4; 16]),
+            device_key_id: Uuid::from_bytes([5; 16]),
+            not_after: "2030-01-01T00:00:00Z",
+        };
+        let serialized = serde_json::to_value(identity).unwrap();
+        assert_eq!(serialized["tenant_id"], tenant_id.to_string());
+        assert_eq!(serialized["site_id"], site_id.to_string());
+        assert_eq!(serialized["display_name"], "branch router");
     }
 
     #[test]
