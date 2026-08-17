@@ -32,7 +32,7 @@ run_sync_loop() {
 		if output=$($SYNC_BIN --state-dir "$STATE_DIR" sync-once 2>&1); then
 			state=$(printf '%s' "$output" | jsonfilter -e '@.state' 2>/dev/null || true)
 			case "$state" in
-				waiting_for_network_configuration|configuration_unchanged|configuration_updated) ;;
+				waiting_for_network_configuration|configuration_unchanged|configuration_updated|activation_pending|activation_rejected) ;;
 				*) state=unknown ;;
 			esac
 			logger -t candy -- "level=info event=cloud_sync result=ok state=$state"
@@ -54,6 +54,8 @@ start_service() {
 	case "$INTERVAL" in ''|*[!0-9]*|0) INTERVAL=30 ;; esac
 	procd_open_instance
 	procd_set_param command "$initscript" run_sync_loop
+	procd_set_param user candy-sdwan
+	procd_set_param group candy-sdwan
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1

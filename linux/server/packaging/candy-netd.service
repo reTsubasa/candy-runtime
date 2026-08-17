@@ -1,0 +1,23 @@
+[Unit]
+Description=Candy server privileged network transaction daemon
+After=network-online.target
+Wants=network-online.target
+Before=candy-server.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/mkdir -p /run/candy-netd /var/lib/candy
+ExecStart=/usr/local/libexec/candy-netd --socket /run/candy-netd/netd.sock --allowed-user candy --allowed-group candy --journal /var/lib/candy/netd.journal
+ExecStopPost=+/usr/local/libexec/candy-netd --recover --journal /var/lib/candy/netd.journal
+Restart=on-failure
+RestartSec=2s
+User=root
+Group=root
+NoNewPrivileges=no
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ReadWritePaths=/run/candy-netd /var/lib/candy
+
+[Install]
+WantedBy=multi-user.target

@@ -26,6 +26,9 @@ const MAX_STATUS_BYTES: u64 = 256 * 1024;
 const MAX_ACTIVATION_BYTES: u64 = 64 * 1024;
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(test)]
+static RUN_TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
 #[derive(Parser, Debug)]
 #[command(
     name = "candy-sdwan-agent",
@@ -988,6 +991,15 @@ fn fail_without_core(
 }
 
 fn run(args: RuntimeArgs) -> Result<()> {
+    // `run` installs process-wide signal handlers and exercises a shared child
+    // process lifecycle. Serialize the in-process fixtures so parallel test
+    // scheduling cannot make readiness timing or signal ownership nondeterministic.
+    #[cfg(test)]
+    let _test_guard = RUN_TEST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("SD-WAN agent test lock poisoned");
+
     if args.generation == 0 {
         return fail_before_prepare(
             &args,
@@ -1178,7 +1190,20 @@ fn run(args: RuntimeArgs) -> Result<()> {
             );
             return Ok(());
         }
-        if let Some(status) = child.try_wait().context("wait for Candy Core")? {
+        let child_status = match child.try_wait().context("wait for Candy Core") {
+            Ok(status) => status,
+            Err(error) => {
+                return fail_after_rollback(
+                    &args,
+                    &mut child,
+                    &mut netd,
+                    "Candy Core process inspection failed",
+                    "core_process_inspection_failed",
+                    error,
+                )
+            }
+        };
+        if let Some(status) = child_status {
             let code = status.code().unwrap_or(1);
             return fail_without_core(
                 &args,
@@ -1421,7 +1446,10 @@ done
 [ -n "$token" ]
 rm -f "$0"
 umask 077
-printf '{{"schema_version":1,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"{}","configured_peers":1,"active_peers":1,"required_route_owners":1,"ready_route_owners":1,"fail_open_required":false,"last_error_code":null}}\n' "$$" "$token" >"$status"
+status_tmp="$status.$$".tmp
+trap 'rm -f "$status_tmp"' EXIT
+printf '{{"schema_version":1,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"{}","configured_peers":1,"active_peers":1,"required_route_owners":1,"ready_route_owners":1,"fail_open_required":false,"last_error_code":null}}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
 sleep 30
 "#,
             lifecycle

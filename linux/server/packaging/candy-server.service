@@ -1,21 +1,30 @@
 [Unit]
 Description=Candy server
-After=network-online.target
-Wants=network-online.target
+After=network-online.target candy-netd.service
+Wants=network-online.target candy-netd.service
 
 [Service]
 Type=simple
 User=candy
 Group=candy
+UMask=0077
 WorkingDirectory=/var/lib/candy
 Environment=CANDY_CORE_CURRENT_LINK=/opt/candy/cores/current
+Environment=CANDY_SDWAN_AGENT=/usr/local/libexec/candy-sdwan-agent
+Environment=CANDY_SDWAN_ACTIVATION_LINK=/var/lib/candy/sdwan/candidate
+Environment=CANDY_SDWAN_ACTIVATION_READY=/var/lib/candy/sdwan/activation-ready-v1.json
+Environment=CANDY_NETD_SOCKET=/run/candy-netd/netd.sock
 ExecStart=/opt/candy/current/candy-server --config /etc/candy/server.toml
 Restart=on-failure
 RestartSec=2s
 LimitNOFILE=1048576
 NoNewPrivileges=yes
-CapabilityBoundingSet=CAP_NET_ADMIN
-AmbientCapabilities=CAP_NET_ADMIN
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/candy /run/candy
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target

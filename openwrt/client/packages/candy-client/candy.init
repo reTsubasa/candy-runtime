@@ -86,6 +86,7 @@ NETWORK_APPLY_LOCK_DIR=${NETWORK_APPLY_LOCK_DIR:-/var/lib/candy/network-apply.lo
 CANDY_SERVICE_LOCK_DIR=${CANDY_SERVICE_LOCK_DIR:-/var/lib/candy/service.lock}
 CANDY_EPOCH_DIRECTORY=${CANDY_EPOCH_DIRECTORY:-/var/lib/candy/epochs}
 CANDY_SDWAN_STATUS_FILE=${CANDY_SDWAN_STATUS_FILE:-$RUNTIME_DIR/sdwan-status.json}
+CANDY_SDWAN_READY_FILE=${CANDY_SDWAN_READY_FILE:-$CANDY_SDWAN_STATE_DIR/activation-ready-v1.json}
 CANDY_VERSION=${CANDY_VERSION:-0.4.0}
 CANDY_RELEASE=${CANDY_RELEASE:-1}
 CONFIG_FILE=/etc/config/candy
@@ -534,7 +535,8 @@ run_sdwan() {
 	[ -x "$CANDY_SDWAN_AGENT" ] || { log_event error sdwan_agent_unavailable "reason=agent_missing"; return 1; }
 	trap 'stopping=1; [ -z "${child:-}" ] || kill -TERM "$child" 2>/dev/null || true' TERM INT
 	"$CANDY_SDWAN_AGENT" --socket "$CANDY_NETD_SOCKET" --core "$CANDY_CORE_BIN" \
-		--activation "$CANDY_SDWAN_CANDIDATE" --status "$CANDY_SDWAN_STATUS_FILE" run &
+		--activation "$CANDY_SDWAN_CANDIDATE" --activation-ready "$CANDY_SDWAN_STATE_DIR/activation-ready-v1.json" \
+		--status "$CANDY_SDWAN_STATUS_FILE" run &
 	child=$!
 	wait "$child"
 	rc=$?

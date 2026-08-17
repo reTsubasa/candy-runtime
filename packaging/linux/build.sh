@@ -69,18 +69,13 @@ install -m 0644 "$repo_root/linux/server/docker/server.example.toml" \
 	"$stage/etc/candy/server.toml.example"
 install -m 0644 "$repo_root/linux/server/packaging/candy-server.service" \
 	"$stage/systemd/candy-server.service"
-install -m 0644 "$repo_root/linux/client/packaging/candy-netd.service" \
+install -m 0644 "$repo_root/linux/server/packaging/candy-netd.service" \
 	"$stage/systemd/candy-netd.service"
-install -m 0644 "$repo_root/linux/client/packaging/candy-sdwan.service" \
-	"$stage/systemd/candy-sdwan.service"
-install -m 0644 "$repo_root/linux/client/packaging/candy-cloud-sync.service" \
+install -m 0644 "$repo_root/linux/server/packaging/candy-cloud-sync.service" \
 	"$stage/systemd/candy-cloud-sync.service"
 install -m 0644 "$repo_root/linux/client/packaging/candy-cloud-sync.timer" \
 	"$stage/systemd/candy-cloud-sync.timer"
-install -m 0644 "$repo_root/linux/client/packaging/sdwan-agent.env.example" \
-	"$stage/etc/candy/sdwan-agent.env.example"
-install -m 0644 "$repo_root/linux/client/packaging/candy.sysusers" "$stage/systemd/candy.sysusers"
-install -m 0644 "$repo_root/linux/client/packaging/candy.tmpfiles" "$stage/systemd/candy.tmpfiles"
+install -m 0644 "$repo_root/linux/server/packaging/candy.tmpfiles" "$stage/systemd/candy.tmpfiles"
 install -m 0755 "$repo_root/linux/server/packaging/install-candy-server.sh" \
 	"$stage/install/install-candy-server.sh"
 install -m 0755 "$repo_root/linux/server/packaging/upgrade-candy-server.sh" \
