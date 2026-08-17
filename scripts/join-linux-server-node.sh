@@ -125,13 +125,30 @@ configure_public_endpoint() {
 	event endpoint succeeded "address=$public_endpoint"
 }
 
-existing_status=$(ssh -p "$node_port" "$ssh_target" 'sudo /usr/local/bin/candy-server sdwan status 2>/dev/null' || true)
-if printf '%s' "$existing_status" | jq -e --arg cloud "$cloud_url" \
+existing_status_raw=$(ssh -p "$node_port" "$ssh_target" '
+	if test -x /usr/local/libexec/candy-cloud-sync &&
+		test -f /etc/systemd/system/candy-cloud-sync.service &&
+		test -f /etc/systemd/system/candy-cloud-sync.timer; then
+		printf "%s\\n" __candy_runtime_ready__
+	fi
+	sudo /usr/local/bin/candy-server sdwan status 2>/dev/null
+' || true)
+# A legacy server can report a persisted registration while lacking the
+# Runtime-owned Cloud sync units. Only use the idempotent fast path when the
+# complete sync runtime is installed; otherwise install the supplied bundle
+# before attempting to resume that registration.
+if printf '%s\n' "$existing_status_raw" | grep -Fxq __candy_runtime_ready__; then
+	existing_runtime_ready=true
+else
+	existing_runtime_ready=false
+fi
+existing_status=$(printf '%s\n' "$existing_status_raw" | grep -Fvx __candy_runtime_ready__ || true)
+if [ "$existing_runtime_ready" = true ] && printf '%s' "$existing_status" | jq -e --arg cloud "$cloud_url" \
 	'.schema_version == 1 and .registration.state == "registered" and .registration.cloud_address == $cloud' >/dev/null 2>&1; then
 	configure_public_endpoint
 	ssh -p "$node_port" "$ssh_target" 'sudo systemctl is-active --quiet candy-netd; sudo systemctl is-active --quiet candy-server' ||
 		fail "registered node services are not healthy"
-	ssh -p "$node_port" "$ssh_target" 'sudo systemctl enable --now candy-cloud-sync.timer >/dev/null; sudo systemctl start candy-cloud-sync.service; sudo systemctl is-active --quiet candy-cloud-sync.timer' ||
+	ssh -p "$node_port" "$ssh_target" 'set -eu; sudo systemctl enable --now candy-cloud-sync.timer >/dev/null; sudo systemctl start candy-cloud-sync.service; sudo systemctl is-active --quiet candy-cloud-sync.timer' ||
 		fail "registered node Cloud synchronization is not healthy"
 	status=$(ssh -p "$node_port" "$ssh_target" 'sudo /usr/local/bin/candy-server sdwan status') || fail "node status query failed"
 	printf '%s' "$status" | jq -e '.schema_version == 1 and .registration.state == "registered" and (.runtime.state == "stopped" or .runtime.state == "running")' >/dev/null ||
@@ -161,6 +178,23 @@ ssh -p "$node_port" "$ssh_target" 'test -x /usr/local/bin/candy-server; test -x 
 	fail "node lacks a complete Runtime or ordinary Candy service is not active"
 configure_public_endpoint
 
+# Installing a newer Runtime can complete the local Cloud sync runtime for a
+# node that was already enrolled by an older release. Reuse that identity
+# after the upgrade instead of attempting a second bootstrap, which the Cloud
+# identity store must (correctly) reject.
+if printf '%s' "$existing_status" | jq -e --arg cloud "$cloud_url" \
+	'.schema_version == 1 and .registration.state == "registered" and .registration.cloud_address == $cloud' >/dev/null 2>&1; then
+	ssh -p "$node_port" "$ssh_target" 'set -eu; sudo systemctl enable --now candy-cloud-sync.timer >/dev/null; sudo systemctl start candy-cloud-sync.service; sudo systemctl is-active --quiet candy-cloud-sync.timer' ||
+		fail "registered node Cloud synchronization is not healthy after Runtime installation"
+	status=$(ssh -p "$node_port" "$ssh_target" 'sudo /usr/local/bin/candy-server sdwan status') || fail "node status query failed"
+	printf '%s' "$status" | jq -e '.schema_version == 1 and .registration.state == "registered" and (.runtime.state == "stopped" or .runtime.state == "running")' >/dev/null ||
+		fail "registered node did not return to a healthy SD-WAN state after Runtime installation"
+	ssh -p "$node_port" "$ssh_target" 'sudo systemctl is-active --quiet candy-server' || fail "ordinary Candy service stopped during Runtime installation"
+	event verification succeeded "already_registered=true runtime_upgraded=true ordinary_service=active sdwan=registered"
+	printf '%s\n' "$status"
+	exit 0
+fi
+
 remote_bootstrap=/tmp/candy-node-bootstrap.$$.json
 scp -q -P "$node_port" "$bootstrap_file" "$ssh_target:$remote_bootstrap" || fail "Bootstrap upload failed"
 ssh -p "$node_port" "$ssh_target" "set -eu; chmod 0600 '$remote_bootstrap'; test \"\$(stat -c '%a' '$remote_bootstrap')\" = 600; sudo /usr/local/bin/candy-server bootstrap '$remote_bootstrap'" ||
@@ -168,7 +202,7 @@ ssh -p "$node_port" "$ssh_target" "set -eu; chmod 0600 '$remote_bootstrap'; test
 remote_bootstrap=
 event enrollment succeeded "cloud=$cloud_url"
 
-ssh -p "$node_port" "$ssh_target" 'sudo systemctl enable --now candy-cloud-sync.timer >/dev/null; sudo systemctl start candy-cloud-sync.service; sudo systemctl is-active --quiet candy-cloud-sync.timer' ||
+ssh -p "$node_port" "$ssh_target" 'set -eu; sudo systemctl enable --now candy-cloud-sync.timer >/dev/null; sudo systemctl start candy-cloud-sync.service; sudo systemctl is-active --quiet candy-cloud-sync.timer' ||
 	fail "Cloud synchronization did not start after enrollment"
 
 status=$(ssh -p "$node_port" "$ssh_target" 'sudo /usr/local/bin/candy-server sdwan status') || fail "node status query failed"
