@@ -287,6 +287,13 @@ struct ActivationGrantManifest {
     expires_at_unix: u64,
 }
 
+#[derive(Debug)]
+struct ServerOutboundPeerActivation {
+    candidate_id: String,
+    tunnel_id: u64,
+    transport_config: PathBuf,
+}
+
 #[derive(Debug, Serialize)]
 struct NetdDeclaration {
     table_id: u32,
@@ -351,7 +358,9 @@ fn activation_required(
     discovery: &DiscoveredControlReport,
 ) -> bool {
     if server_mode {
-        !configuration.peer_projection_catalog.is_empty() || !discovery.inbound_expected.is_empty()
+        !configuration.peer_projection_catalog.is_empty()
+            || !discovery.inbound_expected.is_empty()
+            || !discovery.outbound_candidates.is_empty()
     } else {
         !discovery.outbound_candidates.is_empty()
     }
@@ -604,16 +613,19 @@ fn sync_once_with_retry(args: &Args, allow_unconditional_retry: bool) -> Result<
                 activation_required(true, &configuration, &discovery).then(|| {
                     publish_server_activation(
                         &args.state_dir,
+                        &identity_dir,
                         &core,
                         server_config,
                         &cloud,
                         &etag,
                         &digest,
                         &configuration,
+                        &identity,
                         &segment,
                         &projection,
                         &peer_projections,
                         &discovery,
+                        &resolved_grants,
                     )
                 })
             } else {
@@ -1679,7 +1691,10 @@ fn stable_tunnel_id(candidate_id: &str) -> Result<u64> {
     digest.update(b"candy/runtime-tunnel-id-v1\0");
     digest.update(candidate);
     let bytes: [u8; 8] = digest.finalize()[..8].try_into().unwrap();
-    let value = u64::from_be_bytes(bytes);
+    // TOML integers are signed 64-bit values even though the wire tunnel id is
+    // unsigned. Keep generated ids in the shared positive domain so every
+    // candidate can be represented by both client and server configurations.
+    let value = u64::from_be_bytes(bytes) & (i64::MAX as u64);
     Ok(if value == 0 { 1 } else { value })
 }
 
@@ -1793,6 +1808,7 @@ fn render_server_activation_config(
     segment_path: &Path,
     local_projection_path: &Path,
     peer_projection_paths: &[PathBuf],
+    outbound_peers: &[ServerOutboundPeerActivation],
 ) -> Result<String> {
     use std::str::FromStr;
     use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
@@ -1847,6 +1863,15 @@ fn render_server_activation_config(
         "route_signing_public_key",
         value(&configuration.route_signing_public_key),
     );
+    let mut outbound = ArrayOfTables::new();
+    for peer in outbound_peers {
+        let mut entry = Table::new();
+        entry.insert("candidate_id", value(&peer.candidate_id));
+        entry.insert("tunnel_id", value(i64::try_from(peer.tunnel_id)?));
+        entry.insert("transport_config", value(path(&peer.transport_config)?));
+        outbound.push(entry);
+    }
+    sdwan.insert("outbound_peers", Item::ArrayOfTables(outbound));
     document["sdwan"] = Item::Table(sdwan);
     Ok(document.to_string())
 }
@@ -2072,24 +2097,37 @@ fn publish_client_activation(
 #[allow(clippy::too_many_arguments)]
 fn publish_server_activation(
     state_dir: &Path,
+    identity_dir: &Path,
     core: &Path,
     ordinary_config: &Path,
     cloud: &Url,
     etag: &str,
     delivery_digest: &str,
     configuration: &RuntimeConfiguration,
+    identity: &DeviceIdentity,
     segment: &[u8],
     projection: &[u8],
     peer_projections: &[Vec<u8>],
     discovery: &DiscoveredControlReport,
+    resolved_grants: &[(grant::GrantSubject, grant::CachedGrant)],
 ) -> Result<String> {
-    if peer_projections.is_empty() || peer_projections.len() > 256 {
-        bail!("server activation requires 1..=256 authenticated peer projections")
+    if peer_projections.len() > 256 {
+        bail!("server activation allows at most 256 authenticated peer projections")
     }
+    if peer_projections.is_empty()
+        && discovery.inbound_expected.is_empty()
+        && discovery.outbound_candidates.is_empty()
+    {
+        bail!("server activation requires an inbound or outbound signed peer")
+    }
+    let grants = activation_grants(resolved_grants)?;
     let ordinary = read_bounded(ordinary_config, MAX_CONFIGURATION_BYTES)?;
     let mut activation_hash = Sha256::new();
-    activation_hash.update(b"candy/runtime-server-activation-v1\0");
-    activation_hash.update(decode_hex_32(delivery_digest)?);
+    activation_hash.update(b"candy/runtime-server-activation-v2\0");
+    activation_hash.update(decode_hex_32(&activation_digest(
+        delivery_digest,
+        &grants,
+    )?)?);
     activation_hash.update(Sha256::digest(&ordinary));
     let activation_id = format!("{:x}", activation_hash.finalize());
     let activations = state_dir.join("activations");
@@ -2103,6 +2141,44 @@ fn publish_server_activation(
             let staged_local = staging.join("site.projection");
             atomic_bytes(&staged_segment, segment, 0o600)?;
             atomic_bytes(&staged_local, projection, 0o600)?;
+
+            let key_pem = String::from_utf8(read_bounded(
+                &identity_dir.join("operational-key.pem"),
+                MAX_PROFILE_BYTES,
+            )?)
+            .context("operational private key PEM is not UTF-8")?;
+            let signing_key = SigningKey::from_pkcs8_pem(&key_pem)
+                .context("decode operational private key for Server SD-WAN activation")?;
+            let staged_signing_key = staging.join("device-signing-key.raw");
+            atomic_bytes(&staged_signing_key, &signing_key.to_bytes(), 0o600)?;
+
+            let staged_grants = staging.join("grants");
+            let staged_transports = staging.join("transports");
+            ensure_private_directory(&staged_grants)?;
+            ensure_private_directory(&staged_transports)?;
+            let mut staged_grant_paths = BTreeMap::new();
+            for (manifest, raw) in &grants {
+                let path = staged_grants.join(format!("{}.grant", manifest.node_pool_id.simple()));
+                atomic_bytes(&path, raw, 0o600)?;
+                staged_grant_paths.insert(manifest.node_pool_id, path);
+            }
+            let mut staged_outbound = Vec::with_capacity(discovery.outbound_candidates.len());
+            for candidate in &discovery.outbound_candidates {
+                let pool = parse_hex_uuid(&candidate.node_pool_id, "node pool id")?;
+                let grant_path = staged_grant_paths
+                    .get(&pool)
+                    .context("Server outbound candidate has no verified Grant")?;
+                let transport_path =
+                    staged_transports.join(format!("{}.toml", candidate.candidate_id));
+                let transport =
+                    render_transport_config(candidate, identity, grant_path, &staged_signing_key)?;
+                atomic_bytes(&transport_path, transport.as_bytes(), 0o600)?;
+                staged_outbound.push(ServerOutboundPeerActivation {
+                    candidate_id: candidate.candidate_id.clone(),
+                    tunnel_id: stable_tunnel_id(&candidate.candidate_id)?,
+                    transport_config: transport_path,
+                });
+            }
             let staged_peers = staging.join("peer-projections");
             ensure_private_directory(&staged_peers)?;
             let mut staged_peer_paths = Vec::with_capacity(peer_projections.len());
@@ -2128,6 +2204,7 @@ fn publish_server_activation(
                 &staged_segment,
                 &staged_local,
                 &staged_peer_paths,
+                &staged_outbound,
             )?;
             atomic_bytes(&core_config_path, staged_config.as_bytes(), 0o600)?;
             let output = ProcessCommand::new(core)
@@ -2145,12 +2222,37 @@ fn publish_server_activation(
                         .collect::<String>()
                 )
             }
+            let final_signing_key = generation.join("device-signing-key.raw");
+            let final_grants = generation.join("grants");
+            let final_transports = generation.join("transports");
+            let mut final_outbound = Vec::with_capacity(discovery.outbound_candidates.len());
+            for candidate in &discovery.outbound_candidates {
+                let pool = parse_hex_uuid(&candidate.node_pool_id, "node pool id")?;
+                let final_grant_path = final_grants.join(format!("{}.grant", pool.simple()));
+                let staged_transport_path =
+                    staged_transports.join(format!("{}.toml", candidate.candidate_id));
+                let final_transport_path =
+                    final_transports.join(format!("{}.toml", candidate.candidate_id));
+                let transport = render_transport_config(
+                    candidate,
+                    identity,
+                    &final_grant_path,
+                    &final_signing_key,
+                )?;
+                atomic_bytes(&staged_transport_path, transport.as_bytes(), 0o600)?;
+                final_outbound.push(ServerOutboundPeerActivation {
+                    candidate_id: candidate.candidate_id.clone(),
+                    tunnel_id: stable_tunnel_id(&candidate.candidate_id)?,
+                    transport_config: final_transport_path,
+                });
+            }
             let final_config = render_server_activation_config(
                 ordinary_config,
                 configuration,
                 &generation.join("segment.snapshot"),
                 &generation.join("site.projection"),
                 &final_peer_paths,
+                &final_outbound,
             )?;
             atomic_bytes(&core_config_path, final_config.as_bytes(), 0o600)?;
             atomic_json(
@@ -2158,6 +2260,21 @@ fn publish_server_activation(
                 &build_netd_declaration(discovery, cloud)?,
                 0o600,
             )?;
+            atomic_json(
+                &staging.join("grants-v1.json"),
+                &grants.iter().map(|value| &value.0).collect::<Vec<_>>(),
+                0o600,
+            )?;
+            let refresh_after = grants
+                .iter()
+                .map(|value| value.0.refresh_after_unix)
+                .min()
+                .unwrap_or(0);
+            let expires_at = grants
+                .iter()
+                .map(|value| value.0.expires_at_unix)
+                .min()
+                .unwrap_or(0);
             atomic_json(
                 &staging.join("activation-v1.json"),
                 &ActivationDescriptor {
@@ -2172,8 +2289,8 @@ fn publish_server_activation(
                     core_role: "server".to_owned(),
                     core_config: "core.toml".to_owned(),
                     netd_declaration: "declaration.json".to_owned(),
-                    grant_refresh_after_unix: 0,
-                    grant_expires_at_unix: 0,
+                    grant_refresh_after_unix: refresh_after,
+                    grant_expires_at_unix: expires_at,
                 },
                 0o600,
             )?;
@@ -2854,10 +2971,32 @@ mod tests {
     }
 
     #[test]
-    fn server_activation_is_driven_by_inbound_catalog_not_outbound_candidates() {
+    fn server_activation_is_driven_by_either_inbound_or_outbound_candidates() {
         let mut configuration = configuration();
-        let discovery = discovery();
+        let mut discovery = discovery();
         assert!(!activation_required(true, &configuration, &discovery));
+        discovery.outbound_candidates.push(DiscoveredCandidate {
+            candidate_id: "13".repeat(16),
+            peer_site_id: "14".repeat(16),
+            peer_attachment_id: "12".repeat(16),
+            kind: "direct".into(),
+            priority: 1,
+            endpoint: "198.51.100.2:443".into(),
+            node_pool_id: "15".repeat(16),
+            transport_node_id: "16".repeat(16),
+            transport_node_key_id: "17".repeat(16),
+            server_name: "peer.example".into(),
+            server_cert_sha256: "18".repeat(32),
+            transport_preset: "current".into(),
+            authorization: CorePolicyRef {
+                policy_id: "09".repeat(16),
+                generation: 5,
+                content_hash: "11".repeat(32),
+            },
+        });
+        assert!(activation_required(true, &configuration, &discovery));
+        assert!(activation_required(false, &configuration, &discovery));
+        discovery.outbound_candidates.clear();
         configuration.peer_projection_catalog = vec![RuntimePeerProjection {
             projection_id: Uuid::from_bytes([10; 16]),
             projection_generation: 5,
@@ -2890,6 +3029,11 @@ mod tests {
             Path::new("/secure/segment.snapshot"),
             Path::new("/secure/local.projection"),
             &[PathBuf::from("/secure/peer.projection")],
+            &[ServerOutboundPeerActivation {
+                candidate_id: "13".repeat(16),
+                tunnel_id: 42,
+                transport_config: PathBuf::from("/secure/transport.toml"),
+            }],
         )
         .unwrap();
         let document = rendered.parse::<toml_edit::DocumentMut>().unwrap();
@@ -2908,6 +3052,14 @@ mod tests {
             document["sdwan"]["peer_projections"][0].as_str(),
             Some("/secure/peer.projection")
         );
+        assert_eq!(
+            document["sdwan"]["outbound_peers"][0]["candidate_id"].as_str(),
+            Some("13131313131313131313131313131313")
+        );
+        assert_eq!(
+            document["sdwan"]["outbound_peers"][0]["tunnel_id"].as_integer(),
+            Some(42)
+        );
     }
 
     #[test]
@@ -2925,6 +3077,7 @@ mod tests {
             Path::new("segment"),
             Path::new("local"),
             &[PathBuf::from("peer")],
+            &[],
         )
         .is_err());
     }
