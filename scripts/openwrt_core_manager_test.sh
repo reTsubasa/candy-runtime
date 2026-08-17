@@ -85,7 +85,7 @@ chmod +x "$bin/runtime-health-check"
 cat > "$bin/candy-service" <<'EOF'
 #!/bin/sh
 case "$1" in
-	status) printf '%s\n' running ;;
+	status) [ ! -f "$FAKE_SERVICE_STOPPED" ] && printf '%s\n' running ;;
 	restart)
 		printf '%s\n' restart >> "$FAKE_SERVICE_LOG"
 		if [ -f "$FAKE_SERVICE_FAIL_ONCE" ]; then
@@ -132,6 +132,7 @@ export CANDY_CORE_OPERATION_FILE="$tmp/core-operation.json"
 export CANDY_CORE_ALLOW_FILE_URL=1
 export FAKE_SERVICE_LOG="$tmp/service.log"
 export FAKE_SERVICE_FAIL_ONCE="$tmp/service-fail-once"
+export FAKE_SERVICE_STOPPED="$tmp/service-stopped"
 export FAKE_FETCH_LOG="$tmp/fetch.log"
 
 mkdir "$CANDY_CORE_LOCK_DIR"
@@ -249,6 +250,21 @@ if "$manager" remove 0.4.1 >/dev/null 2>&1; then
 	exit 1
 fi
 grep -q '"state":"error"' "$CANDY_CORE_OPERATION_FILE"
+grep -q '"service_running":true' <<EOF
+$("$manager" status)
+EOF
+touch "$FAKE_SERVICE_STOPPED"
+"$manager" remove 0.4.1 >/dev/null
+[ ! -e "$cores/0.4.1" ]
+[ ! -e "$cores/current" ]
+[ "$(readlink "$cores/previous")" = 0.4.2 ]
+grep -q '"service_running":false' <<EOF
+$("$manager" status)
+EOF
+if "$manager" remove 0.4.2 >/dev/null 2>&1; then
+	echo "rollback Core was removed while the service was stopped" >&2
+	exit 1
+fi
 
 [ "$(wc -l < "$FAKE_SERVICE_LOG")" -ge 3 ]
 

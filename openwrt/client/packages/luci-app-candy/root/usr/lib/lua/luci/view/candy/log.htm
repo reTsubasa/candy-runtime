@@ -45,6 +45,7 @@ end
 
 local service_log = read_log_history("/tmp/candy.log")
 local traffic_log = read_log_history("/tmp/candy-traffic.log")
+local sdwan_lifecycle_log = read_log_tail("/var/lib/candy/sdwan/events-v1.log")
 local _, raw_system_log = process.capture({ "/sbin/logread" })
 
 local function candy_system_log(text)
@@ -99,6 +100,9 @@ local function service_text()
 	parts[#parts + 1] = empty_note(newest_first(service_log), translate("No service log for this boot yet."))
 	if system_log and system_log:gsub("%s+", "") ~= "" then
 		parts[#parts + 1] = "\n== " .. translate("System service events") .. " ==\n" .. newest_first(system_log)
+	end
+	if sdwan_lifecycle_log:gsub("%s+", "") ~= "" then
+		parts[#parts + 1] = "\n== " .. translate("SD-WAN lifecycle") .. " ==\n" .. newest_first(sdwan_lifecycle_log)
 	end
 	return table.concat(parts, "\n")
 end

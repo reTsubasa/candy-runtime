@@ -231,6 +231,7 @@ const data = { core_candidates: candidates, core_current: "0.3.5", core: { insta
 context.candyUpdateRenderCore(data, false);
 assert.equal(elements["candy-update-core"].children.length, 5, "only five server candidates may be rendered");
 assert.deepEqual(elements["candy-update-core-select"].options.map((option) => option.value), ["v0_3_9", "v0_3_8", "v0_3_3"]);
+assert.deepEqual(elements["candy-update-core"].children.map((row) => row.children[3].children[0].children.map((state) => state.textContent)), [["Latest"], [], [], ["Installed"], []], "Core rows may only expose latest, current, or installed-inactive state tags");
 assert.equal(elements["candy-update-core"].children[3].children[4].children.length, 1, "installed inactive Core must link to review");
 elements["candy-update-core-select"].value = "v0_3_8";
 context.candyUpdateRenderCore(data, false);

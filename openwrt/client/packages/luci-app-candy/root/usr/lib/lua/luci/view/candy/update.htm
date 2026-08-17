@@ -120,9 +120,6 @@ var candyUpdateLabels = {
 	inactive: <%=js_string(i18n.translate("Inactive"))%>,
 	latest: <%=js_string(i18n.translate("Latest"))%>,
 	installed: <%=js_string(i18n.translate("Installed"))%>,
-	incompatible: <%=js_string(i18n.translate("Incompatible"))%>,
-	notInstallable: <%=js_string(i18n.translate("Not installable"))%>,
-	rollbackAvailable: <%=js_string(i18n.translate("Rollback available"))%>,
 	noCompatibleCore: <%=js_string(i18n.translate("No compatible Core is available"))%>,
 	uploadingCore: <%=js_string(i18n.translate("Uploading Core bundle"))%>,
 	uploadAccepted: <%=js_string(i18n.translate("Upload complete; validating Core"))%>,
@@ -268,11 +265,8 @@ function candyUpdateRenderCore(data, busy) {
 		var installed = candidate.installed === true ? { active: candidate.active === true } : installedByVersion[String(candidate.version)];
 		var active = candidate.active === true || String(candidate.version || "") === String(data.core_current || "") || !!(installed && installed.active);
 		var compatible = candidate.compatible !== false, installable = candidate.installable !== false;
-		// Core bundles are installed inactive, so a compatible older release is a
-		// valid manual rollback candidate as well as a newer update.
 		var versionDelta = data.core_current ? candyUpdateCompare(candidate.version, data.core_current) : 1;
 		var eligible = compatible && installable && versionDelta !== 0;
-		var rollback = eligible && versionDelta < 0;
 		var latest = candidate.latest === true || (catalog.core && key && key === catalog.core.latest);
 		var row = document.createElement("tr"), states = document.createElement("div"), actionCell, review;
 		row.className = "tr";
@@ -283,10 +277,6 @@ function candyUpdateRenderCore(data, busy) {
 		if (latest) states.appendChild(candyUpdateState(candyUpdateLabels.latest, "available"));
 		if (active) states.appendChild(candyUpdateState(candyUpdateLabels.current, "current"));
 		else if (installed) states.appendChild(candyUpdateState(candyUpdateLabels.installed, "current"));
-		else if (rollback) states.appendChild(candyUpdateState(candyUpdateLabels.rollbackAvailable, "warning"));
-		else if (eligible) states.appendChild(candyUpdateState(candyUpdateLabels.available, "available"));
-		if (!compatible) states.appendChild(candyUpdateState(candyUpdateLabels.incompatible, "warning"));
-		else if (!eligible && !installed && !active) states.appendChild(candyUpdateState(candyUpdateLabels.notInstallable, "warning"));
 		var stateCell = document.createElement("td"); stateCell.className = "td"; stateCell.appendChild(states); row.appendChild(stateCell);
 		actionCell = document.createElement("td"); actionCell.className = "td candy-update-toolbar";
 		if (installed && !active) { review = candyUpdateLink(candyUpdateCorePageUrl, candyUpdateLabels.reviewCore); actionCell.appendChild(review); }

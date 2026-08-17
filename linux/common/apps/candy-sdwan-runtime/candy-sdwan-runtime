@@ -10,6 +10,7 @@ durable_status_file=${CANDY_SDWAN_STATUS_CACHE:-$state_dir/status-v1.json}
 published_status_file=${CANDY_SDWAN_STATUS_FILE:-$run_dir/sdwan-status.json}
 reconcile_marker=${CANDY_SDWAN_RECONCILE_MARKER:-$state_dir/reconcile-target-v1}
 activation_receipt=${CANDY_SDWAN_ACTIVATION_READY:-$state_dir/activation-ready-v1.json}
+event_log=${CANDY_SDWAN_EVENT_LOG:-$state_dir/events-v1.log}
 max_bootstrap_bytes=${CANDY_SDWAN_MAX_BOOTSTRAP_BYTES:-16384}
 max_cloud_bytes=${CANDY_SDWAN_MAX_CLOUD_BYTES:-2048}
 if [ -n "${CANDY_CLOUD_ENROLL_CLIENT:-}" ]; then
@@ -58,6 +59,23 @@ json_string() {
 	}' <<EOF
 $1
 EOF
+}
+
+audit_event() {
+	local audit_action=$1 audit_outcome=$2 audit_detail=$3 updated_at temporary
+	updated_at=$(date +%s 2>/dev/null || printf 0)
+	if [ -f "$event_log" ] && [ ! -L "$event_log" ] && [ "$(wc -c <"$event_log" | tr -d ' ')" -gt 131072 ]; then
+		temporary=$(mktemp "$state_dir/.candy-sdwan-events.XXXXXX") || return 1
+		tail -n 128 "$event_log" >"$temporary" || { rm -f "$temporary"; return 1; }
+		chmod 0600 "$temporary" || { rm -f "$temporary"; return 1; }
+		mv -f "$temporary" "$event_log" || { rm -f "$temporary"; return 1; }
+	fi
+	printf '{"schema_version":1,"updated_at":%s,"action":"%s","outcome":"%s","detail":"%s"}\n' \
+		"$updated_at" "$(json_string "$audit_action")" "$(json_string "$audit_outcome")" "$(json_string "$audit_detail")" >>"$event_log" || return 1
+	chmod 0600 "$event_log" || return 1
+	if [ "${CANDY_SDWAN_TEST_MODE:-0}" != 1 ] && command -v logger >/dev/null 2>&1; then
+		logger -t candy -- "level=info event=sdwan_lifecycle action=$audit_action outcome=$audit_outcome detail=$audit_detail"
+	fi
 }
 
 ensure_directories() {
@@ -379,6 +397,7 @@ case "$action" in
 		bootstrap_file=$1
 		cloud=$(sed -n 's/^.*"cloud_address"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*$/\1/p' "$bootstrap_file")
 		validate_cloud_address "$cloud"
+		audit_event join started "Cloud enrollment started"
 		write_config "$cloud" join-pending
 		write_status join-pending stopped ""
 		delegate_state
@@ -395,6 +414,7 @@ case "$action" in
 			write_config "$cloud" registered
 			write_status registered stopped ""
 			delegate_state
+			audit_event join completed "Cloud enrollment completed"
 			if [ -x /etc/init.d/candy-cloud-sync ]; then
 				/etc/init.d/candy-cloud-sync restart >/dev/null 2>&1 || true
 			elif command -v systemctl >/dev/null 2>&1; then
@@ -407,6 +427,7 @@ case "$action" in
 		else
 			write_status join-pending stopped "Cloud bootstrap failed; retry candy bootstrap with the same file to resume the same installation"
 			delegate_state
+			audit_event join failed "Cloud enrollment failed"
 			rm -f "$output_file"
 			trap - EXIT HUP INT TERM
 			fail "Cloud bootstrap failed; existing network state was not changed"
@@ -417,12 +438,14 @@ case "$action" in
 		ensure_directories
 		state=$(current_registration_state)
 		[ "$state" != unregistered ] || fail "this node has not joined a Cloud"
+		audit_event reconnect requested "SD-WAN reconnect requested"
 		write_status "$state" reconnecting ""
 		delegate_state
 		;;
 	leave)
 		require_root
 		ensure_directories
+		audit_event leave started "Local Cloud identity removal started"
 		if [ -x /etc/init.d/candy-cloud-sync ]; then
 			/etc/init.d/candy-cloud-sync stop >/dev/null 2>&1 || true
 		elif command -v systemctl >/dev/null 2>&1; then
@@ -438,6 +461,7 @@ case "$action" in
 			find "$state_dir/generations" -mindepth 1 -delete
 		fi
 		write_status unregistered stopped ""
+		audit_event leave completed "Local Cloud identity removed"
 		delegate_state
 		;;
 	fail-open)

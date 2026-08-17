@@ -68,6 +68,8 @@ var candyCoreLabels = {
 	no: <%=js_string(i18n.translate("No"))%>,
 	activate: <%=js_string(i18n.translate("Activate"))%>,
 	remove: <%=js_string(i18n.translate("Remove"))%>,
+	removeConfirm: <%=js_string(i18n.translate("Remove Core %s? This cannot be undone."))%>,
+	removeCurrentConfirm: <%=js_string(i18n.translate("Remove the current Core %s? Candy cannot start until another Core is installed and activated."))%>,
 	none: <%=js_string(i18n.translate("None"))%>
 };
 
@@ -80,7 +82,7 @@ function candyCoreSetText(id, value) {
 	if (node) node.textContent = candyCoreText(value);
 }
 
-function candyCoreActionForm(url, version, label, className) {
+function candyCoreActionForm(url, version, label, className, confirmation) {
 	var form = document.createElement("form");
 	var input = document.createElement("input");
 	var button = document.createElement("button");
@@ -96,6 +98,7 @@ function candyCoreActionForm(url, version, label, className) {
 	button.type = "submit";
 	button.className = className;
 	button.textContent = label;
+	if (confirmation) form.onsubmit = function() { return window.confirm(confirmation.replace("%s", version)); };
 	form.appendChild(input);
 	form.appendChild(token);
 	form.appendChild(button);
@@ -146,7 +149,9 @@ function candyCoreRender(data) {
 		cell = document.createElement("td"); cell.className = "td"; cell.textContent = item.managed ? candyCoreLabels.yes : candyCoreLabels.no; row.appendChild(cell);
 		actions = document.createElement("td"); actions.className = "td candy-core-actions";
 		if (!busy && item.managed && !item.active) actions.appendChild(candyCoreActionForm(candyCoreActivateUrl, item.version, candyCoreLabels.activate, "cbi-button cbi-button-apply"));
-		if (!busy && !item.active && !item.rollback) actions.appendChild(candyCoreActionForm(candyCoreRemoveUrl, item.version, candyCoreLabels.remove, "cbi-button cbi-button-reset"));
+		if (!busy && !item.rollback && (!item.active || data.service_running === false)) {
+			actions.appendChild(candyCoreActionForm(candyCoreRemoveUrl, item.version, candyCoreLabels.remove, "cbi-button cbi-button-negative", item.active ? candyCoreLabels.removeCurrentConfirm : candyCoreLabels.removeConfirm));
+		}
 		row.appendChild(actions); body.appendChild(row);
 	});
 }

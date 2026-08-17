@@ -60,6 +60,7 @@ run_runtime() {
 
 run_runtime bootstrap "$bootstrap"
 [ -f "$state/config-v1.json" ] || fail "join did not atomically create config cache"
+grep -F '"action":"join","outcome":"completed"' "$state/events-v1.log" >/dev/null || fail "completed enrollment was not durably audited"
 [ "$(grep -o 'registered' "$state/config-v1.json" | head -1)" = registered ] || fail "join state is not registered"
 if grep -F 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' "$state/config-v1.json" "$state/status-v1.json" "$run/sdwan-status.json" "$state/identity"/* >/dev/null; then
 	fail "activation credential leaked into Runtime cache"
@@ -103,9 +104,12 @@ run_runtime leave
 [ ! -e "$state/sync-state-v1.json" ] || fail "leave retained Cloud synchronization state"
 [ ! -e "$state/cloud-sync-status-v1.json" ] || fail "leave retained Cloud synchronization status"
 [ ! -e "$state/configuration" ] || fail "leave retained active Cloud configuration pointer"
+[ -f "$state/events-v1.log" ] || fail "leave removed the durable lifecycle audit"
+grep -F '"action":"leave","outcome":"completed"' "$state/events-v1.log" >/dev/null || fail "local identity removal was not durably audited"
 [ -z "$(find "$state/generations" -mindepth 1 -print -quit)" ] || fail "leave retained immutable Cloud generations"
 FAKE_ENROLL_FAIL=1 run_runtime bootstrap "$bootstrap" >/dev/null 2>&1 &&
 	fail "failed Cloud enrollment unexpectedly succeeded"
+grep -F '"action":"join","outcome":"failed"' "$state/events-v1.log" >/dev/null || fail "failed enrollment was not durably audited"
 grep -F '"state":"join-pending"' "$run/sdwan-status.json" >/dev/null || fail "failed enrollment did not remain diagnosable"
 grep -F '"state":"stopped"' "$run/sdwan-status.json" >/dev/null || fail "failed enrollment changed the network runtime state"
 

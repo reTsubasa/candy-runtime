@@ -48,6 +48,7 @@ end
 local registration = status and type(status.registration) == "table" and status.registration or {}
 local runtime = status and type(status.runtime) == "table" and status.runtime or {}
 local registration_state = registration.state == "registered" and "registered" or (registration.state == "join-pending" and "join-pending" or "unregistered")
+if registration_state == "unregistered" and next(identity) ~= nil then registration_state = "registered" end
 local function label(value)
 	if value == nil or value == "" then return translate("Unavailable") end
 	return xml.pcdata(tostring(value))
@@ -84,7 +85,7 @@ local function short_id(value)
 	if #value <= 12 then return value end
 	return value:sub(1, 8)
 end
-local cloud_address = registration.cloud_address or ""
+local cloud_address = registration.cloud_address or identity.cloud_address or ""
 local cloud_name = cloud_address:gsub("^https://", ""):gsub("/.*$", "")
 local organization_id = safe_identity_value("organization_id", 64)
 local tenant_id = safe_identity_value("tenant_id", 64)
@@ -97,6 +98,11 @@ tenant_id = type(profile.tenant_id) == "string" and profile.tenant_id or tenant_
 device_id = type(profile.device_id) == "string" and profile.device_id or device_id
 local site_value = type(profile.site_name) == "string" and profile.site_name or object_value(status and status.site, "name")
 local segment_value = type(profile.segment_name) == "string" and profile.segment_name or object_value(status and status.segment, "name")
+local peers = type(status and status.peers) == "table" and status.peers or {}
+local path = type(status and status.path) == "table" and status.path or nil
+local tun = type(status and status.tun) == "table" and status.tun or {}
+local egress = type(status and status.egress) == "table" and status.egress or {}
+local dns = type(status and status.dns) == "table" and status.dns or {}
 local network_ready = registration_state == "registered" and site_value ~= nil and site_value ~= "" and segment_value ~= nil and segment_value ~= ""
 local runtime_active = runtime.state == "running" and tun.state ~= "unavailable"
 local sync_failed = sync_status.state == "error"
@@ -104,11 +110,6 @@ local profile_state = registration_state ~= "registered" and "disconnected" or (
 local profile_state_label = profile_state == "active" and translate("Active") or (profile_state == "error" and translate("Configuration could not be applied") or (profile_state == "applying" and translate("Applying network configuration") or (profile_state == "waiting" and translate("Waiting for network configuration") or translate("Not connected"))))
 local scope_kind = tenant_name or (tenant_id and translate("Tenant")) or organization_name or (organization_id and translate("Organization")) or translate("Cloud account")
 local scope_id = short_id(tenant_id or organization_id)
-local peers = type(status and status.peers) == "table" and status.peers or {}
-local path = type(status and status.path) == "table" and status.path or nil
-local tun = type(status and status.tun) == "table" and status.tun or {}
-local egress = type(status and status.egress) == "table" and status.egress or {}
-local dns = type(status and status.dns) == "table" and status.dns or {}
 local result = luci.http.formvalue("result") or ""
 %>
 

@@ -855,6 +855,9 @@ msgstr "本次启动暂无服务日志。"
 msgid "System service events"
 msgstr "系统服务事件"
 
+msgid "SD-WAN lifecycle"
+msgstr "SD-WAN 生命周期"
+
 msgid "No traffic events for this boot yet. Counters appear after LAN traffic matches Candy firewall rules."
 msgstr "本次启动暂无流量事件。LAN 流量命中 Candy 防火墙规则后会显示计数。"
 
@@ -1435,7 +1438,13 @@ msgid "Runtime updates"
 msgstr "Runtime 更新"
 
 msgid "Installed"
-msgstr "已安装"
+msgstr "已安装未启用"
+
+msgid "Remove Core %s? This cannot be undone."
+msgstr "删除 Core %s？此操作无法撤销。"
+
+msgid "Remove the current Core %s? Candy cannot start until another Core is installed and activated."
+msgstr "删除当前 Core %s？安装并启用另一个 Core 前，Candy 将无法启动。"
 
 msgid "Available"
 msgstr "可用版本"

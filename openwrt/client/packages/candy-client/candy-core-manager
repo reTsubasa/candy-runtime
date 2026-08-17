@@ -511,14 +511,21 @@ rollback_core() {
 }
 
 remove_core() {
-	local version="$1" directory current previous
+	local version="$1" directory current previous removing_current=0
 	directory=$(version_path "$version") || fail "invalid Core version"
 	current=$(link_version "$CURRENT_LINK")
 	previous=$(link_version "$PREVIOUS_LINK")
-	[ "$version" != "$current" ] || fail "cannot remove the active Core"
 	[ "$version" != "$previous" ] || fail "cannot remove the rollback Core"
 	[ -d "$directory" ] || fail "Core $version is not installed"
-	rm -rf "$directory"
+	if [ "$version" = "$current" ]; then
+		service_running && fail "stop Candy before removing the current Core"
+		removing_current=1
+		restore_link "$CURRENT_LINK" "" || fail "cannot detach the current Core"
+	fi
+	if ! rm -rf "$directory" || [ -e "$directory" ]; then
+		[ "$removing_current" = 0 ] || restore_link "$CURRENT_LINK" "$current" || true
+		fail "cannot remove Core $version"
+	fi
 	log_event info core_removed install removed "Removed Core $version"
 	printf '%s\n' "removed Core $version"
 }
@@ -527,7 +534,8 @@ status_json() {
 	local current previous manifest first=1 directory version
 	current=$(link_version "$CURRENT_LINK")
 	previous=$(link_version "$PREVIOUS_LINK")
-	printf '{"schema_version":1,"manager_api_version":1,"required_core_process_api_version":%s,"required_core_api_version":%s' "$EXPECTED_PROCESS_API" "$EXPECTED_CORE_API"
+	printf '{"schema_version":1,"manager_api_version":1,"required_core_process_api_version":%s,"required_core_api_version":%s,"service_running":' "$EXPECTED_PROCESS_API" "$EXPECTED_CORE_API"
+	service_running && printf true || printf false
 	if [ -n "$current" ]; then printf ',"current_version":"%s"' "$current"; else printf ',"current_version":null'; fi
 	if [ -n "$previous" ]; then printf ',"previous_version":"%s"' "$previous"; else printf ',"previous_version":null'; fi
 	manifest="$CORE_ROOT/$current/manifest.json"
