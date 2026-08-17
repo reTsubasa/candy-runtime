@@ -34,6 +34,54 @@ The Linux Runtime package contains only the launcher, systemd unit, installer,
 and example configuration. Core artifacts are installed and activated by the
 independent Core manager.
 
+## Candy Cloud and the public SD-WAN endpoint
+
+A Linux server can run its ordinary Candy service and participate in SD-WAN at
+the same time. Cloud enrollment alone does not advertise a guessed address.
+The inbound QUIC/UDP endpoint must be supplied explicitly as a numeric IP and
+the port already configured on a Core listener:
+
+```text
+install/install-candy-server.sh \
+  --artifact-file /path/to/candy-server-x86_64 \
+  --listen 0.0.0.0:18443 \
+  --public-endpoint 203.0.113.10:18443
+```
+
+IPv6 uses the canonical bracketed form, for example
+`[2001:db8::10]:18443`. The installer writes only this value to
+`/etc/candy/cloud-sync.env`, owned by `root:candy` with mode `0640`. An upgrade
+without `--public-endpoint` preserves the existing file; an explicit value
+updates it atomically. Installer rollback restores the previous value.
+
+`candy-cloud-sync.service` reads that environment file. When an enrolled
+server has no endpoint, synchronization exits successfully without reading an
+identity, publishing transport data, or activating an SD-WAN configuration.
+It records the actionable state below instead of silently skipping work:
+
+```json
+{
+  "state": "waiting_for_public_endpoint",
+  "error_code": "public_endpoint_required"
+}
+```
+
+This waiting state does not stop or modify the ordinary Candy service. After a
+valid endpoint is installed, start `candy-cloud-sync.service` or wait for its
+timer; Cloud then validates the endpoint port against Core's real listeners
+before accepting the transport identity.
+
+For an operator-driven join over SSH, use the repository helper. It supports
+both x86-64 and ARM64 servers and never accepts an SSH password:
+
+```text
+scripts/join-linux-server-node.sh \
+  --bootstrap-file ./candy-node-bootstrap.json \
+  --node 203.0.113.10 \
+  --user operator \
+  --public-endpoint 203.0.113.10:18443
+```
+
 ## Installing a Core bundle
 
 The packaged `candy-core-manager` consumes the same signed bundle format as

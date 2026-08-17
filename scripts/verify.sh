@@ -16,6 +16,8 @@ linux/server/tests/candy_server_launcher_test.sh
 linux/server/tests/candy_server_product_command_test.sh
 linux/server/tests/candy_core_manager_test.sh
 linux/server/tests/candy_server_health_check_test.sh
+linux/server/tests/install_candy_server_endpoint_test.sh
+linux/server/tests/join_linux_server_node_test.sh
 CANDY_CORE_BINARY="$docker_e2e_core_binary" linux/server/tests/candy_core_docker_e2e.sh
 packaging/linux/server_package_test.sh
 sh -n openwrt/client/packages/candy-client/candy.init

@@ -57,6 +57,7 @@ edge_stage=$dist/client/x86_64
 [ -x "$stage/usr/local/bin/candy-core-manager" ] || fail "Core bundle manager was not staged"
 [ -x "$stage/usr/local/libexec/candy-server-health-check" ] || fail "server health check was not staged"
 [ -f "$stage/etc/candy/server.toml.example" ] || fail "server example config was not staged"
+[ -f "$stage/etc/candy/cloud-sync.env.example" ] || fail "server Cloud sync endpoint example was not staged"
 [ -f "$stage/systemd/candy-server.service" ] || fail "systemd unit was not staged"
 [ -f "$stage/systemd/candy-netd.service" ] || fail "server netd unit was not staged"
 [ -f "$stage/systemd/candy-cloud-sync.service" ] || fail "server Cloud sync unit was not staged"
@@ -122,6 +123,10 @@ grep -F -- '--allowed-user candy --allowed-group candy' "$stage/systemd/candy-ne
 	fail "server netd socket is not bound to the Candy server identity"
 grep -F -- '--server-config /etc/candy/server.toml' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||
 	fail "server Cloud sync does not request a server activation"
+grep -F 'EnvironmentFile=-/etc/candy/cloud-sync.env' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||
+	fail "server Cloud sync does not load the persisted public endpoint"
+grep -F 'CANDY_PUBLIC_ENDPOINT=203.0.113.10:8443' "$stage/etc/candy/cloud-sync.env.example" >/dev/null ||
+	fail "server package has no valid public endpoint example"
 grep -F 'ExecStartPost=+/usr/local/libexec/candy-sdwan-runtime reconcile candy-server.service' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||
 	fail "server Cloud sync does not reconcile candidate lifecycle changes"
 grep -F 'Environment=CANDY_SDWAN_SERVICE_USER=candy' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||
@@ -133,6 +138,10 @@ if grep -Eq 'Requires=candy-netd|BindsTo=candy-netd|candy-sdwan\.service' "$stag
 fi
 grep -F 'CONGESTION_TEST_BYTES=52428800' "$stage/install/install-candy-server.sh" >/dev/null ||
 	fail "server installer does not provision the 50 MiB congestion test object"
+grep -F -- '--public-endpoint' "$stage/install/install-candy-server.sh" >/dev/null ||
+	fail "server installer does not accept an explicit public endpoint"
+grep -F "CANDY_PUBLIC_ENDPOINT=%s" "$stage/install/install-candy-server.sh" >/dev/null ||
+	fail "server installer does not persist the public endpoint"
 grep -F 'Z /var/lib/candy/sdwan - candy candy -' "$stage/systemd/candy.tmpfiles" >/dev/null ||
 	fail "server package does not migrate existing SD-WAN state to the candy service identity"
 grep -F 'd /var/lib/candy 0711 root root -' "$stage/systemd/candy.tmpfiles" >/dev/null ||

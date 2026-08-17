@@ -67,6 +67,8 @@ install -m 0755 "$core_manager" "$stage/usr/local/bin/candy-core-manager"
 install -m 0755 "$health_check" "$stage/usr/local/libexec/candy-server-health-check"
 install -m 0644 "$repo_root/linux/server/docker/server.example.toml" \
 	"$stage/etc/candy/server.toml.example"
+install -m 0640 "$repo_root/linux/server/packaging/cloud-sync.env.example" \
+	"$stage/etc/candy/cloud-sync.env.example"
 install -m 0644 "$repo_root/linux/server/packaging/candy-server.service" \
 	"$stage/systemd/candy-server.service"
 install -m 0644 "$repo_root/linux/server/packaging/candy-netd.service" \

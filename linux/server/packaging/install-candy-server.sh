@@ -6,11 +6,13 @@ CONFIG_DIR=/etc/candy
 STATE_DIR=/var/lib/candy
 BACKUP_DIR=/var/backups/candy
 SERVICE_PATH=/etc/systemd/system/candy-server.service
+CLOUD_SYNC_ENV=$CONFIG_DIR/cloud-sync.env
 SERVICE_NAME=candy-server
 SERVICE_USER=candy
 LISTEN_ADDR=0.0.0.0:8443
 TLS_NAME=candy-server
 PUBLIC_HOST=
+PUBLIC_ENDPOINT=
 ARTIFACT_FILE=
 ARTIFACT_URL=
 VERSION=latest
@@ -35,6 +37,7 @@ Options:
   --listen ADDR          Server listen address, default 0.0.0.0:8443.
   --tls-name NAME        Self-signed certificate name, default candy-server.
   --public-host HOST     Override the auto-detected public server address.
+  --public-endpoint ADDR Explicit SD-WAN endpoint advertised to Cloud (HOST:PORT).
   --force-config         Regenerate /etc/candy/server.toml.
   --dry-run              Print planned actions without changing the host.
   -h, --help             Show this help.
@@ -115,6 +118,11 @@ while [ "$#" -gt 0 ]; do
 			[ "$#" -gt 0 ] || die "--public-host requires a host or IP address"
 			PUBLIC_HOST=$1
 			;;
+		--public-endpoint)
+			shift
+			[ "$#" -gt 0 ] || die "--public-endpoint requires HOST:PORT"
+			PUBLIC_ENDPOINT=$1
+			;;
 		--force-config)
 			FORCE_CONFIG=1
 			;;
@@ -131,6 +139,38 @@ done
 need_command systemctl
 need_command openssl
 
+validate_public_endpoint() {
+	endpoint=$1
+	case "$endpoint" in
+		''|*[!A-Za-z0-9._:\[\]-]*) die "--public-endpoint must be a plain HOST:PORT value" ;;
+	esac
+	case "$endpoint" in
+		\[*\]:*)
+			endpoint_host=${endpoint%:*}; endpoint_host=${endpoint_host#\[}; endpoint_host=${endpoint_host%\]}
+			case "$endpoint_host" in ''|*[!0-9A-Fa-f:.]*) die "--public-endpoint must contain a numeric IP address" ;; esac
+			;;
+		*:*:*) die "IPv6 public endpoints must use [ADDRESS]:PORT" ;;
+		*:*)
+			endpoint_host=${endpoint%:*}
+			case "$endpoint_host" in ''|*[!0-9.]*) die "--public-endpoint must contain a numeric IP address" ;; esac
+			printf '%s\n' "$endpoint_host" | awk -F. '
+				NF != 4 { exit 1 }
+				{ for (i = 1; i <= 4; i++) if ($i !~ /^[0-9]+$/ || $i > 255) exit 1 }
+			' || die "--public-endpoint contains an invalid IPv4 address"
+			;;
+		*) die "--public-endpoint must include a port" ;;
+	esac
+	endpoint_port=${endpoint##*:}
+	case "$endpoint_port" in ''|*[!0-9]*) die "--public-endpoint port must be numeric" ;; esac
+	[ "$endpoint_port" -ge 1 ] && [ "$endpoint_port" -le 65535 ] ||
+		die "--public-endpoint port is outside 1..65535"
+	case "$endpoint_host" in
+		''|'*'|0.0.0.0|::) die "--public-endpoint must identify a concrete reachable IP address" ;;
+	esac
+}
+
+[ -z "$PUBLIC_ENDPOINT" ] || validate_public_endpoint "$PUBLIC_ENDPOINT"
+
 if [ "$DRY_RUN" = 1 ]; then
 	log "Candy server dry run"
 	log "artifact-file: ${ARTIFACT_FILE:-<download>}"
@@ -143,6 +183,7 @@ if [ "$DRY_RUN" = 1 ]; then
 	log "listen: $LISTEN_ADDR"
 	log "tls-name: $TLS_NAME"
 	log "public-host: ${PUBLIC_HOST:-<auto-detect>}"
+	log "public-endpoint: ${PUBLIC_ENDPOINT:-<preserve-or-wait>}"
 	exit 0
 fi
 
@@ -197,6 +238,9 @@ had_previous_unit=0
 previous_service_active=0
 config_backup=
 config_changed=0
+cloud_sync_env_backup=$work_dir/previous-cloud-sync.env
+had_cloud_sync_env=0
+cloud_sync_env_changed=0
 cert_sha256=
 congestion_test_temporary=
 
@@ -227,6 +271,15 @@ rollback() {
 			run cp "$config_backup" "$config_file"
 		else
 			run rm -f "$config_file"
+		fi
+	fi
+	if [ "$cloud_sync_env_changed" = 1 ]; then
+		if [ "$had_cloud_sync_env" = 1 ]; then
+			run cp "$cloud_sync_env_backup" "$CLOUD_SYNC_ENV"
+			run chown root:"$SERVICE_USER" "$CLOUD_SYNC_ENV"
+			run chmod 0640 "$CLOUD_SYNC_ENV"
+		else
+			run rm -f "$CLOUD_SYNC_ENV"
 		fi
 	fi
 	run systemctl daemon-reload
@@ -282,6 +335,23 @@ prepare_sdwan_state() {
 	run find "$sdwan_state" -xdev -type d -exec chmod 0700 {} \;
 	run find "$sdwan_state" -xdev -type f -exec chmod 0600 {} \;
 	run find "$sdwan_state" -xdev ! -type l -exec chown "$SERVICE_USER:$SERVICE_USER" {} \;
+}
+
+persist_public_endpoint() {
+	[ -n "$PUBLIC_ENDPOINT" ] || return 0
+	if [ -f "$CLOUD_SYNC_ENV" ] && [ ! -L "$CLOUD_SYNC_ENV" ]; then
+		had_cloud_sync_env=1
+		run cp "$CLOUD_SYNC_ENV" "$cloud_sync_env_backup"
+	elif [ -e "$CLOUD_SYNC_ENV" ] || [ -L "$CLOUD_SYNC_ENV" ]; then
+		die "refusing non-regular Cloud sync environment file: $CLOUD_SYNC_ENV"
+	fi
+	cloud_sync_env_changed=1
+	temporary=$(mktemp "$CONFIG_DIR/.cloud-sync.env.XXXXXX") ||
+		die "failed to allocate Cloud sync environment file"
+	printf 'CANDY_PUBLIC_ENDPOINT=%s\n' "$PUBLIC_ENDPOINT" >"$temporary"
+	run chown root:"$SERVICE_USER" "$temporary"
+	run chmod 0640 "$temporary"
+	run mv -f "$temporary" "$CLOUD_SYNC_ENV"
 }
 
 random_secret() {
@@ -539,6 +609,7 @@ run mkdir -p "$release_dir"
 run cp "$artifact_path" "$release_dir/candy-server"
 run chmod 0755 "$release_dir/candy-server"
 run chown -R root:root "$release_dir"
+persist_public_endpoint
 install_unit
 run systemctl daemon-reload
 

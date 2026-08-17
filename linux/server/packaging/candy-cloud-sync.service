@@ -11,6 +11,7 @@ Group=candy
 UMask=0077
 Environment=CANDY_SDWAN_SERVICE_USER=candy
 Environment=CANDY_SDWAN_SERVICE_GROUP=candy
+EnvironmentFile=-/etc/candy/cloud-sync.env
 ExecStart=/usr/local/libexec/candy-cloud-sync --core /opt/candy/cores/current/candy-core --server-config /etc/candy/server.toml sync-once
 ExecStartPost=+/usr/local/libexec/candy-sdwan-runtime reconcile candy-server.service
 NoNewPrivileges=true

@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::Write,
     net::{SocketAddr, ToSocketAddrs},
@@ -30,6 +31,7 @@ const MAX_PROFILE_BYTES: u64 = 64 * 1024;
 const MAX_CONFIGURATION_BYTES: u64 = 3 * 1024 * 1024;
 const MAX_ROUTE_ENVELOPE_BYTES: usize = 1024 * 1024;
 const CONFIGURATION_MEDIA_TYPE: &str = "application/vnd.candy.runtime-configuration.v1+json";
+const PUBLIC_ENDPOINT_ENV: &str = "CANDY_PUBLIC_ENDPOINT";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -349,7 +351,68 @@ fn run(args: Args) -> Result<()> {
 }
 
 fn sync_once(args: &Args) -> Result<()> {
-    sync_once_with_retry(args, true)
+    let public_endpoint = std::env::var_os(PUBLIC_ENDPOINT_ENV);
+    sync_once_with_public_endpoint_env(args, public_endpoint.as_deref())
+}
+
+fn sync_once_with_public_endpoint_env(args: &Args, public_endpoint: Option<&OsStr>) -> Result<()> {
+    ensure_private_state_root(&args.state_dir)?;
+    let public_endpoints = effective_public_endpoints(args, public_endpoint)?;
+    if args.server_config.is_some() && public_endpoints.is_empty() {
+        write_local_sync_status(
+            &args.state_dir,
+            "waiting_for_public_endpoint",
+            Some("public_endpoint_required"),
+        )?;
+        eprintln!(
+            "level=warn event=cloud_sync_waiting state=waiting_for_public_endpoint error_code=public_endpoint_required reason=server_public_endpoint_missing"
+        );
+        println!(
+            "{}",
+            serde_json::to_string(&SyncResult {
+                schema_version: 1,
+                state: "waiting_for_public_endpoint",
+                network_ready: false,
+                configuration_changed: false,
+                etag: None,
+            })?
+        );
+        return Ok(());
+    }
+    sync_once_with_retry(args, &public_endpoints, true)
+}
+
+fn effective_public_endpoints(
+    args: &Args,
+    public_endpoint: Option<&OsStr>,
+) -> Result<Vec<SocketAddr>> {
+    if !args.public_endpoints.is_empty() {
+        validate_public_endpoints(&args.public_endpoints, "explicit --public-endpoint")?;
+        return Ok(args.public_endpoints.clone());
+    }
+    if args.server_config.is_none() {
+        return Ok(Vec::new());
+    }
+    let Some(public_endpoint) = public_endpoint else {
+        return Ok(Vec::new());
+    };
+    let public_endpoint = public_endpoint
+        .to_str()
+        .context("CANDY_PUBLIC_ENDPOINT must be valid UTF-8")?;
+    let endpoint = public_endpoint.parse::<SocketAddr>().context(
+        "CANDY_PUBLIC_ENDPOINT must contain exactly one IP:PORT endpoint (IPv6 addresses require brackets)",
+    )?;
+    validate_public_endpoints(&[endpoint], "CANDY_PUBLIC_ENDPOINT")?;
+    Ok(vec![endpoint])
+}
+
+fn validate_public_endpoints(endpoints: &[SocketAddr], source: &str) -> Result<()> {
+    for endpoint in endpoints {
+        if endpoint.port() == 0 || endpoint.ip().is_unspecified() {
+            bail!("{source} must contain a concrete IP address and a non-zero port")
+        }
+    }
+    Ok(())
 }
 
 fn activation_required(
@@ -366,7 +429,11 @@ fn activation_required(
     }
 }
 
-fn sync_once_with_retry(args: &Args, allow_unconditional_retry: bool) -> Result<()> {
+fn sync_once_with_retry(
+    args: &Args,
+    public_endpoints: &[SocketAddr],
+    allow_unconditional_retry: bool,
+) -> Result<()> {
     ensure_private_state_root(&args.state_dir)?;
     let identity_dir = args
         .identity_dir
@@ -379,7 +446,7 @@ fn sync_once_with_retry(args: &Args, allow_unconditional_retry: bool) -> Result<
     validate_identity(&identity)?;
     let cloud = validate_cloud(&identity.cloud_address)?;
     let client = build_client(&identity_dir, args.ca_certificate.as_deref())?;
-    reconcile_transport_identity(args, &client, &cloud)?;
+    reconcile_transport_identity(args, public_endpoints, &client, &cloud)?;
 
     let state_path = args.state_dir.join("sync-state-v1.json");
     let mut state: SyncState = if state_path.exists() {
@@ -474,7 +541,7 @@ fn sync_once_with_retry(args: &Args, allow_unconditional_retry: bool) -> Result<
                     "configuration_revalidation_required",
                     None,
                 )?;
-                return sync_once_with_retry(args, false);
+                return sync_once_with_retry(args, public_endpoints, false);
             }
             let activation_rejected =
                 state.activation_rejected_etag.as_deref() == Some(etag.as_str());
@@ -690,8 +757,13 @@ fn sync_once_with_retry(args: &Args, allow_unconditional_retry: bool) -> Result<
     Ok(())
 }
 
-fn reconcile_transport_identity(args: &Args, client: &Client, cloud: &Url) -> Result<()> {
-    if args.public_endpoints.is_empty() {
+fn reconcile_transport_identity(
+    args: &Args,
+    public_endpoints: &[SocketAddr],
+    client: &Client,
+    cloud: &Url,
+) -> Result<()> {
+    if public_endpoints.is_empty() {
         return Ok(());
     }
     let server_config = args
@@ -700,7 +772,7 @@ fn reconcile_transport_identity(args: &Args, client: &Client, cloud: &Url) -> Re
         .context("explicit public-endpoint requires --server-config")?;
     let core = resolve_core(args.core.as_deref())?;
     let inspected = transport_identity::inspect_core(&core, server_config)?;
-    let desired = transport_identity::build_registration(&inspected, &args.public_endpoints)?;
+    let desired = transport_identity::build_registration(&inspected, public_endpoints)?;
     let outcome = transport_identity::reconcile(
         &args.state_dir.join("transport-identity-state-v1.json"),
         desired,
@@ -714,7 +786,7 @@ fn reconcile_transport_identity(args: &Args, client: &Client, cloud: &Url) -> Re
     )?;
     eprintln!(
         "level=info event=transport_identity_reconciled outcome={outcome:?} endpoint_count={}",
-        args.public_endpoints.len()
+        public_endpoints.len()
     );
     Ok(())
 }
@@ -2608,6 +2680,92 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn args(state_dir: PathBuf, server_mode: bool, public_endpoints: Vec<SocketAddr>) -> Args {
+        Args {
+            state_dir,
+            identity_dir: None,
+            ca_certificate: None,
+            core: None,
+            server_config: server_mode.then(|| PathBuf::from("/etc/candy/server.toml")),
+            public_endpoints,
+            command: Command::SyncOnce,
+        }
+    }
+
+    #[test]
+    fn explicit_public_endpoint_has_priority_over_environment() {
+        let explicit = "203.0.113.7:18443".parse().unwrap();
+        let args = args(PathBuf::from("state"), true, vec![explicit]);
+        assert_eq!(
+            effective_public_endpoints(&args, Some(OsStr::new("not-an-endpoint"))).unwrap(),
+            vec![explicit]
+        );
+    }
+
+    #[test]
+    fn server_public_endpoint_uses_one_valid_environment_value() {
+        let args = args(PathBuf::from("state"), true, Vec::new());
+        assert_eq!(
+            effective_public_endpoints(&args, Some(OsStr::new("[2001:db8::7]:18443"))).unwrap(),
+            vec!["[2001:db8::7]:18443".parse().unwrap()]
+        );
+        let error = effective_public_endpoints(
+            &args,
+            Some(OsStr::new("203.0.113.7:18443,203.0.113.8:18443")),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exactly one IP:PORT endpoint"));
+    }
+
+    #[test]
+    fn invalid_or_non_concrete_server_public_endpoint_is_rejected() {
+        let args = args(PathBuf::from("state"), true, Vec::new());
+        assert!(
+            effective_public_endpoints(&args, Some(OsStr::new("0.0.0.0:18443")))
+                .unwrap_err()
+                .to_string()
+                .contains("concrete IP address")
+        );
+        assert!(
+            effective_public_endpoints(&args, Some(OsStr::new("203.0.113.7:0")))
+                .unwrap_err()
+                .to_string()
+                .contains("non-zero port")
+        );
+    }
+
+    #[test]
+    fn client_mode_ignores_server_public_endpoint_environment() {
+        let args = args(PathBuf::from("state"), false, Vec::new());
+        assert!(
+            effective_public_endpoints(&args, Some(OsStr::new("not-an-endpoint")))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn server_without_public_endpoint_publishes_waiting_status_before_identity_access() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let state_dir = directory.path().join("state");
+        fs::create_dir(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let args = args(state_dir.clone(), true, Vec::new());
+
+        sync_once_with_public_endpoint_env(&args, None).unwrap();
+
+        let status: serde_json::Value =
+            serde_json::from_slice(&fs::read(state_dir.join("cloud-sync-status-v1.json")).unwrap())
+                .unwrap();
+        assert_eq!(status["state"], "waiting_for_public_endpoint");
+        assert_eq!(status["error_code"], "public_endpoint_required");
+        assert!(!state_dir.join("sync-state-v1.json").exists());
+        assert!(!state_dir.join("transport-identity-state-v1.json").exists());
+        assert!(!state_dir.join("candidate").exists());
+    }
 
     fn identity() -> DeviceIdentity {
         DeviceIdentity {
