@@ -207,6 +207,7 @@ Runtime internal actions:
   leave
   fail-open [REASON]
   running
+  stopped
   publish
   status
 EOF
@@ -274,6 +275,11 @@ case "$action" in
 		require_root
 		ensure_directories
 		write_status "$(current_registration_state)" running ""
+		;;
+	stopped)
+		require_root
+		ensure_directories
+		write_status "$(current_registration_state)" stopped ""
 		;;
 	publish)
 		require_root

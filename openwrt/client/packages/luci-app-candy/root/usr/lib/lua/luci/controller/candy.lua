@@ -865,6 +865,10 @@ function action_sdwan_reconnect()
 		luci.http.status(409, "Conflict")
 		return
 	end
+	if uci:get("candy", "sdwan", "enabled") ~= "1" then
+		redirect_sdwan("not-enabled")
+		return
+	end
 	if not process.run({ "/etc/init.d/candy", "sdwan_reconnect" }, { background = true, timeout = 30 }) then
 		redirect_sdwan("error")
 		return

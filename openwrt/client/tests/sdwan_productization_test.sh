@@ -87,6 +87,7 @@ grep -F 'enctype="multipart/form-data"' "$sdwan" >/dev/null || fail "node bootst
 grep -F 'name="bootstrap_file"' "$sdwan" >/dev/null || fail "node bootstrap file control is missing"
 grep -F 'action_sdwan_join' "$controller" >/dev/null || fail "LuCI join action is missing"
 grep -F 'action_sdwan_reconnect' "$controller" >/dev/null || fail "LuCI reconnect action is missing"
+grep -F 'uci:get("candy", "sdwan", "enabled") ~= "1"' "$controller" >/dev/null || fail "LuCI reconnect does not reject a disabled SD-WAN service"
 grep -F 'action_sdwan_leave' "$controller" >/dev/null || fail "LuCI leave action is missing"
 grep -F 'MAX_SDWAN_BOOTSTRAP_BYTES = 16 * 1024' "$controller" >/dev/null || fail "node bootstrap upload is unbounded"
 grep -F 'fs.chmod(temporary, "0600")' "$controller" >/dev/null || fail "node bootstrap upload is not private"
@@ -101,6 +102,11 @@ fi
 if grep -Eiq 'v2|legacy|eBPF' "$sdwan" "$controller"; then
 	fail "formal V1 product surface contains an obsolete contract label"
 fi
+grep -F 'state_label(registration_state)' "$sdwan" >/dev/null || fail "LuCI registration state is not presented independently"
+if grep -F 'state_label(enabled and registration_state' "$sdwan" >/dev/null; then
+	fail "LuCI still conflates Cloud registration with SD-WAN enablement"
+fi
+grep -F '<% if enabled then %><form method="post" action="<%=luci.dispatcher.build_url('\''admin/services/candy/sdwan_reconnect'\'')%>"' "$sdwan" >/dev/null || fail "LuCI exposes reconnect while SD-WAN is disabled"
 if grep -E 'candy-sdwan-(generation|epoch|mtu|drops|failover)|Active Hub|Route generation|Attachment epoch|Effective MTU' "$status"; then
 	fail "Overview duplicates professional SD-WAN evidence"
 fi

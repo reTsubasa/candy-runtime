@@ -1156,6 +1156,15 @@ grep -Fq 'procd_set_param command '"$CANDY_INIT_SELF"' run_sdwan' "$runtime_dir/
 grep -Fq 'procd_open_instance watchdog' "$runtime_dir/procd.log" || fail "ordinary health watchdog disappeared when SD-WAN was enabled"
 TEST_SDWAN_ENABLED=0
 
+sdwan_runtime_actions=
+sdwan_runtime_state() { sdwan_runtime_actions="${sdwan_runtime_actions}${sdwan_runtime_actions:+ }$1"; }
+sdwan_process_pids() { fail "disabled SD-WAN reconnect inspected process state"; }
+if sdwan_reconnect; then
+  fail "disabled SD-WAN reconnect unexpectedly succeeded"
+fi
+[ "$sdwan_runtime_actions" = stopped ] || fail "disabled SD-WAN reconnect did not restore stopped state"
+grep -Fq 'event=sdwan_reconnect' "$LOG_FILE" || fail "disabled SD-WAN reconnect rejection was not logged"
+
 isolated_failure_log=$runtime_dir/isolated-failure.log
 run_detached_direct_command() { printf '%s\n' "$*" >> "$isolated_failure_log"; }
 service_failed sdwan

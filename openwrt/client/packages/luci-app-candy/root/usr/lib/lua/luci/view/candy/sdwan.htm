@@ -27,9 +27,19 @@ end
 local function state_label(value)
 	if value == "registered" then return translate("Registered") end
 	if value == "join-pending" then return translate("Joining Candy Cloud") end
-	if value == "disabled" then return translate("Disabled") end
-	if value == "fail-open" then return translate("Network restored") end
 	return translate("Not joined")
+end
+local function service_state_label(value)
+	return value and translate("Enabled") or translate("Disabled")
+end
+local function runtime_state_label(value)
+	if value == "running" then return translate("Running") end
+	if value == "reconnecting" then return translate("Reconnecting") end
+	if value == "stopped" then return translate("Stopped") end
+	if value == "fail-open" then return translate("Network restored") end
+	if value == "disabled" then return translate("Disabled") end
+	if value == "unavailable" or value == nil or value == "" then return translate("Unavailable") end
+	return label(value)
 end
 local function object_label(value, key)
 	if type(value) ~= "table" then return label(value) end
@@ -67,18 +77,19 @@ local result = luci.http.formvalue("result") or ""
 <div class="cbi-map">
 	<% if result == "joined" then %><div class="candy-sdwan-result"><%:This node has joined Candy Cloud.%></div><% end %>
 	<% if result == "reconnecting" then %><div class="candy-sdwan-result"><%:Reconnect requested.%></div><% end %>
+	<% if result == "not-enabled" then %><div class="candy-sdwan-result"><%:The node has joined Candy Cloud, but the SD-WAN service is not enabled.%></div><% end %>
 	<% if result == "left" then %><div class="candy-sdwan-result"><%:This node has left Candy Cloud.%></div><% end %>
 	<% if result == "invalid-file" then %><div class="candy-sdwan-result"><%:The node join file could not be read. Choose the JSON file downloaded from Candy Cloud and try again.%></div><% end %>
 	<% if result == "file-too-large" then %><div class="candy-sdwan-result"><%:The node join file is too large. Generate a new join file in Candy Cloud and try again.%></div><% end %>
 	<% if result == "error" then %><div class="candy-sdwan-result"><%:Operation failed. Check Logs for details.%></div><% end %>
 	<div class="candy-sdwan-head">
 		<h2><%:SD-WAN%></h2>
-		<span class="candy-sdwan-state <%=registration_state == "registered" and "registered" or (registration_state == "join-pending" and "pending" or "")%>"><%=state_label(enabled and registration_state or "disabled")%></span>
+		<span class="candy-sdwan-state <%=registration_state == "registered" and "registered" or (registration_state == "join-pending" and "pending" or "")%>"><%=state_label(registration_state)%></span>
 	</div>
 	<% if registration_state ~= "registered" then %>
 		<dl class="candy-sdwan-grid">
 			<div><dt><%:Cloud%></dt><dd><%=label(registration.cloud_address)%></dd></div>
-			<div><dt><%:Join state%></dt><dd><%=state_label(enabled and registration_state or "disabled")%></dd></div>
+			<div><dt><%:Join state%></dt><dd><%=state_label(registration_state)%></dd></div>
 		</dl>
 		<form class="candy-sdwan-form" method="post" enctype="multipart/form-data" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_join')%>">
 			<input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" />
@@ -88,21 +99,24 @@ local result = luci.http.formvalue("result") or ""
 		</form>
 	<% else %>
 		<dl class="candy-sdwan-grid">
+			<div><dt><%:Join state%></dt><dd><%=state_label(registration_state)%></dd></div>
+			<div><dt><%:SD-WAN service%></dt><dd><%=service_state_label(enabled)%></dd></div>
 			<div><dt><%:Site%></dt><dd><%=object_label(status.site, "name")%></dd></div>
 			<div><dt><%:Segment%></dt><dd><%=object_label(status.segment, "name")%></dd></div>
 			<div><dt><%:Cloud%></dt><dd><%=label(registration.cloud_address)%></dd></div>
-			<div><dt><%:TUN%></dt><dd><%=label(tun.state)%><% if tun.full_duplex == true then %> / <%:Full duplex%><% elseif tun.full_duplex == false then %> / <%:Unavailable%><% end %></dd></div>
+			<div><dt><%:TUN%></dt><dd><%=runtime_state_label(tun.state)%><% if tun.full_duplex == true then %> / <%:Full duplex%><% elseif tun.full_duplex == false then %> / <%:Unavailable%><% end %></dd></div>
 			<div><dt><%:Peer%></dt><dd><% if #peers == 0 then %><%=translate("Unavailable")%><% else %><ul class="candy-sdwan-peers"><% for _, peer in ipairs(peers) do %><li><%=label(peer.name or peer.id)%> / <%=label(peer.state)%></li><% end %></ul><% end %></dd></div>
 			<div><dt><%:Path%></dt><dd><% if path and (path.kind == "direct" or path.kind == "relay") then %><%=path.kind == "direct" and translate("Direct") or translate("Relay")%><% else %><%=translate("Unavailable")%><% end %></dd></div>
 			<div><dt><%:Local egress%></dt><dd><%=object_label(egress["local"], "name")%></dd></div>
 			<div><dt><%:Remote egress%></dt><dd><%=object_label(egress.remote, "name")%></dd></div>
-			<div><dt><%:Internal DNS%></dt><dd><%=label(dns.state)%></dd></div>
-			<div><dt><%:Runtime%></dt><dd><%=label(runtime.state)%></dd></div>
+			<div><dt><%:Internal DNS%></dt><dd><%=runtime_state_label(dns.state)%></dd></div>
+			<div><dt><%:Runtime%></dt><dd><%=runtime_state_label(runtime.state)%></dd></div>
 		</dl>
 		<div class="candy-sdwan-actions">
-			<form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_reconnect')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-action" type="submit"><%:Reconnect%></button></form>
+			<% if enabled then %><form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_reconnect')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-action" type="submit"><%:Reconnect%></button></form><% end %>
 			<form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_leave')%>" onsubmit="return confirm('<%=translate('Leave Candy Cloud and remove this node?')%>');"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-negative" type="submit"><%:Leave%></button></form>
 		</div>
+		<% if not enabled then %><p class="candy-sdwan-join-help"><%:The node identity has joined Candy Cloud. The SD-WAN data plane is not enabled, and ordinary Candy traffic continues normally.%></p><% end %>
 	<% end %>
 </div>
 

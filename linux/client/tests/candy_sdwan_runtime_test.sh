@@ -86,6 +86,9 @@ inode_after=$(stat -c '%i' "$run/sdwan-status.json" 2>/dev/null || stat -f '%i' 
 [ "$inode_before" != "$inode_after" ] || fail "status replacement was not atomic"
 grep -F '"state":"reconnecting"' "$run/sdwan-status.json" >/dev/null || fail "reconnect state missing"
 
+run_runtime stopped
+grep -F '"state":"stopped"' "$run/sdwan-status.json" >/dev/null || fail "stopped state missing"
+
 run_runtime fail-open core-exit
 grep -F '"state":"fail-open"' "$run/sdwan-status.json" >/dev/null || fail "fail-open state missing"
 [ -f "$state/config-v1.json" ] || fail "fail-open removed durable enrollment intent"

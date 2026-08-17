@@ -1648,7 +1648,7 @@ msgid "Joining Candy Cloud"
 msgstr "正在加入 Candy Cloud"
 
 msgid "Registered"
-msgstr "已注册"
+msgstr "已加入 Cloud"
 
 msgid "Not joined"
 msgstr "未加入"
@@ -1682,6 +1682,18 @@ msgstr "内部 DNS"
 
 msgid "Runtime"
 msgstr "运行时"
+
+msgid "SD-WAN service"
+msgstr "SD-WAN 服务"
+
+msgid "Reconnecting"
+msgstr "正在重新连接"
+
+msgid "The node identity has joined Candy Cloud. The SD-WAN data plane is not enabled, and ordinary Candy traffic continues normally."
+msgstr "节点身份已加入 Candy Cloud；SD-WAN 数据面尚未启用，普通 Candy 流量继续正常运行。"
+
+msgid "The node has joined Candy Cloud, but the SD-WAN service is not enabled."
+msgstr "节点已加入 Candy Cloud，但 SD-WAN 服务尚未启用。"
 
 msgid "Node join file"
 msgstr "节点加入文件"

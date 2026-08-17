@@ -3208,6 +3208,9 @@ start_service() {
 	migrate_candy_node_rule_targets
 	migrate_reserved_dns_forward
 	config_load candy
+	if ! sdwan_enabled; then
+		sdwan_runtime_state stopped || true
+	fi
 	local enabled
 	config_get_bool enabled client enabled 0
 	if [ "$enabled" -ne 1 ]; then
@@ -3522,6 +3525,11 @@ sdwan_fail_open() {
 
 sdwan_reconnect() {
 	local pids
+	if ! sdwan_enabled; then
+		sdwan_runtime_state stopped || true
+		log_event warn sdwan_reconnect "request rejected; reason=disabled ordinary_client=preserved"
+		return 1
+	fi
 	sdwan_runtime_state reconnect || return 1
 	pids=$(sdwan_process_pids)
 	[ -z "$pids" ] || kill -TERM $pids 2>/dev/null || true
