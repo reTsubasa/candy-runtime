@@ -2,8 +2,11 @@
 
 set -u
 
-CATALOG_URL=https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json
-CATALOG_SIGNATURE_URL=https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json.sig
+# Use GitHub's canonical refs path so the catalog and detached signature are
+# served from the same current branch object instead of independent legacy
+# raw/main CDN cache entries.
+CATALOG_URL=https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json
+CATALOG_SIGNATURE_URL=https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json.sig
 CATALOG_KEY=${CANDY_UPDATE_CATALOG_KEY:-/usr/share/candy/keys/catalog-release.pub}
 STATE_ROOT=${CANDY_UPDATE_STATE_ROOT:-/var/lib/candy/update}
 CATALOG_FILE=$STATE_ROOT/stable.json

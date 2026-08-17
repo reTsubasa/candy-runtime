@@ -55,8 +55,8 @@ case "$url" in
 	;;
 esac
 case "$url" in
-	https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json) source=$FAKE_CATALOG ;;
-	https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json.sig) source=$FAKE_CATALOG_SIGNATURE ;;
+	https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json) source=$FAKE_CATALOG ;;
+	https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json.sig) source=$FAKE_CATALOG_SIGNATURE ;;
 	https://github.com/reTsubasa/candy-release/releases/download/*) source="$FAKE_ASSET_DIR/${url##*/}" ;;
 	*) exit 92 ;;
 esac
@@ -269,7 +269,7 @@ make_catalog 1 3 0.3.5
 "$manager" check >/dev/null
 [ "$(cat "$state/sequence")" = 1 ]
 [ "$(stat -c '%a' "$state" 2>/dev/null || stat -f '%Lp' "$state")" = 700 ]
-grep -Fx 'https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json' "$FAKE_FETCH_LOG" >/dev/null
+grep -Fx 'https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json' "$FAKE_FETCH_LOG" >/dev/null
 grep -q '"catalog_valid":true' <<EOF
 $("$manager" status)
 EOF
