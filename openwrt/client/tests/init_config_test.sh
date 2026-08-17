@@ -253,7 +253,7 @@ grep -F 'migrate_reserved_dns_forward' "$repo_root/candy-client/candy.init" >/de
 grep -F 'forward local listen conflicts with reserved Candy DNS listener' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'CANDY_FAST_STATUS_ACTION' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'case "${action:-${1:-}}" in' "$repo_root/candy-client/candy.init" >/dev/null
-grep -F 'status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|fail_open|sdwan_fail_open|sdwan_reconnect|sdwan_stop|health_watchdog|congestion_test|run_client|run_sdwan|run_netd)' "$repo_root/candy-client/candy.init" >/dev/null
+grep -F 'status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|fail_open|sdwan_fail_open|sdwan_reconcile|sdwan_reconnect|sdwan_stop|health_watchdog|congestion_test|run_client|run_sdwan|run_netd)' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F -- '--control-socket-path "$CANDY_CONTROL_SOCKET"' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F -- '--active "$RUNTIME_CONFIG"' "$repo_root/candy-client/candy.init" >/dev/null || fail "runtime reload does not request atomic active-config promotion"
 grep -F 'reload_service()' "$repo_root/candy-client/candy.init" >/dev/null

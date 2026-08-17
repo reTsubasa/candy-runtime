@@ -36,8 +36,9 @@ grep -F 'candy-core-manager' "$makefile" >/dev/null || fail "Core lifecycle mana
 grep -F 'candy-runtime-health-check' "$makefile" >/dev/null || fail "Core activation health check is not installed"
 grep -F '+kmod-tun' "$makefile" >/dev/null || fail "TUN kernel dependency is missing"
 grep -F 'config sdwan' "$config" >/dev/null || fail "SD-WAN UCI bootstrap is missing"
-grep -F "option enabled '0'" "$config" >/dev/null || fail "SD-WAN must default off"
-grep -F "option mode 'sdwan_tun'" "$config" >/dev/null || fail "SD-WAN mode is not explicit"
+if sed -n '/^config sdwan /,/^$/p' "$config" | grep -Eq "option (enabled|mode) "; then
+	fail "local UCI still controls Cloud SD-WAN activation"
+fi
 
 if grep -Eiq 'option[[:space:]]+(cidr|route|hub_candidate|attachment_epoch|route_generation)' "$config"; then
 	fail "UCI exposes signed route or attachment authority"
@@ -57,16 +58,26 @@ if printf '%s\n' "$sdwan_failure_body" | grep -E 'stop_candy_clients|network_cle
 fi
 grep -F 'procd_set_param user candy-sdwan' "$init" >/dev/null || fail "SD-WAN supervisor is not unprivileged"
 grep -F 'wait_for_sdwan_netd' "$init" >/dev/null || fail "client start does not wait for netd"
-grep -F 'CANDY_SDWAN_CONFIG=${CANDY_SDWAN_CONFIG:-/etc/candy/sdwan.toml}' "$init" >/dev/null || fail "signed SD-WAN config path is not explicit"
+grep -F 'CANDY_SDWAN_CANDIDATE=${CANDY_SDWAN_CANDIDATE:-$CANDY_SDWAN_STATE_DIR/candidate}' "$init" >/dev/null || fail "Cloud activation candidate is not explicit"
+grep -F 'CANDY_SDWAN_ACTIVE=${CANDY_SDWAN_ACTIVE:-$CANDY_SDWAN_STATE_DIR/active}' "$init" >/dev/null || fail "last-good activation pointer is not explicit"
+grep -F 'load_sdwan_candidate' "$init" >/dev/null || fail "Cloud activation descriptor is not validated"
+if grep -F 'sdwan_enabled()' "$init" >/dev/null; then
+	fail "legacy UCI SD-WAN enable gate remains"
+fi
+grep -F 'sdwan_reconcile()' "$init" >/dev/null || fail "Cloud activation reconcile command is missing"
+grep -F 'start_sdwan_supervision' "$init" >/dev/null || fail "SD-WAN supervision is not independent from ordinary Candy"
 grep -F 'ensure_sdwan_instance_id' "$init" >/dev/null || fail "SD-WAN instance identity is not bootstrapped"
 grep -F 'ensure_sdwan_generation' "$init" >/dev/null || fail "SD-WAN transaction generation is not persisted"
 grep -F '"$CANDY_SDWAN_AGENT" --socket "$CANDY_NETD_SOCKET"' "$init" >/dev/null || fail "SD-WAN agent lifecycle contract is missing"
+grep -F -- '--activation "$CANDY_SDWAN_CANDIDATE"' "$init" >/dev/null || fail "Cloud activation pointer is not passed to the agent"
 grep -F -- '--status "$CANDY_SDWAN_STATUS_FILE"' "$init" >/dev/null || fail "SD-WAN agent does not pass the Core status path"
 grep -F 'sdwan_uid=$(id -u candy-sdwan' "$init" >/dev/null || fail "netd caller UID is not dedicated"
 grep -F -- '--allowed-uid "$sdwan_uid"' "$init" >/dev/null || fail "netd caller UID is not passed"
 if grep -F -- '--client-args' "$init" >/dev/null || grep -F -- '--netd-socket' "$init" >/dev/null; then
 	fail "legacy SD-WAN supervisor arguments remain"
 fi
+grep -F '"$CANDY_INIT" sdwan_reconcile' "$root/candy-client/candy-cloud-sync.init" >/dev/null || fail "successful Cloud synchronization does not trigger activation reconcile"
+grep -F 'activation=unchanged' "$root/candy-client/candy-cloud-sync.init" >/dev/null || fail "failed Cloud synchronization can disturb the last-good activation"
 grep -F 'chown root:root /var/lib/candy' "$init" >/dev/null || fail "netd journal parent is not root-owned"
 grep -F 'chmod 0770 "$RUNTIME_DIR"' "$init" >/dev/null || fail "SD-WAN application runtime is not writable by its dedicated user"
 grep -F 'chmod 0750 "$CANDY_NETD_RUNTIME_DIR"' "$init" >/dev/null || fail "netd socket parent permits replacement by the SD-WAN caller"
