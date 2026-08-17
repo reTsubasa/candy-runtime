@@ -24,7 +24,6 @@ grep -F 'fs.chmod(upload_path, "0600")' "$controller" >/dev/null
 ! grep -Eq 'formvalue\("(url|sha256|path)"\)' "$controller"
 grep -F 'candy-update-runtime' "$view" >/dev/null
 grep -F 'candy-update-core' "$view" >/dev/null
-grep -F 'candy-update-core-installed' "$view" >/dev/null
 grep -F 'data.core_candidates' "$view" >/dev/null
 grep -F 'candidates.slice(0, 5)' "$view" >/dev/null
 grep -F 'Rollback available' "$view" "$po" >/dev/null
@@ -38,8 +37,9 @@ grep -F 'new FormData(form)' "$view" >/dev/null
 grep -F 'Uploading Core bundle' "$view" "$po" >/dev/null
 grep -F 'candy-update-catalog-actions' "$view" >/dev/null
 grep -F 'candy-update-section' "$view" >/dev/null
-grep -F 'data.core && data.core.installed' "$view" >/dev/null
-grep -F 'installed && !active' "$view" >/dev/null
+! grep -F 'data.core && data.core.installed' "$view" >/dev/null
+! grep -F 'installedLocally' "$view" >/dev/null
+! grep -F 'candidate.active === true ||' "$view" >/dev/null
 grep -F 'Review Core' "$view" "$po" >/dev/null
 grep -F 'setTimeout(refreshCandyUpdateStatus, 2000)' "$view" >/dev/null
 grep -F 'never activated automatically' "$view" >/dev/null
@@ -195,7 +195,7 @@ class Element {
 }
 
 const elements = {};
-for (const id of ["candy-update-core", "candy-update-core-select", "candy-update-core-install", "candy-update-core-upload", "candy-update-core-upload-form", "candy-update-core-upload-file", "candy-update-core-upload-progress", "candy-update-core-upload-status", "candy-update-core-installed", "candy-update-runtime", "candy-update-operation", "candy-update-catalog-valid", "candy-update-sequence", "candy-update-published", "candy-update-checked", "candy-update-platform", "candy-update-check"]) {
+for (const id of ["candy-update-core", "candy-update-core-select", "candy-update-core-install", "candy-update-core-upload", "candy-update-core-upload-form", "candy-update-core-upload-file", "candy-update-core-upload-progress", "candy-update-core-upload-status", "candy-update-runtime", "candy-update-operation", "candy-update-catalog-valid", "candy-update-sequence", "candy-update-published", "candy-update-checked", "candy-update-platform", "candy-update-check"]) {
 	elements[id] = new Element(id === "candy-update-core-select" ? "select" : "div");
 }
 const requests = [];
@@ -214,8 +214,7 @@ const context = {
 vm.createContext(context); vm.runInContext(source, context);
 Object.assign(context.candyUpdateLabels, {
 	latest: "Latest", current: "Current", installed: "Installed", incompatible: "Incompatible",
-	notInstallable: "Not installable", available: "Available", reviewCore: "Review", active: "Active",
-	inactive: "Inactive", installedLocally: "Installed locally", noCompatibleCore: "None"
+	notInstallable: "Not installable", available: "Available", reviewCore: "Review", noCompatibleCore: "None"
 });
 assert.equal(typeof elements["candy-update-core-upload-form"].listeners.submit, "function", "upload form must submit in place");
 
@@ -233,6 +232,12 @@ assert.equal(elements["candy-update-core"].children.length, 5, "only five server
 assert.deepEqual(elements["candy-update-core-select"].options.map((option) => option.value), ["v0_3_9", "v0_3_8", "v0_3_3"]);
 assert.deepEqual(elements["candy-update-core"].children.map((row) => row.children[3].children[0].children.map((state) => state.textContent)), [["Latest"], [], [], ["Installed"], []], "Core rows may only expose latest, current, or installed-inactive state tags");
 assert.equal(elements["candy-update-core"].children[3].children[4].children.length, 1, "installed inactive Core must link to review");
+candidates[0].installed = true;
+candidates[0].active = true;
+context.candyUpdateRenderCore(data, false);
+assert.deepEqual(elements["candy-update-core"].children[0].children[3].children[0].children.map((state) => state.textContent), ["Latest", "Current"], "the active latest Core must expose both authoritative state tags");
+candidates[0].installed = false;
+candidates[0].active = false;
 elements["candy-update-core-select"].value = "v0_3_8";
 context.candyUpdateRenderCore(data, false);
 assert.equal(elements["candy-update-core-select"].value, "v0_3_8", "selection must survive status refresh");

@@ -20,7 +20,9 @@ local CONGESTION_TEST_RESULT_FILE = "/tmp/candy-congestion-test.json"
 local CONGESTION_TEST_LOG_FILE = "/tmp/candy-congestion-test.log"
 local MAX_CONGESTION_TEST_BYTES = 262144
 local CORE_MANAGER = "/usr/libexec/candy-core-manager"
+local CORE_UPDATE_MANAGER = "/usr/libexec/candy-update-manager"
 local MAX_CORE_STATUS_BYTES = 524288
+local MAX_UPDATE_STATUS_BYTES = 1024 * 1024
 local process = require "luci.candy.process"
 local run_argv = process.run
 
@@ -243,6 +245,29 @@ local function read_core_status()
 			manager_api_version = 1,
 			installed = {},
 			error = "Core manager returned invalid status"
+		}
+	end
+	return status
+end
+
+local function read_core_update_status()
+	local jsonc = require "luci.jsonc"
+	local ok, output = process.capture({ CORE_UPDATE_MANAGER, "status" }, { timeout = 5 })
+	if not ok or not output or #output > MAX_UPDATE_STATUS_BYTES then
+		return {
+			schema_version = 1,
+			core = read_core_status(),
+			core_candidates = {},
+			error = "Update manager is unavailable"
+		}
+	end
+	local status = jsonc.parse(output)
+	if type(status) ~= "table" or tonumber(status.schema_version) ~= 1 or type(status.core_candidates) ~= "table" then
+		return {
+			schema_version = 1,
+			core = read_core_status(),
+			core_candidates = {},
+			error = "Update manager returned invalid status"
 		}
 	end
 	return status
@@ -588,6 +613,7 @@ function index()
 	entry({"admin", "services", "candy", "core_activate"}, call("action_core_activate")).leaf = true
 	entry({"admin", "services", "candy", "core_rollback"}, call("action_core_rollback")).leaf = true
 	entry({"admin", "services", "candy", "core_remove"}, call("action_core_remove")).leaf = true
+	entry({"admin", "services", "candy", "core_install"}, call("action_core_install")).leaf = true
 end
 
 local function require_post()
@@ -621,7 +647,26 @@ function action_core_status()
 	local jsonc = require "luci.jsonc"
 	luci.http.header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 	luci.http.prepare_content("application/json")
-	luci.http.write(jsonc.stringify(read_core_status()))
+	luci.http.write(jsonc.stringify(read_core_update_status()))
+end
+
+function action_core_install()
+	if not require_post() then return end
+	local version_key = trim(luci.http.formvalue("version_key") or "")
+	if not version_key:match("^v[%w_]+$") or #version_key > 96 then
+		luci.http.status(400, "Bad Request")
+		return
+	end
+	local fs = require "nixio.fs"
+	if not fs.access(CORE_UPDATE_MANAGER, "x") then
+		luci.http.status(503, "Service Unavailable")
+		return
+	end
+	if not process.run({ CORE_UPDATE_MANAGER, "install-core", version_key }, { background = true, output = "/tmp/candy-update-manager.log", append = true }) then
+		luci.http.status(500, "Internal Server Error")
+		return
+	end
+	luci.http.redirect(luci.dispatcher.build_url("admin", "services", "candy", "core"))
 end
 
 function action_core_activate()

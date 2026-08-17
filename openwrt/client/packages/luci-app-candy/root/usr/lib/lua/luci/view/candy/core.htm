@@ -14,6 +14,10 @@ end
 <style>
 .candy-core-actions { display: flex; flex-wrap: wrap; gap: .5em; align-items: center; }
 .candy-core-actions form { margin: 0; }
+.candy-core-state { display: inline-block; border: 1px solid currentColor; border-radius: 4px; padding: .15em .45em; line-height: 1.4; white-space: nowrap; }
+.candy-core-state.latest { color: #2e7d32; }
+.candy-core-state.current, .candy-core-state.installed { color: #666; }
+.candy-core-states { display: flex; flex-wrap: wrap; gap: .35em; align-items: center; }
 .candy-core-operation { border-left: 4px solid #777; padding: .65em .9em; margin-bottom: 1em; }
 .candy-core-operation.running { border-color: #d7a51d; }
 .candy-core-operation.completed { border-color: #2e7d32; }
@@ -58,18 +62,25 @@ end
 var candyCoreStatusUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core_status')%>";
 var candyCoreActivateUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core_activate')%>";
 var candyCoreRemoveUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core_remove')%>";
+var candyCoreInstallUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core_install')%>";
 var candyCoreToken = <%=js_string(auth_token)%>;
 var candyCoreTimer = null;
 var candyCoreLabels = {
-	active: <%=js_string(i18n.translate("Active"))%>,
-	rollback: <%=js_string(i18n.translate("Rollback"))%>,
-	inactive: <%=js_string(i18n.translate("Inactive"))%>,
+	latest: <%=js_string(i18n.translate("Latest"))%>,
+	current: <%=js_string(i18n.translate("Current"))%>,
+	installed: <%=js_string(i18n.translate("Installed"))%>,
 	yes: <%=js_string(i18n.translate("Yes"))%>,
 	no: <%=js_string(i18n.translate("No"))%>,
 	activate: <%=js_string(i18n.translate("Activate"))%>,
+	downloadLatest: <%=js_string(i18n.translate("Download latest Core"))%>,
 	remove: <%=js_string(i18n.translate("Remove"))%>,
 	removeConfirm: <%=js_string(i18n.translate("Remove Core %s? This cannot be undone."))%>,
 	removeCurrentConfirm: <%=js_string(i18n.translate("Remove the current Core %s? Candy cannot start until another Core is installed and activated."))%>,
+	removed: <%=js_string(i18n.translate("Core %s was removed"))%>,
+	activated: <%=js_string(i18n.translate("Core %s is active"))%>,
+	installedCore: <%=js_string(i18n.translate("Core %s was installed"))%>,
+	downloadingCore: <%=js_string(i18n.translate("Downloading and validating Core"))%>,
+	coreReady: <%=js_string(i18n.translate("Core installed; activation remains manual"))%>,
 	none: <%=js_string(i18n.translate("None"))%>
 };
 
@@ -82,15 +93,15 @@ function candyCoreSetText(id, value) {
 	if (node) node.textContent = candyCoreText(value);
 }
 
-function candyCoreActionForm(url, version, label, className, confirmation) {
+function candyCoreActionForm(url, field, value, label, className, confirmation) {
 	var form = document.createElement("form");
 	var input = document.createElement("input");
 	var button = document.createElement("button");
 	form.method = "post";
 	form.action = url;
 	input.type = "hidden";
-	input.name = "version";
-	input.value = version;
+	input.name = field;
+	input.value = value;
 	var token = document.createElement("input");
 	token.type = "hidden";
 	token.name = "token";
@@ -98,40 +109,75 @@ function candyCoreActionForm(url, version, label, className, confirmation) {
 	button.type = "submit";
 	button.className = className;
 	button.textContent = label;
-	if (confirmation) form.onsubmit = function() { return window.confirm(confirmation.replace("%s", version)); };
+	if (confirmation) form.onsubmit = function() { return window.confirm(confirmation.replace("%s", value)); };
 	form.appendChild(input);
 	form.appendChild(token);
 	form.appendChild(button);
 	return form;
 }
 
+function candyCoreState(label, className) {
+	var state = document.createElement("span");
+	state.className = "candy-core-state " + className;
+	state.textContent = label;
+	return state;
+}
+
+function candyCoreOperationText(operation) {
+	var version = operation.version || "";
+	if (operation.action === "install-core" || operation.action === "install-core-upload") {
+		return operation.state === "completed" ? candyCoreLabels.coreReady : (operation.state === "running" ? candyCoreLabels.downloadingCore : (operation.message || ""));
+	}
+	if (operation.state === "completed" && version) {
+		if (operation.action === "remove") return candyCoreLabels.removed.replace("%s", version);
+		if (operation.action === "activate" || operation.action === "rollback") return candyCoreLabels.activated.replace("%s", version);
+		if (operation.action === "install" || operation.action === "install-local") return candyCoreLabels.installedCore.replace("%s", version);
+	}
+	return operation.message || "";
+}
+
 function candyCoreRender(data) {
-	var bundle = data.current_manifest || {};
+	var core = data.core || {};
+	var bundle = core.current_manifest || {};
 	var manifest = bundle.core || {};
 	var artifact = bundle.artifact || {};
 	var protocol = manifest.protocol_version || {};
-	var operation = data.operation || {};
+	var updateOperation = data.operation || {}, coreOperation = core.operation || {};
+	var updateIsCore = updateOperation.action === "install-core" || updateOperation.action === "install-core-upload";
+	var operation = coreOperation;
+	if (updateIsCore && (updateOperation.state === "running" || Number(updateOperation.updated_at || 0) >= Number(coreOperation.updated_at || 0))) operation = updateOperation;
 	var operationNode = document.getElementById("candy-core-operation");
 	var rollbackButton = document.getElementById("candy-core-rollback");
 	var body = document.getElementById("candy-core-installed");
-	var installed = data.installed || [];
-	var busy = operation.state === "running";
-	var row, cell, actions, state;
-	candyCoreSetText("candy-core-current", data.current_version);
-	candyCoreSetText("candy-core-previous", data.previous_version);
-	candyCoreSetText("candy-core-process-api", bundle.process_api_version || data.required_core_process_api_version);
-	candyCoreSetText("candy-core-api", manifest.core_api_version || data.required_core_api_version);
+	var installed = core.installed || [], candidates = Array.isArray(data.core_candidates) ? data.core_candidates.slice(0, 5) : [];
+	var installedByVersion = {}, rendered = {}, rows = [];
+	var busy = coreOperation.state === "running" || updateOperation.state === "running";
+	var row, cell, actions, states;
+	installed.forEach(function(item) { if (item && item.version) installedByVersion[String(item.version)] = item; });
+	candidates.forEach(function(candidate) {
+		if (!candidate || !candidate.version) return;
+		rows.push({ candidate: candidate, local: installedByVersion[String(candidate.version)] || null });
+		rendered[String(candidate.version)] = true;
+	});
+	installed.forEach(function(item) {
+		if (!item || !item.version || rendered[String(item.version)]) return;
+		rows.push({ candidate: null, local: item });
+	});
+	candyCoreSetText("candy-core-current", core.current_version);
+	candyCoreSetText("candy-core-previous", core.previous_version);
+	candyCoreSetText("candy-core-process-api", bundle.process_api_version || core.required_core_process_api_version);
+	candyCoreSetText("candy-core-api", manifest.core_api_version || core.required_core_api_version);
 	candyCoreSetText("candy-core-protocol", protocol.major === undefined ? null : protocol.major + "." + protocol.minor);
 	candyCoreSetText("candy-core-architecture", artifact.target_arch);
-	if (rollbackButton) rollbackButton.disabled = !data.previous_version || busy;
+	if (rollbackButton) rollbackButton.disabled = !core.previous_version || busy;
 	if (operationNode) {
 		operationNode.style.display = operation.state || data.error ? "" : "none";
 		operationNode.className = "candy-core-operation " + (operation.state || "error");
-		operationNode.textContent = data.error || operation.message || "";
+		operationNode.textContent = data.error || candyCoreOperationText(operation);
 	}
 	if (!body) return;
 	body.textContent = "";
-	if (!installed.length) {
+	if (!rows.length) {
 		row = document.createElement("tr");
 		cell = document.createElement("td");
 		cell.className = "td";
@@ -141,17 +187,26 @@ function candyCoreRender(data) {
 		body.appendChild(row);
 		return;
 	}
-	installed.forEach(function(item) {
+	rows.forEach(function(entry) {
+		var candidate = entry.candidate, item = entry.local;
+		var version = candidate ? candidate.version : item.version;
+		var isInstalled = candidate ? candidate.installed === true : true;
+		var isCurrent = candidate ? candidate.active === true : item.active === true;
+		var isLatest = !!(candidate && candidate.latest === true);
 		row = document.createElement("tr"); row.className = "tr";
-		cell = document.createElement("td"); cell.className = "td"; cell.textContent = candyCoreText(item.version); row.appendChild(cell);
-		state = item.active ? candyCoreLabels.active : (item.rollback ? candyCoreLabels.rollback : candyCoreLabels.inactive);
-		cell = document.createElement("td"); cell.className = "td"; cell.textContent = state; row.appendChild(cell);
-		cell = document.createElement("td"); cell.className = "td"; cell.textContent = item.managed ? candyCoreLabels.yes : candyCoreLabels.no; row.appendChild(cell);
+		cell = document.createElement("td"); cell.className = "td"; cell.textContent = candyCoreText(version); row.appendChild(cell);
+		states = document.createElement("div"); states.className = "candy-core-states";
+		if (isLatest) states.appendChild(candyCoreState(candyCoreLabels.latest, "latest"));
+		if (isCurrent) states.appendChild(candyCoreState(candyCoreLabels.current, "current"));
+		else if (isInstalled) states.appendChild(candyCoreState(candyCoreLabels.installed, "installed"));
+		cell = document.createElement("td"); cell.className = "td"; cell.appendChild(states); row.appendChild(cell);
+		cell = document.createElement("td"); cell.className = "td"; cell.textContent = item ? (item.managed ? candyCoreLabels.yes : candyCoreLabels.no) : "-"; row.appendChild(cell);
 		actions = document.createElement("td"); actions.className = "td candy-core-actions";
-		if (!busy && item.managed && !item.active) actions.appendChild(candyCoreActionForm(candyCoreActivateUrl, item.version, candyCoreLabels.activate, "cbi-button cbi-button-apply"));
-		if (!busy && !item.rollback && (!item.active || data.service_running === false)) {
-			actions.appendChild(candyCoreActionForm(candyCoreRemoveUrl, item.version, candyCoreLabels.remove, "cbi-button cbi-button-negative", item.active ? candyCoreLabels.removeCurrentConfirm : candyCoreLabels.removeConfirm));
+		if (!busy && item && item.managed && !isCurrent) actions.appendChild(candyCoreActionForm(candyCoreActivateUrl, "version", version, candyCoreLabels.activate, "cbi-button cbi-button-apply"));
+		if (!busy && item && item.managed && (!isCurrent || core.service_running === false)) {
+			actions.appendChild(candyCoreActionForm(candyCoreRemoveUrl, "version", version, candyCoreLabels.remove, "cbi-button cbi-button-negative", isCurrent ? candyCoreLabels.removeCurrentConfirm : candyCoreLabels.removeConfirm));
 		}
+		if (!busy && candidate && isLatest && !isInstalled && candidate.version_key && candidate.compatible !== false && candidate.installable !== false) actions.appendChild(candyCoreActionForm(candyCoreInstallUrl, "version_key", candidate.version_key, candyCoreLabels.downloadLatest, "cbi-button cbi-button-apply"));
 		row.appendChild(actions); body.appendChild(row);
 	});
 }

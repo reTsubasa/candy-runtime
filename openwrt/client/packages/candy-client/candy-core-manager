@@ -14,6 +14,8 @@ EXPECTED_CORE_API=${CANDY_EXPECTED_CORE_API:-1}
 MAX_CORE_BYTES=${CANDY_MAX_CORE_BYTES:-134217728}
 MAX_MANIFEST_BYTES=${CANDY_MAX_MANIFEST_BYTES:-262144}
 LOCK_DIR=${CANDY_CORE_LOCK_DIR:-/var/lock/candy-core-manager.lock}
+SERVICE_LOCK_DIR=${CANDY_SERVICE_LOCK_DIR:-/var/lib/candy/service.lock}
+PROC_ROOT=${CANDY_PROC_ROOT:-/proc}
 OPERATION_FILE=${CANDY_CORE_OPERATION_FILE:-/tmp/candy-core-operation.json}
 HEALTH_WAIT_SECONDS=${CANDY_CORE_HEALTH_WAIT_SECONDS:-15}
 OPERATION_ACTION=
@@ -22,6 +24,7 @@ VALIDATION_PHASE=
 VALIDATION_CODE=
 VALIDATION_DETAIL=
 LOCAL_UPLOAD_COPY=
+SERVICE_LOCK_HELD=0
 
 json_string() {
 	printf '"'
@@ -92,6 +95,17 @@ validation_error() {
 	return 1
 }
 
+cleanup_operation_locks() {
+	if [ "$SERVICE_LOCK_HELD" = 1 ]; then
+		rm -f "$SERVICE_LOCK_DIR/pid" 2>/dev/null || true
+		rmdir "$SERVICE_LOCK_DIR" 2>/dev/null || true
+		SERVICE_LOCK_HELD=0
+	fi
+	rm -f "$LOCAL_UPLOAD_COPY" 2>/dev/null || true
+	rm -f "$LOCK_DIR/pid" 2>/dev/null || true
+	rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+
 acquire_lock() {
 	local lock_pid
 	mkdir -p "$(dirname "$LOCK_DIR")" || return 1
@@ -106,7 +120,20 @@ acquire_lock() {
 		mkdir "$LOCK_DIR" 2>/dev/null || return 1
 	fi
 	printf '%s\n' "$$" > "$LOCK_DIR/pid" || { rmdir "$LOCK_DIR" 2>/dev/null || true; return 1; }
-	trap 'rm -f "$LOCAL_UPLOAD_COPY" 2>/dev/null || true; rm -f "$LOCK_DIR/pid" 2>/dev/null || true; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT HUP INT TERM
+	trap 'cleanup_operation_locks' EXIT HUP INT TERM
+}
+
+acquire_service_lifecycle_lock() {
+	mkdir -p "$(dirname "$SERVICE_LOCK_DIR")" || return 1
+	mkdir "$SERVICE_LOCK_DIR" 2>/dev/null || return 1
+	SERVICE_LOCK_HELD=1
+	if ! chmod 0700 "$SERVICE_LOCK_DIR" 2>/dev/null ||
+		! printf '%s\n' "$$" > "$SERVICE_LOCK_DIR/pid"; then
+		rm -f "$SERVICE_LOCK_DIR/pid" 2>/dev/null || true
+		rmdir "$SERVICE_LOCK_DIR" 2>/dev/null || true
+		SERVICE_LOCK_HELD=0
+		return 1
+	fi
 }
 
 valid_version() {
@@ -448,6 +475,21 @@ service_running() {
 	[ -x "$SERVICE_INIT" ] && "$SERVICE_INIT" status >/dev/null 2>&1
 }
 
+core_directory_in_use() {
+	local directory="$1" physical_directory executable target
+	physical_directory=$(CDPATH= cd "$directory" 2>/dev/null && pwd -P) || physical_directory=$directory
+	for executable in "$PROC_ROOT"/[0-9]*/exe; do
+		[ -L "$executable" ] || continue
+		target=$(readlink "$executable" 2>/dev/null || true)
+		case "$target" in
+			"$directory/candy-core"|"$directory/candy-core (deleted)"|"$physical_directory/candy-core"|"$physical_directory/candy-core (deleted)")
+				return 0
+			;;
+		esac
+	done
+	return 1
+}
+
 restart_if_running() {
 	local waited=0 state
 	[ "$1" = 1 ] || return 0
@@ -511,19 +553,30 @@ rollback_core() {
 }
 
 remove_core() {
-	local version="$1" directory current previous removing_current=0
+	local version="$1" directory current previous removing_current=0 removing_previous=0
 	directory=$(version_path "$version") || fail "invalid Core version"
 	current=$(link_version "$CURRENT_LINK")
 	previous=$(link_version "$PREVIOUS_LINK")
-	[ "$version" != "$previous" ] || fail "cannot remove the rollback Core"
 	[ -d "$directory" ] || fail "Core $version is not installed"
+	[ ! -L "$directory" ] || fail "Core $version directory is unsafe"
 	if [ "$version" = "$current" ]; then
+		acquire_service_lifecycle_lock || fail "another Candy service lifecycle action is running"
 		service_running && fail "stop Candy before removing the current Core"
+		core_directory_in_use "$directory" && fail "Core $version is still in use by a running process"
 		removing_current=1
-		restore_link "$CURRENT_LINK" "" || fail "cannot detach the current Core"
+	fi
+	[ "$version" != "$previous" ] || removing_previous=1
+	if { [ "$removing_current" = 0 ] || restore_link "$CURRENT_LINK" ""; } &&
+		{ [ "$removing_previous" = 0 ] || restore_link "$PREVIOUS_LINK" ""; }; then
+		:
+	else
+		restore_link "$CURRENT_LINK" "$current" || true
+		restore_link "$PREVIOUS_LINK" "$previous" || true
+		fail "cannot detach Core $version"
 	fi
 	if ! rm -rf "$directory" || [ -e "$directory" ]; then
-		[ "$removing_current" = 0 ] || restore_link "$CURRENT_LINK" "$current" || true
+		restore_link "$CURRENT_LINK" "$current" || true
+		restore_link "$PREVIOUS_LINK" "$previous" || true
 		fail "cannot remove Core $version"
 	fi
 	log_event info core_removed install removed "Removed Core $version"

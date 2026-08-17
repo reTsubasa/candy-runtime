@@ -1458,6 +1458,18 @@ msgstr "安装所选 Core"
 msgid "Latest"
 msgstr "最新"
 
+msgid "Download latest Core"
+msgstr "下载最新 Core"
+
+msgid "Core %s was removed"
+msgstr "Core %s 已删除"
+
+msgid "Core %s is active"
+msgstr "Core %s 已启用"
+
+msgid "Core %s was installed"
+msgstr "Core %s 已安装"
+
 msgid "Incompatible"
 msgstr "不兼容"
 

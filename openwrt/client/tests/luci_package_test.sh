@@ -717,11 +717,14 @@ assert_not_contains "$controller" '\{"admin", "services", "candy", "client"\}'
 assert_contains "$controller" 'action_rules_import'
 assert_contains "$controller" 'action_rules_export'
 assert_contains "$controller" 'action_status_json'
-for action in core_status core_activate core_rollback core_remove; do
+for action in core_status core_activate core_rollback core_remove core_install; do
 	assert_contains "$controller" "action_$action"
 done
 assert_contains "$controller" 'status\.core = read_core_status\(\)'
 assert_contains "$controller" 'CORE_MANAGER = "/usr/libexec/candy-core-manager"'
+assert_contains "$controller" 'CORE_UPDATE_MANAGER = "/usr/libexec/candy-update-manager"'
+assert_contains "$controller" 'CORE_UPDATE_MANAGER, "status"'
+assert_contains "$controller" 'CORE_UPDATE_MANAGER, "install-core", version_key'
 assert_not_contains "$controller" 'pidof.*candy-client'
 assert_not_contains "$status" 'pidof.*candy-client'
 assert_contains "$controller" 'REQUEST_METHOD.*POST'
@@ -1015,21 +1018,22 @@ assert_not_contains "$status" 'node\.last_error'
 assert_not_contains "$status" 'status\.dns'
 
 assert_contains "$core_view" 'core_status'
-assert_not_contains "$core_view" 'core_install'
+assert_contains "$core_view" 'core_install'
 assert_not_contains "$core_view" 'Install Core bundle'
 assert_not_contains "$core_view" 'Bundle URL'
 assert_not_contains "$core_view" 'candy-core-install-submit'
 assert_contains "$core_view" 'core_activate'
 assert_contains "$core_view" 'core_rollback'
 assert_contains "$core_view" 'core_remove'
-assert_contains "$core_view" 'data\.service_running === false'
 assert_contains "$core_view" 'removeCurrentConfirm'
-assert_contains "$core_view" 'current_manifest'
+assert_contains "$core_view" 'core\.service_running === false'
+assert_not_contains "$core_view" 'data\.service_running === false'
+assert_contains "$core_view" 'core\.current_manifest'
 assert_contains "$core_view" 'process_api_version'
 assert_contains "$core_view" 'protocol_version'
 assert_contains "$core_view" 'target_arch'
-assert_contains "$update_view" 'data\.core && data\.core\.installed'
-assert_contains "$update_view" 'candy-update-core-installed'
+assert_not_contains "$update_view" 'data\.core && data\.core\.installed'
+assert_not_contains "$update_view" 'candy-update-core-installed'
 assert_contains "$update_view" 'candyUpdateCorePageUrl'
 assert_contains "$update_view" 'data\.core_candidates'
 assert_contains "$update_view" 'candidates\.slice\(0, 5\)'
@@ -1037,6 +1041,8 @@ assert_contains "$update_view" 'name="version_key"'
 assert_contains "$update_view" 'enctype="multipart/form-data"'
 assert_contains "$update_view" 'name="core_bundle"'
 assert_contains "$update_view" 'installed && !active'
+assert_not_contains "$update_view" 'installedLocally'
+assert_not_contains "$update_view" 'candidate\.active === true \|\|'
 assert_contains "$update_view" 'candyUpdateLink'
 assert_not_contains "$update_view" 'rollbackAvailable'
 assert_not_contains "$update_view" 'candyUpdateLabels\.incompatible'
@@ -1490,6 +1496,75 @@ victim_file:close()
 os.remove(legacy_path)
 os.remove(victim)
 LUA
+
+node - "$repo_root/$core_view" <<'NODE'
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+
+let source = fs.readFileSync(process.argv[2], "utf8").match(/<script type="text\/javascript">([\s\S]*?)<\/script>/)[1];
+source = source.replace(/"<%=[\s\S]*?%>"/g, '"/test"').replace(/<%=[\s\S]*?%>/g, '"translated"');
+source = source.replace(/\nrefreshCandyCoreStatus\(\);\s*$/, "");
+
+class Element {
+	constructor(tag) { this.tagName = tag; this.children = []; this.style = {}; this.disabled = false; this._text = ""; }
+	appendChild(child) { this.children.push(child); return child; }
+	set textContent(value) { this._text = String(value); this.children = []; }
+	get textContent() { return this._text; }
+}
+
+const elements = {};
+for (const id of ["candy-core-operation", "candy-core-rollback", "candy-core-installed", "candy-core-current", "candy-core-previous", "candy-core-process-api", "candy-core-api", "candy-core-protocol", "candy-core-architecture"]) elements[id] = new Element("div");
+const context = {
+	document: { createElement: (tag) => new Element(tag), getElementById: (id) => elements[id] || null },
+	window: { confirm: () => true }, console, Date, JSON, Array, String,
+	XMLHttpRequest: class {}, setTimeout: () => 1, clearTimeout: () => {}
+};
+vm.createContext(context); vm.runInContext(source, context);
+Object.assign(context.candyCoreLabels, {
+	latest: "Latest", current: "Current", installed: "Installed", yes: "Yes", no: "No",
+	activate: "Activate", remove: "Remove", downloadLatest: "Download latest Core", none: "None",
+	removed: "Core %s was removed", activated: "Core %s is active", installedCore: "Core %s was installed",
+	downloadingCore: "Downloading and validating Core", coreReady: "Core installed; activation remains manual"
+});
+
+const data = {
+	operation: {},
+	core: {
+		current_version: "0.3.9", previous_version: "0.3.8", service_running: false,
+		operation: { state: "completed", action: "remove", version: "0.3.7", message: "untranslated internal message" },
+		installed: [
+			{ version: "0.3.9", active: true, rollback: false, managed: true },
+			{ version: "0.3.8", active: false, rollback: true, managed: true },
+			{ version: "0.3.7", active: false, rollback: false, managed: true }
+		]
+	},
+	core_candidates: [
+		{ version_key: "v0_3_10", version: "0.3.10", latest: true, installed: false, active: false, compatible: true, installable: true },
+		{ version_key: "v0_3_9", version: "0.3.9", latest: false, installed: true, active: true },
+		{ version_key: "v0_3_8", version: "0.3.8", latest: false, installed: true, active: false }
+	]
+};
+context.candyCoreRender(data);
+const rows = elements["candy-core-installed"].children;
+assert.equal(rows.length, 4, "catalog candidates and locally installed Core versions must be merged");
+assert.deepEqual(rows.map((row) => row.children[1].children[0].children.map((tag) => tag.textContent)), [["Latest"], ["Current"], ["Installed"], ["Installed"]]);
+assert.deepEqual([...new Set(rows.flatMap((row) => row.children[1].children[0].children.map((tag) => tag.textContent)))].sort(), ["Current", "Installed", "Latest"]);
+assert.equal(rows[0].children[3].children[0].children[0].name, "version_key");
+assert.equal(rows[0].children[3].children[0].children[0].value, "v0_3_10", "latest download must submit only the signed catalog key");
+assert.deepEqual(rows[1].children[3].children.map((form) => form.children[2].textContent), ["Remove"], "stopped current Core must be removable");
+assert.deepEqual(rows[2].children[3].children.map((form) => form.children[2].textContent), ["Activate", "Remove"], "rollback Core must be removable");
+assert.equal(elements["candy-core-operation"].textContent, "Core 0.3.7 was removed", "completed removal must use the localized operation template");
+
+data.operation = { state: "completed", action: "install-core", version_key: "v0_3_10", updated_at: 2, message: "untranslated update message" };
+data.core.operation.updated_at = 1;
+context.candyCoreRender(data);
+assert.equal(elements["candy-core-operation"].textContent, "Core installed; activation remains manual", "completed catalog download must use the localized operation template");
+
+data.core.service_running = true;
+context.candyCoreRender(data);
+assert.equal(elements["candy-core-installed"].children[1].children[3].children.length, 0, "running current Core must not expose removal");
+NODE
 
 if grep -R "carrier" "$app_dir" >/dev/null 2>&1; then
 	fail "Candy LuCI files must not reference carrier"

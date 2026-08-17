@@ -128,12 +128,15 @@ export CANDY_SERVICE_INIT="$bin/candy-service"
 export CANDY_CORE_SIGNATURE_VERIFIER="$bin/core-signature-verifier"
 export CANDY_RUNTIME_HEALTH_CHECK="$bin/runtime-health-check"
 export CANDY_CORE_LOCK_DIR="$tmp/core-manager.lock"
+export CANDY_SERVICE_LOCK_DIR="$tmp/service.lock"
+export CANDY_PROC_ROOT="$tmp/proc"
 export CANDY_CORE_OPERATION_FILE="$tmp/core-operation.json"
 export CANDY_CORE_ALLOW_FILE_URL=1
 export FAKE_SERVICE_LOG="$tmp/service.log"
 export FAKE_SERVICE_FAIL_ONCE="$tmp/service-fail-once"
 export FAKE_SERVICE_STOPPED="$tmp/service-stopped"
 export FAKE_FETCH_LOG="$tmp/fetch.log"
+mkdir -p "$CANDY_PROC_ROOT"
 
 mkdir "$CANDY_CORE_LOCK_DIR"
 printf '%s\n' "$$" > "$CANDY_CORE_LOCK_DIR/pid"
@@ -254,6 +257,47 @@ grep -q '"service_running":true' <<EOF
 $("$manager" status)
 EOF
 touch "$FAKE_SERVICE_STOPPED"
+mkdir "$CANDY_SERVICE_LOCK_DIR"
+printf '%s\n' "$$" > "$CANDY_SERVICE_LOCK_DIR/pid"
+if "$manager" remove 0.4.1 >/dev/null 2>&1; then
+	echo "current Core removal bypassed the service lifecycle lock" >&2
+	exit 1
+fi
+[ -d "$CANDY_SERVICE_LOCK_DIR" ]
+[ -d "$cores/0.4.1" ]
+[ "$(readlink "$cores/current")" = 0.4.1 ]
+rm -f "$CANDY_SERVICE_LOCK_DIR/pid"
+rmdir "$CANDY_SERVICE_LOCK_DIR"
+
+mkdir -p "$CANDY_PROC_ROOT/4242"
+ln -s "$cores/0.4.1/candy-core" "$CANDY_PROC_ROOT/4242/exe"
+if "$manager" remove 0.4.1 >/dev/null 2>&1; then
+	echo "current Core was removed while its executable was in use" >&2
+	exit 1
+fi
+[ ! -e "$CANDY_SERVICE_LOCK_DIR" ]
+[ -d "$cores/0.4.1" ]
+[ "$(readlink "$cores/current")" = 0.4.1 ]
+rm -f "$CANDY_PROC_ROOT/4242/exe"
+rmdir "$CANDY_PROC_ROOT/4242"
+
+mkdir "$tmp/failing-remove-bin"
+cat > "$tmp/failing-remove-bin/rm" <<'EOF'
+#!/bin/sh
+[ "$*" != "-rf $FAKE_REMOVE_TARGET" ] || exit 1
+exec /bin/rm "$@"
+EOF
+chmod +x "$tmp/failing-remove-bin/rm"
+if PATH="$tmp/failing-remove-bin:$PATH" FAKE_REMOVE_TARGET="$cores/0.4.1" \
+	"$manager" remove 0.4.1 >/dev/null 2>&1; then
+	echo "failed current Core directory removal was accepted" >&2
+	exit 1
+fi
+[ ! -e "$CANDY_SERVICE_LOCK_DIR" ]
+[ -d "$cores/0.4.1" ]
+[ "$(readlink "$cores/current")" = 0.4.1 ]
+[ "$(readlink "$cores/previous")" = 0.4.2 ]
+
 "$manager" remove 0.4.1 >/dev/null
 [ ! -e "$cores/0.4.1" ]
 [ ! -e "$cores/current" ]
@@ -261,10 +305,16 @@ touch "$FAKE_SERVICE_STOPPED"
 grep -q '"service_running":false' <<EOF
 $("$manager" status)
 EOF
-if "$manager" remove 0.4.2 >/dev/null 2>&1; then
-	echo "rollback Core was removed while the service was stopped" >&2
+if PATH="$tmp/failing-remove-bin:$PATH" FAKE_REMOVE_TARGET="$cores/0.4.2" \
+	"$manager" remove 0.4.2 >/dev/null 2>&1; then
+	echo "failed rollback Core directory removal was accepted" >&2
 	exit 1
 fi
+[ -d "$cores/0.4.2" ]
+[ "$(readlink "$cores/previous")" = 0.4.2 ]
+"$manager" remove 0.4.2 >/dev/null
+[ ! -e "$cores/0.4.2" ]
+[ ! -e "$cores/previous" ]
 
 [ "$(wc -l < "$FAKE_SERVICE_LOG")" -ge 3 ]
 

@@ -85,7 +85,6 @@ end
 			<select id="candy-update-core-select" name="version_key" disabled="disabled"></select>
 			<button id="candy-update-core-install" class="cbi-button cbi-button-apply" type="submit" disabled="disabled"><%:Install selected Core%></button>
 		</form>
-		<p id="candy-update-core-installed" class="candy-update-note"></p>
 		<p class="candy-update-note"><%:A downloaded Core is installed but never activated automatically. Review it on the Core page before activation.%></p>
 		<details class="candy-update-advanced">
 			<summary><%:Advanced: install a local Core bundle%></summary>
@@ -115,9 +114,6 @@ var candyUpdateLabels = {
 	current: <%=js_string(i18n.translate("Current"))%>,
 	installRuntime: <%=js_string(i18n.translate("Install Runtime"))%>,
 	reviewCore: <%=js_string(i18n.translate("Review Core"))%>,
-	installedLocally: <%=js_string(i18n.translate("Installed locally"))%>,
-	active: <%=js_string(i18n.translate("Active"))%>,
-	inactive: <%=js_string(i18n.translate("Inactive"))%>,
 	latest: <%=js_string(i18n.translate("Latest"))%>,
 	installed: <%=js_string(i18n.translate("Installed"))%>,
 	noCompatibleCore: <%=js_string(i18n.translate("No compatible Core is available"))%>,
@@ -248,26 +244,19 @@ function candyUpdateCoreCandidates(data) {
 
 function candyUpdateRenderCore(data, busy) {
 	var body = document.getElementById("candy-update-core"), select = document.getElementById("candy-update-core-select");
-	var installButton = document.getElementById("candy-update-core-install"), catalog = data.catalog || {};
-	var installedCores = (data.core && data.core.installed) || [], installedByVersion = {}, selected = select ? select.value : "";
-	var candidates = candyUpdateCoreCandidates(data), installedLabel = [];
-	installedCores.forEach(function(item) {
-		if (!item || !item.version) return;
-		installedByVersion[String(item.version)] = item;
-		installedLabel.push(String(item.version) + " (" + (item.active ? candyUpdateLabels.active : candyUpdateLabels.inactive) + ")");
-	});
-	candyUpdateSet("candy-update-core-installed", installedLabel.length ? candyUpdateLabels.installedLocally + ": " + installedLabel.join(", ") : null);
+	var installButton = document.getElementById("candy-update-core-install");
+	var selected = select ? select.value : "";
+	var candidates = candyUpdateCoreCandidates(data);
 	if (body) body.textContent = "";
 	if (select) select.textContent = "";
 	candidates.forEach(function(candidate) {
 		if (!candidate || typeof candidate !== "object") return;
 		var key = candidate.version_key || candidate.key || "", version = candyUpdateText(candidate.version);
-		var installed = candidate.installed === true ? { active: candidate.active === true } : installedByVersion[String(candidate.version)];
-		var active = candidate.active === true || String(candidate.version || "") === String(data.core_current || "") || !!(installed && installed.active);
+		var installed = candidate.installed === true;
+		var active = candidate.active === true;
 		var compatible = candidate.compatible !== false, installable = candidate.installable !== false;
-		var versionDelta = data.core_current ? candyUpdateCompare(candidate.version, data.core_current) : 1;
-		var eligible = compatible && installable && versionDelta !== 0;
-		var latest = candidate.latest === true || (catalog.core && key && key === catalog.core.latest);
+		var eligible = compatible && installable;
+		var latest = candidate.latest === true;
 		var row = document.createElement("tr"), states = document.createElement("div"), actionCell, review;
 		row.className = "tr";
 		[version, candyUpdateText(candidate.process_api_version), candyUpdateText(candidate.core_api_version)].forEach(function(value) {
