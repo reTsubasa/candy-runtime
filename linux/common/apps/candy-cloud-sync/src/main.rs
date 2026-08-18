@@ -265,6 +265,23 @@ struct RuntimeTelemetry<'a> {
     tx_bps: Option<u64>,
     reconnects: Option<u64>,
     path_changes: Option<u64>,
+    paths: &'a [RuntimePathTelemetry],
+}
+
+#[derive(Debug, Serialize, Eq, PartialEq)]
+struct RuntimePathTelemetry {
+    peer_attachment_id: String,
+    candidate_id: Option<String>,
+    path_kind: String,
+    transport: String,
+    connection_epoch: u64,
+    rtt_ms: Option<u32>,
+    jitter_ms: Option<u32>,
+    packet_loss_ppm: Option<u32>,
+    rx_bps: Option<u64>,
+    tx_bps: Option<u64>,
+    reconnects: u64,
+    path_changes: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,6 +352,8 @@ struct RuntimeTelemetrySample {
 #[serde(deny_unknown_fields)]
 struct RuntimePathSample {
     connection_epoch: u64,
+    tx_bytes: u64,
+    rx_bytes: u64,
     sent_packets: u64,
     lost_packets: u64,
 }
@@ -912,6 +931,20 @@ fn report_runtime_telemetry(
         previous_sample.as_ref(),
         current_sample.as_ref(),
     );
+    let path_performance = match derive_runtime_paths(
+        core_status.as_ref(),
+        previous_sample.as_ref(),
+        current_sample.as_ref(),
+    ) {
+        Ok(paths) => paths,
+        Err(error) => {
+            eprintln!(
+                "level=warn event=runtime_path_telemetry_omitted reason={}",
+                sanitize_log_value(&format!("{error:#}"))
+            );
+            Vec::new()
+        }
+    };
     let local_status = read_local_runtime_status(state_dir).ok();
     let lifecycle = if core_status
         .as_ref()
@@ -974,6 +1007,7 @@ fn report_runtime_telemetry(
             tx_bps: performance.tx_bps,
             reconnects: performance.reconnects,
             path_changes: performance.path_changes,
+            paths: &path_performance,
         })
         .send()
         .context("report Runtime telemetry")?;
@@ -1012,6 +1046,8 @@ fn runtime_telemetry_sample(
                     path.peer_attachment_id.clone(),
                     RuntimePathSample {
                         connection_epoch: path.connection_epoch,
+                        tx_bytes: path.tx_bytes,
+                        rx_bytes: path.rx_bytes,
                         sent_packets: path.sent_packets,
                         lost_packets: path.lost_packets,
                     },
@@ -1108,6 +1144,106 @@ fn derive_runtime_performance(
         );
     }
     performance
+}
+
+fn derive_runtime_paths(
+    status: Option<&CoreRuntimeStatus>,
+    previous: Option<&RuntimeTelemetrySample>,
+    current: Option<&RuntimeTelemetrySample>,
+) -> Result<Vec<RuntimePathTelemetry>> {
+    let Some(status) = status.filter(|status| status.schema_version >= 2) else {
+        return Ok(Vec::new());
+    };
+    if status.paths.len() > 256 {
+        bail!("Core Runtime path telemetry exceeds the Cloud reporting bound")
+    }
+    let interval = previous.zip(current).filter(|(previous, current)| {
+        previous.boot_id == current.boot_id
+            && previous.core_pid == current.core_pid
+            && previous.generation == current.generation
+            && current.observed_monotonic_ms > previous.observed_monotonic_ms
+            && (1_000..=300_000).contains(
+                &current
+                    .observed_monotonic_ms
+                    .saturating_sub(previous.observed_monotonic_ms),
+            )
+    });
+    status
+        .paths
+        .iter()
+        .map(|path| {
+            let mut result = RuntimePathTelemetry {
+                peer_attachment_id: canonical_uuid_hex(&path.peer_attachment_id)?,
+                candidate_id: path
+                    .candidate_id
+                    .as_deref()
+                    .map(canonical_uuid_hex)
+                    .transpose()?,
+                path_kind: path.path_kind.clone(),
+                transport: path.transport.clone(),
+                connection_epoch: path.connection_epoch,
+                rtt_ms: (path.rtt_micros > 0).then(|| micros_to_millis(path.rtt_micros)),
+                jitter_ms: (path.rtt_sample_count >= 2)
+                    .then(|| micros_to_millis(path.rtt_variance_micros)),
+                packet_loss_ppm: None,
+                rx_bps: None,
+                tx_bps: None,
+                reconnects: path.reconnects,
+                path_changes: path.path_changes,
+            };
+            let Some((previous, current)) = interval else {
+                return Ok(result);
+            };
+            let Some(previous_path) = previous.paths.get(&path.peer_attachment_id) else {
+                return Ok(result);
+            };
+            let Some(current_path) = current.paths.get(&path.peer_attachment_id) else {
+                return Ok(result);
+            };
+            if previous_path.connection_epoch != current_path.connection_epoch
+                || current_path.tx_bytes < previous_path.tx_bytes
+                || current_path.rx_bytes < previous_path.rx_bytes
+                || current_path.sent_packets < previous_path.sent_packets
+                || current_path.lost_packets < previous_path.lost_packets
+            {
+                return Ok(result);
+            }
+            let elapsed_ms = current
+                .observed_monotonic_ms
+                .saturating_sub(previous.observed_monotonic_ms);
+            result.tx_bps = Some(rate_bps(
+                current_path.tx_bytes.saturating_sub(previous_path.tx_bytes),
+                elapsed_ms,
+            ));
+            result.rx_bps = Some(rate_bps(
+                current_path.rx_bytes.saturating_sub(previous_path.rx_bytes),
+                elapsed_ms,
+            ));
+            let sent = current_path
+                .sent_packets
+                .saturating_sub(previous_path.sent_packets);
+            let lost = current_path
+                .lost_packets
+                .saturating_sub(previous_path.lost_packets);
+            if sent > 0 {
+                result.packet_loss_ppm =
+                    Some(((u128::from(lost.min(sent)) * 1_000_000) / u128::from(sent)) as u32);
+            }
+            Ok(result)
+        })
+        .collect()
+}
+
+fn canonical_uuid_hex(value: &str) -> Result<String> {
+    validate_hex(value, 16, "Runtime path identifier")?;
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &value[..8],
+        &value[8..12],
+        &value[12..16],
+        &value[16..20],
+        &value[20..]
+    ))
 }
 
 fn micros_to_millis(value: u64) -> u32 {
@@ -3302,6 +3438,32 @@ mod tests {
             derive_runtime_performance(Some(&old), None, None),
             DerivedRuntimePerformance::default()
         );
+    }
+
+    #[test]
+    fn runtime_path_telemetry_uses_canonical_ids_and_real_transport_counters() {
+        let boot_id = Uuid::new_v4();
+        let status = core_status_v2();
+        let mut previous = runtime_telemetry_sample(boot_id, 1, 1_000, &status);
+        let path = previous.paths.get_mut(&"11".repeat(16)).unwrap();
+        path.tx_bytes = 1_000;
+        path.rx_bytes = 2_000;
+        path.sent_packets = 100;
+        path.lost_packets = 2;
+        let current = runtime_telemetry_sample(boot_id, 2, 3_000, &status);
+        let paths = derive_runtime_paths(Some(&status), Some(&previous), Some(&current)).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(
+            paths[0].peer_attachment_id,
+            "11111111-1111-1111-1111-111111111111"
+        );
+        assert_eq!(
+            paths[0].candidate_id.as_deref(),
+            Some("22222222-2222-2222-2222-222222222222")
+        );
+        assert_eq!(paths[0].tx_bps, Some(32_000));
+        assert_eq!(paths[0].rx_bps, Some(24_000));
+        assert_eq!(paths[0].packet_loss_ppm, Some(50_000));
     }
 
     fn args(state_dir: PathBuf, server_mode: bool, public_endpoints: Vec<SocketAddr>) -> Args {
