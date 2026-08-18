@@ -166,11 +166,30 @@ safe_absolute_directory_path() {
 }
 
 directory_mode() {
-	stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
+	local value
+	if command -v stat >/dev/null 2>&1; then
+		value=$(stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null || true)
+		if [ -n "$value" ]; then
+			printf '%s\n' "$value"
+			return 0
+		fi
+	fi
+	# Some minimal OpenWrt images do not ship a stat applet. The staging
+	# contract only accepts an exact owner-private directory, which can be
+	# checked from the portable ls mode string without weakening the policy.
+	ls -ldn "$1" 2>/dev/null | awk '$1 == "drwx------" { print "700"; exit }'
 }
 
 directory_owner() {
-	stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1" 2>/dev/null
+	local value
+	if command -v stat >/dev/null 2>&1; then
+		value=$(stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1" 2>/dev/null || true)
+		if [ -n "$value" ]; then
+			printf '%s\n' "$value"
+			return 0
+		fi
+	fi
+	ls -ldn "$1" 2>/dev/null | awk '$1 == "drwx------" { print $3; exit }'
 }
 
 prepare_core_staging_root() {

@@ -33,6 +33,27 @@ fi
 EOF
 chmod 0755 "$bin/jsonfilter"
 
+# Exercise the minimal OpenWrt path where stat is not installed. The update
+# manager must still enforce the exact 0700/root staging-directory contract.
+cat > "$bin/stat" <<'EOF'
+#!/bin/sh
+if [ "${FAKE_STAT_UNAVAILABLE:-0}" = 1 ]; then
+	exit 127
+fi
+exec /usr/bin/stat "$@"
+EOF
+chmod 0755 "$bin/stat"
+
+cat > "$bin/ls" <<'EOF'
+#!/bin/sh
+if [ "${FAKE_STAT_UNAVAILABLE:-0}" = 1 ]; then
+	/bin/ls "$@" | sed 's/^drwx------@/drwx------/'
+	exit ${PIPESTATUS:-0}
+fi
+exec /bin/ls "$@"
+EOF
+chmod 0755 "$bin/ls"
+
 cat > "$bin/uclient-fetch" <<'EOF'
 #!/bin/sh
 destination=
@@ -414,7 +435,7 @@ if FAKE_CORE_INSTALL_FAIL=1 "$manager" install-core v0_3_5 >/dev/null 2>&1; then
 fi
 [ -z "$(find "$CANDY_UPDATE_CORE_STAGING_ROOT" -mindepth 1 -print 2>/dev/null | sed -n '1p')" ]
 
-"$manager" install-core v0_3_5 >/dev/null
+FAKE_STAT_UNAVAILABLE=1 "$manager" install-core v0_3_5 >/dev/null
 grep -Eq '^install 0\.3\.5 file:///.+ [0-9a-f]{64}$' "$FAKE_CORE_LOG"
 grep -E "^install 0\\.3\\.5 file://$CANDY_UPDATE_CORE_STAGING_ROOT/\\.core-[0-9]+/core\\.tar\\.gz [0-9a-f]{64}$" "$FAKE_CORE_LOG" >/dev/null
 grep -E "candy-core-0\\.3\\.5-x86_64-unknown-linux-musl\\.tar\\.gz $CANDY_UPDATE_CORE_STAGING_ROOT/\\.core-[0-9]+/core\\.tar\\.gz$" "$FAKE_FETCH_DEST_LOG" >/dev/null
