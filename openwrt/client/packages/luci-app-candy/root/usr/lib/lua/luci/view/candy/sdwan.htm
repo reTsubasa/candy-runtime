@@ -129,6 +129,7 @@ local result = luci.http.formvalue("result") or ""
 .candy-cloud-profile-state.active { border-color:#2e7d32; color:#1b5e20; background:#f1f8f2; }
 .candy-cloud-profile-state.applying { border-color:#2669a8; color:#174c7d; background:#eef6ff; }
 .candy-cloud-profile-state.error { border-color:#b42318; color:#8a1c13; background:#fff2f0; }
+.candy-cloud-profile-state-group { display:flex; align-items:center; gap:.65em; flex-wrap:wrap; justify-content:flex-end; }
 .candy-cloud-profile-meta { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); padding:.95em 1.1em; gap:1em; }
 .candy-cloud-profile-meta > div { min-width:0; }
 .candy-cloud-profile-meta span, .candy-cloud-profile-meta small { display:block; color:#666; }
@@ -146,9 +147,9 @@ local result = luci.http.formvalue("result") or ""
 .candy-sdwan-next p { color:#555; margin:.25em 0 .8em; line-height:1.6; }
 .candy-sdwan-details { margin-top:1.3em; }
 .candy-sdwan-details h3 { margin:0 0 .5em; font-size:1.05em; }
-.candy-sdwan-connection { margin-top:1.2em; color:#666; }
-.candy-sdwan-connection summary { cursor:pointer; display:inline-block; }
-.candy-sdwan-connection .candy-sdwan-actions { margin-top:.7em; }
+.candy-sdwan-profile-management { display:flex; align-items:center; justify-content:space-between; gap:1.25em; margin-top:1.2em; padding:.9em 0; border-top:1px solid rgba(128,128,128,.25); }
+.candy-sdwan-profile-management strong, .candy-sdwan-profile-management span { display:block; }
+.candy-sdwan-profile-management span { margin-top:.2em; color:#666; line-height:1.55; }
 .candy-sdwan-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.65em 1.25em; margin:0; }
 .candy-sdwan-grid > div { display:grid; grid-template-columns:minmax(7em, .8fr) minmax(0, 1.5fr); gap:.75em; padding:.65em 0; border-bottom:1px solid rgba(128,128,128,.3); min-width:0; }
 .candy-sdwan-grid dt { color:#666; }
@@ -160,7 +161,7 @@ local result = luci.http.formvalue("result") or ""
 .candy-sdwan-form .cbi-value { display:grid; grid-template-columns:minmax(9em,.8fr) minmax(0,1.8fr); gap:.8em; align-items:center; }
 .candy-sdwan-join-help { color:#666; margin:.5em 0 0; line-height:1.65; }
 .candy-sdwan-result { padding:.7em .9em; margin-bottom:1em; border-left:4px solid #b26a00; background:#fff8e8; }
-@media (max-width: 640px) { .candy-sdwan-grid, .candy-cloud-profile-meta, .candy-cloud-progress { grid-template-columns:1fr; } .candy-cloud-progress > div + div { border-left:0; border-top:1px solid rgba(128,128,128,.22); } }
+@media (max-width: 640px) { .candy-sdwan-grid, .candy-cloud-profile-meta, .candy-cloud-progress { grid-template-columns:1fr; } .candy-cloud-progress > div + div { border-left:0; border-top:1px solid rgba(128,128,128,.22); } .candy-sdwan-profile-management { align-items:flex-start; flex-direction:column; } }
 @media (max-width: 480px) { .candy-sdwan-form .cbi-value { grid-template-columns:1fr; gap:.25em; } }
 </style>
 
@@ -168,7 +169,7 @@ local result = luci.http.formvalue("result") or ""
 	<% if result == "joined" then %><div class="candy-sdwan-result"><%:This node has joined Candy Cloud.%></div><% end %>
 	<% if result == "reconnecting" then %><div class="candy-sdwan-result"><%:Reconnect requested.%></div><% end %>
 	<% if result == "not-enabled" then %><div class="candy-sdwan-result"><%:The node has joined Candy Cloud, but the SD-WAN service is not enabled.%></div><% end %>
-	<% if result == "left" then %><div class="candy-sdwan-result"><%:This node has left Candy Cloud.%></div><% end %>
+	<% if result == "left" then %><div class="candy-sdwan-result"><%:The current Cloud Profile has been removed. Local SD-WAN state is cleared and ordinary Candy traffic is unaffected.%></div><% end %>
 	<% if result == "invalid-file" then %><div class="candy-sdwan-result"><%:The node join file could not be read. Choose the JSON file downloaded from Candy Cloud and try again.%></div><% end %>
 	<% if result == "file-too-large" then %><div class="candy-sdwan-result"><%:The node join file is too large. Generate a new join file in Candy Cloud and try again.%></div><% end %>
 	<% if result == "error" then %><div class="candy-sdwan-result"><%:Operation failed. Check Logs for details.%></div><% end %>
@@ -192,7 +193,7 @@ local result = luci.http.formvalue("result") or ""
 			<div class="candy-cloud-profile-head">
 				<span class="candy-cloud-avatar">C</span>
 				<div class="candy-cloud-profile-title"><strong><%:Cloud network profile%></strong><span><%=label(display_name or cloud_name)%></span></div>
-				<span class="candy-cloud-profile-state <%=profile_state%>"><%=profile_state_label%></span>
+				<div class="candy-cloud-profile-state-group"><span class="candy-cloud-profile-state <%=profile_state%>"><%=profile_state_label%></span></div>
 			</div>
 			<div class="candy-cloud-profile-meta">
 				<div><span><%:Cloud%></span><strong><%=label(cloud_name)%></strong><small><%=label(cloud_address)%></small></div>
@@ -221,7 +222,10 @@ local result = luci.http.formvalue("result") or ""
 			</dl></div>
 			<% if network_ready then %><div class="candy-sdwan-actions"><form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_reconnect')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-action" type="submit"><%:Reconnect%></button></form></div><% end %>
 		<% end %>
-		<details class="candy-sdwan-connection"><summary><%:Cloud connection management%></summary><div class="candy-sdwan-actions"><form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_leave')%>" onsubmit="return confirm('<%=translate('Remove this node from Candy Cloud and erase its local Cloud identity?')%>');"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-negative" type="submit"><%:Remove from Cloud%></button></form></div></details>
+		<div class="candy-sdwan-profile-management">
+			<div><strong><%:Profile management%></strong><span><%:Leaving removes this device's local Cloud identity and SD-WAN configuration. The node record remains in Cloud until an administrator deletes it.%></span></div>
+			<form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_leave')%>" onsubmit="return confirm('<%=translate('Leave the current Cloud Profile? Local SD-WAN state will be cleared and ordinary Candy traffic will continue normally.')%>');"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-negative" type="submit"><%:Leave current Profile%></button></form>
+		</div>
 	<% end %>
 </div>
 

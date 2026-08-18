@@ -1776,14 +1776,17 @@ msgstr "打开 Candy Cloud"
 msgid "Network status"
 msgstr "网络状态"
 
-msgid "Cloud connection management"
-msgstr "Cloud 连接管理"
+msgid "Profile management"
+msgstr "Profile 管理"
 
-msgid "Remove from Cloud"
-msgstr "从 Cloud 移除"
+msgid "Leaving removes this device's local Cloud identity and SD-WAN configuration. The node record remains in Cloud until an administrator deletes it."
+msgstr "退出会清除此设备的本地 Cloud 身份和 SD-WAN 配置；Cloud 中的节点记录会保留，直到管理员将其删除。"
 
-msgid "Remove this node from Candy Cloud and erase its local Cloud identity?"
-msgstr "确认从 Candy Cloud 移除此节点，并清除本地 Cloud 身份？"
+msgid "Leave current Profile"
+msgstr "退出当前 Profile"
+
+msgid "Leave the current Cloud Profile? Local SD-WAN state will be cleared and ordinary Candy traffic will continue normally."
+msgstr "确认退出当前 Cloud Profile？本地 SD-WAN 状态将被清除，普通 Candy 流量会继续正常运行。"
 
 msgid "Reconnecting"
 msgstr "正在重新连接"
@@ -1815,8 +1818,8 @@ msgstr "此节点已加入 Candy Cloud。"
 msgid "Reconnect requested."
 msgstr "已请求重新连接。"
 
-msgid "This node has left Candy Cloud."
-msgstr "此节点已离开 Candy Cloud。"
+msgid "The current Cloud Profile has been removed. Local SD-WAN state is cleared and ordinary Candy traffic is unaffected."
+msgstr "已退出当前 Cloud Profile。本地 SD-WAN 状态已清除，普通 Candy 流量不受影响。"
 
 msgid "The node join file could not be read. Choose the JSON file downloaded from Candy Cloud and try again."
 msgstr "无法读取节点加入文件。请选择从 Candy Cloud 下载的 JSON 文件后重试。"

@@ -98,6 +98,18 @@ delegate_state() {
 		fail "could not delegate SD-WAN state to $state_user"
 }
 
+clear_state_path() {
+	path=$1
+	if [ -L "$path" ] || [ -f "$path" ]; then
+		rm -f "$path"
+	elif [ -d "$path" ]; then
+		find "$path" -mindepth 1 -delete
+		rmdir "$path"
+	elif [ -e "$path" ]; then
+		fail "unsupported SD-WAN state object: $path"
+	fi
+}
+
 atomic_from_stdin() {
 	target=$1
 	mode=$2
@@ -458,11 +470,21 @@ case "$action" in
 		if [ -d "$enrollment_dir" ] && [ ! -L "$enrollment_dir" ]; then
 			find "$enrollment_dir" -maxdepth 1 -type f ! -name installation-instance-id -delete
 		fi
-		rm -f "$state_dir/profile-v1.json" "$state_dir/sync-state-v1.json" \
-			"$state_dir/cloud-sync-status-v1.json" "$state_dir/configuration"
-		if [ -d "$state_dir/generations" ] && [ ! -L "$state_dir/generations" ]; then
-			find "$state_dir/generations" -mindepth 1 -delete
-		fi
+		for path in \
+			"$state_dir/profile-v1.json" \
+			"$state_dir/sync-state-v1.json" \
+			"$state_dir/cloud-sync-status-v1.json" \
+			"$state_dir/transport-identity-state-v1.json" \
+			"$state_dir/activation-ready-v1.json" \
+			"$state_dir/reconcile-target-v1" \
+			"$state_dir/candidate" \
+			"$state_dir/active" \
+			"$state_dir/configuration" \
+			"$state_dir/activations" \
+			"$state_dir/generations" \
+			"$state_dir/grants"; do
+			clear_state_path "$path"
+		done
 		write_status unregistered stopped ""
 		audit_event leave completed "Local Cloud identity removed"
 		delegate_state

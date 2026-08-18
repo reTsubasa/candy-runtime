@@ -125,7 +125,7 @@ grep -F 'tonumber(parsed.schema_version) == 1' "$sdwan" >/dev/null || fail "LuCI
 for label in 'Site' 'Segment' 'Cloud' 'Full duplex' 'Peer' 'Direct' 'Relay' 'Local egress' 'Remote egress' 'Internal DNS'; do
 	grep -F "$label" "$sdwan" >/dev/null || fail "SD-WAN page is missing $label"
 done
-for control in 'Node join file' 'Import and join' 'Reconnect' 'Remove from Cloud'; do
+for control in 'Node join file' 'Import and join' 'Reconnect' 'Leave current Profile'; do
 	grep -F "$control" "$sdwan" >/dev/null || fail "SD-WAN page is missing $control control"
 done
 grep -F 'enctype="multipart/form-data"' "$sdwan" >/dev/null || fail "node bootstrap import is not multipart"
@@ -156,7 +156,9 @@ fi
 grep -F 'Cloud network profile' "$sdwan" >/dev/null || fail "LuCI does not present the enrolled Cloud profile"
 grep -F 'Waiting for network configuration' "$sdwan" >/dev/null || fail "LuCI does not distinguish enrollment from network readiness"
 grep -F 'no additional local settings are required' "$sdwan" >/dev/null || fail "LuCI does not explain the Cloud-managed activation flow"
-grep -F 'Remove from Cloud' "$sdwan" >/dev/null || fail "LuCI Cloud identity removal is not explicit"
+grep -F 'Profile management' "$sdwan" >/dev/null || fail "LuCI Profile management is not explicit"
+grep -F "The node record remains in Cloud until an administrator deletes it" "$sdwan" >/dev/null || fail "LuCI leave action misrepresents Cloud inventory state"
+grep -F 'if not process.run({ "/etc/init.d/candy", "sdwan_stop", "user_leave" }' "$controller" >/dev/null || fail "LuCI can erase identity before fail-open completes"
 grep -F 'if network_ready then %><div class="candy-sdwan-actions"><form method="post" action="<%=luci.dispatcher.build_url('\''admin/services/candy/sdwan_reconnect'\'')%>"' "$sdwan" >/dev/null || fail "LuCI reconnect is not gated by a synchronized Cloud network profile"
 if grep -F 'The node identity has joined Candy Cloud. The SD-WAN data plane is not enabled' "$sdwan" >/dev/null; then
 	fail "LuCI still exposes the ambiguous data-plane-disabled message"

@@ -918,7 +918,10 @@ end
 
 function action_sdwan_leave()
 	if not require_post() then return end
-	process.run({ "/etc/init.d/candy", "sdwan_stop", "user_leave" }, { timeout = 30 })
+	if not process.run({ "/etc/init.d/candy", "sdwan_stop", "user_leave" }, { timeout = 30 }) then
+		redirect_sdwan("error")
+		return
+	end
 	if not process.run({ SDWAN_RUNTIME, "leave" }, { timeout = 10 }) then
 		redirect_sdwan("error")
 		return
