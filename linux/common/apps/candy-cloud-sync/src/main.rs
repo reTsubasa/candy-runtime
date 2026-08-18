@@ -42,6 +42,8 @@ const PUBLIC_ENDPOINT_ENV: &str = "CANDY_PUBLIC_ENDPOINT";
 struct Args {
     #[arg(long, default_value = "/var/lib/candy/sdwan")]
     state_dir: PathBuf,
+    #[arg(long, default_value = "/run/candy")]
+    run_dir: PathBuf,
     #[arg(long)]
     identity_dir: Option<PathBuf>,
     #[arg(long)]
@@ -242,6 +244,121 @@ struct ConfigurationStatus<'a> {
     projection_content_hash: &'a str,
     state: &'a str,
     error_code: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeTelemetry<'a> {
+    schema_version: u8,
+    boot_id: Uuid,
+    sequence: u64,
+    lifecycle: &'a str,
+    configured_peers: u32,
+    active_peers: u32,
+    required_route_owners: u32,
+    ready_route_owners: u32,
+    fail_open_required: bool,
+    last_error_code: Option<&'a str>,
+    rtt_ms: Option<u32>,
+    jitter_ms: Option<u32>,
+    packet_loss_ppm: Option<u32>,
+    rx_bps: Option<u64>,
+    tx_bps: Option<u64>,
+    reconnects: Option<u64>,
+    path_changes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreRuntimeStatus {
+    schema_version: u16,
+    generation: u64,
+    pid: u32,
+    lifecycle: String,
+    configured_peers: u32,
+    active_peers: u32,
+    required_route_owners: u32,
+    ready_route_owners: u32,
+    fail_open_required: bool,
+    last_error_code: Option<String>,
+    #[serde(default)]
+    counters: CorePacketCounters,
+    #[serde(default)]
+    paths: Vec<CorePathStatus>,
+    #[serde(default)]
+    reconnects: u64,
+    #[serde(default)]
+    path_changes: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CorePacketCounters {
+    #[serde(default)]
+    tun_bytes_received: u64,
+    #[serde(default)]
+    tun_bytes_sent: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CorePathStatus {
+    peer_attachment_id: String,
+    candidate_id: Option<String>,
+    path_kind: String,
+    transport: String,
+    connection_epoch: u64,
+    rtt_micros: u64,
+    rtt_variance_micros: u64,
+    rtt_sample_count: u64,
+    tx_bytes: u64,
+    rx_bytes: u64,
+    sent_packets: u64,
+    lost_packets: u64,
+    congestion_window_bytes: u64,
+    path_mtu: u16,
+    reconnects: u64,
+    path_changes: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeTelemetrySample {
+    schema_version: u8,
+    boot_id: Uuid,
+    sequence: u64,
+    core_pid: u32,
+    generation: u64,
+    observed_monotonic_ms: u64,
+    tun_bytes_received: u64,
+    tun_bytes_sent: u64,
+    paths: BTreeMap<String, RuntimePathSample>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimePathSample {
+    connection_epoch: u64,
+    sent_packets: u64,
+    lost_packets: u64,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct DerivedRuntimePerformance {
+    rtt_ms: Option<u32>,
+    jitter_ms: Option<u32>,
+    packet_loss_ppm: Option<u32>,
+    rx_bps: Option<u64>,
+    tx_bps: Option<u64>,
+    reconnects: Option<u64>,
+    path_changes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalRuntimeStatus {
+    schema_version: u8,
+    runtime: LocalRuntimeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalRuntimeState {
+    state: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -754,7 +871,416 @@ fn sync_once_with_retry(
         }
         status => bail!("Cloud Runtime configuration request failed with HTTP {status}"),
     }
+    if let Err(error) = report_runtime_telemetry(&client, &cloud, &args.state_dir, &args.run_dir) {
+        eprintln!(
+            "level=warn event=runtime_telemetry_report_failed error={}",
+            sanitize_log_value(&format!("{error:#}"))
+        );
+    }
     Ok(())
+}
+
+fn report_runtime_telemetry(
+    client: &Client,
+    cloud: &Url,
+    state_dir: &Path,
+    run_dir: &Path,
+) -> Result<()> {
+    let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .context("read kernel boot id")?
+        .trim()
+        .parse::<Uuid>()
+        .context("parse kernel boot id")?;
+    let observed_monotonic_ms = monotonic_millis()?.max(1);
+    let sample_path = state_dir.join("runtime-telemetry-sample-v1.json");
+    let previous_sample =
+        read_bounded_json::<RuntimeTelemetrySample>(&sample_path, MAX_PROFILE_BYTES)
+            .ok()
+            .filter(|sample| sample.schema_version == 1 && sample.boot_id == boot_id);
+    let sequence = previous_sample
+        .as_ref()
+        .map_or(observed_monotonic_ms, |sample| {
+            observed_monotonic_ms.max(sample.sequence.saturating_add(1))
+        });
+    let core_status = read_active_core_status(state_dir, run_dir)?;
+    let current_sample = core_status
+        .as_ref()
+        .filter(|status| status.schema_version >= 2)
+        .map(|status| runtime_telemetry_sample(boot_id, sequence, observed_monotonic_ms, status));
+    let performance = derive_runtime_performance(
+        core_status.as_ref(),
+        previous_sample.as_ref(),
+        current_sample.as_ref(),
+    );
+    let local_status = read_local_runtime_status(state_dir).ok();
+    let lifecycle = if core_status
+        .as_ref()
+        .is_some_and(|status| status.fail_open_required)
+    {
+        "fail_open"
+    } else if let Some(status) = core_status.as_ref() {
+        match status.lifecycle.as_str() {
+            "active" => "active",
+            "starting" => "starting",
+            "degraded" => "degraded",
+            "failed" => "fail_open",
+            _ => "unknown",
+        }
+    } else {
+        match local_status
+            .as_ref()
+            .map(|status| status.runtime.state.as_str())
+        {
+            Some("fail-open") => "fail_open",
+            Some("stopped") => "stopped",
+            Some("reconnecting" | "running") => "starting",
+            _ => "unknown",
+        }
+    };
+    let empty = CoreRuntimeStatus {
+        schema_version: 1,
+        generation: 0,
+        pid: 0,
+        lifecycle: "unknown".into(),
+        configured_peers: 0,
+        active_peers: 0,
+        required_route_owners: 0,
+        ready_route_owners: 0,
+        fail_open_required: lifecycle == "fail_open",
+        last_error_code: None,
+        counters: CorePacketCounters::default(),
+        paths: Vec::new(),
+        reconnects: 0,
+        path_changes: 0,
+    };
+    let status = core_status.as_ref().unwrap_or(&empty);
+    let response = client
+        .put(endpoint(cloud, "auth/v1/runtime/telemetry")?)
+        .json(&RuntimeTelemetry {
+            schema_version: 1,
+            boot_id,
+            sequence,
+            lifecycle,
+            configured_peers: status.configured_peers,
+            active_peers: status.active_peers,
+            required_route_owners: status.required_route_owners,
+            ready_route_owners: status.ready_route_owners,
+            fail_open_required: lifecycle == "fail_open",
+            last_error_code: status.last_error_code.as_deref(),
+            rtt_ms: performance.rtt_ms,
+            jitter_ms: performance.jitter_ms,
+            packet_loss_ppm: performance.packet_loss_ppm,
+            rx_bps: performance.rx_bps,
+            tx_bps: performance.tx_bps,
+            reconnects: performance.reconnects,
+            path_changes: performance.path_changes,
+        })
+        .send()
+        .context("report Runtime telemetry")?;
+    if response.status() != StatusCode::NO_CONTENT {
+        bail!(
+            "Cloud rejected Runtime telemetry with HTTP {}",
+            response.status()
+        )
+    }
+    if let Some(sample) = current_sample {
+        atomic_json(&sample_path, &sample, 0o600)?;
+    }
+    Ok(())
+}
+
+fn runtime_telemetry_sample(
+    boot_id: Uuid,
+    sequence: u64,
+    observed_monotonic_ms: u64,
+    status: &CoreRuntimeStatus,
+) -> RuntimeTelemetrySample {
+    RuntimeTelemetrySample {
+        schema_version: 1,
+        boot_id,
+        sequence,
+        core_pid: status.pid,
+        generation: status.generation,
+        observed_monotonic_ms,
+        tun_bytes_received: status.counters.tun_bytes_received,
+        tun_bytes_sent: status.counters.tun_bytes_sent,
+        paths: status
+            .paths
+            .iter()
+            .map(|path| {
+                (
+                    path.peer_attachment_id.clone(),
+                    RuntimePathSample {
+                        connection_epoch: path.connection_epoch,
+                        sent_packets: path.sent_packets,
+                        lost_packets: path.lost_packets,
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+fn derive_runtime_performance(
+    status: Option<&CoreRuntimeStatus>,
+    previous: Option<&RuntimeTelemetrySample>,
+    current: Option<&RuntimeTelemetrySample>,
+) -> DerivedRuntimePerformance {
+    let Some(status) = status.filter(|status| status.schema_version >= 2) else {
+        return DerivedRuntimePerformance::default();
+    };
+    let rtt_ms = status
+        .paths
+        .iter()
+        .filter(|path| path.rtt_micros > 0)
+        .map(|path| micros_to_millis(path.rtt_micros))
+        .max();
+    let jitter_ms = status
+        .paths
+        .iter()
+        .filter(|path| path.rtt_sample_count >= 2)
+        .map(|path| micros_to_millis(path.rtt_variance_micros))
+        .max();
+    let mut performance = DerivedRuntimePerformance {
+        rtt_ms,
+        jitter_ms,
+        reconnects: Some(status.reconnects),
+        path_changes: Some(status.path_changes),
+        ..DerivedRuntimePerformance::default()
+    };
+    let (Some(previous), Some(current)) = (previous, current) else {
+        return performance;
+    };
+    if previous.boot_id != current.boot_id
+        || previous.core_pid != current.core_pid
+        || previous.generation != current.generation
+        || current.observed_monotonic_ms <= previous.observed_monotonic_ms
+    {
+        return performance;
+    }
+    let elapsed_ms = current
+        .observed_monotonic_ms
+        .saturating_sub(previous.observed_monotonic_ms);
+    if (1_000..=300_000).contains(&elapsed_ms)
+        && current.tun_bytes_received >= previous.tun_bytes_received
+        && current.tun_bytes_sent >= previous.tun_bytes_sent
+    {
+        performance.tx_bps = Some(rate_bps(
+            current
+                .tun_bytes_received
+                .saturating_sub(previous.tun_bytes_received),
+            elapsed_ms,
+        ));
+        performance.rx_bps = Some(rate_bps(
+            current
+                .tun_bytes_sent
+                .saturating_sub(previous.tun_bytes_sent),
+            elapsed_ms,
+        ));
+    }
+    let mut sent_packets = 0_u64;
+    let mut lost_packets = 0_u64;
+    for (attachment_id, current_path) in &current.paths {
+        let Some(previous_path) = previous.paths.get(attachment_id) else {
+            continue;
+        };
+        if current_path.connection_epoch != previous_path.connection_epoch
+            || current_path.sent_packets < previous_path.sent_packets
+            || current_path.lost_packets < previous_path.lost_packets
+        {
+            continue;
+        }
+        sent_packets = sent_packets.saturating_add(
+            current_path
+                .sent_packets
+                .saturating_sub(previous_path.sent_packets),
+        );
+        lost_packets = lost_packets.saturating_add(
+            current_path
+                .lost_packets
+                .saturating_sub(previous_path.lost_packets),
+        );
+    }
+    if sent_packets > 0 {
+        performance.packet_loss_ppm = Some(
+            ((u128::from(lost_packets.min(sent_packets)) * 1_000_000) / u128::from(sent_packets))
+                as u32,
+        );
+    }
+    performance
+}
+
+fn micros_to_millis(value: u64) -> u32 {
+    value
+        .saturating_add(999)
+        .saturating_div(1_000)
+        .min(u64::from(u32::MAX)) as u32
+}
+
+fn rate_bps(bytes: u64, elapsed_ms: u64) -> u64 {
+    ((u128::from(bytes) * 8_000) / u128::from(elapsed_ms.max(1))).min(u128::from(u64::MAX)) as u64
+}
+
+fn read_active_core_status(state_dir: &Path, run_dir: &Path) -> Result<Option<CoreRuntimeStatus>> {
+    let active = state_dir.join("active");
+    let target = match fs::read_link(&active) {
+        Ok(target) => target,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("read active Runtime pointer"),
+    };
+    let components = target.components().collect::<Vec<_>>();
+    if components.len() != 2
+        || components[0] != std::path::Component::Normal("activations".as_ref())
+    {
+        bail!("active Runtime pointer has an invalid target")
+    }
+    let activation_id = components[1]
+        .as_os_str()
+        .to_str()
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .context("active Runtime pointer has an invalid activation id")?;
+    let activation_directory = state_dir.join(&target);
+    let metadata =
+        fs::symlink_metadata(&activation_directory).context("inspect active Runtime activation")?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("active Runtime activation must be a real directory")
+    }
+    let descriptor: ActivationDescriptor = read_bounded_json(
+        &activation_directory.join("activation-v1.json"),
+        MAX_PROFILE_BYTES,
+    )?;
+    if descriptor.schema_version != 1
+        || descriptor.activation_id != activation_id
+        || descriptor.projection_generation == 0
+    {
+        bail!("active Runtime activation descriptor is invalid")
+    }
+    let paths = [
+        run_dir.join("sdwan-status.json"),
+        run_dir.join(format!("sdwan-{activation_id}.status.json")),
+    ];
+    let mut status = None;
+    for path in paths {
+        if !path.exists() {
+            continue;
+        }
+        let candidate: CoreRuntimeStatus = read_bounded_json(&path, MAX_PROFILE_BYTES)
+            .context("read active Core Runtime status")?;
+        if candidate.generation == descriptor.projection_generation {
+            status = Some(candidate);
+            break;
+        }
+    }
+    let Some(status) = status else {
+        return Ok(None);
+    };
+    if !matches!(status.schema_version, 1 | 2)
+        || status.pid == 0
+        || !process_is_alive(status.pid)
+        || !matches!(
+            status.lifecycle.as_str(),
+            "starting" | "active" | "stopping" | "stopped" | "failed" | "degraded"
+        )
+        || status.active_peers > status.configured_peers
+        || status.ready_route_owners > status.required_route_owners
+        || status.ready_route_owners > status.active_peers
+        || status.last_error_code.as_deref().is_some_and(|value| {
+            value.is_empty()
+                || value.len() > 80
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+    {
+        bail!("active Core Runtime status is invalid")
+    }
+    if status.schema_version >= 2 {
+        validate_core_path_status(&status)?;
+    }
+    Ok(Some(status))
+}
+
+fn validate_core_path_status(status: &CoreRuntimeStatus) -> Result<()> {
+    if status.paths.len() > status.active_peers as usize {
+        bail!("active Core Runtime path count exceeds active peers")
+    }
+    let mut paths = BTreeMap::new();
+    for path in &status.paths {
+        validate_hex(&path.peer_attachment_id, 16, "Core path peer attachment id")?;
+        if let Some(candidate_id) = &path.candidate_id {
+            validate_hex(candidate_id, 16, "Core path candidate id")?;
+        }
+        if !matches!(path.path_kind.as_str(), "direct" | "relay")
+            || path.transport != "quic_udp"
+            || path.connection_epoch == 0
+            || path.lost_packets > path.sent_packets
+            || path.rtt_micros > 60_000_000
+            || path.rtt_variance_micros > 60_000_000
+            || path.rtt_sample_count == 0
+            || path.path_mtu < 1_200
+            || path.congestion_window_bytes == 0
+            || path.reconnects > status.reconnects
+            || path.path_changes > status.path_changes
+            || paths.insert(&path.peer_attachment_id, ()).is_some()
+        {
+            bail!("active Core Runtime path telemetry is invalid")
+        }
+        let _ = (path.tx_bytes, path.rx_bytes);
+    }
+    Ok(())
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    if pid > i32::MAX as u32 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let result = unsafe { nix::libc::kill(pid as nix::libc::pid_t, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(nix::libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+fn read_local_runtime_status(state_dir: &Path) -> Result<LocalRuntimeStatus> {
+    let status: LocalRuntimeStatus =
+        read_bounded_json(&state_dir.join("status-v1.json"), MAX_PROFILE_BYTES)?;
+    if status.schema_version != 1 {
+        bail!("local Runtime status has an unsupported schema")
+    }
+    Ok(status)
+}
+
+fn monotonic_millis() -> Result<u64> {
+    let uptime = fs::read_to_string("/proc/uptime").context("read monotonic clock")?;
+    let seconds = uptime
+        .split_whitespace()
+        .next()
+        .context("kernel uptime is empty")?
+        .parse::<f64>()
+        .context("parse kernel uptime")?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        bail!("kernel uptime is invalid")
+    }
+    Ok((seconds * 1000.0) as u64)
+}
+
+fn sanitize_log_value(value: &str) -> String {
+    value
+        .chars()
+        .take(512)
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 fn reconcile_transport_identity(
@@ -2681,9 +3207,107 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn core_status_v2() -> CoreRuntimeStatus {
+        CoreRuntimeStatus {
+            schema_version: 2,
+            generation: 7,
+            pid: std::process::id(),
+            lifecycle: "active".into(),
+            configured_peers: 1,
+            active_peers: 1,
+            required_route_owners: 1,
+            ready_route_owners: 1,
+            fail_open_required: false,
+            last_error_code: None,
+            counters: CorePacketCounters {
+                tun_bytes_received: 3_000,
+                tun_bytes_sent: 5_000,
+            },
+            paths: vec![CorePathStatus {
+                peer_attachment_id: "11".repeat(16),
+                candidate_id: Some("22".repeat(16)),
+                path_kind: "direct".into(),
+                transport: "quic_udp".into(),
+                connection_epoch: 1,
+                rtt_micros: 12_500,
+                rtt_variance_micros: 1_500,
+                rtt_sample_count: 3,
+                tx_bytes: 9_000,
+                rx_bytes: 8_000,
+                sent_packets: 140,
+                lost_packets: 4,
+                congestion_window_bytes: 64_000,
+                path_mtu: 1_400,
+                reconnects: 2,
+                path_changes: 1,
+            }],
+            reconnects: 2,
+            path_changes: 1,
+        }
+    }
+
+    #[test]
+    fn runtime_performance_uses_same_generation_monotonic_deltas() {
+        let boot_id = Uuid::new_v4();
+        let status = core_status_v2();
+        let mut previous = runtime_telemetry_sample(boot_id, 1, 1_000, &status);
+        previous.tun_bytes_received = 1_000;
+        previous.tun_bytes_sent = 2_000;
+        previous
+            .paths
+            .get_mut(&"11".repeat(16))
+            .unwrap()
+            .sent_packets = 100;
+        previous
+            .paths
+            .get_mut(&"11".repeat(16))
+            .unwrap()
+            .lost_packets = 2;
+        let current = runtime_telemetry_sample(boot_id, 2, 3_000, &status);
+
+        assert_eq!(
+            derive_runtime_performance(Some(&status), Some(&previous), Some(&current)),
+            DerivedRuntimePerformance {
+                rtt_ms: Some(13),
+                jitter_ms: Some(2),
+                packet_loss_ppm: Some(50_000),
+                rx_bps: Some(12_000),
+                tx_bps: Some(8_000),
+                reconnects: Some(2),
+                path_changes: Some(1),
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_performance_never_diffs_across_connection_epoch_or_old_core() {
+        let boot_id = Uuid::new_v4();
+        let status = core_status_v2();
+        let mut previous = runtime_telemetry_sample(boot_id, 1, 1_000, &status);
+        previous
+            .paths
+            .get_mut(&"11".repeat(16))
+            .unwrap()
+            .connection_epoch = 9;
+        let current = runtime_telemetry_sample(boot_id, 2, 3_000, &status);
+        assert_eq!(
+            derive_runtime_performance(Some(&status), Some(&previous), Some(&current))
+                .packet_loss_ppm,
+            None
+        );
+
+        let mut old = core_status_v2();
+        old.schema_version = 1;
+        assert_eq!(
+            derive_runtime_performance(Some(&old), None, None),
+            DerivedRuntimePerformance::default()
+        );
+    }
+
     fn args(state_dir: PathBuf, server_mode: bool, public_endpoints: Vec<SocketAddr>) -> Args {
         Args {
             state_dir,
+            run_dir: PathBuf::from("/run/candy"),
             identity_dir: None,
             ca_certificate: None,
             core: None,
@@ -2691,6 +3315,82 @@ mod tests {
             public_endpoints,
             command: Command::SyncOnce,
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn active_core_status_is_bound_to_activation_generation_and_live_process() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        let run = root.path().join("run");
+        let activation_id = "11".repeat(32);
+        let activation = state.join("activations").join(&activation_id);
+        fs::create_dir_all(&activation).unwrap();
+        fs::create_dir_all(&run).unwrap();
+        fs::write(
+            activation.join("activation-v1.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "activation_id": activation_id,
+                "delivery_etag": format!("\"sha256-{}\"", "22".repeat(32)),
+                "delivery_sha256": "22".repeat(32),
+                "projection_publication_id": Uuid::new_v4(),
+                "projection_content_hash": "33".repeat(32),
+                "segment_generation": 4,
+                "projection_generation": 7,
+                "core_role": "client_sdwan",
+                "core_config": "core.toml",
+                "netd_declaration": "netd.json",
+                "grant_refresh_after_unix": 0,
+                "grant_expires_at_unix": 0
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            Path::new("activations").join(&activation_id),
+            state.join("active"),
+        )
+        .unwrap();
+        fs::write(
+            run.join("sdwan-status.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "generation": 7,
+                "pid": std::process::id(),
+                "lifecycle": "active",
+                "configured_peers": 1,
+                "active_peers": 1,
+                "required_route_owners": 1,
+                "ready_route_owners": 1,
+                "fail_open_required": false,
+                "last_error_code": null
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let status = read_active_core_status(&state, &run).unwrap().unwrap();
+        assert_eq!(status.lifecycle, "active");
+        assert_eq!(status.active_peers, 1);
+
+        fs::write(
+            run.join("sdwan-status.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "generation": 7,
+                "pid": u32::MAX,
+                "lifecycle": "active",
+                "configured_peers": 1,
+                "active_peers": 1,
+                "required_route_owners": 1,
+                "ready_route_owners": 1,
+                "fail_open_required": false,
+                "last_error_code": null
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(read_active_core_status(&state, &run).is_err());
     }
 
     #[test]
