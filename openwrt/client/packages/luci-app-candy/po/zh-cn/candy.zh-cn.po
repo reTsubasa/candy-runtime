@@ -1827,6 +1827,12 @@ msgstr "无法读取节点加入文件。请选择从 Candy Cloud 下载的 JSON
 msgid "The node join file is too large. Generate a new join file in Candy Cloud and try again."
 msgstr "节点加入文件过大。请在 Candy Cloud 重新生成后重试。"
 
+msgid "Could not stop the SD-WAN data plane safely. The profile was kept; check Logs for the stop-phase error."
+msgstr "无法安全停止 SD-WAN 数据面。Profile 已保留，请查看日志中的停止阶段错误。"
+
+msgid "The SD-WAN data plane stopped, but local profile cleanup failed. The profile was kept; check Logs for the cleanup-phase error."
+msgstr "SD-WAN 数据面已停止，但本地 Profile 清理失败。Profile 已保留，请查看日志中的清理阶段错误。"
+
 msgid "Operation failed. Check Logs for details."
 msgstr "操作失败，请查看日志。"
 
