@@ -219,7 +219,12 @@ pub fn put_to_cloud(
         .json(request)
         .send()
         .context("publish Runtime transport identity")?;
-    if response.status() != reqwest::StatusCode::NO_CONTENT {
+    // Cloud V1 specifies 204. Accept 200 from older Cloud images during a
+    // rolling upgrade; the response body is intentionally ignored.
+    if !matches!(
+        response.status(),
+        reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::OK
+    ) {
         bail!(
             "Cloud rejected Runtime transport identity with HTTP {}",
             response.status()
