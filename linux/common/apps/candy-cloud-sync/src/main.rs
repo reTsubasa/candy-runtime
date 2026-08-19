@@ -71,7 +71,8 @@ struct DeviceIdentity {
     organization_id: Uuid,
     tenant_id: Option<Uuid>,
     site_id: Option<Uuid>,
-    display_name: String,
+    #[serde(default)]
+    display_name: Option<String>,
     device_id: Uuid,
     device_key_id: Uuid,
     not_after: String,
@@ -2171,8 +2172,10 @@ fn validate_identity(identity: &DeviceIdentity) -> Result<()> {
         || identity.organization_id.is_nil()
         || identity.tenant_id.is_none_or(|value| value.is_nil())
         || identity.site_id.is_none_or(|value| value.is_nil())
-        || identity.display_name.trim().is_empty()
-        || identity.display_name.len() > 200
+        || identity
+            .display_name
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty() || value.len() > 200)
         || identity.device_id.is_nil()
         || identity.device_key_id.is_nil()
         || identity.not_after.trim().is_empty()
@@ -3636,11 +3639,28 @@ mod tests {
             organization_id: Uuid::from_bytes([1; 16]),
             tenant_id: Some(Uuid::from_bytes([2; 16])),
             site_id: Some(Uuid::from_bytes([5; 16])),
-            display_name: "Router".into(),
+            display_name: Some("Router".into()),
             device_id: Uuid::from_bytes([3; 16]),
             device_key_id: Uuid::from_bytes([4; 16]),
             not_after: "2030-01-01T00:00:00Z".into(),
         }
+    }
+
+    #[test]
+    fn accepts_legacy_identity_without_display_name() {
+        let legacy = serde_json::json!({
+            "schema_version": 1,
+            "cloud_address": "https://cloud.example.test",
+            "organization_id": "01010101-0101-0101-0101-010101010101",
+            "tenant_id": "02020202-0202-0202-0202-020202020202",
+            "site_id": "05050505-0505-0505-0505-050505050505",
+            "device_id": "03030303-0303-0303-0303-030303030303",
+            "device_key_id": "04040404-0404-0404-0404-040404040404",
+            "not_after": "2030-01-01T00:00:00Z"
+        });
+        let identity: DeviceIdentity = serde_json::from_value(legacy).unwrap();
+        assert_eq!(identity.display_name, None);
+        validate_identity(&identity).unwrap();
     }
 
     fn configuration() -> RuntimeConfiguration {
