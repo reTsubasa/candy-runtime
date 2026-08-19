@@ -2170,8 +2170,8 @@ fn validate_verified_report(
 fn validate_identity(identity: &DeviceIdentity) -> Result<()> {
     if identity.schema_version != 1
         || identity.organization_id.is_nil()
-        || identity.tenant_id.is_none_or(|value| value.is_nil())
-        || identity.site_id.is_none_or(|value| value.is_nil())
+        || identity.tenant_id.is_some_and(|value| value.is_nil())
+        || identity.site_id.is_some_and(|value| value.is_nil())
         || identity
             .display_name
             .as_deref()
