@@ -115,7 +115,16 @@ printf '%s\n' target >"$state/reconcile-target-v1"
 ln -s generations/test-generation "$state/configuration"
 ln -s activations/test-activation "$state/candidate"
 ln -s activations/test-activation "$state/active"
-run_runtime leave
+mkdir -p "$tmp/busybox-bin"
+cat >"$tmp/busybox-bin/find" <<'EOF'
+#!/bin/sh
+# OpenWrt BusyBox find intentionally has no GNU -delete/-mindepth options.
+printf '%s\n' "find must not be used by leave cleanup" >&2
+exit 99
+EOF
+chmod 0755 "$tmp/busybox-bin/find"
+PATH="$tmp/busybox-bin:$PATH" run_runtime leave
+rm -rf "$tmp/busybox-bin"
 grep -Fx stop "$fake_sync_calls" >/dev/null || fail "leave did not stop Cloud synchronization"
 grep -Fx disable "$fake_sync_calls" >/dev/null || fail "leave did not disable Cloud synchronization"
 [ ! -e "$state/profile-v1.json" ] || fail "leave retained Cloud profile"

@@ -172,6 +172,8 @@ local result = luci.http.formvalue("result") or ""
 	<% if result == "left" then %><div class="candy-sdwan-result"><%:The current Cloud Profile has been removed. Local SD-WAN state is cleared and ordinary Candy traffic is unaffected.%></div><% end %>
 	<% if result == "invalid-file" then %><div class="candy-sdwan-result"><%:The node join file could not be read. Choose the JSON file downloaded from Candy Cloud and try again.%></div><% end %>
 	<% if result == "file-too-large" then %><div class="candy-sdwan-result"><%:The node join file is too large. Generate a new join file in Candy Cloud and try again.%></div><% end %>
+	<% if result == "leave-stop-failed" then %><div class="candy-sdwan-result error"><%:Could not stop the SD-WAN data plane safely. The profile was kept; check Logs for the stop-phase error.%></div><% end %>
+	<% if result == "leave-runtime-failed" then %><div class="candy-sdwan-result error"><%:The SD-WAN data plane stopped, but local profile cleanup failed. The profile was kept; check Logs for the cleanup-phase error.%></div><% end %>
 	<% if result == "error" then %><div class="candy-sdwan-result"><%:Operation failed. Check Logs for details.%></div><% end %>
 	<div class="candy-sdwan-head">
 		<h2><%:SD-WAN%></h2>

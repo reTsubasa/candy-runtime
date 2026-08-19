@@ -786,6 +786,21 @@ local function redirect_sdwan(result)
 	luci.http.redirect(url)
 end
 
+local function run_sdwan_lifecycle(stage, argv, timeout)
+	local ok, output = process.capture(argv, { timeout = timeout })
+	local detail = trim(output or ""):gsub("[\r\n]+", " "):sub(1, 1024)
+	local log = io.open(SERVICE_LOG_FILE, "a")
+	if log then
+		local level = ok and "info" or "error"
+		log:write(os.date("%Y-%m-%d %H:%M:%S"), " level=", level,
+			" event=sdwan_leave phase=", stage, " pid=luci result=", ok and "ok" or "failed")
+		if detail ~= "" then log:write(" detail=", detail) end
+		log:write("\n")
+		log:close()
+	end
+	return ok
+end
+
 local function allocate_sdwan_bootstrap_path(fs)
 	local nixio = require "nixio"
 	local prefix = string.format("%s/bootstrap-%d-%d", SDWAN_BOOTSTRAP_ROOT, nixio.getpid(), os.time())
@@ -918,13 +933,18 @@ end
 
 function action_sdwan_leave()
 	if not require_post() then return end
-	if not process.run({ "/etc/init.d/candy", "sdwan_stop", "user_leave" }, { timeout = 30 }) then
-		redirect_sdwan("error")
+	if not run_sdwan_lifecycle("stop", { "/etc/init.d/candy", "sdwan_stop", "user_leave" }, 30) then
+		redirect_sdwan("leave-stop-failed")
 		return
 	end
-	if not process.run({ SDWAN_RUNTIME, "leave" }, { timeout = 10 }) then
-		redirect_sdwan("error")
+	if not run_sdwan_lifecycle("runtime", { SDWAN_RUNTIME, "leave" }, 20) then
+		redirect_sdwan("leave-runtime-failed")
 		return
+	end
+	local log = io.open(SERVICE_LOG_FILE, "a")
+	if log then
+		log:write(os.date("%Y-%m-%d %H:%M:%S"), " level=info event=sdwan_leave result=completed ordinary_client=preserved\n")
+		log:close()
 	end
 	redirect_sdwan("left")
 end

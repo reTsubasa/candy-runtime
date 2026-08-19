@@ -103,11 +103,26 @@ clear_state_path() {
 	if [ -L "$path" ] || [ -f "$path" ]; then
 		rm -f "$path"
 	elif [ -d "$path" ]; then
-		find "$path" -mindepth 1 -delete
-		rmdir "$path"
+		# OpenWrt ships BusyBox find, which does not provide GNU -delete or
+		# -mindepth. The paths passed here are fixed SD-WAN-owned paths and
+		# the symlink case is handled above, so recursive rm is portable and
+		# cannot escape through a state-directory symlink.
+		rm -rf "$path"
 	elif [ -e "$path" ]; then
 		fail "unsupported SD-WAN state object: $path"
 	fi
+}
+
+clear_enrollment_material() {
+	[ -d "$enrollment_dir" ] && [ ! -L "$enrollment_dir" ] || return 0
+	for path in "$enrollment_dir"/*; do
+		[ -e "$path" ] || [ -L "$path" ] || continue
+		case "${path##*/}" in
+			installation-instance-id) continue ;;
+		esac
+		[ -f "$path" ] || [ -L "$path" ] || fail "unsupported enrollment state object: $path"
+		rm -f "$path" || fail "could not remove enrollment material: $path"
+	done
 }
 
 atomic_from_stdin() {
@@ -466,10 +481,8 @@ case "$action" in
 		elif command -v systemctl >/dev/null 2>&1; then
 			systemctl stop candy-cloud-sync.timer candy-cloud-sync.service >/dev/null 2>&1 || true
 		fi
-		rm -f "$config_file"
-		if [ -d "$enrollment_dir" ] && [ ! -L "$enrollment_dir" ]; then
-			find "$enrollment_dir" -maxdepth 1 -type f ! -name installation-instance-id -delete
-		fi
+		clear_state_path "$config_file"
+		clear_enrollment_material
 		for path in \
 			"$state_dir/profile-v1.json" \
 			"$state_dir/sync-state-v1.json" \
