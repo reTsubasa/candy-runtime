@@ -98,6 +98,14 @@ local function normalize_resolver_list(value)
 	return table.concat(resolvers, ",")
 end
 
+local function normalize_domain(value)
+	value = trim(value):lower():gsub("%.$", "")
+	if value == "" or value:find("[^a-z0-9._-]") or value:sub(1, 1) == "." or not value:find(".", 1, true) then
+		return nil
+	end
+	return value
+end
+
 local function read_dns_tunnel_status()
 	local status = {}
 	local rows = {}
@@ -170,6 +178,38 @@ o.validate = function(self, value)
 	end
 	return resolver
 end
+
+s = m:section(TypedSection, "dns_rule", translate("Domain resolution policy"))
+s.description = translate("Choose domestic resolution or a specific Candy node for selected domains. Rules are evaluated from top to bottom; use domain for one hostname and domain-suffix for a domain and all subdomains.")
+s.anonymous = true
+s.addremove = true
+s.template = "cbi/tblsection"
+
+o = s:option(ListValue, "type", translate("Match type"))
+o:value("domain", translate("domain (exact hostname)"))
+o:value("domain-suffix", translate("domain-suffix (domain and subdomains)"))
+o.default = "domain-suffix"
+o.rmempty = false
+
+o = s:option(Value, "domain", translate("Domain"))
+o.placeholder = "example.com"
+o.rmempty = false
+function o.validate(self, value)
+	local normalized = normalize_domain(value)
+	if not normalized then return nil, translate("Enter a valid domain, for example example.com") end
+	return normalized
+end
+
+o = s:option(ListValue, "target", translate("Resolve through"))
+o:value("direct", translate("Domestic DNS (direct)"))
+uci:foreach("candy", "node", function(node)
+	if node[".name"] and node[".name"] ~= "" and node.enabled ~= "0" then
+		o:value(node[".name"], node.name and node.name ~= "" and (node.name .. " (Candy node)") or node[".name"])
+	end
+end)
+o.default = "direct"
+o.rmempty = false
+o.description = translate("A Candy node resolves through its encrypted data path; domestic DNS uses the router/direct path.")
 
 s = m:section(NamedSection, "client", "candy", translate("DNS tunnel status"))
 s.addremove = false

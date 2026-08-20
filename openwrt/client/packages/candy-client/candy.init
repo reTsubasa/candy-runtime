@@ -1960,6 +1960,38 @@ write_rule() {
 	write_rule_value "$value"
 }
 
+write_dns_rule() {
+	local section kind domain target target_name
+	config_get kind "$section" type domain-suffix
+	config_get domain "$section" domain
+	config_get target "$section" target direct
+	case "$kind" in
+		domain|domain-suffix) ;;
+		*) log_error "dns_rule=$section rejected invalid type: $kind"; CANDY_CONFIG_RULE_ERROR=1; return 0 ;;
+	esac
+	case "$domain" in
+		""|*[!A-Za-z0-9._-]*|.*|*.) log_error "dns_rule=$section rejected invalid domain: $domain"; CANDY_CONFIG_RULE_ERROR=1; return 0 ;;
+	esac
+	case "$target" in
+		direct) ;;
+		*)
+			if ! uci -q get "candy.$target" >/dev/null 2>&1 || [ "$(uci -q get "candy.$target" 2>/dev/null)" != node ]; then
+				log_error "dns_rule=$section rejected unknown node target: $target"
+				CANDY_CONFIG_RULE_ERROR=1
+				return 0
+			fi
+			config_get target_name "$target" name "$target"
+			;;
+	esac
+	if [ "$FIRST_DNS_RULE" -eq 0 ]; then printf ','; fi
+	printf '{"type":'; json_string "$kind"
+	printf ',"domain":'; json_string "$domain"
+	printf ',"target":'
+	if [ "$target" = direct ]; then printf '"direct"'; else printf '{"node":'; json_string "$target_name"; printf '}'; fi
+	printf '}'
+	FIRST_DNS_RULE=0
+}
+
 write_rule_value() {
 	local value="$1"
 	if [ "$FIRST_RULE" -eq 0 ]; then
@@ -2088,6 +2120,10 @@ generate_config() {
 		json_string "$dns_egress_resolver"
 		printf ',"bootstrap_resolvers":'
 		json_string_list "$dns_bootstrap_resolvers"
+		printf ',"rules":['
+		FIRST_DNS_RULE=1
+		config_foreach write_dns_rule dns_rule
+		printf ']'
 		printf '}'
 		printf '}'
 		printf ',"performance":{"mode":'

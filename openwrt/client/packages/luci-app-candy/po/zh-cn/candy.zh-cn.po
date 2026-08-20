@@ -1924,3 +1924,33 @@ msgstr "配置未能应用"
 
 msgid "Open Logs for details; ordinary Candy traffic is unaffected"
 msgstr "请打开日志查看详情；普通 Candy 流量不受影响"
+
+msgid "Domain resolution policy"
+msgstr "域名解析策略"
+
+msgid "Choose domestic resolution or a specific Candy node for selected domains. Rules are evaluated from top to bottom; use domain for one hostname and domain-suffix for a domain and all subdomains."
+msgstr "为指定域名选择国内解析或指定 Candy 节点解析。规则按列表顺序从上到下匹配；domain 用于单个主机名，domain-suffix 用于域名及其所有子域名。"
+
+msgid "Match type"
+msgstr "匹配类型"
+
+msgid "domain (exact hostname)"
+msgstr "domain（精确主机名）"
+
+msgid "domain-suffix (domain and subdomains)"
+msgstr "domain-suffix（域名及子域名）"
+
+msgid "Domain"
+msgstr "域名"
+
+msgid "Enter a valid domain, for example example.com"
+msgstr "请输入有效域名，例如 example.com"
+
+msgid "Resolve through"
+msgstr "解析路径"
+
+msgid "Domestic DNS (direct)"
+msgstr "国内 DNS（直连）"
+
+msgid "A Candy node resolves through its encrypted data path; domestic DNS uses the router/direct path."
+msgstr "通过 Candy 节点解析会使用加密数据路径；国内 DNS 使用路由器直连路径。"
