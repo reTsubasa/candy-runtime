@@ -4,7 +4,7 @@ PKG_NAME:=candy-client
 PKG_VERSION:=0.4.0
 # OpenWrt requires a package revision. This is internal metadata, not part of
 # the Candy product version shown to users.
-PKG_RELEASE:=39
+PKG_RELEASE:=40
 CANDY_RUNTIME_BIN_DIR?=
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
@@ -100,6 +100,12 @@ mkdir -p /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-
 chown root:root /var/lib/candy
 chmod 0711 /var/lib/candy
 chmod 0700 /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache /var/lib/candy/update
+if [ -d /usr/lib/candy/cores ] && [ ! -L /usr/lib/candy/cores ]; then
+	for core_dir in /usr/lib/candy/cores/*; do
+		[ -d "$$core_dir" ] && [ ! -L "$$core_dir" ] || continue
+		chmod 0755 "$$core_dir" || exit 1
+	done
+fi
 find /var/lib/candy/sdwan -xdev -type d -exec chmod 0700 {} \;
 find /var/lib/candy/sdwan -xdev -type f -exec chmod 0600 {} \;
 find /var/lib/candy/sdwan -xdev ! -type l -exec chown candy-sdwan:candy-sdwan {} \;

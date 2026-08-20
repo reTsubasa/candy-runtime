@@ -437,6 +437,12 @@ install_core() {
 		rm -rf "$temporary"
 		fail_stage "${VALIDATION_PHASE:-validation}" "${VALIDATION_CODE:-validation_failed}" "${VALIDATION_DETAIL:-Core bundle validation failed}"
 	}
+	# Core verification runs as root, while Cloud synchronization executes the
+	# active binary as the unprivileged candy-sdwan user.
+	chmod 0755 "$temporary" || {
+		rm -rf "$temporary"
+		fail_stage install permission_failed "Cannot make the verified Core available to Runtime services"
+	}
 	if [ "$existing" = 1 ]; then
 		backup="$CORE_ROOT/.replace-$version-$$"
 		mv "$destination" "$backup" || {

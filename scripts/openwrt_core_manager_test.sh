@@ -196,6 +196,10 @@ rm -f "$FAKE_FETCH_LOG"
 }
 "$manager" activate 0.4.1 >/dev/null
 [ "$(readlink "$cores/current")" = 0.4.1 ]
+[ "$(ls -ld "$cores/0.4.1" | cut -c1-10)" = drwxr-xr-x ] || {
+	echo "installed Core is not traversable by unprivileged Runtime services" >&2
+	exit 1
+}
 grep -q '"state":"completed"' "$CANDY_CORE_OPERATION_FILE"
 grep -q '"current_version":"0.4.1"' <<EOF
 $("$manager" status)
