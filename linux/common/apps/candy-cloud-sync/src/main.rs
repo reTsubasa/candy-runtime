@@ -2,12 +2,12 @@ use std::{
     collections::BTreeMap,
     ffi::OsStr,
     fs::{self, File, OpenOptions},
-    io::Write,
-    net::{SocketAddr, ToSocketAddrs},
+    io::{Read, Write},
+    net::{Ipv4Addr, SocketAddr, ToSocketAddrs},
     os::fd::AsRawFd,
     path::{Path, PathBuf},
-    process::Command as ProcessCommand,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    process::{Command as ProcessCommand, Stdio},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{bail, Context, Result};
@@ -30,6 +30,9 @@ mod transport_identity;
 const MAX_PROFILE_BYTES: u64 = 64 * 1024;
 const MAX_CONFIGURATION_BYTES: u64 = 3 * 1024 * 1024;
 const MAX_ROUTE_ENVELOPE_BYTES: usize = 1024 * 1024;
+const MAX_LOCAL_ROUTE_OUTPUT_BYTES: usize = 256 * 1024;
+const MAX_LOCAL_NETWORKS: usize = 64;
+const LOCAL_ROUTE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const CONFIGURATION_MEDIA_TYPE: &str = "application/vnd.candy.runtime-configuration.v1+json";
 const PUBLIC_ENDPOINT_ENV: &str = "CANDY_PUBLIC_ENDPOINT";
 
@@ -267,6 +270,17 @@ struct RuntimeTelemetry<'a> {
     reconnects: Option<u64>,
     path_changes: Option<u64>,
     paths: &'a [RuntimePathTelemetry],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_networks: Option<&'a [LocalNetworkTelemetry]>,
+}
+
+#[derive(Debug, Clone, Serialize, Eq, PartialEq)]
+struct LocalNetworkTelemetry {
+    network_id: String,
+    interface_name: String,
+    cidr: String,
+    address: String,
+    kind: &'static str,
 }
 
 #[derive(Debug, Serialize, Eq, PartialEq)]
@@ -946,6 +960,16 @@ fn report_runtime_telemetry(
             Vec::new()
         }
     };
+    let local_networks = match discover_local_networks() {
+        Ok(networks) => Some(networks),
+        Err(error) => {
+            eprintln!(
+                "level=warn event=local_network_telemetry_omitted reason={}",
+                sanitize_log_value(&format!("{error:#}"))
+            );
+            None
+        }
+    };
     let local_status = read_local_runtime_status(state_dir).ok();
     let lifecycle = if core_status
         .as_ref()
@@ -1009,6 +1033,7 @@ fn report_runtime_telemetry(
             reconnects: performance.reconnects,
             path_changes: performance.path_changes,
             paths: &path_performance,
+            local_networks: local_networks.as_deref(),
         })
         .send()
         .context("report Runtime telemetry")?;
@@ -1022,6 +1047,166 @@ fn report_runtime_telemetry(
         atomic_json(&sample_path, &sample, 0o600)?;
     }
     Ok(())
+}
+
+fn discover_local_networks() -> Result<Vec<LocalNetworkTelemetry>> {
+    let mut child = ProcessCommand::new("ip")
+        .args([
+            "-o", "-4", "route", "show", "table", "main", "proto", "kernel", "scope", "link",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("run IPv4 connected-route discovery")?;
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if started.elapsed() >= LOCAL_ROUTE_DISCOVERY_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("IPv4 connected-route discovery timed out")
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let status = child.wait()?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("read IPv4 route discovery output")?;
+    let mut bytes = Vec::new();
+    stdout
+        .take((MAX_LOCAL_ROUTE_OUTPUT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .context("read IPv4 connected-route discovery output")?;
+    if !status.success() {
+        bail!(
+            "IPv4 connected-route discovery exited with status {}",
+            status
+        )
+    }
+    if bytes.len() > MAX_LOCAL_ROUTE_OUTPUT_BYTES {
+        bail!("IPv4 connected-route discovery output exceeds the reporting bound")
+    }
+    let routes = std::str::from_utf8(&bytes)
+        .context("IPv4 connected-route discovery output is not UTF-8")?;
+    Ok(parse_local_networks(routes))
+}
+
+fn parse_local_networks(routes: &str) -> Vec<LocalNetworkTelemetry> {
+    let mut networks = routes
+        .lines()
+        .filter_map(parse_local_network_route)
+        .collect::<Vec<_>>();
+    networks.sort_by(|left, right| {
+        (&left.interface_name, &left.cidr, &left.address).cmp(&(
+            &right.interface_name,
+            &right.cidr,
+            &right.address,
+        ))
+    });
+    networks.dedup_by(|current, previous| {
+        current.interface_name == previous.interface_name && current.cidr == previous.cidr
+    });
+    networks.truncate(MAX_LOCAL_NETWORKS);
+    networks
+}
+
+fn parse_local_network_route(route: &str) -> Option<LocalNetworkTelemetry> {
+    let fields = route.split_ascii_whitespace().collect::<Vec<_>>();
+    let destination = *fields.first()?;
+    if destination == "default" {
+        return None;
+    }
+    let interface_name = route_field(&fields, "dev")?;
+    let source = route_field(&fields, "src")?;
+    if !valid_interface_name(interface_name) || virtual_interface(interface_name) {
+        return None;
+    }
+    let (network, prefix, cidr) = canonical_ipv4_cidr(destination)?;
+    let address = source.parse::<Ipv4Addr>().ok()?;
+    if excluded_ipv4(network) || excluded_ipv4(address) || ipv4_network(address, prefix) != network
+    {
+        return None;
+    }
+    let address_text = address.to_string();
+    if cidr.len() > 64 || address_text.len() > 64 {
+        return None;
+    }
+    let network_id = local_network_id(interface_name, &cidr);
+    debug_assert_eq!(network_id.len(), 64);
+    Some(LocalNetworkTelemetry {
+        network_id,
+        interface_name: interface_name.to_owned(),
+        cidr,
+        address: address_text,
+        kind: "direct_ipv4",
+    })
+}
+
+fn route_field<'a>(fields: &'a [&str], name: &str) -> Option<&'a str> {
+    fields
+        .windows(2)
+        .find_map(|pair| (pair[0] == name).then_some(pair[1]))
+}
+
+fn valid_interface_name(interface_name: &str) -> bool {
+    !interface_name.is_empty()
+        && interface_name.len() <= 15
+        && interface_name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'@')
+        })
+}
+
+fn virtual_interface(interface_name: &str) -> bool {
+    let interface_name = interface_name.to_ascii_lowercase();
+    interface_name.contains("candy")
+        || interface_name.starts_with("tun")
+        || interface_name.starts_with("utun")
+        || ["docker", "virbr", "veth", "wg", "tailscale", "zt"]
+            .iter()
+            .any(|prefix| interface_name.starts_with(prefix))
+}
+
+fn canonical_ipv4_cidr(value: &str) -> Option<(Ipv4Addr, u8, String)> {
+    let (address, prefix) = value.split_once('/')?;
+    let address = address.parse::<Ipv4Addr>().ok()?;
+    let prefix = prefix.parse::<u8>().ok()?;
+    if prefix > 32 {
+        return None;
+    }
+    let network = ipv4_network(address, prefix);
+    Some((network, prefix, format!("{network}/{prefix}")))
+}
+
+fn ipv4_network(address: Ipv4Addr, prefix: u8) -> Ipv4Addr {
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - u32::from(prefix))
+    };
+    Ipv4Addr::from(u32::from(address) & mask)
+}
+
+fn excluded_ipv4(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
+    address.is_unspecified()
+        || address.is_loopback()
+        || address.is_link_local()
+        || !(octets[0] == 10
+            || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+            || (octets[0] == 192 && octets[1] == 168)
+            || (octets[0] == 100 && (64..=127).contains(&octets[1])))
+}
+
+fn local_network_id(interface_name: &str, cidr: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"local-network-v1\0");
+    digest.update(interface_name.as_bytes());
+    digest.update(b"\0");
+    digest.update(cidr.as_bytes());
+    format!("{:x}", digest.finalize())
 }
 
 fn runtime_telemetry_sample(
@@ -3345,6 +3530,104 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_network_routes_are_canonical_sorted_and_deduplicated() {
+        let routes = r#"
+10.20.30.77/24 dev eth1 proto kernel scope link src 10.20.30.9 metric 10
+192.168.50.0/24 dev br-lan proto kernel scope link src 192.168.50.1
+10.20.30.0/24 dev eth1 proto kernel scope link src 10.20.30.8
+"#;
+        let networks = parse_local_networks(routes);
+
+        assert_eq!(networks.len(), 2);
+        assert!(networks.windows(2).all(|pair| {
+            (&pair[0].interface_name, &pair[0].cidr, &pair[0].address)
+                < (&pair[1].interface_name, &pair[1].cidr, &pair[1].address)
+        }));
+        let eth1 = networks
+            .iter()
+            .find(|network| network.interface_name == "eth1")
+            .unwrap();
+        assert_eq!(eth1.cidr, "10.20.30.0/24");
+        assert_eq!(eth1.address, "10.20.30.8");
+        assert_eq!(eth1.kind, "direct_ipv4");
+        assert_eq!(eth1.network_id.len(), 64);
+        assert!(eth1.network_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn local_network_routes_exclude_unsafe_or_virtual_entries() {
+        let routes = r#"
+default via 192.0.2.1 dev eth0 proto static
+127.0.0.0/8 dev lo proto kernel scope link src 127.0.0.1
+169.254.0.0/16 dev eth0 proto kernel scope link src 169.254.4.5
+0.0.0.0/8 dev eth0 proto kernel scope link src 0.0.0.1
+192.168.1.0/24 dev candy0 proto kernel scope link src 192.168.1.1
+192.168.2.0/24 dev tun0 proto kernel scope link src 192.168.2.1
+192.168.3.0/24 dev utun4 proto kernel scope link src 192.168.3.1
+192.168.4.0/24 dev interface-name-too-long proto kernel scope link src 192.168.4.1
+192.168.5.0/24 dev eth0 proto kernel scope link
+192.168.6.0/33 dev eth0 proto kernel scope link src 192.168.6.1
+192.168.7.0/24 dev eth0 proto kernel scope link src invalid
+192.168.8.0/24 dev eth0 proto kernel scope link src 192.168.9.1
+10.0.0.0/8 dev br-home proto kernel scope link src 10.0.0.1
+"#;
+
+        assert_eq!(
+            parse_local_networks(routes),
+            vec![LocalNetworkTelemetry {
+                network_id: local_network_id("br-home", "10.0.0.0/8"),
+                interface_name: "br-home".into(),
+                cidr: "10.0.0.0/8".into(),
+                address: "10.0.0.1".into(),
+                kind: "direct_ipv4",
+            }]
+        );
+    }
+
+    #[test]
+    fn local_network_id_is_stable_and_bound_to_interface_and_canonical_cidr() {
+        let first = parse_local_network_route(
+            "192.168.7.19/24 dev br-lan proto kernel scope link src 192.168.7.1",
+        )
+        .unwrap();
+        let same = parse_local_network_route(
+            "192.168.7.0/24 dev br-lan proto kernel scope link src 192.168.7.2",
+        )
+        .unwrap();
+        let other_interface = parse_local_network_route(
+            "192.168.7.0/24 dev eth0 proto kernel scope link src 192.168.7.1",
+        )
+        .unwrap();
+        let other_network = parse_local_network_route(
+            "192.168.8.0/24 dev br-lan proto kernel scope link src 192.168.8.1",
+        )
+        .unwrap();
+
+        assert_eq!(first.cidr, "192.168.7.0/24");
+        assert_eq!(
+            first.network_id,
+            "0c733427cadad740e05695151d376806bf3a6700ddbfd77cee83c5613eaeca8f"
+        );
+        assert_eq!(first.network_id, same.network_id);
+        assert_ne!(first.network_id, other_interface.network_id);
+        assert_ne!(first.network_id, other_network.network_id);
+    }
+
+    #[test]
+    fn local_network_reporting_has_a_deterministic_bound() {
+        let routes = (0..80)
+            .map(|index| {
+                format!("10.{index}.0.0/16 dev eth0 proto kernel scope link src 10.{index}.0.1")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let networks = parse_local_networks(&routes);
+
+        assert_eq!(networks.len(), MAX_LOCAL_NETWORKS);
+        assert!(networks.windows(2).all(|pair| pair[0].cidr < pair[1].cidr));
+    }
 
     fn core_status_v2() -> CoreRuntimeStatus {
         CoreRuntimeStatus {
