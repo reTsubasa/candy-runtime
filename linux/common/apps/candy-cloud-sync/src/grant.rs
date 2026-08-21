@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 
-const GRANT_STATE_SCHEMA_VERSION: u8 = 1;
+const GRANT_STATE_SCHEMA_VERSION: u8 = 2;
 const MAX_GRANT_ENVELOPE_BYTES: usize = 8 * 1024;
 const MAX_GRANT_STATE_BYTES: u64 = 64 * 1024;
 
@@ -44,7 +44,7 @@ impl GrantSubject {
 
     fn storage_id(&self) -> Result<String> {
         self.validate()?;
-        Ok(domain_hash(b"candy/sdwan-grant-state-v1\0", self, None))
+        Ok(domain_hash(b"candy/sdwan-grant-state-v2\0", self, None))
     }
 
     fn request_id(&self, sequence: u64) -> Result<String> {
@@ -53,8 +53,8 @@ impl GrantSubject {
             bail!("Grant renewal sequence must be non-zero")
         }
         Ok(format!(
-            "sdwan-v1-{}",
-            domain_hash(b"candy/sdwan-grant-request-v1\0", self, Some(sequence))
+            "sdwan-v2-{}",
+            domain_hash(b"candy/sdwan-grant-request-v2\0", self, Some(sequence))
         ))
     }
 }
@@ -735,6 +735,7 @@ mod tests {
     #[test]
     fn renewal_request_is_stable_per_sequence_and_changes_after_success() {
         let subject = subject();
+        assert!(subject.request_id(1).unwrap().starts_with("sdwan-v2-"));
         assert_eq!(
             subject.request_id(1).unwrap(),
             subject.request_id(1).unwrap()
@@ -744,6 +745,41 @@ mod tests {
             subject.request_id(2).unwrap()
         );
         assert!(subject.request_id(1).unwrap().len() <= 120);
+    }
+
+    #[test]
+    fn legacy_grant_cache_is_not_reused_after_wire_contract_upgrade() {
+        let root = tempdir().unwrap();
+        let grants = root.path().join("grants");
+        fs::create_dir(&grants).unwrap();
+        let subject = subject();
+        let legacy_id = domain_hash(b"candy/sdwan-grant-state-v1\0", &subject, None);
+        fs::write(
+            grants.join(format!("{legacy_id}.json")),
+            b"legacy grant state",
+        )
+        .unwrap();
+
+        let fetched = Arc::new(Mutex::new(false));
+        let fetch_called = Arc::clone(&fetched);
+        let outcome = GrantStore::new(root.path())
+            .refresh(
+                &subject,
+                1_000,
+                |_| {
+                    *fetch_called.lock().unwrap() = true;
+                    Ok(response(10_000))
+                },
+                |_| Ok(verification(10_000)),
+            )
+            .unwrap();
+
+        assert!(matches!(outcome, RefreshOutcome::Refreshed(_)));
+        assert!(*fetched.lock().unwrap());
+        assert!(GrantStore::new(root.path())
+            .path(&subject)
+            .unwrap()
+            .exists());
     }
 
     #[test]
