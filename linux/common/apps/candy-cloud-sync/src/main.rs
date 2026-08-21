@@ -624,23 +624,25 @@ fn sync_once_with_retry(
             if state.etag.as_deref() == Some(activation.descriptor.delivery_etag.as_str()) {
                 match activation.receipt.state.as_str() {
                     "committed" => {
-                        promote_committed_activation(&args.state_dir, &activation)?;
-                        report_activation_status(&client, &cloud, &activation, "active", None)?;
-                        state.activation_rejected_etag = None;
-                        state.activation_rejected_at_unix = None;
+                        if report_activation_status(&client, &cloud, &activation, "active", None)? {
+                            promote_committed_activation(&args.state_dir, &activation)?;
+                            state.activation_rejected_etag = None;
+                            state.activation_rejected_at_unix = None;
+                        }
                     }
                     "rejected" => {
-                        report_activation_status(
+                        if report_activation_status(
                             &client,
                             &cloud,
                             &activation,
                             "rejected",
                             activation.receipt.error_code.as_deref(),
-                        )?;
-                        remove_candidate_if_matches(&args.state_dir, &activation)?;
-                        state.activation_rejected_etag =
-                            Some(activation.descriptor.delivery_etag.clone());
-                        state.activation_rejected_at_unix = Some(unix_now()?);
+                        )? {
+                            remove_candidate_if_matches(&args.state_dir, &activation)?;
+                            state.activation_rejected_etag =
+                                Some(activation.descriptor.delivery_etag.clone());
+                            state.activation_rejected_at_unix = Some(unix_now()?);
+                        }
                     }
                     _ => unreachable!("validated activation receipt state"),
                 }
@@ -1881,7 +1883,7 @@ fn report_activation_status(
     activation: &ActivationOutcome,
     state: &str,
     error_code: Option<&str>,
-) -> Result<()> {
+) -> Result<bool> {
     let response = client
         .put(endpoint(cloud, "auth/v1/runtime/configuration/status")?)
         .header(IF_MATCH, &activation.descriptor.delivery_etag)
@@ -1893,13 +1895,16 @@ fn report_activation_status(
         })
         .send()
         .context("report SD-WAN activation status")?;
+    if response.status() == StatusCode::CONFLICT {
+        return Ok(false);
+    }
     if response.status() != StatusCode::NO_CONTENT {
         bail!(
             "Cloud rejected SD-WAN activation status with HTTP {}",
             response.status()
         )
     }
-    Ok(())
+    Ok(true)
 }
 
 fn clear_activation_ready_receipt(state_dir: &Path) -> Result<()> {
