@@ -194,6 +194,12 @@ struct CoreReadinessStatus {
     active_peers: usize,
     required_route_owners: usize,
     ready_route_owners: usize,
+    #[serde(default)]
+    inbound_listener_configured: bool,
+    #[serde(default)]
+    inbound_listener_ready: bool,
+    #[serde(default)]
+    inbound_listener_endpoints: Vec<String>,
     fail_open_required: bool,
     #[serde(default)]
     last_error_code: Option<String>,
@@ -202,6 +208,7 @@ struct CoreReadinessStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReadinessState {
     Waiting,
+    ListenerReady,
     Ready,
     Failed,
 }
@@ -763,7 +770,7 @@ fn read_core_readiness(
     let status: CoreReadinessStatus =
         serde_json::from_slice(&fs::read(path).context("read SD-WAN Core readiness status")?)
             .context("parse SD-WAN Core readiness status")?;
-    if status.schema_version != 1
+    if status.schema_version != 3
         || status.generation != generation
         || status.pid != pid
         || status.readiness_token != readiness_token
@@ -777,11 +784,19 @@ fn read_core_readiness(
         bail!("SD-WAN Core readiness status has impossible peer counters")
     }
     let state = match status.lifecycle.as_str() {
+        "starting"
+            if !status.fail_open_required
+                && status.inbound_listener_configured
+                && status.inbound_listener_ready
+                && !status.inbound_listener_endpoints.is_empty() =>
+        {
+            ReadinessState::ListenerReady
+        }
         "starting" if !status.fail_open_required => ReadinessState::Waiting,
         "active"
             if !status.fail_open_required
                 && status.required_route_owners > 0
-                && status.ready_route_owners == status.required_route_owners =>
+                && status.ready_route_owners > 0 =>
         {
             ReadinessState::Ready
         }
@@ -789,7 +804,7 @@ fn read_core_readiness(
         "active"
             if status.fail_open_required
                 || status.required_route_owners == 0
-                || status.ready_route_owners != status.required_route_owners =>
+                || status.ready_route_owners == 0 =>
         {
             ReadinessState::Failed
         }
@@ -806,10 +821,13 @@ fn wait_for_core_readiness(
     args: &RuntimeArgs,
     child: &mut Child,
     readiness_token: &str,
+    netd: &mut NetdClient,
 ) -> Result<()> {
     let deadline = Instant::now()
         .checked_add(Duration::from_millis(args.readiness_timeout_ms))
         .context("Core readiness deadline overflow")?;
+    let renew_every = Duration::from_millis((args.lease_ms / 3).max(1_000));
+    let mut next_renewal = Instant::now() + renew_every;
     loop {
         if let Some(status) = child.try_wait().context("wait for candidate Candy Core")? {
             bail!(
@@ -817,14 +835,32 @@ fn wait_for_core_readiness(
                 status.code().unwrap_or(1)
             )
         }
-        if matches!(
-            read_core_readiness(&args.status, args.generation, child.id(), readiness_token,)?,
-            Some(ReadinessState::Ready)
-        ) {
+        let readiness =
+            read_core_readiness(&args.status, args.generation, child.id(), readiness_token)?;
+        if matches!(readiness, Some(ReadinessState::Ready)) {
             return Ok(());
         }
-        if Instant::now() >= deadline {
+        let server_listener_ready = args.core_role == CoreRole::Server
+            && matches!(readiness, Some(ReadinessState::ListenerReady));
+        // An authenticated server listener can be healthy before a peer is
+        // connected. Keep Core alive in that phase so the peer's next dial can
+        // complete; netd remains prepared but uncommitted until Active.
+        if Instant::now() >= deadline && !server_listener_ready {
             bail!("Candy Core SD-WAN readiness timed out")
+        }
+        if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+            bail!("SD-WAN agent shutdown requested before Core route readiness")
+        }
+        if !activation_pointer_unchanged(args)? {
+            bail!("Cloud candidate changed before Core route readiness")
+        }
+        if Instant::now() >= next_renewal {
+            let renewed_deadline = monotonic_ms()?
+                .checked_add(args.lease_ms)
+                .context("prepared lease deadline overflow")?;
+            netd.renew_lease(renewed_deadline)
+                .context("renew prepared netd lease while waiting for Core")?;
+            next_renewal = Instant::now() + renew_every;
         }
         thread::sleep(Duration::from_millis(50));
     }
@@ -1144,7 +1180,7 @@ fn run(args: RuntimeArgs) -> Result<()> {
             );
         }
     };
-    if let Err(error) = wait_for_core_readiness(&args, &mut child, &readiness_token) {
+    if let Err(error) = wait_for_core_readiness(&args, &mut child, &readiness_token, &mut netd) {
         return fail_after_rollback(
             &args,
             &mut child,
@@ -1241,6 +1277,18 @@ fn run(args: RuntimeArgs) -> Result<()> {
         }
         match read_core_readiness(&args.status, args.generation, child.id(), &readiness_token) {
             Ok(Some(ReadinessState::Ready)) => {}
+            Ok(Some(ReadinessState::ListenerReady)) => {
+                return fail_after_rollback(
+                    &args,
+                    &mut child,
+                    &mut netd,
+                    "Candy Core lost SD-WAN route readiness",
+                    "core_route_readiness_lost",
+                    anyhow::anyhow!(
+                        "Candy Core listener remains ready but no route owner is active"
+                    ),
+                );
+            }
             Ok(Some(ReadinessState::Waiting)) | Ok(None) => {
                 return fail_after_rollback(
                     &args,
@@ -1474,7 +1522,7 @@ rm -f "$0"
 umask 077
 status_tmp="$status.$$".tmp
 trap 'rm -f "$status_tmp"' EXIT
-printf '{{"schema_version":1,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"{}","configured_peers":1,"active_peers":1,"required_route_owners":1,"ready_route_owners":1,"fail_open_required":false,"last_error_code":null}}\n' "$$" "$token" >"$status_tmp"
+printf '{{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"{}","configured_peers":1,"active_peers":1,"required_route_owners":1,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null}}\n' "$$" "$token" >"$status_tmp"
 mv -f "$status_tmp" "$status"
 sleep 30
 "#,
@@ -1670,7 +1718,7 @@ sleep 30
 
     fn status(generation: u64, lifecycle: &str, configured: usize, active: usize) -> String {
         serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 3,
             "generation": generation,
             "pid": 42,
             "readiness_token": "00112233445566778899aabbccddeeff",
@@ -1679,6 +1727,9 @@ sleep 30
             "active_peers": active,
             "required_route_owners": 1,
             "ready_route_owners": active.min(1),
+            "inbound_listener_configured": false,
+            "inbound_listener_ready": false,
+            "inbound_listener_endpoints": [],
             "fail_open_required": false,
             "last_error_code": null
         })
@@ -1708,13 +1759,13 @@ sleep 30
     }
 
     #[test]
-    fn listener_readiness_waits_for_an_authenticated_inbound_peer() {
+    fn listener_readiness_is_distinct_from_route_readiness() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("status.json");
         fs::write(
             &path,
             serde_json::json!({
-                "schema_version": 1,
+                "schema_version": 3,
                 "generation": 9,
                 "pid": 42,
                 "readiness_token": "00112233445566778899aabbccddeeff",
@@ -1723,6 +1774,9 @@ sleep 30
                 "active_peers": 0,
                 "required_route_owners": 0,
                 "ready_route_owners": 0,
+                "inbound_listener_configured": true,
+                "inbound_listener_ready": true,
+                "inbound_listener_endpoints": ["127.0.0.1:8443"],
                 "fail_open_required": false,
                 "last_error_code": null
             })
@@ -1732,7 +1786,7 @@ sleep 30
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(
             read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
-            Some(ReadinessState::Waiting)
+            Some(ReadinessState::ListenerReady)
         );
         fs::write(&path, status(9, "active", 1, 1)).unwrap();
         assert_eq!(
