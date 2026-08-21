@@ -43,7 +43,7 @@ PATH="$fake_bin:$PATH" CANDY_LINUX_DIST_DIR="$dist" CANDY_SDWAN_AGENT_BINARY="$a
 	CANDY_NETD_BINARY="$netd" \
 	CANDY_CLOUD_ENROLL_BINARY="$enroll" \
 	CANDY_CLOUD_SYNC_BINARY="$sync" \
-	CANDY_RELEASE_VERSION=0.4.0 CANDY_RELEASE_REVISION=49 \
+	CANDY_RELEASE_VERSION=0.4.0 CANDY_RELEASE_REVISION=50 \
 	"$root/packaging/linux/build.sh" x86_64-unknown-linux-gnu >/dev/null
 
 stage=$dist/server/x86_64
@@ -71,9 +71,9 @@ grep -F 'ExecStart=/opt/candy/current/candy-server --config /etc/candy/server.to
 [ ! -e "$stage/systemd/candy-sdwan.service" ] || fail "server package must not stage a second SD-WAN service"
 [ -x "$stage/install/install-candy-server.sh" ] || fail "installer was not staged"
 [ -x "$stage/install/upgrade-candy-server.sh" ] || fail "full Runtime upgrader was not staged"
-[ "$(cat "$stage/RUNTIME-RELEASE")" = 0.4.0-r49 ] || fail "server bundle release identity is missing or invalid"
+[ "$(cat "$stage/RUNTIME-RELEASE")" = 0.4.0-r50 ] || fail "server bundle release identity is missing or invalid"
 [ "$(cat "$stage/RUNTIME-ARCH")" = x86_64 ] || fail "server bundle architecture identity is missing or invalid"
-[ "$(cat "$edge_stage/RUNTIME-RELEASE")" = 0.4.0-r49 ] || fail "edge bundle release identity is missing or invalid"
+[ "$(cat "$edge_stage/RUNTIME-RELEASE")" = 0.4.0-r50 ] || fail "edge bundle release identity is missing or invalid"
 [ "$(cat "$edge_stage/RUNTIME-ARCH")" = x86_64 ] || fail "edge bundle architecture identity is missing or invalid"
 [ -x "$dist/candy-server-x86_64" ] || fail "product release launcher artifact was not staged"
 [ -s "$dist/candy-server-runtime-x86_64.tar.gz" ] || fail "complete server Runtime bundle was not staged"
@@ -108,8 +108,13 @@ cmp "$root/linux/server/apps/candy-server/candy-server" \
 [ -f "$edge_stage/systemd/candy-cloud-sync.timer" ] || fail "Cloud synchronization timer was not staged"
 grep -F 'ConditionPathExists=/var/lib/candy/sdwan/identity/device-identity-v1.json' "$edge_stage/systemd/candy-cloud-sync.service" >/dev/null ||
 	fail "Cloud synchronization does not wait for an enrolled identity"
-grep -F 'OnUnitActiveSec=30s' "$edge_stage/systemd/candy-cloud-sync.timer" >/dev/null ||
+grep -F 'OnActiveSec=15s' "$edge_stage/systemd/candy-cloud-sync.timer" >/dev/null ||
+	fail "Cloud synchronization timer has no post-upgrade first trigger"
+grep -F 'OnUnitInactiveSec=30s' "$edge_stage/systemd/candy-cloud-sync.timer" >/dev/null ||
 	fail "Cloud synchronization timer has the wrong cadence"
+if grep -F 'OnUnitActiveSec=' "$edge_stage/systemd/candy-cloud-sync.timer" >/dev/null; then
+	fail "Cloud synchronization timer still depends on a pre-upgrade service activation"
+fi
 grep -F 'Requires=candy-netd.service' "$edge_stage/systemd/candy-sdwan.service" >/dev/null || fail "SD-WAN unit does not require netd"
 grep -F 'BindsTo=candy-netd.service' "$edge_stage/systemd/candy-sdwan.service" >/dev/null || fail "SD-WAN unit is not bound to netd"
 grep -F -- '--recover --journal' "$edge_stage/systemd/candy-netd.service" >/dev/null || fail "netd unit has no real orphan recovery hook"
