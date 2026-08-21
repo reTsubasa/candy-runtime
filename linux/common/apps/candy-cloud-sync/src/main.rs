@@ -1507,26 +1507,29 @@ fn read_active_core_status(state_dir: &Path, run_dir: &Path) -> Result<Option<Co
     {
         bail!("active Runtime activation descriptor is invalid")
     }
-    let paths = [
-        run_dir.join("sdwan-status.json"),
-        run_dir.join(format!("sdwan-{activation_id}.status.json")),
-    ];
-    let mut status = None;
-    for path in paths {
-        if !path.exists() {
-            continue;
-        }
-        let candidate: CoreRuntimeStatus = read_bounded_json(&path, MAX_PROFILE_BYTES)
-            .context("read active Core Runtime status")?;
-        if candidate.generation == descriptor.projection_generation {
-            status = Some(candidate);
-            break;
-        }
-    }
+    let activation_status = run_dir.join(format!("sdwan-{activation_id}.status.json"));
+    let legacy_status = run_dir.join("sdwan-status.json");
+    let status = if activation_status.exists() {
+        Some(
+            read_bounded_json::<CoreRuntimeStatus>(&activation_status, MAX_PROFILE_BYTES)
+                .context("read activation-specific Core Runtime status")?,
+        )
+    } else if legacy_status.exists() {
+        // Older Runtime releases shared this path with the product status
+        // consumed by LuCI. A product-status document is not a Core readiness
+        // failure and must not prevent a current per-activation status from
+        // being consumed after an upgrade.
+        read_bounded_json::<CoreRuntimeStatus>(&legacy_status, MAX_PROFILE_BYTES).ok()
+    } else {
+        None
+    };
     let Some(status) = status else {
         return Ok(None);
     };
-    if !matches!(status.schema_version, 1 | 2)
+    if status.generation != descriptor.projection_generation {
+        return Ok(None);
+    }
+    if !matches!(status.schema_version, 1 | 2 | 3)
         || status.pid == 0
         || !process_is_alive(status.pid)
         || !matches!(
@@ -3927,6 +3930,17 @@ default via 192.0.2.1 dev eth0 proto static
             run.join("sdwan-status.json"),
             serde_json::json!({
                 "schema_version": 1,
+                "registration": {"state": "registered"},
+                "runtime": {"state": "reconnecting"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let activation_status = run.join(format!("sdwan-{activation_id}.status.json"));
+        fs::write(
+            &activation_status,
+            serde_json::json!({
+                "schema_version": 3,
                 "generation": 7,
                 "pid": std::process::id(),
                 "lifecycle": "active",
@@ -3943,9 +3957,29 @@ default via 192.0.2.1 dev eth0 proto static
         let status = read_active_core_status(&state, &run).unwrap().unwrap();
         assert_eq!(status.lifecycle, "active");
         assert_eq!(status.active_peers, 1);
+        assert_eq!(status.schema_version, 3);
 
         fs::write(
-            run.join("sdwan-status.json"),
+            &activation_status,
+            serde_json::json!({
+                "schema_version": 1,
+                "generation": 8,
+                "pid": std::process::id(),
+                "lifecycle": "active",
+                "configured_peers": 1,
+                "active_peers": 1,
+                "required_route_owners": 1,
+                "ready_route_owners": 1,
+                "fail_open_required": false,
+                "last_error_code": null
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(read_active_core_status(&state, &run).unwrap().is_none());
+
+        fs::write(
+            &activation_status,
             serde_json::json!({
                 "schema_version": 1,
                 "generation": 7,
@@ -3962,6 +3996,29 @@ default via 192.0.2.1 dev eth0 proto static
         )
         .unwrap();
         assert!(read_active_core_status(&state, &run).is_err());
+
+        fs::remove_file(&activation_status).unwrap();
+        assert!(read_active_core_status(&state, &run).unwrap().is_none());
+
+        fs::write(
+            run.join("sdwan-status.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "generation": 7,
+                "pid": std::process::id(),
+                "lifecycle": "active",
+                "configured_peers": 1,
+                "active_peers": 1,
+                "required_route_owners": 1,
+                "ready_route_owners": 1,
+                "fail_open_required": false,
+                "last_error_code": null
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let legacy = read_active_core_status(&state, &run).unwrap().unwrap();
+        assert_eq!(legacy.generation, 7);
     }
 
     #[test]

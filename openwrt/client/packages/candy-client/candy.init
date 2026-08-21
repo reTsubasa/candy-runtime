@@ -534,7 +534,7 @@ run_client() {
 }
 
 run_sdwan() {
-	local attempted_hash child rc stopping=0
+	local attempted_hash core_status child rc stopping=0
 	[ -x "$CANDY_SDWAN_AGENT" ] || { log_event error sdwan_agent_unavailable "reason=agent_missing"; return 1; }
 	trap 'stopping=1; [ -z "${child:-}" ] || kill -TERM "$child" 2>/dev/null || true' TERM INT
 	while [ "$stopping" -eq 0 ]; do
@@ -545,9 +545,10 @@ run_sdwan() {
 			sleep 2
 			continue
 		fi
+		core_status="$RUNTIME_DIR/sdwan-$attempted_hash.status.json"
 		"$CANDY_SDWAN_AGENT" --socket "$CANDY_NETD_SOCKET" --core "$CANDY_CORE_BIN" \
 			--activation "$CANDY_SDWAN_CANDIDATE" --activation-ready "$CANDY_SDWAN_STATE_DIR/activation-ready-v1.json" \
-			--status "$CANDY_SDWAN_STATUS_FILE" run &
+			--status "$core_status" run &
 		child=$!
 		wait "$child"
 		rc=$?
@@ -563,6 +564,25 @@ run_sdwan() {
 		done
 	done
 	trap - TERM INT
+	return 0
+}
+
+cleanup_stale_sdwan_core_statuses() {
+	local path name activation_id
+	[ -d "$RUNTIME_DIR" ] || return 0
+	[ ! -L "$RUNTIME_DIR" ] || return 1
+	for path in "$RUNTIME_DIR"/sdwan-*.status.json; do
+		[ -e "$path" ] || [ -L "$path" ] || continue
+		name=${path##*/}
+		activation_id=${name#sdwan-}
+		activation_id=${activation_id%.status.json}
+		canonical_lower_hex "$activation_id" 64 || continue
+		# The root startup phase may remove a status left by an older
+		# root-run supervisor, but must never follow or replace an
+		# unexpected object in the shared runtime directory.
+		[ -f "$path" ] && [ ! -L "$path" ] || return 1
+		rm -f "$path" || return 1
+	done
 	return 0
 }
 
@@ -828,6 +848,13 @@ start_sdwan_netd() {
 }
 
 start_sdwan_supervision() {
+	# procd launches the data-plane supervisor as candy-sdwan. Migrate stale
+	# per-activation Core readiness files while this startup hook still has
+	# root authority; the stable Runtime/LuCI status is intentionally retained.
+	if ! cleanup_stale_sdwan_core_statuses; then
+		log_event error sdwan_status_cleanup "result=failed ordinary_client=preserved"
+		return 1
+	fi
 	start_sdwan_netd || return 1
 	procd_open_instance sdwan
 	procd_set_param command "$CANDY_INIT_SELF" run_sdwan

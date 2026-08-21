@@ -86,7 +86,12 @@ grep -F 'result=activation_in_progress' "$init" >/dev/null || fail "SD-WAN recon
 grep -F 'result=activated' "$init" >/dev/null || fail "SD-WAN reconciliation does not promote a committed activation"
 grep -F '"$CANDY_SDWAN_AGENT" --socket "$CANDY_NETD_SOCKET"' "$init" >/dev/null || fail "SD-WAN agent lifecycle contract is missing"
 grep -F -- '--activation "$CANDY_SDWAN_CANDIDATE"' "$init" >/dev/null || fail "Cloud activation pointer is not passed to the agent"
-grep -F -- '--status "$CANDY_SDWAN_STATUS_FILE"' "$init" >/dev/null || fail "SD-WAN agent does not pass the Core status path"
+grep -F 'core_status="$RUNTIME_DIR/sdwan-$attempted_hash.status.json"' "$init" >/dev/null || fail "SD-WAN Core status is not activation-specific"
+grep -F -- '--status "$core_status"' "$init" >/dev/null || fail "SD-WAN agent does not receive the activation-specific Core status path"
+if grep -F -- '--status "$CANDY_SDWAN_STATUS_FILE"' "$init" >/dev/null; then
+	fail "Runtime product status is still shared with Core readiness"
+fi
+grep -F 'cleanup_stale_sdwan_core_statuses' "$init" >/dev/null || fail "root startup does not migrate stale Core status files"
 grep -F 'sdwan_uid=$(id -u candy-sdwan' "$init" >/dev/null || fail "netd caller UID is not dedicated"
 grep -F -- '--allowed-uid "$sdwan_uid"' "$init" >/dev/null || fail "netd caller UID is not passed"
 if grep -F -- '--client-args' "$init" >/dev/null || grep -F -- '--netd-socket' "$init" >/dev/null; then

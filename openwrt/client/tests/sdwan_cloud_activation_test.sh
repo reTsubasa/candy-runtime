@@ -36,6 +36,8 @@ CANDY_SDWAN_ACTIVATIONS_DIR=$CANDY_SDWAN_STATE_DIR/activations
 CANDY_SDWAN_CANDIDATE=$CANDY_SDWAN_STATE_DIR/candidate
 CANDY_SDWAN_ACTIVE=$CANDY_SDWAN_STATE_DIR/active
 LOG_FILE=$test_root/candy.log
+RUNTIME_DIR=$test_root/run/candy
+CANDY_SDWAN_STATUS_FILE=$RUNTIME_DIR/sdwan-status.json
 hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 delivery=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 projection=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
@@ -45,6 +47,21 @@ printf '%s\n' 'core configuration' >"$activation/core.toml"
 printf '%s\n' '{"schema_version":1}' >"$activation/declaration.json"
 printf '%s\n' "{\"schema_version\":1,\"activation_id\":\"$hash\",\"delivery_etag\":\"\\\"sha256-$delivery\\\"\",\"delivery_sha256\":\"$delivery\",\"projection_publication_id\":\"11111111-2222-3333-4444-555555555555\",\"projection_content_hash\":\"$projection\",\"segment_generation\":1,\"projection_generation\":2,\"core_role\":\"client_sdwan\",\"core_config\":\"core.toml\",\"netd_declaration\":\"declaration.json\",\"grant_refresh_after_unix\":0,\"grant_expires_at_unix\":4102444800}" >"$activation/activation-v1.json"
 ln -s "activations/$hash" "$CANDY_SDWAN_CANDIDATE"
+
+mkdir -p "$RUNTIME_DIR"
+printf '%s\n' '{"runtime":{"state":"reconnecting"}}' >"$CANDY_SDWAN_STATUS_FILE"
+printf '%s\n' '{"schema_version":3}' >"$RUNTIME_DIR/sdwan-$hash.status.json"
+printf '%s\n' 'unrelated' >"$RUNTIME_DIR/sdwan-not-an-activation.status.json"
+cleanup_stale_sdwan_core_statuses || fail "root startup could not remove a regular stale Core status"
+[ -f "$CANDY_SDWAN_STATUS_FILE" ] || fail "Core status cleanup removed the stable Runtime product status"
+[ ! -e "$RUNTIME_DIR/sdwan-$hash.status.json" ] || fail "stale activation-specific Core status was retained"
+[ -f "$RUNTIME_DIR/sdwan-not-an-activation.status.json" ] || fail "Core status cleanup removed an unrelated file"
+ln -s "$CANDY_SDWAN_STATUS_FILE" "$RUNTIME_DIR/sdwan-$hash.status.json"
+if cleanup_stale_sdwan_core_statuses; then
+	fail "symlinked Core status was accepted during privileged cleanup"
+fi
+[ -f "$CANDY_SDWAN_STATUS_FILE" ] || fail "symlink rejection modified the Runtime product status"
+rm -f "$RUNTIME_DIR/sdwan-$hash.status.json"
 
 load_sdwan_candidate || fail "valid authenticated activation was rejected"
 [ "$CANDY_SDWAN_CANDIDATE_HASH" = "$hash" ] || fail "candidate hash was not loaded"
