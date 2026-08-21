@@ -37,6 +37,13 @@ enrollment_dir=${CANDY_SDWAN_ENROLLMENT_DIR:-$state_dir/identity}
 state_user=${CANDY_SDWAN_SERVICE_USER:-candy-sdwan}
 state_group=${CANDY_SDWAN_SERVICE_GROUP:-$state_user}
 cloud_sync_init=${CANDY_CLOUD_SYNC_INIT:-/etc/init.d/candy-cloud-sync}
+if [ -n "${CANDY_SDWAN_STATUS_INSPECTOR:-}" ]; then
+	status_inspector=$CANDY_SDWAN_STATUS_INSPECTOR
+elif [ -x /usr/libexec/candy-cloud-sync ]; then
+	status_inspector=/usr/libexec/candy-cloud-sync
+else
+	status_inspector=/usr/local/libexec/candy-cloud-sync
+fi
 
 fail() {
 	printf '%s\n' "candy: $*" >&2
@@ -374,8 +381,22 @@ reconcile_control() {
 				systemctl start "$service"
 				acted=1
 			fi
-			if [ "$acted" = 1 ]; then
-				write_status "$(current_registration_state)" reconnecting "Cloud SD-WAN candidate changed"
+			if [ ! -x "$status_inspector" ]; then
+				write_status "$(current_registration_state)" fail-open "Local SD-WAN status verifier is unavailable"
+				fail "local SD-WAN status verifier is unavailable: $status_inspector"
+			fi
+			if verified_state=$("$status_inspector" --state-dir "$state_dir" --run-dir "$run_dir" project-local-runtime-status); then
+				case "$verified_state" in
+					running|reconnecting) ;;
+					fail-open) write_status "$(current_registration_state)" fail-open "Candy Core is not ready" ;;
+					*)
+						write_status "$(current_registration_state)" fail-open "Local SD-WAN status verifier returned an invalid state"
+						fail "local SD-WAN status verifier returned an invalid state"
+						;;
+				esac
+			else
+				write_status "$(current_registration_state)" fail-open "Active Candy Core status verification failed"
+				fail "active Candy Core status verification failed"
 			fi
 			;;
 	esac
@@ -505,6 +526,7 @@ case "$action" in
 			"$state_dir/cloud-sync-status-v1.json" \
 			"$state_dir/transport-identity-state-v1.json" \
 			"$state_dir/activation-ready-v1.json" \
+			"$state_dir/active-activation-v1.json" \
 			"$state_dir/reconcile-target-v1" \
 			"$state_dir/candidate" \
 			"$state_dir/active" \

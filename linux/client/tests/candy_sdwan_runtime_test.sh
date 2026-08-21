@@ -118,6 +118,7 @@ printf '%s\n' sync >"$state/sync-state-v1.json"
 printf '%s\n' status >"$state/cloud-sync-status-v1.json"
 printf '%s\n' transport >"$state/transport-identity-state-v1.json"
 printf '%s\n' receipt >"$state/activation-ready-v1.json"
+printf '%s\n' proof >"$state/active-activation-v1.json"
 printf '%s\n' target >"$state/reconcile-target-v1"
 ln -s generations/test-generation "$state/configuration"
 ln -s activations/test-activation "$state/candidate"
@@ -142,6 +143,7 @@ grep -Fx disable "$fake_sync_calls" >/dev/null || fail "leave did not disable Cl
 [ ! -e "$state/active" ] || fail "leave retained active activation pointer"
 [ ! -e "$state/transport-identity-state-v1.json" ] || fail "leave retained Cloud transport identity state"
 [ ! -e "$state/activation-ready-v1.json" ] || fail "leave retained activation receipt"
+[ ! -e "$state/active-activation-v1.json" ] || fail "leave retained active activation proof"
 [ ! -e "$state/reconcile-target-v1" ] || fail "leave retained reconciliation target"
 [ ! -e "$state/activations" ] || fail "leave retained immutable Cloud activations"
 [ ! -e "$state/grants" ] || fail "leave retained Cloud Grant cache"
@@ -261,6 +263,7 @@ chmod -R u+w "$privileged_state"
 systemd_bin=$tmp/systemd-bin
 systemd_state=$tmp/systemd-state
 systemd_calls=$tmp/systemd.calls
+status_inspector_calls=$tmp/status-inspector.calls
 mkdir -p "$systemd_bin" "$systemd_state"
 cat >"$systemd_bin/systemctl" <<'EOF'
 #!/bin/sh
@@ -282,13 +285,27 @@ case "$action" in
 esac
 EOF
 chmod 0755 "$systemd_bin/systemctl"
+fake_status_inspector=$tmp/fake-status-inspector
+cat >"$fake_status_inspector" <<'EOF'
+#!/bin/sh
+set -eu
+[ "${1:-}" = --state-dir ]
+[ "${3:-}" = --run-dir ]
+[ "${5:-}" = project-local-runtime-status ]
+printf '%s\n' "$*" >>"$FAKE_STATUS_INSPECTOR_CALLS"
+[ "${FAKE_STATUS_INSPECTOR_FAIL:-0}" != 1 ] || exit 1
+printf '%s\n' "${FAKE_VERIFIED_RUNTIME_STATE:-reconnecting}"
+EOF
+chmod 0755 "$fake_status_inspector"
 run_reconcile() {
 	role_state=$1
 	service=$2
 	shift 2
 	PATH="$systemd_bin:$PATH" FAKE_SYSTEMD_STATE="$systemd_state" \
 		FAKE_SYSTEMD_CALLS="$systemd_calls" CANDY_SDWAN_TEST_MODE=1 \
+		FAKE_STATUS_INSPECTOR_CALLS="$status_inspector_calls" \
 		CANDY_SDWAN_STATE_DIR="$role_state" CANDY_SDWAN_RUN_DIR="$tmp/reconcile-run" \
+		CANDY_SDWAN_STATUS_INSPECTOR="$fake_status_inspector" \
 		"$@" "$runtime" reconcile "$service"
 }
 
@@ -302,8 +319,15 @@ ln -s "activations/$activation_a" "$client_reconcile/candidate"
 run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
 grep -Fx 'start candy-sdwan.service' "$systemd_calls" >/dev/null || fail "new candidate did not start the Linux client"
 calls_before=$(wc -l <"$systemd_calls")
-run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
+run_reconcile "$client_reconcile" candy-sdwan.service env FAKE_VERIFIED_RUNTIME_STATE=running >/dev/null
 [ "$(wc -l <"$systemd_calls")" -eq "$calls_before" ] || fail "unchanged candidate restarted the Linux client"
+grep -F 'project-local-runtime-status' "$status_inspector_calls" >/dev/null ||
+	fail "unchanged candidate did not request verified product status projection"
+if run_reconcile "$client_reconcile" candy-sdwan.service env FAKE_STATUS_INSPECTOR_FAIL=1 >/dev/null 2>&1; then
+	fail "failed Core status verification unexpectedly reconciled"
+fi
+grep -F '"state":"fail-open"' "$tmp/reconcile-run/sdwan-status.json" >/dev/null ||
+	fail "failed Core status verification was not projected as fail-open"
 rm -f "$systemd_state/candy-sdwan.service"
 run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
 [ "$(tail -n 1 "$systemd_calls")" = 'start candy-sdwan.service' ] || fail "inactive client was not restored for an unchanged candidate"

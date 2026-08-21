@@ -63,6 +63,7 @@ CANDY_HEALTH_CHECK_START_GRACE_SECONDS=${CANDY_HEALTH_CHECK_START_GRACE_SECONDS:
 CANDY_SDWAN_BIN=${CANDY_SDWAN_BIN:-/usr/bin/candy-sdwan}
 CANDY_SDWAN_AGENT=${CANDY_SDWAN_AGENT:-/usr/bin/candy-sdwan-agent}
 CANDY_SDWAN_RUNTIME=${CANDY_SDWAN_RUNTIME:-/usr/libexec/candy-sdwan-runtime}
+CANDY_SDWAN_STATUS_INSPECTOR=${CANDY_SDWAN_STATUS_INSPECTOR:-/usr/libexec/candy-cloud-sync}
 CANDY_CORE_BIN=${CANDY_CORE_BIN:-/usr/lib/candy/cores/current/candy-core}
 CANDY_SDWAN_STATE_DIR=${CANDY_SDWAN_STATE_DIR:-/var/lib/candy/sdwan}
 CANDY_SDWAN_ACTIVATIONS_DIR=${CANDY_SDWAN_ACTIVATIONS_DIR:-$CANDY_SDWAN_STATE_DIR/activations}
@@ -87,6 +88,7 @@ CANDY_SERVICE_LOCK_DIR=${CANDY_SERVICE_LOCK_DIR:-/var/lib/candy/service.lock}
 CANDY_EPOCH_DIRECTORY=${CANDY_EPOCH_DIRECTORY:-/var/lib/candy/epochs}
 CANDY_SDWAN_STATUS_FILE=${CANDY_SDWAN_STATUS_FILE:-$RUNTIME_DIR/sdwan-status.json}
 CANDY_SDWAN_READY_FILE=${CANDY_SDWAN_READY_FILE:-$CANDY_SDWAN_STATE_DIR/activation-ready-v1.json}
+CANDY_SDWAN_ACTIVE_PROOF=${CANDY_SDWAN_ACTIVE_PROOF:-$CANDY_SDWAN_STATE_DIR/active-activation-v1.json}
 CANDY_VERSION=${CANDY_VERSION:-0.4.0}
 CANDY_RELEASE=${CANDY_RELEASE:-1}
 CONFIG_FILE=/etc/config/candy
@@ -167,6 +169,35 @@ sdwan_runtime_state() {
 			log_warn "SD-WAN Runtime state action failed: $action"
 			return 1
 		}
+}
+
+sdwan_refresh_runtime_state() {
+	local verified_state
+	if [ ! -x "$CANDY_SDWAN_STATUS_INSPECTOR" ]; then
+		sdwan_fail_open status_verifier_unavailable || true
+		log_event error sdwan_status "result=verification_failed reason=verifier_unavailable"
+		return 1
+	fi
+	if ! verified_state=$("$CANDY_SDWAN_STATUS_INSPECTOR" \
+		--state-dir "$CANDY_SDWAN_STATE_DIR" --run-dir "$RUNTIME_DIR" project-local-runtime-status); then
+		sdwan_fail_open status_verification_failed || true
+		log_event error sdwan_status "result=verification_failed reason=invalid_active_state"
+		return 1
+	fi
+	case "$verified_state" in
+		running|reconnecting) ;;
+		fail-open)
+			sdwan_fail_open core_not_ready || true
+			return 1
+			;;
+		*)
+			sdwan_fail_open invalid_verified_state || true
+			log_event error sdwan_status "result=verification_failed reason=invalid_verifier_output"
+			return 1
+			;;
+	esac
+	log_event info sdwan_status "result=updated state=$verified_state"
+	return 0
 }
 
 rotate_log_file() {
@@ -3752,20 +3783,6 @@ sdwan_active_target() {
 	printf '%s\n' "$target"
 }
 
-promote_sdwan_active() {
-	local target="$1" temporary
-	[ "$target" = "$CANDY_SDWAN_CANDIDATE_TARGET" ] || return 1
-	[ "$(readlink "$CANDY_SDWAN_CANDIDATE" 2>/dev/null || true)" = "$target" ] || return 1
-	mkdir -p "$CANDY_SDWAN_STATE_DIR" || return 1
-	temporary="$CANDY_SDWAN_STATE_DIR/.active.$$"
-	rm -f "$temporary"
-	ln -s "$target" "$temporary" || return 1
-	if ! mv -f "$temporary" "$CANDY_SDWAN_ACTIVE"; then
-		rm -f "$temporary"
-		return 1
-	fi
-}
-
 remove_sdwan_candidate_if_current() {
 	local expected="$1"
 	[ -L "$CANDY_SDWAN_CANDIDATE" ] || return 0
@@ -3775,24 +3792,14 @@ remove_sdwan_candidate_if_current() {
 
 clear_sdwan_active() {
 	if [ -L "$CANDY_SDWAN_ACTIVE" ]; then
-		rm -f "$CANDY_SDWAN_ACTIVE"
-		return $?
+		rm -f "$CANDY_SDWAN_ACTIVE" || return 1
+	elif [ -e "$CANDY_SDWAN_ACTIVE" ]; then
+		return 1
 	fi
-	[ ! -e "$CANDY_SDWAN_ACTIVE" ]
-}
-
-sdwan_activation_committed() {
-	local receipt activation_id candidate_target state receipt_target
-	receipt="$CANDY_SDWAN_READY_FILE"
-	[ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
-	command -v jsonfilter >/dev/null 2>&1 || return 1
-	state=$(jsonfilter -i "$receipt" -e '@.state' 2>/dev/null || true)
-	activation_id=$(jsonfilter -i "$receipt" -e '@.activation_id' 2>/dev/null || true)
-	receipt_target=$(jsonfilter -i "$receipt" -e '@.candidate_target' 2>/dev/null || true)
-	[ "$state" = committed ] || return 1
-	[ "$activation_id" = "$CANDY_SDWAN_CANDIDATE_HASH" ] || return 1
-	candidate_target="$CANDY_SDWAN_CANDIDATE_TARGET"
-	[ "$receipt_target" = "$candidate_target" ] || return 1
+	if [ -e "$CANDY_SDWAN_ACTIVE_PROOF" ] || [ -L "$CANDY_SDWAN_ACTIVE_PROOF" ]; then
+		[ -f "$CANDY_SDWAN_ACTIVE_PROOF" ] && [ ! -L "$CANDY_SDWAN_ACTIVE_PROOF" ] || return 1
+		rm -f "$CANDY_SDWAN_ACTIVE_PROOF" || return 1
+	fi
 	return 0
 }
 
@@ -3809,19 +3816,9 @@ sdwan_reconcile() {
 	if load_sdwan_candidate; then
 		active_target=$(sdwan_active_target 2>/dev/null || true)
 		if [ "$active_target" = "$CANDY_SDWAN_CANDIDATE_TARGET" ]; then
+			sdwan_refresh_runtime_state || return 1
 			log_event info sdwan_reconcile "result=unchanged activation=$CANDY_SDWAN_CANDIDATE_HASH ordinary_client=preserved"
 			return 0
-		fi
-		# candy-sdwan-agent publishes this receipt only after Core readiness and
-		# netd commit. Promote the immutable candidate at that point so the next
-		# Cloud poll is idempotent and does not restart a healthy data plane.
-		if sdwan_activation_committed; then
-			if promote_sdwan_active "$CANDY_SDWAN_CANDIDATE_TARGET"; then
-				log_event info sdwan_reconcile "result=activated activation=$CANDY_SDWAN_CANDIDATE_HASH ordinary_client=preserved"
-				return 0
-			fi
-			log_event error sdwan_reconcile "result=activation_pointer_failed activation=$CANDY_SDWAN_CANDIDATE_HASH ordinary_client=preserved"
-			return 1
 		fi
 		# The initial supervisor may still be waiting for the candidate or for
 		# netd. Leave it alone; killing it here creates a reconnect loop.

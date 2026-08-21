@@ -74,6 +74,8 @@ if grep -F 'sdwan_enabled()' "$init" >/dev/null; then
 	fail "legacy UCI SD-WAN enable gate remains"
 fi
 grep -F 'sdwan_reconcile()' "$init" >/dev/null || fail "Cloud activation reconcile command is missing"
+grep -F 'sdwan_refresh_runtime_state()' "$init" >/dev/null || fail "verified SD-WAN product status projection is missing"
+grep -F 'project-local-runtime-status' "$init" >/dev/null || fail "SD-WAN status is not projected by the verified Rust aggregator"
 grep -F 'start_sdwan_supervision' "$init" >/dev/null || fail "SD-WAN supervision is not independent from ordinary Candy"
 grep -F 'ensure_sdwan_instance_id' "$init" >/dev/null || fail "SD-WAN instance identity is not bootstrapped"
 grep -F 'hexdump -v -e' "$init" >/dev/null || fail "SD-WAN instance identity must use the OpenWrt-supported hexdump"
@@ -81,9 +83,10 @@ if grep -F ' | od ' "$init" >/dev/null; then
 	 fail "SD-WAN init must not depend on od, which is absent from the base image"
 fi
 grep -F 'ensure_sdwan_generation' "$init" >/dev/null || fail "SD-WAN transaction generation is not persisted"
-grep -F 'sdwan_activation_committed()' "$init" >/dev/null || fail "SD-WAN activation receipt is not consumed"
 grep -F 'result=activation_in_progress' "$init" >/dev/null || fail "SD-WAN reconciliation does not preserve an in-flight data plane"
-grep -F 'result=activated' "$init" >/dev/null || fail "SD-WAN reconciliation does not promote a committed activation"
+if grep -F 'promote_sdwan_active "$CANDY_SDWAN_CANDIDATE_TARGET"' "$init" >/dev/null; then
+	fail "OpenWrt init must not promote a candidate before Cloud acknowledgement and durable proof publication"
+fi
 grep -F '"$CANDY_SDWAN_AGENT" --socket "$CANDY_NETD_SOCKET"' "$init" >/dev/null || fail "SD-WAN agent lifecycle contract is missing"
 grep -F -- '--activation "$CANDY_SDWAN_CANDIDATE"' "$init" >/dev/null || fail "Cloud activation pointer is not passed to the agent"
 grep -F 'core_status="$RUNTIME_DIR/sdwan-$attempted_hash.status.json"' "$init" >/dev/null || fail "SD-WAN Core status is not activation-specific"

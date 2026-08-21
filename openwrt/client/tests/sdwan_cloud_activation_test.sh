@@ -35,6 +35,7 @@ CANDY_SDWAN_STATE_DIR=$test_root/sdwan
 CANDY_SDWAN_ACTIVATIONS_DIR=$CANDY_SDWAN_STATE_DIR/activations
 CANDY_SDWAN_CANDIDATE=$CANDY_SDWAN_STATE_DIR/candidate
 CANDY_SDWAN_ACTIVE=$CANDY_SDWAN_STATE_DIR/active
+CANDY_SDWAN_ACTIVE_PROOF=$CANDY_SDWAN_STATE_DIR/active-activation-v1.json
 LOG_FILE=$test_root/candy.log
 RUNTIME_DIR=$test_root/run/candy
 CANDY_SDWAN_STATUS_FILE=$RUNTIME_DIR/sdwan-status.json
@@ -69,8 +70,38 @@ load_sdwan_candidate || fail "valid authenticated activation was rejected"
 [ "$CANDY_SDWAN_DECLARATION" = "$activation/declaration.json" ] || fail "netd declaration was not bound to the immutable activation"
 [ "$CANDY_SDWAN_CORE_ROLE" = client_sdwan ] || fail "Core role was not loaded"
 
-promote_sdwan_active "activations/$hash" || fail "valid activation could not be promoted"
+ln -s "activations/$hash" "$CANDY_SDWAN_ACTIVE"
 [ "$(readlink "$CANDY_SDWAN_ACTIVE")" = "activations/$hash" ] || fail "active pointer was not atomically promoted"
+
+status_inspector=$test_root/status-inspector
+cat >"$status_inspector" <<'EOF'
+#!/bin/sh
+[ "${CANDY_TEST_STATUS_FAIL:-0}" != 1 ] || exit 1
+printf '%s\n' "$*" >>"$CANDY_TEST_STATUS_CALLS"
+printf '%s\n' "${CANDY_TEST_VERIFIED_STATE:-reconnecting}"
+EOF
+chmod 0755 "$status_inspector"
+CANDY_SDWAN_STATUS_INSPECTOR=$status_inspector
+CANDY_TEST_STATUS_CALLS=$test_root/status-inspector.calls
+export CANDY_TEST_STATUS_CALLS
+projected_state=untouched
+sdwan_runtime_state() { projected_state=$1; }
+sdwan_fail_open() { projected_state=fail-open; }
+export CANDY_TEST_VERIFIED_STATE=running
+sdwan_reconcile || fail "unchanged active activation could not refresh product status"
+[ "$projected_state" = untouched ] || fail "shell duplicated verified product status projection"
+grep -F 'project-local-runtime-status' "$CANDY_TEST_STATUS_CALLS" >/dev/null ||
+	fail "OpenWrt reconcile did not request verified product status projection"
+export CANDY_TEST_VERIFIED_STATE=reconnecting
+sdwan_reconcile || fail "starting activation could not refresh product status"
+[ "$projected_state" = untouched ] || fail "shell duplicated reconnecting product status projection"
+export CANDY_TEST_STATUS_FAIL=1
+if sdwan_reconcile; then
+	fail "invalid active Core status unexpectedly reconciled"
+fi
+[ "$projected_state" = fail-open ] || fail "invalid active Core status did not trigger fail-open"
+unset CANDY_TEST_STATUS_FAIL
+export CANDY_TEST_VERIFIED_STATE=running
 
 rm -f "$CANDY_SDWAN_CANDIDATE"
 ln -s "../activations/$hash" "$CANDY_SDWAN_CANDIDATE"

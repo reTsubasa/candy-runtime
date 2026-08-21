@@ -70,6 +70,8 @@ struct Args {
 #[derive(Debug, Subcommand)]
 enum Command {
     SyncOnce,
+    LocalRuntimeState,
+    ProjectLocalRuntimeStatus,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -443,6 +445,19 @@ struct ActivationReadyReceipt {
     error_code: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ActiveActivationProof {
+    schema_version: u8,
+    activation_id: String,
+    candidate_target: String,
+    projection_generation: u64,
+    delivery_etag: String,
+    agent_pid: u32,
+    state: String,
+    committed_at_unix: u64,
+}
+
 #[derive(Debug)]
 struct ActivationOutcome {
     receipt: ActivationReadyReceipt,
@@ -541,7 +556,105 @@ fn main() {
 fn run(args: Args) -> Result<()> {
     match args.command {
         Command::SyncOnce => sync_once(&args),
+        Command::LocalRuntimeState => {
+            println!(
+                "{}",
+                verified_local_runtime_state(&args.state_dir, &args.run_dir)?
+            );
+            Ok(())
+        }
+        Command::ProjectLocalRuntimeStatus => {
+            println!(
+                "{}",
+                project_verified_local_runtime_status(&args.state_dir, &args.run_dir)?
+            );
+            Ok(())
+        }
     }
+}
+
+fn verified_local_runtime_state(state_dir: &Path, run_dir: &Path) -> Result<&'static str> {
+    let Some((descriptor, proof)) = read_active_activation(state_dir)? else {
+        return if fs::symlink_metadata(state_dir.join("active")).is_ok() {
+            Ok("fail-open")
+        } else {
+            Ok("reconnecting")
+        };
+    };
+    if !process_is_alive_and_owned_by_state(proof.agent_pid, state_dir)? {
+        return Ok("fail-open");
+    }
+    let status_path = run_dir.join(format!("sdwan-{}.status.json", descriptor.activation_id));
+    let status = match fs::symlink_metadata(&status_path) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
+            read_bounded_json::<CoreRuntimeStatus>(&status_path, MAX_PROFILE_BYTES)
+                .context("read activation-specific Core Runtime status")?
+        }
+        Ok(_) => bail!("activation-specific Core Runtime status must be a regular file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok("fail-open"),
+        Err(error) => return Err(error).context("inspect activation-specific Core Runtime status"),
+    };
+    if status.generation != descriptor.projection_generation
+        || !valid_core_status_metadata(&status)?
+        || !process_is_alive_and_owned_by_state(status.pid, state_dir)?
+    {
+        return Ok("fail-open");
+    }
+    if status.fail_open_required
+        || status.last_error_code.is_some()
+        || matches!(
+            status.lifecycle.as_str(),
+            "failed" | "stopping" | "stopped" | "degraded"
+        )
+    {
+        return Ok("fail-open");
+    }
+    if status.lifecycle == "active" {
+        if status.configured_peers > 0
+            && status.active_peers == status.configured_peers
+            && status.required_route_owners > 0
+            && status.ready_route_owners == status.required_route_owners
+            && status.last_error_code.is_none()
+        {
+            return Ok("running");
+        }
+        return Ok("fail-open");
+    }
+    if status.lifecycle == "starting" {
+        return Ok("reconnecting");
+    }
+    Ok("fail-open")
+}
+
+fn project_verified_local_runtime_status(state_dir: &Path, run_dir: &Path) -> Result<&'static str> {
+    let state = verified_local_runtime_state(state_dir, run_dir)?;
+    let durable_path = state_dir.join("status-v1.json");
+    let mut document: serde_json::Value = read_bounded_json(&durable_path, MAX_PROFILE_BYTES)
+        .context("read product Runtime status")?;
+    if document
+        .get("schema_version")
+        .and_then(|value| value.as_u64())
+        != Some(1)
+    {
+        bail!("product Runtime status has an unsupported schema")
+    }
+    let runtime = document
+        .get_mut("runtime")
+        .and_then(|value| value.as_object_mut())
+        .context("product Runtime status is missing its Runtime object")?;
+    runtime.insert("state".into(), serde_json::Value::String(state.into()));
+    runtime.insert("updated_at".into(), serde_json::Value::from(unix_now()?));
+    runtime.insert(
+        "last_error".into(),
+        serde_json::Value::String(if state == "fail-open" {
+            "active_runtime_verification_failed".into()
+        } else {
+            String::new()
+        }),
+    );
+    atomic_json(&durable_path, &document, 0o600)?;
+    atomic_public_json(&run_dir.join("sdwan-status.json"), &document, 0o644)?;
+    Ok(state)
 }
 
 fn sync_once(args: &Args) -> Result<()> {
@@ -1034,7 +1147,7 @@ fn report_runtime_telemetry(
         .map_or(observed_monotonic_ms, |sample| {
             observed_monotonic_ms.max(sample.sequence.saturating_add(1))
         });
-    let core_status = read_active_core_status(state_dir, run_dir)?;
+    let core_status = read_active_core_status(state_dir, run_dir, true)?;
     let current_sample = core_status
         .as_ref()
         .filter(|status| status.schema_version >= 2)
@@ -1541,7 +1654,51 @@ fn rate_bps(bytes: u64, elapsed_ms: u64) -> u64 {
     ((u128::from(bytes) * 8_000) / u128::from(elapsed_ms.max(1))).min(u128::from(u64::MAX)) as u64
 }
 
-fn read_active_core_status(state_dir: &Path, run_dir: &Path) -> Result<Option<CoreRuntimeStatus>> {
+fn read_active_core_status(
+    state_dir: &Path,
+    run_dir: &Path,
+    allow_legacy_status: bool,
+) -> Result<Option<CoreRuntimeStatus>> {
+    let Some((descriptor, proof)) = read_active_activation(state_dir)? else {
+        return Ok(None);
+    };
+    if !process_is_alive_and_owned_by_state(proof.agent_pid, state_dir)? {
+        return Ok(None);
+    }
+    let activation_id = &descriptor.activation_id;
+    let activation_status = run_dir.join(format!("sdwan-{activation_id}.status.json"));
+    let legacy_status = run_dir.join("sdwan-status.json");
+    let status = if activation_status.exists() {
+        Some(
+            read_bounded_json::<CoreRuntimeStatus>(&activation_status, MAX_PROFILE_BYTES)
+                .context("read activation-specific Core Runtime status")?,
+        )
+    } else if allow_legacy_status && legacy_status.exists() {
+        // Older Runtime releases shared this path with the product status
+        // consumed by LuCI. A product-status document is not a Core readiness
+        // failure and must not prevent a current per-activation status from
+        // being consumed after an upgrade.
+        read_bounded_json::<CoreRuntimeStatus>(&legacy_status, MAX_PROFILE_BYTES).ok()
+    } else {
+        None
+    };
+    let Some(status) = status else {
+        return Ok(None);
+    };
+    if status.generation != descriptor.projection_generation {
+        return Ok(None);
+    }
+    if !valid_core_status_metadata(&status)?
+        || !process_is_alive_and_owned_by_state(status.pid, state_dir)?
+    {
+        bail!("active Core Runtime status is invalid")
+    }
+    Ok(Some(status))
+}
+
+fn read_active_activation(
+    state_dir: &Path,
+) -> Result<Option<(ActivationDescriptor, ActiveActivationProof)>> {
     let active = state_dir.join("active");
     let target = match fs::read_link(&active) {
         Ok(target) => target,
@@ -1557,8 +1714,8 @@ fn read_active_core_status(state_dir: &Path, run_dir: &Path) -> Result<Option<Co
     let activation_id = components[1]
         .as_os_str()
         .to_str()
-        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .context("active Runtime pointer has an invalid activation id")?;
+        .context("active Runtime pointer id is not UTF-8")?;
+    validate_hex(activation_id, 32, "active Runtime activation id")?;
     let activation_directory = state_dir.join(&target);
     let metadata =
         fs::symlink_metadata(&activation_directory).context("inspect active Runtime activation")?;
@@ -1569,58 +1726,127 @@ fn read_active_core_status(state_dir: &Path, run_dir: &Path) -> Result<Option<Co
         &activation_directory.join("activation-v1.json"),
         MAX_PROFILE_BYTES,
     )?;
-    if descriptor.schema_version != 1
-        || descriptor.activation_id != activation_id
-        || descriptor.projection_generation == 0
-    {
+    if !valid_active_descriptor(&descriptor, activation_id)? {
         bail!("active Runtime activation descriptor is invalid")
     }
-    let activation_status = run_dir.join(format!("sdwan-{activation_id}.status.json"));
-    let legacy_status = run_dir.join("sdwan-status.json");
-    let status = if activation_status.exists() {
-        Some(
-            read_bounded_json::<CoreRuntimeStatus>(&activation_status, MAX_PROFILE_BYTES)
-                .context("read activation-specific Core Runtime status")?,
-        )
-    } else if legacy_status.exists() {
-        // Older Runtime releases shared this path with the product status
-        // consumed by LuCI. A product-status document is not a Core readiness
-        // failure and must not prevent a current per-activation status from
-        // being consumed after an upgrade.
-        read_bounded_json::<CoreRuntimeStatus>(&legacy_status, MAX_PROFILE_BYTES).ok()
-    } else {
-        None
-    };
-    let Some(status) = status else {
+    let Some(proof) = active_activation_proof(state_dir, &target, &descriptor)? else {
         return Ok(None);
     };
-    if status.generation != descriptor.projection_generation {
-        return Ok(None);
+    Ok(Some((descriptor, proof)))
+}
+
+fn valid_active_descriptor(descriptor: &ActivationDescriptor, activation_id: &str) -> Result<bool> {
+    validate_hex(
+        &descriptor.delivery_sha256,
+        32,
+        "active activation delivery digest",
+    )?;
+    validate_hex(
+        &descriptor.projection_content_hash,
+        32,
+        "active activation projection digest",
+    )?;
+    Ok(descriptor.schema_version == 1
+        && descriptor.activation_id == activation_id
+        && descriptor.delivery_etag == format!("\"sha256-{}\"", descriptor.delivery_sha256)
+        && descriptor.segment_generation > 0
+        && descriptor.projection_generation > 0
+        && matches!(descriptor.core_role.as_str(), "client_sdwan" | "server")
+        && !descriptor.core_config.is_empty()
+        && !descriptor.netd_declaration.is_empty()
+        && descriptor.grant_refresh_after_unix <= descriptor.grant_expires_at_unix)
+}
+
+fn active_activation_proof(
+    state_dir: &Path,
+    active_target: &Path,
+    descriptor: &ActivationDescriptor,
+) -> Result<Option<ActiveActivationProof>> {
+    let path = state_dir.join("active-activation-v1.json");
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect committed activation proof"),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_PROFILE_BYTES
+    {
+        bail!("committed activation proof must be a bounded regular file")
     }
-    if !matches!(status.schema_version, 1..=3)
-        || status.pid == 0
-        || !process_is_alive(status.pid)
-        || !matches!(
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            bail!("committed activation proof must have mode 0600")
+        }
+        let owner = fs::symlink_metadata(state_dir).context("inspect SD-WAN state owner")?;
+        if metadata.uid() != owner.uid() || metadata.gid() != owner.gid() {
+            bail!("committed activation proof owner does not match the state owner")
+        }
+    }
+    let proof: ActiveActivationProof = read_bounded_json(&path, MAX_PROFILE_BYTES)?;
+    let target = active_target
+        .to_str()
+        .context("active Runtime target is not UTF-8")?;
+    if proof.schema_version != 1
+        || proof.activation_id != descriptor.activation_id
+        || proof.candidate_target != target
+        || proof.projection_generation != descriptor.projection_generation
+        || proof.delivery_etag != descriptor.delivery_etag
+        || proof.agent_pid == 0
+        || proof.state != "committed"
+        || proof.committed_at_unix == 0
+    {
+        bail!("committed activation proof does not match the active Runtime activation")
+    }
+    Ok(Some(proof))
+}
+
+fn valid_core_status_metadata(status: &CoreRuntimeStatus) -> Result<bool> {
+    let valid = matches!(status.schema_version, 1..=3)
+        && status.pid != 0
+        && matches!(
             status.lifecycle.as_str(),
             "starting" | "active" | "stopping" | "stopped" | "failed" | "degraded"
         )
-        || status.active_peers > status.configured_peers
-        || status.ready_route_owners > status.required_route_owners
-        || status.ready_route_owners > status.active_peers
-        || status.last_error_code.as_deref().is_some_and(|value| {
+        && status.active_peers <= status.configured_peers
+        && status.ready_route_owners <= status.required_route_owners
+        && status.ready_route_owners <= status.active_peers
+        && !status.last_error_code.as_deref().is_some_and(|value| {
             value.is_empty()
                 || value.len() > 80
                 || !value
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-        })
+        });
+    if valid && status.schema_version >= 2 {
+        validate_core_path_status(status)?;
+    }
+    Ok(valid)
+}
+
+fn process_is_alive_and_owned_by_state(pid: u32, state_dir: &Path) -> Result<bool> {
+    if !process_is_alive(pid) {
+        return Ok(false);
+    }
+    #[cfg(target_os = "linux")]
     {
-        bail!("active Core Runtime status is invalid")
+        use std::os::unix::fs::MetadataExt;
+        let process = match fs::metadata(format!("/proc/{pid}")) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error).context("inspect Runtime process owner"),
+        };
+        let state = fs::symlink_metadata(state_dir).context("inspect SD-WAN state owner")?;
+        return Ok(process.uid() == state.uid());
     }
-    if status.schema_version >= 2 {
-        validate_core_path_status(&status)?;
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = state_dir;
+        Ok(true)
     }
-    Ok(Some(status))
 }
 
 fn validate_core_path_status(status: &CoreRuntimeStatus) -> Result<()> {
@@ -1929,7 +2155,24 @@ fn promote_committed_activation(state_dir: &Path, activation: &ActivationOutcome
     if candidate_target != Path::new(&activation.receipt.candidate_target) {
         bail!("SD-WAN candidate changed before activation promotion")
     }
-    publish_pointer(state_dir, "active", candidate_target)
+    let proof = ActiveActivationProof {
+        schema_version: 1,
+        activation_id: activation.receipt.activation_id.clone(),
+        candidate_target: activation.receipt.candidate_target.clone(),
+        projection_generation: activation.receipt.generation,
+        delivery_etag: activation.descriptor.delivery_etag.clone(),
+        agent_pid: activation.receipt.agent_pid,
+        state: "committed".into(),
+        committed_at_unix: unix_now()?,
+    };
+    let activation_directory = state_dir.join(&candidate_target);
+    let metadata = fs::symlink_metadata(&activation_directory)
+        .context("inspect committed activation directory")?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("committed activation directory must be a real directory")
+    }
+    publish_pointer(state_dir, "active", candidate_target)?;
+    atomic_json(&state_dir.join("active-activation-v1.json"), &proof, 0o600)
 }
 
 fn remove_candidate_if_matches(state_dir: &Path, activation: &ActivationOutcome) -> Result<()> {
@@ -1997,25 +2240,48 @@ fn clear_activation_ready_receipt(state_dir: &Path) -> Result<()> {
 }
 
 fn withdraw_local_activation(state_dir: &Path) -> Result<()> {
-    for name in ["candidate", "active"] {
-        let path = state_dir.join(name);
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) => {
-                if !metadata.file_type().is_symlink() {
-                    bail!("Runtime {name} pointer must be a symbolic link")
-                }
-                fs::remove_file(&path)
-                    .with_context(|| format!("withdraw Runtime {name} pointer"))?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| format!("inspect Runtime {name} pointer"))
-            }
-        }
-    }
+    remove_state_pointer(state_dir, "active")?;
     File::open(state_dir)
         .and_then(|directory| directory.sync_all())
-        .context("sync withdrawn Runtime activation pointers")
+        .context("sync withdrawn Runtime active pointer")?;
+    remove_regular_state_file(state_dir, "active-activation-v1.json")?;
+    remove_state_pointer(state_dir, "candidate")?;
+    File::open(state_dir)
+        .and_then(|directory| directory.sync_all())
+        .context("sync withdrawn Runtime candidate pointer")
+}
+
+fn remove_state_pointer(state_dir: &Path, name: &str) -> Result<()> {
+    let path = state_dir.join(name);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_symlink() {
+                bail!("Runtime {name} pointer must be a symbolic link")
+            }
+            fs::remove_file(&path).with_context(|| format!("withdraw Runtime {name} pointer"))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("inspect Runtime {name} pointer")),
+    }
+    Ok(())
+}
+
+fn remove_regular_state_file(state_dir: &Path, name: &str) -> Result<()> {
+    let path = state_dir.join(name);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("Runtime {name} must be a regular file")
+            }
+            fs::remove_file(&path).with_context(|| format!("remove Runtime {name}"))?;
+            File::open(state_dir)
+                .and_then(|directory| directory.sync_all())
+                .with_context(|| format!("sync removed Runtime {name}"))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("inspect Runtime {name}")),
+    }
+    Ok(())
 }
 
 fn report_configuration_status(
@@ -4109,6 +4375,43 @@ fn atomic_json(path: &Path, value: &impl Serialize, mode: u32) -> Result<()> {
     atomic_bytes(path, &serde_json::to_vec(value)?, mode)
 }
 
+fn atomic_public_json(path: &Path, value: &impl Serialize, mode: u32) -> Result<()> {
+    let bytes = serde_json::to_vec(value)?;
+    let parent = path.parent().context("public state path has no parent")?;
+    let metadata = fs::symlink_metadata(parent).context("inspect public state directory")?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("public state directory must be a real directory")
+    }
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name().unwrap().to_string_lossy(),
+        Uuid::new_v4()
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
+    }
+    let mut file = options
+        .open(&temporary)
+        .context("create atomic public state file")?;
+    file.write_all(&bytes)
+        .context("write atomic public state file")?;
+    file.sync_all().context("sync atomic public state file")?;
+    set_file_mode(&file, mode)?;
+    drop(file);
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).context("replace atomic public state file");
+    }
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .context("sync public state directory")?;
+    Ok(())
+}
+
 fn atomic_bytes(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     let parent = path.parent().context("state path has no parent")?;
     ensure_private_directory(parent)?;
@@ -4503,12 +4806,51 @@ default via 192.0.2.1 dev eth0 proto static
             state.join("active"),
         )
         .unwrap();
+        assert_eq!(
+            verified_local_runtime_state(&state, &run).unwrap(),
+            "fail-open"
+        );
+        let proof_path = state.join("active-activation-v1.json");
+        fs::write(
+            &proof_path,
+            serde_json::json!({
+                "schema_version": 1,
+                "activation_id": activation_id,
+                "candidate_target": format!("activations/{activation_id}"),
+                "projection_generation": 7,
+                "delivery_etag": format!("\"sha256-{}\"", "22".repeat(32)),
+                "agent_pid": std::process::id(),
+                "state": "committed",
+                "committed_at_unix": 1
+            })
+            .to_string(),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&proof_path, fs::Permissions::from_mode(0o600)).unwrap();
         fs::write(
             run.join("sdwan-status.json"),
             serde_json::json!({
                 "schema_version": 1,
                 "registration": {"state": "registered"},
                 "runtime": {"state": "reconnecting"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            state.join("status-v1.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "registration": {"state": "registered", "cloud_address": "https://cloud.example.test", "last_error": ""},
+                "runtime": {"state": "reconnecting", "updated_at": 1, "last_error": ""},
+                "site": null,
+                "segment": null,
+                "tun": {"state": "unavailable", "full_duplex": null},
+                "peers": [],
+                "path": null,
+                "egress": {"local": null, "remote": null},
+                "dns": {"state": "unavailable"}
             })
             .to_string(),
         )
@@ -4531,10 +4873,63 @@ default via 192.0.2.1 dev eth0 proto static
             .to_string(),
         )
         .unwrap();
-        let status = read_active_core_status(&state, &run).unwrap().unwrap();
+        let status = read_active_core_status(&state, &run, false)
+            .unwrap()
+            .unwrap();
         assert_eq!(status.lifecycle, "active");
         assert_eq!(status.active_peers, 1);
         assert_eq!(status.schema_version, 3);
+        assert_eq!(
+            verified_local_runtime_state(&state, &run).unwrap(),
+            "running"
+        );
+        assert_eq!(
+            project_verified_local_runtime_status(&state, &run).unwrap(),
+            "running"
+        );
+        for path in [state.join("status-v1.json"), run.join("sdwan-status.json")] {
+            let product: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            assert_eq!(product["runtime"]["state"], "running");
+        }
+        assert_eq!(
+            fs::symlink_metadata(state.join("status-v1.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::symlink_metadata(run.join("sdwan-status.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+
+        fs::write(
+            &activation_status,
+            serde_json::json!({
+                "schema_version": 3,
+                "generation": 7,
+                "pid": std::process::id(),
+                "lifecycle": "active",
+                "configured_peers": 1,
+                "active_peers": 0,
+                "required_route_owners": 1,
+                "ready_route_owners": 0,
+                "fail_open_required": false,
+                "last_error_code": null
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            verified_local_runtime_state(&state, &run).unwrap(),
+            "fail-open"
+        );
 
         fs::write(
             &activation_status,
@@ -4553,7 +4948,13 @@ default via 192.0.2.1 dev eth0 proto static
             .to_string(),
         )
         .unwrap();
-        assert!(read_active_core_status(&state, &run).unwrap().is_none());
+        assert!(read_active_core_status(&state, &run, false)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            verified_local_runtime_state(&state, &run).unwrap(),
+            "fail-open"
+        );
 
         fs::write(
             &activation_status,
@@ -4572,10 +4973,16 @@ default via 192.0.2.1 dev eth0 proto static
             .to_string(),
         )
         .unwrap();
-        assert!(read_active_core_status(&state, &run).is_err());
+        assert!(read_active_core_status(&state, &run, false).is_err());
+        assert_eq!(
+            verified_local_runtime_state(&state, &run).unwrap(),
+            "fail-open"
+        );
 
         fs::remove_file(&activation_status).unwrap();
-        assert!(read_active_core_status(&state, &run).unwrap().is_none());
+        assert!(read_active_core_status(&state, &run, false)
+            .unwrap()
+            .is_none());
 
         fs::write(
             run.join("sdwan-status.json"),
@@ -4594,8 +5001,396 @@ default via 192.0.2.1 dev eth0 proto static
             .to_string(),
         )
         .unwrap();
-        let legacy = read_active_core_status(&state, &run).unwrap().unwrap();
+        assert!(read_active_core_status(&state, &run, false)
+            .unwrap()
+            .is_none());
+        let legacy = read_active_core_status(&state, &run, true)
+            .unwrap()
+            .unwrap();
         assert_eq!(legacy.generation, 7);
+    }
+
+    struct ActiveContractFixture {
+        _root: tempfile::TempDir,
+        state: PathBuf,
+        run: PathBuf,
+        activation_id: String,
+        activation: PathBuf,
+        status: PathBuf,
+    }
+
+    impl ActiveContractFixture {
+        fn proof_path(&self) -> PathBuf {
+            self.state.join("active-activation-v1.json")
+        }
+
+        fn write_proof(&self, value: serde_json::Value) {
+            atomic_json(&self.proof_path(), &value, 0o600).unwrap();
+        }
+
+        fn write_status(&self, value: serde_json::Value) {
+            fs::write(&self.status, value.to_string()).unwrap();
+        }
+
+        fn assert_not_running(&self) {
+            assert_ne!(
+                verified_local_runtime_state(&self.state, &self.run).ok(),
+                Some("running")
+            );
+        }
+    }
+
+    fn active_contract_fixture() -> ActiveContractFixture {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        let run = root.path().join("run");
+        let activation_id = "a".repeat(64);
+        let activation = state.join("activations").join(&activation_id);
+        fs::create_dir_all(&activation).unwrap();
+        fs::create_dir_all(&run).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(state.join("activations"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&activation, fs::Permissions::from_mode(0o700)).unwrap();
+        atomic_json(
+            &activation.join("activation-v1.json"),
+            &serde_json::json!({
+                "schema_version": 1,
+                "activation_id": activation_id,
+                "delivery_etag": format!("\"sha256-{}\"", "b".repeat(64)),
+                "delivery_sha256": "b".repeat(64),
+                "projection_publication_id": Uuid::from_bytes([1; 16]),
+                "projection_content_hash": "c".repeat(64),
+                "segment_generation": 4,
+                "projection_generation": 7,
+                "core_role": "client_sdwan",
+                "core_config": "core.toml",
+                "netd_declaration": "netd.json",
+                "grant_refresh_after_unix": 0,
+                "grant_expires_at_unix": 0
+            }),
+            0o600,
+        )
+        .unwrap();
+        let target = Path::new("activations").join(&activation_id);
+        symlink(&target, state.join("active")).unwrap();
+        let fixture = ActiveContractFixture {
+            _root: root,
+            state,
+            run,
+            activation_id,
+            status: PathBuf::new(),
+            activation,
+        };
+        let status = fixture
+            .run
+            .join(format!("sdwan-{}.status.json", fixture.activation_id));
+        let fixture = ActiveContractFixture { status, ..fixture };
+        fixture.write_proof(serde_json::json!({
+            "schema_version": 1,
+            "activation_id": fixture.activation_id,
+            "candidate_target": target,
+            "projection_generation": 7,
+            "delivery_etag": format!("\"sha256-{}\"", "b".repeat(64)),
+            "agent_pid": std::process::id(),
+            "state": "committed",
+            "committed_at_unix": 1_787_350_000_u64
+        }));
+        fixture.write_status(serde_json::json!({
+            "schema_version": 3,
+            "generation": 7,
+            "pid": std::process::id(),
+            "lifecycle": "active",
+            "configured_peers": 2,
+            "active_peers": 2,
+            "required_route_owners": 2,
+            "ready_route_owners": 2,
+            "fail_open_required": false,
+            "last_error_code": null
+        }));
+        fixture
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn running_requires_root_durable_proof_and_complete_readiness() {
+        let fixture = active_contract_fixture();
+        assert_eq!(
+            verified_local_runtime_state(&fixture.state, &fixture.run).unwrap(),
+            "running"
+        );
+
+        fixture.write_status(serde_json::json!({
+            "schema_version": 3,
+            "generation": 7,
+            "pid": std::process::id(),
+            "lifecycle": "active",
+            "configured_peers": 2,
+            "active_peers": 1,
+            "required_route_owners": 2,
+            "ready_route_owners": 1,
+            "fail_open_required": false,
+            "last_error_code": null
+        }));
+        fixture.assert_not_running();
+
+        fixture.write_status(serde_json::json!({
+            "schema_version": 3,
+            "generation": 7,
+            "pid": std::process::id(),
+            "lifecycle": "active",
+            "configured_peers": 2,
+            "active_peers": 2,
+            "required_route_owners": 2,
+            "ready_route_owners": 1,
+            "fail_open_required": false,
+            "last_error_code": null
+        }));
+        fixture.assert_not_running();
+
+        fixture.write_status(serde_json::json!({
+            "schema_version": 3,
+            "generation": 7,
+            "pid": std::process::id(),
+            "lifecycle": "active",
+            "configured_peers": 0,
+            "active_peers": 0,
+            "required_route_owners": 0,
+            "ready_route_owners": 0,
+            "fail_open_required": false,
+            "last_error_code": null
+        }));
+        fixture.assert_not_running();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn active_pointer_and_proof_are_fail_closed() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let fixture = active_contract_fixture();
+        fs::remove_file(fixture.state.join("active")).unwrap();
+        fs::write(
+            fixture.state.join("active"),
+            format!("activations/{}", fixture.activation_id),
+        )
+        .unwrap();
+        fixture.assert_not_running();
+
+        fs::remove_file(fixture.state.join("active")).unwrap();
+        symlink(
+            Path::new("..")
+                .join("activations")
+                .join(&fixture.activation_id),
+            fixture.state.join("active"),
+        )
+        .unwrap();
+        fixture.assert_not_running();
+
+        fs::remove_file(fixture.state.join("active")).unwrap();
+        symlink(
+            Path::new("activations").join(&fixture.activation_id),
+            fixture.state.join("active"),
+        )
+        .unwrap();
+        fs::remove_file(fixture.proof_path()).unwrap();
+        fixture.assert_not_running();
+
+        fixture.write_proof(serde_json::json!({
+            "schema_version": 1,
+            "activation_id": fixture.activation_id,
+            "candidate_target": format!("activations/{}", fixture.activation_id),
+            "projection_generation": 7,
+            "delivery_etag": format!("\"sha256-{}\"", "b".repeat(64)),
+            "agent_pid": std::process::id(),
+            "state": "committed",
+            "committed_at_unix": 1_787_350_000_u64
+        }));
+        fs::set_permissions(fixture.proof_path(), fs::Permissions::from_mode(0o644)).unwrap();
+        fixture.assert_not_running();
+
+        fs::remove_file(fixture.proof_path()).unwrap();
+        symlink(
+            fixture.activation.join("activation-v1.json"),
+            fixture.proof_path(),
+        )
+        .unwrap();
+        fixture.assert_not_running();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn proof_descriptor_generation_and_process_must_match() {
+        let fixture = active_contract_fixture();
+        let valid = serde_json::json!({
+            "schema_version": 1,
+            "activation_id": fixture.activation_id,
+            "candidate_target": format!("activations/{}", fixture.activation_id),
+            "projection_generation": 7,
+            "delivery_etag": format!("\"sha256-{}\"", "b".repeat(64)),
+            "agent_pid": std::process::id(),
+            "state": "committed",
+            "committed_at_unix": 1_787_350_000_u64
+        });
+        for (field, value) in [
+            ("activation_id", serde_json::json!("d".repeat(64))),
+            (
+                "candidate_target",
+                serde_json::json!(format!("activations/{}", "d".repeat(64))),
+            ),
+            ("projection_generation", serde_json::json!(8)),
+            (
+                "delivery_etag",
+                serde_json::json!(format!("\"sha256-{}\"", "d".repeat(64))),
+            ),
+            ("agent_pid", serde_json::json!(u32::MAX)),
+            ("state", serde_json::json!("preparing")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            fixture.write_proof(invalid);
+            fixture.assert_not_running();
+        }
+        let mut unknown = valid;
+        unknown["unknown"] = serde_json::json!(true);
+        fixture.write_proof(unknown);
+        fixture.assert_not_running();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn descriptor_identity_and_generation_are_bound_to_active_proof() {
+        let fixture = active_contract_fixture();
+        let descriptor_path = fixture.activation.join("activation-v1.json");
+        let valid: serde_json::Value =
+            serde_json::from_slice(&fs::read(&descriptor_path).unwrap()).unwrap();
+
+        let mut wrong_id = valid.clone();
+        wrong_id["activation_id"] = serde_json::json!("d".repeat(64));
+        atomic_json(&descriptor_path, &wrong_id, 0o600).unwrap();
+        fixture.assert_not_running();
+
+        let mut wrong_generation = valid.clone();
+        wrong_generation["projection_generation"] = serde_json::json!(8);
+        atomic_json(&descriptor_path, &wrong_generation, 0o600).unwrap();
+        fixture.assert_not_running();
+
+        let mut wrong_delivery = valid;
+        wrong_delivery["delivery_etag"] =
+            serde_json::json!(format!("\"sha256-{}\"", "d".repeat(64)));
+        atomic_json(&descriptor_path, &wrong_delivery, 0o600).unwrap();
+        fixture.assert_not_running();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn live_process_owned_by_another_account_is_not_trusted() {
+        use std::os::unix::{fs::MetadataExt, process::CommandExt};
+
+        let fixture = active_contract_fixture();
+        let state_uid = fs::symlink_metadata(&fixture.state).unwrap().uid();
+        let init_uid = fs::metadata("/proc/1").unwrap().uid();
+        if init_uid != state_uid {
+            assert!(!process_is_alive_and_owned_by_state(1, &fixture.state).unwrap());
+            return;
+        }
+
+        if unsafe { nix::libc::geteuid() } == 0 {
+            let mut child = ProcessCommand::new("sleep");
+            child.arg("30");
+            child.uid(65_534);
+            let mut child = child.spawn().unwrap();
+            assert!(!process_is_alive_and_owned_by_state(child.id(), &fixture.state).unwrap());
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn core_exit_generation_and_failure_state_revoke_running() {
+        let fixture = active_contract_fixture();
+        let valid = serde_json::json!({
+            "schema_version": 3,
+            "generation": 7,
+            "pid": std::process::id(),
+            "lifecycle": "active",
+            "configured_peers": 2,
+            "active_peers": 2,
+            "required_route_owners": 2,
+            "ready_route_owners": 2,
+            "fail_open_required": false,
+            "last_error_code": null
+        });
+        for (field, value) in [
+            ("generation", serde_json::json!(8)),
+            ("pid", serde_json::json!(u32::MAX)),
+            ("lifecycle", serde_json::json!("starting")),
+            ("lifecycle", serde_json::json!("stopping")),
+            ("lifecycle", serde_json::json!("stopped")),
+            ("lifecycle", serde_json::json!("failed")),
+            ("lifecycle", serde_json::json!("degraded")),
+            ("fail_open_required", serde_json::json!(true)),
+            ("last_error_code", serde_json::json!("route_owner_failed")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            fixture.write_status(invalid);
+            fixture.assert_not_running();
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn legacy_shared_status_and_partial_withdrawal_cannot_report_running() {
+        let fixture = active_contract_fixture();
+        let legacy = fs::read(&fixture.status).unwrap();
+        fs::remove_file(&fixture.status).unwrap();
+        fs::write(fixture.run.join("sdwan-status.json"), legacy).unwrap();
+        fixture.assert_not_running();
+
+        fs::remove_file(fixture.state.join("active")).unwrap();
+        fixture.assert_not_running();
+
+        std::os::unix::fs::symlink(
+            Path::new("activations").join(&fixture.activation_id),
+            fixture.state.join("active"),
+        )
+        .unwrap();
+        fs::remove_file(fixture.proof_path()).unwrap();
+        fixture.assert_not_running();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn promotion_publishes_durable_proof_and_withdrawal_revokes_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (directory, activation_id) = activation_outcome_fixture("committed", None, 7);
+        let outcome = read_activation_ready_receipt(directory.path())
+            .unwrap()
+            .unwrap();
+        promote_committed_activation(directory.path(), &outcome).unwrap();
+        let proof = directory.path().join("active-activation-v1.json");
+        let metadata = fs::symlink_metadata(&proof).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&proof).unwrap()).unwrap();
+        assert_eq!(value["activation_id"], activation_id);
+        assert_eq!(
+            value["candidate_target"],
+            format!("activations/{activation_id}")
+        );
+        assert_eq!(value["projection_generation"], 7);
+        assert_eq!(
+            value["delivery_etag"],
+            format!("\"sha256-{}\"", "b".repeat(64))
+        );
+
+        withdraw_local_activation(directory.path()).unwrap();
+        assert!(!directory.path().join("active").exists());
+        assert!(!proof.exists());
     }
 
     #[test]
@@ -5174,8 +5969,16 @@ default via 192.0.2.1 dev eth0 proto static
         promote_committed_activation(directory.path(), &outcome).unwrap();
         assert_eq!(
             fs::read_link(directory.path().join("active")).unwrap(),
-            Path::new("activations").join(activation_id)
+            Path::new("activations").join(&activation_id)
         );
+        let proof: ActiveActivationProof = read_bounded_json(
+            &directory.path().join("active-activation-v1.json"),
+            MAX_PROFILE_BYTES,
+        )
+        .unwrap();
+        assert_eq!(proof.activation_id, activation_id);
+        assert_eq!(proof.projection_generation, 7);
+        assert_eq!(proof.state, "committed");
     }
 
     #[test]
@@ -5194,6 +5997,42 @@ default via 192.0.2.1 dev eth0 proto static
             fs::read_link(directory.path().join("active")).unwrap(),
             last_good
         );
+    }
+
+    #[test]
+    fn rejected_receipt_for_active_target_preserves_last_good_evidence() {
+        use std::os::unix::fs::symlink;
+
+        let (directory, activation_id) =
+            activation_outcome_fixture("rejected", Some("core_readiness_failed"), 7);
+        let target = Path::new("activations").join(&activation_id);
+        symlink(&target, directory.path().join("active")).unwrap();
+        atomic_json(
+            &directory.path().join("active-activation-v1.json"),
+            &serde_json::json!({
+                "schema_version": 1,
+                "activation_id": activation_id,
+                "candidate_target": target,
+                "projection_generation": 7,
+                "delivery_etag": format!("\"sha256-{}\"", "b".repeat(64)),
+                "agent_pid": std::process::id(),
+                "state": "committed",
+                "committed_at_unix": 1_787_350_000_u64
+            }),
+            0o600,
+        )
+        .unwrap();
+        let outcome = read_activation_ready_receipt(directory.path())
+            .unwrap()
+            .unwrap();
+        remove_candidate_if_matches(directory.path(), &outcome).unwrap();
+
+        assert_eq!(
+            fs::read_link(directory.path().join("active")).unwrap(),
+            target
+        );
+        assert!(directory.path().join("active-activation-v1.json").is_file());
+        assert!(!directory.path().join("candidate").exists());
     }
 
     #[test]

@@ -43,7 +43,7 @@ PATH="$fake_bin:$PATH" CANDY_LINUX_DIST_DIR="$dist" CANDY_SDWAN_AGENT_BINARY="$a
 	CANDY_NETD_BINARY="$netd" \
 	CANDY_CLOUD_ENROLL_BINARY="$enroll" \
 	CANDY_CLOUD_SYNC_BINARY="$sync" \
-	CANDY_RELEASE_VERSION=0.4.0 CANDY_RELEASE_REVISION=52 \
+	CANDY_RELEASE_VERSION=0.4.0 CANDY_RELEASE_REVISION=53 \
 	"$root/packaging/linux/build.sh" x86_64-unknown-linux-gnu >/dev/null
 
 stage=$dist/server/x86_64
@@ -71,9 +71,9 @@ grep -F 'ExecStart=/opt/candy/current/candy-server --config /etc/candy/server.to
 [ ! -e "$stage/systemd/candy-sdwan.service" ] || fail "server package must not stage a second SD-WAN service"
 [ -x "$stage/install/install-candy-server.sh" ] || fail "installer was not staged"
 [ -x "$stage/install/upgrade-candy-server.sh" ] || fail "full Runtime upgrader was not staged"
-[ "$(cat "$stage/RUNTIME-RELEASE")" = 0.4.0-r52 ] || fail "server bundle release identity is missing or invalid"
+[ "$(cat "$stage/RUNTIME-RELEASE")" = 0.4.0-r53 ] || fail "server bundle release identity is missing or invalid"
 [ "$(cat "$stage/RUNTIME-ARCH")" = x86_64 ] || fail "server bundle architecture identity is missing or invalid"
-[ "$(cat "$edge_stage/RUNTIME-RELEASE")" = 0.4.0-r52 ] || fail "edge bundle release identity is missing or invalid"
+[ "$(cat "$edge_stage/RUNTIME-RELEASE")" = 0.4.0-r53 ] || fail "edge bundle release identity is missing or invalid"
 [ "$(cat "$edge_stage/RUNTIME-ARCH")" = x86_64 ] || fail "edge bundle architecture identity is missing or invalid"
 [ -x "$dist/candy-server-x86_64" ] || fail "product release launcher artifact was not staged"
 [ -s "$dist/candy-server-runtime-x86_64.tar.gz" ] || fail "complete server Runtime bundle was not staged"
@@ -135,6 +135,8 @@ grep -F 'Restart=no' "$edge_stage/systemd/candy-sdwan.service" >/dev/null ||
 	fail "Linux Edge SD-WAN service can loop on a rejected candidate"
 grep -F 'ExecStartPost=+/usr/local/libexec/candy-sdwan-runtime reconcile candy-sdwan.service' "$edge_stage/systemd/candy-cloud-sync.service" >/dev/null ||
 	fail "Linux Edge Cloud sync does not reconcile candidate lifecycle changes"
+grep -F 'project-local-runtime-status' "$edge_stage/usr/local/libexec/candy-sdwan-runtime" >/dev/null ||
+	fail "Linux Edge reconciliation does not publish verified product status"
 grep -F 'candy-sdwan-agent --socket ${CANDY_NETD_SOCKET}' "$edge_stage/systemd/candy-sdwan.service" >/dev/null ||
 	fail "Linux Edge SD-WAN service does not place agent options before the run subcommand"
 if grep -F 'candy-sdwan-agent run --socket' "$edge_stage/systemd/candy-sdwan.service" >/dev/null; then
