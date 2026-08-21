@@ -1798,4 +1798,22 @@ done
 grep -Fq 'phase=1 args=start regression-check' "$runtime_dir/start-guard/second-phase" ||
   fail "unhealthy start did not enter the guarded procd phase"
 
+(
+  . "$repo_root/candy-client/candy.init"
+  load_sdwan_candidate() { return 2; }
+  sdwan_active_target() { return 1; }
+  interrupt_sdwan_processes() { fail "idempotent withdrawal killed waiting SD-WAN supervisors"; }
+  sdwan_fail_open() { fail "idempotent withdrawal repeated SD-WAN fail-open"; }
+  clear_sdwan_active() { return 0; }
+  sdwan_runtime_state() { [ "$1" = stopped ]; }
+  log_event() { return 0; }
+  sdwan_reconcile || fail "idempotent SD-WAN withdrawal failed"
+)
+
+grep -F 'while [ "$stopping" -eq 0 ]; do' "$repo_root/candy-client/candy.init" >/dev/null ||
+  fail "SD-WAN children are still one-shot procd crash-loop candidates"
+grep -F 'while [ "$stopping" -eq 0 ] && load_sdwan_candidate && [ "$CANDY_SDWAN_CANDIDATE_HASH" = "$attempted_hash" ]; do' \
+  "$repo_root/candy-client/candy.init" >/dev/null ||
+  fail "failed SD-WAN activations can be retried before Cloud consumes their receipt"
+
 printf '%s\n' "OpenWrt Candy init config generation test passed"

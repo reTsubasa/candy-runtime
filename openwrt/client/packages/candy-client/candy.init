@@ -534,26 +534,36 @@ run_client() {
 }
 
 run_sdwan() {
-	local child rc stopping=0
-	wait_for_sdwan_candidate || return 0
-	if ! wait_for_sdwan_netd; then
-		log_event error sdwan_agent_unavailable "reason=netd_not_ready activation=$CANDY_SDWAN_CANDIDATE_HASH"
-		return 1
-	fi
+	local attempted_hash child rc stopping=0
 	[ -x "$CANDY_SDWAN_AGENT" ] || { log_event error sdwan_agent_unavailable "reason=agent_missing"; return 1; }
 	trap 'stopping=1; [ -z "${child:-}" ] || kill -TERM "$child" 2>/dev/null || true' TERM INT
-	"$CANDY_SDWAN_AGENT" --socket "$CANDY_NETD_SOCKET" --core "$CANDY_CORE_BIN" \
-		--activation "$CANDY_SDWAN_CANDIDATE" --activation-ready "$CANDY_SDWAN_STATE_DIR/activation-ready-v1.json" \
-		--status "$CANDY_SDWAN_STATUS_FILE" run &
-	child=$!
-	wait "$child"
-	rc=$?
-	trap - TERM INT
-	if [ "$stopping" -eq 0 ]; then
-		log_event error sdwan_exit "exit=$rc; scheduling isolated SD-WAN fail-open"
+	while [ "$stopping" -eq 0 ]; do
+		wait_for_sdwan_candidate || continue
+		attempted_hash=$CANDY_SDWAN_CANDIDATE_HASH
+		if ! wait_for_sdwan_netd; then
+			log_event warn sdwan_agent_waiting "reason=netd_not_ready activation=$attempted_hash"
+			sleep 2
+			continue
+		fi
+		"$CANDY_SDWAN_AGENT" --socket "$CANDY_NETD_SOCKET" --core "$CANDY_CORE_BIN" \
+			--activation "$CANDY_SDWAN_CANDIDATE" --activation-ready "$CANDY_SDWAN_STATE_DIR/activation-ready-v1.json" \
+			--status "$CANDY_SDWAN_STATUS_FILE" run &
+		child=$!
+		wait "$child"
+		rc=$?
+		child=
+		[ "$stopping" -eq 0 ] || break
+		log_event error sdwan_exit "exit=$rc; scheduling isolated SD-WAN fail-open activation=$attempted_hash"
 		run_detached_direct_command sdwan_fail_open "sdwan_exit:$rc"
-	fi
-	return "$rc"
+		# The Cloud synchronizer consumes the signed rejection receipt and
+		# withdraws or replaces this exact candidate. Do not let procd respawn
+		# the same failed activation until that reconciliation has happened.
+		while [ "$stopping" -eq 0 ] && load_sdwan_candidate && [ "$CANDY_SDWAN_CANDIDATE_HASH" = "$attempted_hash" ]; do
+			sleep 2
+		done
+	done
+	trap - TERM INT
+	return 0
 }
 
 health_watchdog() {
@@ -668,7 +678,7 @@ sdwan_candidate_ready() {
 
 wait_for_sdwan_candidate() {
 	local rc logged=0
-	while :; do
+	while [ "${stopping:-0}" -eq 0 ]; do
 		if load_sdwan_candidate; then
 			return 0
 		else
@@ -684,6 +694,7 @@ wait_for_sdwan_candidate() {
 		fi
 		sleep 5
 	done
+	return 1
 }
 
 ensure_sdwan_instance_id() {
@@ -765,19 +776,37 @@ prepare_sdwan_state() {
 }
 
 run_netd() {
-	local sdwan_uid sdwan_gid
-	wait_for_sdwan_candidate || return 0
-	prepare_sdwan_state || {
-		log_event error sdwan_netd_unavailable "reason=invalid_state activation=$CANDY_SDWAN_CANDIDATE_HASH"
-		return 1
-	}
+	local attempted_hash child rc sdwan_uid sdwan_gid stopping=0
 	sdwan_uid=$(id -u candy-sdwan 2>/dev/null) || return 1
 	sdwan_gid=$(id -g candy-sdwan 2>/dev/null) || return 1
-	exec "$CANDY_NETD_BIN" \
-		--socket "$CANDY_NETD_SOCKET" \
-		--allowed-uid "$sdwan_uid" \
-		--allowed-gid "$sdwan_gid" \
-		--journal "$CANDY_NETD_JOURNAL"
+	trap 'stopping=1; [ -z "${child:-}" ] || kill -TERM "$child" 2>/dev/null || true' TERM INT
+	while [ "$stopping" -eq 0 ]; do
+		wait_for_sdwan_candidate || continue
+		attempted_hash=$CANDY_SDWAN_CANDIDATE_HASH
+		if ! prepare_sdwan_state; then
+			log_event error sdwan_netd_unavailable "reason=invalid_state activation=$attempted_hash"
+			sleep 2
+			continue
+		fi
+		"$CANDY_NETD_BIN" \
+			--socket "$CANDY_NETD_SOCKET" \
+			--allowed-uid "$sdwan_uid" \
+			--allowed-gid "$sdwan_gid" \
+			--journal "$CANDY_NETD_JOURNAL" &
+		child=$!
+		wait "$child"
+		rc=$?
+		child=
+		[ "$stopping" -eq 0 ] || break
+		log_event error sdwan_netd_exit "exit=$rc activation=$attempted_hash"
+		# Keep this procd instance alive while Cloud consumes the matching
+		# activation outcome. A replacement candidate starts a fresh helper.
+		while [ "$stopping" -eq 0 ] && load_sdwan_candidate && [ "$CANDY_SDWAN_CANDIDATE_HASH" = "$attempted_hash" ]; do
+			sleep 2
+		done
+	done
+	trap - TERM INT
+	return 0
 }
 
 start_sdwan_netd() {
@@ -3773,14 +3802,24 @@ sdwan_reconcile() {
 		candidate_rc=$?
 	fi
 	if [ "$candidate_rc" -eq 2 ]; then
-		interrupt_sdwan_processes
-		sdwan_fail_open cloud_withdrawn || true
+		active_target=$(sdwan_active_target 2>/dev/null || true)
+		# A completed withdrawal is an idempotent steady state. Preserve the
+		# waiting supervisors so a later Cloud generation can activate without
+		# restarting the ordinary Candy service or reviving a procd crash loop.
+		if [ -n "$active_target" ]; then
+			interrupt_sdwan_processes
+			sdwan_fail_open cloud_withdrawn || true
+		fi
 		if ! clear_sdwan_active; then
 			log_event error sdwan_reconcile "result=withdrawal_failed reason=active_pointer_not_removable ordinary_client=preserved"
 			return 1
 		fi
 		sdwan_runtime_state stopped || true
-		log_event info sdwan_reconcile "result=withdrawn ordinary_client=preserved"
+		if [ -n "$active_target" ]; then
+			log_event info sdwan_reconcile "result=withdrawn ordinary_client=preserved"
+		else
+			log_event info sdwan_reconcile "result=unchanged state=withdrawn ordinary_client=preserved"
+		fi
 		return 0
 	fi
 	active_target=$(sdwan_active_target 2>/dev/null || true)
