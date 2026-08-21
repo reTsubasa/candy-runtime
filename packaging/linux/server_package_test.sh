@@ -43,6 +43,7 @@ PATH="$fake_bin:$PATH" CANDY_LINUX_DIST_DIR="$dist" CANDY_SDWAN_AGENT_BINARY="$a
 	CANDY_NETD_BINARY="$netd" \
 	CANDY_CLOUD_ENROLL_BINARY="$enroll" \
 	CANDY_CLOUD_SYNC_BINARY="$sync" \
+	CANDY_RELEASE_VERSION=0.4.0 CANDY_RELEASE_REVISION=47 \
 	"$root/packaging/linux/build.sh" x86_64-unknown-linux-gnu >/dev/null
 
 stage=$dist/server/x86_64
@@ -57,7 +58,10 @@ edge_stage=$dist/client/x86_64
 [ -x "$stage/usr/local/bin/candy-core-manager" ] || fail "Core bundle manager was not staged"
 grep -F 'LAUNCHER=${CANDY_SERVER_LAUNCHER:-/opt/candy/current/candy-server}' \
 	"$stage/usr/local/bin/candy-core-manager" >/dev/null ||
-	fail "Core manager does not use the installed public server launcher"
+	fail "Core manager does not use the stable current release launcher"
+grep -F 'ExecStart=/opt/candy/current/candy-server --config /etc/candy/server.toml' \
+	"$stage/systemd/candy-server.service" >/dev/null ||
+	fail "server unit does not use the stable current release launcher"
 [ -x "$stage/usr/local/libexec/candy-server-health-check" ] || fail "server health check was not staged"
 [ -f "$stage/etc/candy/server.toml.example" ] || fail "server example config was not staged"
 [ -f "$stage/etc/candy/cloud-sync.env.example" ] || fail "server Cloud sync endpoint example was not staged"
@@ -66,6 +70,11 @@ grep -F 'LAUNCHER=${CANDY_SERVER_LAUNCHER:-/opt/candy/current/candy-server}' \
 [ -f "$stage/systemd/candy-cloud-sync.service" ] || fail "server Cloud sync unit was not staged"
 [ ! -e "$stage/systemd/candy-sdwan.service" ] || fail "server package must not stage a second SD-WAN service"
 [ -x "$stage/install/install-candy-server.sh" ] || fail "installer was not staged"
+[ -x "$stage/install/upgrade-candy-server.sh" ] || fail "full Runtime upgrader was not staged"
+[ "$(cat "$stage/RUNTIME-RELEASE")" = 0.4.0-r47 ] || fail "server bundle release identity is missing or invalid"
+[ "$(cat "$stage/RUNTIME-ARCH")" = x86_64 ] || fail "server bundle architecture identity is missing or invalid"
+[ "$(cat "$edge_stage/RUNTIME-RELEASE")" = 0.4.0-r47 ] || fail "edge bundle release identity is missing or invalid"
+[ "$(cat "$edge_stage/RUNTIME-ARCH")" = x86_64 ] || fail "edge bundle architecture identity is missing or invalid"
 [ -x "$dist/candy-server-x86_64" ] || fail "product release launcher artifact was not staged"
 [ -s "$dist/candy-server-runtime-x86_64.tar.gz" ] || fail "complete server Runtime bundle was not staged"
 grep -F -- '--no-xattrs' "$tmp/tar.args" >/dev/null || fail "server Runtime bundle does not suppress host extended attributes"
@@ -73,6 +82,10 @@ tar -tzf "$dist/candy-server-runtime-x86_64.tar.gz" | grep -F './usr/local/libex
 	fail "server Runtime bundle does not contain Cloud enrollment"
 tar -tzf "$dist/candy-server-runtime-x86_64.tar.gz" | grep -F './usr/local/libexec/candy-cloud-sync' >/dev/null ||
 	fail "server Runtime bundle does not contain Cloud synchronization"
+tar -tzf "$dist/candy-server-runtime-x86_64.tar.gz" | grep -F './RUNTIME-RELEASE' >/dev/null ||
+	fail "server Runtime bundle does not contain immutable release identity"
+tar -tzf "$dist/candy-server-runtime-x86_64.tar.gz" | grep -F './RUNTIME-ARCH' >/dev/null ||
+	fail "server Runtime bundle does not contain architecture identity"
 if tar -tzf "$dist/candy-server-runtime-x86_64.tar.gz" | grep -F './systemd/candy-sdwan.service' >/dev/null; then
 	fail "server Runtime bundle contains a duplicate SD-WAN service"
 fi

@@ -24,12 +24,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-openwrt-client-0.4.0-r46
+  group: release-openwrt-client-0.4.0-r47
   cancel-in-progress: false
 
 env:
   CANDY_RELEASE_VERSION: "0.4.0"
-  CANDY_RELEASE_REVISION: "46"
+  CANDY_RELEASE_REVISION: "47"
   OPENWRT_RELEASE: "25.12.4"
   OPENWRT_GCC_VERSION: "14.3.0"
   RELEASE_REPOSITORY: reTsubasa/candy-release

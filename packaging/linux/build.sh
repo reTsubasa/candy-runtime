@@ -4,6 +4,23 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 target=${1:-x86_64-unknown-linux-gnu}
 dist_root=${CANDY_LINUX_DIST_DIR:-$repo_root/dist/linux}
+release_version=${CANDY_RELEASE_VERSION:-$(tr -d '\r\n' <"$repo_root/VERSION")}
+release_revision=${CANDY_RELEASE_REVISION:-}
+
+case "$release_version" in
+	''|*[!0-9A-Za-z._+-]*)
+		printf '%s\n' "invalid Linux Runtime release version: $release_version" >&2
+		exit 1
+		;;
+esac
+case "$release_revision" in
+	'') runtime_release=$release_version ;;
+	*[!0-9]*|0)
+		printf '%s\n' "invalid Linux Runtime release revision: $release_revision" >&2
+		exit 1
+		;;
+	*) runtime_release=$release_version-r$release_revision ;;
+esac
 
 case "$target" in
 	x86_64-unknown-linux-*) artifact_arch=x86_64 ;;
@@ -84,6 +101,8 @@ install -m 0755 "$repo_root/linux/server/packaging/upgrade-candy-server.sh" \
 	"$stage/install/upgrade-candy-server.sh"
 install -m 0644 "$repo_root/linux/server/README.md" "$stage/README.md"
 install -m 0644 "$repo_root/VERSION" "$stage/VERSION"
+printf '%s\n' "$runtime_release" >"$stage/RUNTIME-RELEASE"
+printf '%s\n' "$artifact_arch" >"$stage/RUNTIME-ARCH"
 
 bundle=$dist_root/candy-server-runtime-$artifact_arch.tar.gz
 COPYFILE_DISABLE=1 tar --no-xattrs -C "$stage" -czf "$bundle" .
@@ -112,6 +131,8 @@ install -m 0644 "$repo_root/linux/client/packaging/sdwan-agent.env.example" "$ed
 install -m 0644 "$repo_root/linux/client/packaging/candy.sysusers" "$edge_stage/systemd/candy.sysusers"
 install -m 0644 "$repo_root/linux/client/packaging/candy.tmpfiles" "$edge_stage/systemd/candy.tmpfiles"
 install -m 0644 "$repo_root/VERSION" "$edge_stage/VERSION"
+printf '%s\n' "$runtime_release" >"$edge_stage/RUNTIME-RELEASE"
+printf '%s\n' "$artifact_arch" >"$edge_stage/RUNTIME-ARCH"
 
 printf '%s\n' "Linux server Runtime package staged in $stage"
 printf '%s\n' "Linux server Runtime bundle staged in $bundle"
