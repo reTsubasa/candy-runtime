@@ -221,6 +221,6 @@ if [ -n "$ordinary_config" ] && [ -e "$sdwan_candidate" ]; then
 fi
 
 # Ordinary Candy and optional SD-WAN are always owned by one Core server
-# process. After an SD-WAN activation failure the agent replaces the merged
-# child with an ordinary-config child only after rolling back Candy-owned state.
+# process. After an SD-WAN activation failure the agent supervises an
+# ordinary-config child only after rolling back Candy-owned state.
 exec "$core_binary" server "$@"

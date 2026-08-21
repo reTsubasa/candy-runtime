@@ -24,6 +24,7 @@ const MIN_READINESS_TIMEOUT_MS: u64 = 1_000;
 const MAX_READINESS_TIMEOUT_MS: u64 = 120_000;
 const MAX_STATUS_BYTES: u64 = 256 * 1024;
 const MAX_ACTIVATION_BYTES: u64 = 64 * 1024;
+const CORE_TERMINATION_GRACE: Duration = Duration::from_secs(5);
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn sanitize_log_value(value: &str) -> String {
@@ -835,11 +836,11 @@ fn wait_for_core_readiness(
     let renew_every = Duration::from_millis((args.lease_ms / 3).max(1_000));
     let mut next_renewal = Instant::now() + renew_every;
     loop {
-        if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+        if shutdown_requested() {
             return Ok(ReadinessWait::ShutdownRequested);
         }
         if let Some(status) = child.try_wait().context("wait for candidate Candy Core")? {
-            if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+            if shutdown_requested() {
                 return Ok(ReadinessWait::ShutdownRequested);
             }
             bail!(
@@ -849,7 +850,7 @@ fn wait_for_core_readiness(
         }
         let readiness =
             read_core_readiness(&args.status, args.generation, child.id(), readiness_token)?;
-        if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+        if shutdown_requested() {
             return Ok(ReadinessWait::ShutdownRequested);
         }
         if matches!(readiness, Some(ReadinessState::Ready)) {
@@ -879,7 +880,11 @@ fn wait_for_core_readiness(
 }
 
 extern "C" fn request_shutdown(_signal: nix::libc::c_int) {
-    SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+fn shutdown_requested() -> bool {
+    SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
 }
 
 fn install_shutdown_handlers() -> Result<()> {
@@ -898,6 +903,27 @@ fn install_shutdown_handlers() -> Result<()> {
 }
 
 fn stop_core(child: &mut Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let term_result =
+        unsafe { nix::libc::kill(child.id() as nix::libc::pid_t, nix::libc::SIGTERM) };
+    if term_result == 0 {
+        let deadline = Instant::now() + CORE_TERMINATION_GRACE;
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => thread::sleep(Duration::from_millis(50)),
+                Err(error) => {
+                    eprintln!(
+                        "level=warn event=sdwan_core_stop_wait_failed error={}",
+                        sanitize_log_value(&error.to_string())
+                    );
+                    break;
+                }
+            }
+        }
+    }
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -908,7 +934,7 @@ fn rollback_or_report(netd: &mut NetdClient, cause: &str) -> Result<()> {
         .with_context(|| format!("{cause}; netd rollback failed"))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(test))]
 fn spawn_ordinary_server(args: &RuntimeArgs) -> Result<Child> {
     let ordinary_config = args
         .ordinary_config
@@ -927,6 +953,14 @@ fn spawn_ordinary_server(args: &RuntimeArgs) -> Result<Child> {
 }
 
 fn keep_server_fail_open(args: &RuntimeArgs, cause: &str) -> Result<()> {
+    if shutdown_requested() {
+        remove_activation_receipt(args.activation_ready.as_deref())?;
+        eprintln!(
+            "level=info event=sdwan_server_fail_open_skipped reason=shutdown_requested generation={}",
+            args.generation
+        );
+        return Ok(());
+    }
     eprintln!("level=warn event=sdwan_server_fail_open reason={cause} mode=ordinary_only");
     #[cfg(test)]
     {
@@ -940,32 +974,49 @@ fn keep_server_fail_open(args: &RuntimeArgs, cause: &str) -> Result<()> {
             ordinary_config.display()
         )
     }
-    #[cfg(all(unix, not(test)))]
-    {
-        use std::os::unix::process::CommandExt;
-        let ordinary_config = args
-            .ordinary_config
-            .as_deref()
-            .context("server fail-open requires the validated ordinary config")?;
-        let error = Command::new(&args.core)
-            .args(["server", "--config"])
-            .arg(ordinary_config)
-            .exec();
-        Err(error).with_context(|| {
-            format!(
-                "replace failed SD-WAN server with ordinary Candy Server: {}",
-                args.core.display()
-            )
-        })
-    }
-    #[cfg(all(not(unix), not(test)))]
+    #[cfg(not(test))]
     {
         let mut child = spawn_ordinary_server(args)?;
-        child
-            .wait()
-            .context("wait for ordinary Candy Server after SD-WAN rollback")?;
-        Ok(())
+        loop {
+            if shutdown_requested() {
+                stop_core(&mut child);
+                remove_activation_receipt(args.activation_ready.as_deref())?;
+                eprintln!(
+                    "level=info event=sdwan_stopped generation={} phase=ordinary_fail_open rollback_ok=true",
+                    args.generation
+                );
+                return Ok(());
+            }
+            match child
+                .try_wait()
+                .context("wait for ordinary Candy Server after SD-WAN rollback")?
+            {
+                Some(status) if status.success() => return Ok(()),
+                Some(status) => bail!(
+                    "ordinary Candy Server exited after SD-WAN rollback with status {}",
+                    status.code().unwrap_or(1)
+                ),
+                None => thread::sleep(Duration::from_millis(50)),
+            }
+        }
     }
+}
+
+fn finish_shutdown_after_rollback(
+    args: &RuntimeArgs,
+    rollback: Result<()>,
+    phase: &str,
+) -> Result<()> {
+    if let Err(rollback_error) = &rollback {
+        eprintln!("level=error event=sdwan_rollback_failed error={rollback_error:#}");
+    }
+    rollback?;
+    remove_activation_receipt(args.activation_ready.as_deref())?;
+    eprintln!(
+        "level=info event=sdwan_stopped generation={} phase={} rollback_ok=true",
+        args.generation, phase
+    );
+    Ok(())
 }
 
 fn fail_before_prepare(
@@ -1007,6 +1058,9 @@ fn fail_after_rollback(
     );
     stop_core(child);
     let rollback = rollback_or_report(netd, cause);
+    if shutdown_requested() {
+        return finish_shutdown_after_rollback(args, rollback, "activation_failure");
+    }
     let receipt_code = if rollback.is_err() {
         "rollback_failed"
     } else {
@@ -1042,6 +1096,9 @@ fn fail_without_core(
         sanitize_log_value(&format!("{error:#}"))
     );
     let rollback = rollback_or_report(netd, cause);
+    if shutdown_requested() {
+        return finish_shutdown_after_rollback(args, rollback, "activation_failure");
+    }
     let receipt_code = if rollback.is_err() {
         "rollback_failed"
     } else {
@@ -1074,7 +1131,7 @@ fn run(args: RuntimeArgs) -> Result<()> {
         .lock()
         .expect("SD-WAN agent test lock poisoned");
     #[cfg(test)]
-    SHUTDOWN_REQUESTED.store(false, Ordering::Relaxed);
+    SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
 
     if args.generation == 0 {
         return fail_before_prepare(
@@ -1269,7 +1326,7 @@ fn run(args: RuntimeArgs) -> Result<()> {
                 )
             }
         }
-        if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+        if shutdown_requested() {
             stop_core(&mut child);
             let rollback = rollback_or_report(&mut netd, "SD-WAN agent shutdown");
             let receipt = remove_activation_receipt(args.activation_ready.as_deref());
@@ -1476,7 +1533,11 @@ mod tests {
         (root, args)
     }
 
-    fn start_netd_mock(socket: &Path, commit_result: Option<bool>) -> thread::JoinHandle<()> {
+    fn start_netd_mock_with_shutdown(
+        socket: &Path,
+        commit_result: Option<bool>,
+        shutdown_during_rollback: bool,
+    ) -> thread::JoinHandle<()> {
         let listener = UnixListener::bind(socket).unwrap();
         thread::spawn(move || {
             let (prepare_stream, _) = listener.accept().unwrap();
@@ -1518,6 +1579,9 @@ mod tests {
             let (rollback_stream, _) = listener.accept().unwrap();
             let rollback = recv_request(&rollback_stream).unwrap();
             assert!(matches!(rollback.operation, NetdOperation::Rollback));
+            if shutdown_during_rollback {
+                request_shutdown(nix::libc::SIGTERM);
+            }
             send_response(
                 &rollback_stream,
                 &NetdResponse {
@@ -1530,6 +1594,10 @@ mod tests {
             )
             .unwrap();
         })
+    }
+
+    fn start_netd_mock(socket: &Path, commit_result: Option<bool>) -> thread::JoinHandle<()> {
+        start_netd_mock_with_shutdown(socket, commit_result, false)
     }
 
     fn install_fake_ready_core(path: &Path, lifecycle: &str) {
@@ -1730,6 +1798,27 @@ sleep 30
         );
         let value: serde_json::Value = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
         assert_eq!(value["error_code"], "netd_commit_failed");
+    }
+
+    #[test]
+    fn server_shutdown_during_failure_rollback_never_starts_ordinary_core() {
+        let (_root, args) = server_runtime_fixture();
+        install_fake_ready_core(&args.core, "active");
+        let receipt = args.activation_ready.clone().unwrap();
+        write_private(&receipt, b"stale receipt");
+        let netd = start_netd_mock_with_shutdown(&args.socket, Some(false), true);
+
+        let result = run(args);
+
+        netd.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "shutdown entered ordinary fallback: {result:?}"
+        );
+        assert!(
+            !receipt.exists(),
+            "shutdown retained or published an activation rejection receipt"
+        );
     }
 
     #[test]
