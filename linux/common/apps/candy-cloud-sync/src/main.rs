@@ -33,6 +33,7 @@ const MAX_ROUTE_ENVELOPE_BYTES: usize = 1024 * 1024;
 const MAX_LOCAL_ROUTE_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_LOCAL_NETWORKS: usize = 64;
 const LOCAL_ROUTE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
+const ACTIVATION_REVALIDATION_SECONDS: u64 = 300;
 const CONFIGURATION_MEDIA_TYPE: &str = "application/vnd.candy.runtime-configuration.v1+json";
 const PUBLIC_ENDPOINT_ENV: &str = "CANDY_PUBLIC_ENDPOINT";
 
@@ -223,6 +224,8 @@ struct SyncState {
     activation_required: bool,
     #[serde(default)]
     activation_rejected_etag: Option<String>,
+    #[serde(default)]
+    activation_rejected_at_unix: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -624,6 +627,7 @@ fn sync_once_with_retry(
                         promote_committed_activation(&args.state_dir, &activation)?;
                         report_activation_status(&client, &cloud, &activation, "active", None)?;
                         state.activation_rejected_etag = None;
+                        state.activation_rejected_at_unix = None;
                     }
                     "rejected" => {
                         report_activation_status(
@@ -636,6 +640,7 @@ fn sync_once_with_retry(
                         remove_candidate_if_matches(&args.state_dir, &activation)?;
                         state.activation_rejected_etag =
                             Some(activation.descriptor.delivery_etag.clone());
+                        state.activation_rejected_at_unix = Some(unix_now()?);
                     }
                     _ => unreachable!("validated activation receipt state"),
                 }
@@ -658,6 +663,7 @@ fn sync_once_with_retry(
             state.configuration_sha256 = None;
             state.activation_required = false;
             state.activation_rejected_etag = None;
+            state.activation_rejected_at_unix = None;
             atomic_json(&state_path, &state, 0o600)?;
             write_local_sync_status(&args.state_dir, "waiting_for_network_configuration", None)?;
             println!(
@@ -696,6 +702,26 @@ fn sync_once_with_retry(
             }
             let activation_rejected =
                 state.activation_rejected_etag.as_deref() == Some(etag.as_str());
+            if activation_rejected {
+                let now = unix_now()?;
+                let rejected_at = state.activation_rejected_at_unix.get_or_insert(now);
+                if now.saturating_sub(*rejected_at) >= ACTIVATION_REVALIDATION_SECONDS
+                    && allow_unconditional_retry
+                {
+                    state.etag = None;
+                    state.configuration_sha256 = None;
+                    state.activation_rejected_etag = None;
+                    state.activation_rejected_at_unix = None;
+                    atomic_json(&state_path, &state, 0o600)?;
+                    write_local_sync_status(
+                        &args.state_dir,
+                        "configuration_revalidation_required",
+                        None,
+                    )?;
+                    return sync_once_with_retry(args, public_endpoints, false);
+                }
+                atomic_json(&state_path, &state, 0o600)?;
+            }
             let result_state = if activation_rejected {
                 "activation_rejected"
             } else {
@@ -878,10 +904,12 @@ fn sync_once_with_retry(
                 }
                 state.activation_required = true;
                 state.activation_rejected_etag = None;
+                state.activation_rejected_at_unix = None;
             } else {
                 withdraw_local_activation(&args.state_dir)?;
                 state.activation_required = false;
                 state.activation_rejected_etag = None;
+                state.activation_rejected_at_unix = None;
             }
             state.etag = Some(etag);
             state.configuration_sha256 = Some(digest);
@@ -1640,10 +1668,7 @@ fn reconcile_transport_identity(
 }
 
 fn write_local_sync_status(state_dir: &Path, state: &str, error_code: Option<&str>) -> Result<()> {
-    let updated_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("read system clock for synchronization status")?
-        .as_secs();
+    let updated_at = unix_now()?;
     atomic_json(
         &state_dir.join("cloud-sync-status-v1.json"),
         &LocalSyncStatus {
@@ -1654,6 +1679,13 @@ fn write_local_sync_status(state_dir: &Path, state: &str, error_code: Option<&st
         },
         0o600,
     )
+}
+
+fn unix_now() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("read system clock")?
+        .as_secs())
 }
 
 fn candidate_activation_directory(state_dir: &Path) -> Result<Option<PathBuf>> {
@@ -2036,12 +2068,12 @@ fn render_core_control_config(
         writeln!(
             &mut output,
             "issuer_id = {}",
-            serde_json::to_string(&key.issuer_id.to_string())?
+            serde_json::to_string(&key.issuer_id.simple().to_string())?
         )?;
         writeln!(
             &mut output,
             "environment_id = {}",
-            serde_json::to_string(&key.environment_id.to_string())?
+            serde_json::to_string(&key.environment_id.simple().to_string())?
         )?;
     }
     for (candidate, tunnel_id, transport) in peers {
@@ -2243,8 +2275,8 @@ fn verify_grant_with_core(
             .arg(grant_path)
             .args(["--public-key", &key.ed25519_public_key])
             .args(["--key-id", &key.key_id])
-            .args(["--issuer-id", &key.issuer_id.to_string()])
-            .args(["--environment-id", &key.environment_id.to_string()])
+            .args(["--issuer-id", &key.issuer_id.simple().to_string()])
+            .args(["--environment-id", &key.environment_id.simple().to_string()])
             .args(["--tenant-id", &subject.tenant_id.to_string()])
             .args(["--device-id", &subject.device_id.to_string()])
             .args(["--device-key-id", &subject.device_key_id.to_string()])
@@ -2918,7 +2950,16 @@ fn publish_client_activation(
     grants: &[(grant::GrantSubject, grant::CachedGrant)],
 ) -> Result<String> {
     let grants = activation_grants(grants)?;
-    let activation_id = activation_digest(delivery_digest, &grants)?;
+    let declaration = build_netd_declaration(discovery, cloud)?;
+    let declaration_bytes = serde_json::to_vec(&declaration)?;
+    let mut activation_hash = Sha256::new();
+    activation_hash.update(b"candy/runtime-client-activation-v2\0");
+    activation_hash.update(decode_hex_32(&activation_digest(
+        delivery_digest,
+        &grants,
+    )?)?);
+    activation_hash.update(Sha256::digest(&declaration_bytes));
+    let activation_id = format!("{:x}", activation_hash.finalize());
     let activations = state_dir.join("activations");
     ensure_private_directory(&activations)?;
     let generation = activations.join(&activation_id);
@@ -3019,8 +3060,7 @@ fn publish_client_activation(
             let final_core_config =
                 render_core_control_config(&generation, configuration, &final_peer_refs)?;
             atomic_bytes(&core_config_path, final_core_config.as_bytes(), 0o600)?;
-            let declaration = build_netd_declaration(discovery, cloud)?;
-            atomic_json(&staging.join("declaration.json"), &declaration, 0o600)?;
+            atomic_bytes(&staging.join("declaration.json"), &declaration_bytes, 0o600)?;
             atomic_json(
                 &staging.join("grants-v1.json"),
                 &grants.iter().map(|v| &v.0).collect::<Vec<_>>(),
@@ -3100,6 +3140,8 @@ fn publish_server_activation(
         bail!("server activation requires an inbound or outbound signed peer")
     }
     let grants = activation_grants(resolved_grants)?;
+    let declaration = build_netd_declaration(discovery, cloud)?;
+    let declaration_bytes = serde_json::to_vec(&declaration)?;
     let ordinary = read_bounded(ordinary_config, MAX_CONFIGURATION_BYTES)?;
     let mut activation_hash = Sha256::new();
     activation_hash.update(b"candy/runtime-server-activation-v2\0");
@@ -3107,6 +3149,7 @@ fn publish_server_activation(
         delivery_digest,
         &grants,
     )?)?);
+    activation_hash.update(Sha256::digest(&declaration_bytes));
     activation_hash.update(Sha256::digest(&ordinary));
     let activation_id = format!("{:x}", activation_hash.finalize());
     let activations = state_dir.join("activations");
@@ -3234,11 +3277,7 @@ fn publish_server_activation(
                 &final_outbound,
             )?;
             atomic_bytes(&core_config_path, final_config.as_bytes(), 0o600)?;
-            atomic_json(
-                &staging.join("declaration.json"),
-                &build_netd_declaration(discovery, cloud)?,
-                0o600,
-            )?;
+            atomic_bytes(&staging.join("declaration.json"), &declaration_bytes, 0o600)?;
             atomic_json(
                 &staging.join("grants-v1.json"),
                 &grants.iter().map(|value| &value.0).collect::<Vec<_>>(),
@@ -4370,6 +4409,22 @@ default via 192.0.2.1 dev eth0 proto static
                 .unwrap();
         assert!(!state.activation_required);
         assert!(state.activation_rejected_etag.is_none());
+    }
+
+    #[test]
+    fn core_control_uses_fixed_width_hex_scopes() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut configuration = configuration();
+        configuration.grant_verification_keys = vec![RuntimeGrantVerificationKey {
+            key_id: "grant-key".into(),
+            ed25519_public_key: "11".repeat(32),
+            issuer_id: Uuid::parse_str("31b6bd7f-4fd7-42f9-842c-9e0d635c9ea9").unwrap(),
+            environment_id: Uuid::parse_str("d12c8a2f-18d2-44ba-810c-7d5b5097058f").unwrap(),
+        }];
+        let rendered = render_core_control_config(directory.path(), &configuration, &[]).unwrap();
+        assert!(rendered.contains("issuer_id = \"31b6bd7f4fd742f9842c9e0d635c9ea9\""));
+        assert!(rendered.contains("environment_id = \"d12c8a2f18d244ba810c7d5b5097058f\""));
+        assert!(!rendered.contains("31b6bd7f-4fd7-42f9-842c-9e0d635c9ea9"));
     }
 
     #[test]
