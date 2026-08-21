@@ -38,6 +38,7 @@ fn linux_plan_installs_only_signed_remote_routes_with_fixed_owned_names() {
     assert_eq!(plan.interface_name, CANDY_INTERFACE_NAME);
     assert_eq!(plan.route_table, CANDY_TABLE_MIN);
     assert_eq!(plan.policy_priority, CANDY_POLICY_PRIORITY_MIN);
+    assert_eq!(plan.local_prefixes, vec![local]);
     assert_eq!(plan.remote_routes, vec![remote]);
     assert_eq!(plan.exclusions, vec![exclusion]);
     assert_eq!(plan.nft_table_name, "candy_sdwan_20000");
@@ -84,6 +85,7 @@ fn linux_plan_policy_selects_only_remote_destinations() {
     };
 
     let plan = LinuxNetworkPlan::compile(&declaration).unwrap();
+    assert_eq!(plan.local_prefixes, vec![local]);
     assert_eq!(plan.remote_routes, vec![remote]);
     assert!(!plan.remote_routes.contains(&local));
     assert!(!plan.remote_routes.contains(&cloud));

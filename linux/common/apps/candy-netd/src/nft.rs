@@ -1,5 +1,3 @@
-#![cfg(target_os = "linux")]
-
 use crate::{LinuxNetworkPlan, NetworkError};
 use nix::sys::socket::{
     bind, recv, sendto, socket, AddressFamily, MsgFlags, NetlinkAddr, SockFlag, SockProtocol,
@@ -55,7 +53,11 @@ const NFTA_EXTHDR_OFFSET: u16 = 3;
 const NFTA_EXTHDR_LEN: u16 = 4;
 const NFTA_EXTHDR_OP: u16 = 6;
 const NFTA_EXTHDR_SREG: u16 = 7;
-const NFT_CHAIN_NAME: &str = "forward";
+const NFTA_NAT_TYPE: u16 = 1;
+const NFTA_NAT_FAMILY: u16 = 2;
+const NFTA_NAT_REG_ADDR_MIN: u16 = 3;
+const NFT_FORWARD_CHAIN_NAME: &str = "forward";
+const NFT_POSTROUTING_CHAIN_NAME: &str = "postrouting";
 const OWNER_PREFIX: &[u8] = b"candy-netd-v1:";
 
 pub fn preflight_nft(plan: &LinuxNetworkPlan) -> Result<(), NetworkError> {
@@ -92,7 +94,7 @@ pub fn stage_firewall(
         create_flags(),
         vec![
             string_attr(NFTA_CHAIN_TABLE, &plan.nft_table_name),
-            string_attr(NFTA_CHAIN_NAME, NFT_CHAIN_NAME),
+            string_attr(NFTA_CHAIN_NAME, NFT_FORWARD_CHAIN_NAME),
             string_attr(NFTA_CHAIN_TYPE, "filter"),
             nested_attr(
                 NFTA_CHAIN_HOOK,
@@ -121,7 +123,49 @@ pub fn stage_firewall(
             tcp_mss_clamp_rule(plan),
         );
     }
+    if !plan.local_prefixes.is_empty() {
+        batch.push(
+            nft_type(nix::libc::NFT_MSG_NEWCHAIN),
+            create_flags(),
+            base_chain(
+                plan,
+                NFT_POSTROUTING_CHAIN_NAME,
+                "nat",
+                nix::libc::NF_INET_POST_ROUTING as u32,
+                99,
+            ),
+        );
+        for prefix in &plan.local_prefixes {
+            batch.push(
+                nft_type(nix::libc::NFT_MSG_NEWRULE),
+                create_flags(),
+                identity_snat_rule(plan, *prefix),
+            );
+        }
+    }
     send_batch(&socket, batch)
+}
+
+fn base_chain(
+    plan: &LinuxNetworkPlan,
+    name: &str,
+    chain_type: &str,
+    hook: u32,
+    priority: i32,
+) -> Vec<Attribute> {
+    vec![
+        string_attr(NFTA_CHAIN_TABLE, &plan.nft_table_name),
+        string_attr(NFTA_CHAIN_NAME, name),
+        string_attr(NFTA_CHAIN_TYPE, chain_type),
+        nested_attr(
+            NFTA_CHAIN_HOOK,
+            vec![
+                u32_attr(NFTA_HOOK_HOOKNUM, hook),
+                i32_attr(NFTA_HOOK_PRIORITY, priority),
+            ],
+        ),
+        u32_attr(NFTA_CHAIN_POLICY, nix::libc::NF_ACCEPT as u32),
+    ]
 }
 
 fn tcp_mss_clamp_rule(plan: &LinuxNetworkPlan) -> Vec<Attribute> {
@@ -201,9 +245,103 @@ fn tcp_mss_clamp_rule(plan: &LinuxNetworkPlan) -> Vec<Attribute> {
     ];
     vec![
         string_attr(NFTA_RULE_TABLE, &plan.nft_table_name),
-        string_attr(NFTA_RULE_CHAIN, NFT_CHAIN_NAME),
+        string_attr(NFTA_RULE_CHAIN, NFT_FORWARD_CHAIN_NAME),
         nested_attr(NFTA_RULE_EXPRESSIONS, expressions),
     ]
+}
+
+fn identity_snat_rule(
+    plan: &LinuxNetworkPlan,
+    prefix: candy_netd_proto::Ipv4Prefix,
+) -> Vec<Attribute> {
+    let mut expressions = interface_match_expressions(plan, nix::libc::NFT_META_OIFNAME as u32);
+    expressions.extend(ipv4_prefix_match_expressions(prefix, 12));
+    expressions.push(ipv4_payload_expression(12));
+    expressions.push(expression(
+        "nat",
+        vec![
+            u32_attr(NFTA_NAT_TYPE, nix::libc::NFT_NAT_SNAT as u32),
+            u32_attr(NFTA_NAT_FAMILY, nix::libc::NFPROTO_IPV4 as u32),
+            u32_attr(NFTA_NAT_REG_ADDR_MIN, nix::libc::NFT_REG_1 as u32),
+        ],
+    ));
+    vec![
+        string_attr(NFTA_RULE_TABLE, &plan.nft_table_name),
+        string_attr(NFTA_RULE_CHAIN, NFT_POSTROUTING_CHAIN_NAME),
+        nested_attr(NFTA_RULE_EXPRESSIONS, expressions),
+    ]
+}
+
+fn interface_match_expressions(plan: &LinuxNetworkPlan, meta_key: u32) -> Vec<Attribute> {
+    vec![
+        expression(
+            "meta",
+            vec![
+                u32_attr(NFTA_META_DREG, nix::libc::NFT_REG_1 as u32),
+                u32_attr(NFTA_META_KEY, meta_key),
+            ],
+        ),
+        compare_data(
+            nix::libc::NFT_CMP_EQ as u32,
+            format!("{}\0", plan.interface_name).as_bytes(),
+        ),
+    ]
+}
+
+fn ipv4_prefix_match_expressions(
+    prefix: candy_netd_proto::Ipv4Prefix,
+    payload_offset: u32,
+) -> Vec<Attribute> {
+    let mut expressions = vec![ipv4_payload_expression(payload_offset)];
+    if prefix.prefix_len < 32 {
+        let mask = u32::MAX << (32 - u32::from(prefix.prefix_len));
+        expressions.push(expression(
+            "bitwise",
+            vec![
+                u32_attr(NFTA_BITWISE_SREG, nix::libc::NFT_REG_1 as u32),
+                u32_attr(NFTA_BITWISE_DREG, nix::libc::NFT_REG_1 as u32),
+                u32_attr(NFTA_BITWISE_LEN, 4),
+                nested_attr(
+                    NFTA_BITWISE_MASK,
+                    vec![bytes_attr(NFTA_DATA_VALUE, &mask.to_be_bytes())],
+                ),
+                nested_attr(NFTA_BITWISE_XOR, vec![bytes_attr(NFTA_DATA_VALUE, &[0; 4])]),
+            ],
+        ));
+    }
+    expressions.push(compare_data(nix::libc::NFT_CMP_EQ as u32, &prefix.network));
+    expressions
+}
+
+fn ipv4_payload_expression(offset: u32) -> Attribute {
+    expression(
+        "payload",
+        vec![
+            u32_attr(NFTA_PAYLOAD_DREG, nix::libc::NFT_REG_1 as u32),
+            u32_attr(
+                NFTA_PAYLOAD_BASE,
+                nix::libc::NFT_PAYLOAD_NETWORK_HEADER as u32,
+            ),
+            u32_attr(NFTA_PAYLOAD_OFFSET, offset),
+            u32_attr(NFTA_PAYLOAD_LEN, 4),
+        ],
+    )
+}
+
+fn accept_expression() -> Attribute {
+    expression(
+        "immediate",
+        vec![
+            u32_attr(NFTA_IMMEDIATE_DREG, nix::libc::NFT_REG_VERDICT as u32),
+            nested_attr(
+                NFTA_IMMEDIATE_DATA,
+                vec![nested_attr(
+                    NFTA_DATA_VERDICT,
+                    vec![i32_attr(NFTA_VERDICT_CODE, nix::libc::NF_ACCEPT)],
+                )],
+            ),
+        ],
+    )
 }
 
 fn compare_data(operation: u32, value: &[u8]) -> Attribute {
@@ -234,45 +372,11 @@ pub fn remove_firewall(plan: &LinuxNetworkPlan) -> Result<(), NetworkError> {
 }
 
 fn interface_accept_rule(plan: &LinuxNetworkPlan, meta_key: u32) -> Vec<Attribute> {
-    let expressions = vec![
-        expression(
-            "meta",
-            vec![
-                u32_attr(NFTA_META_DREG, nix::libc::NFT_REG_1 as u32),
-                u32_attr(NFTA_META_KEY, meta_key),
-            ],
-        ),
-        expression(
-            "cmp",
-            vec![
-                u32_attr(NFTA_CMP_SREG, nix::libc::NFT_REG_1 as u32),
-                u32_attr(NFTA_CMP_OP, nix::libc::NFT_CMP_EQ as u32),
-                nested_attr(
-                    NFTA_CMP_DATA,
-                    vec![bytes_attr(
-                        NFTA_DATA_VALUE,
-                        format!("{}\0", plan.interface_name).as_bytes(),
-                    )],
-                ),
-            ],
-        ),
-        expression(
-            "immediate",
-            vec![
-                u32_attr(NFTA_IMMEDIATE_DREG, nix::libc::NFT_REG_VERDICT as u32),
-                nested_attr(
-                    NFTA_IMMEDIATE_DATA,
-                    vec![nested_attr(
-                        NFTA_DATA_VERDICT,
-                        vec![i32_attr(NFTA_VERDICT_CODE, nix::libc::NF_ACCEPT)],
-                    )],
-                ),
-            ],
-        ),
-    ];
+    let mut expressions = interface_match_expressions(plan, meta_key);
+    expressions.push(accept_expression());
     vec![
         string_attr(NFTA_RULE_TABLE, &plan.nft_table_name),
-        string_attr(NFTA_RULE_CHAIN, NFT_CHAIN_NAME),
+        string_attr(NFTA_RULE_CHAIN, NFT_FORWARD_CHAIN_NAME),
         nested_attr(NFTA_RULE_EXPRESSIONS, expressions),
     ]
 }
@@ -448,6 +552,10 @@ fn receive_acks(socket: &OwnedFd, expected: usize) -> Result<(), NetworkError> {
                         .map_err(|_| NetworkError::Backend)?,
                 );
                 if error != 0 {
+                    eprintln!(
+                        "level=error component=candy-netd event=nft_batch_rejected error={}",
+                        std::io::Error::from_raw_os_error(error.saturating_neg())
+                    );
                     return Err(NetworkError::Backend);
                 }
                 acknowledged += 1;

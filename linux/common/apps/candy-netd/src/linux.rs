@@ -579,6 +579,7 @@ pub struct LinuxNetworkPlan {
     pub interface_name: &'static str,
     pub route_table: u32,
     pub policy_priority: u32,
+    pub local_prefixes: Vec<Ipv4Prefix>,
     pub remote_routes: Vec<Ipv4Prefix>,
     pub exclusions: Vec<UnderlayExclusion>,
     pub nft_table_name: String,
@@ -597,10 +598,16 @@ impl LinuxNetworkPlan {
             .iter()
             .filter_map(|route| (route.kind == RouteKind::Remote).then_some(route.prefix))
             .collect::<Vec<_>>();
+        let local_prefixes = declaration
+            .routes
+            .iter()
+            .filter_map(|route| (route.kind == RouteKind::Local).then_some(route.prefix))
+            .collect::<Vec<_>>();
         Ok(Self {
             interface_name: CANDY_INTERFACE_NAME,
             route_table: declaration.table_id,
             policy_priority,
+            local_prefixes,
             remote_routes,
             exclusions: declaration.exclusions.clone(),
             nft_table_name: format!("candy_sdwan_{}", declaration.table_id),

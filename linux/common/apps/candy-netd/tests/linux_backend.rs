@@ -6,8 +6,141 @@ use candy_netd_proto::{
     UnderlayExclusion, UnderlayKind, CANDY_TABLE_MAX,
 };
 use std::fs;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
+
+struct NamespaceFixture;
+
+impl Drop for NamespaceFixture {
+    fn drop(&mut self) {
+        let _ = Command::new("nft")
+            .args(["delete", "table", "ip", "candy_test_docker"])
+            .status();
+        let _ = Command::new("ip")
+            .args(["netns", "delete", "candy-test-ns"])
+            .status();
+        let _ = Command::new("ip")
+            .args(["link", "delete", "candy-test-br"])
+            .status();
+    }
+}
+
+fn run(command: &str, args: &[&str]) {
+    let output = Command::new(command).args(args).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{command} {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn install_docker_style_source_namespace() -> NamespaceFixture {
+    let fixture = NamespaceFixture;
+    run("ip", &["link", "add", "candy-test-br", "type", "bridge"]);
+    run(
+        "ip",
+        &["addr", "add", "172.31.254.1/24", "dev", "candy-test-br"],
+    );
+    run("ip", &["link", "set", "candy-test-br", "up"]);
+    run("ip", &["netns", "add", "candy-test-ns"]);
+    run(
+        "ip",
+        &[
+            "link",
+            "add",
+            "candy-test-vh",
+            "type",
+            "veth",
+            "peer",
+            "name",
+            "candy-test-vn",
+        ],
+    );
+    run(
+        "ip",
+        &["link", "set", "candy-test-vh", "master", "candy-test-br"],
+    );
+    run("ip", &["link", "set", "candy-test-vh", "up"]);
+    run(
+        "ip",
+        &["link", "set", "candy-test-vn", "netns", "candy-test-ns"],
+    );
+    run(
+        "ip",
+        &[
+            "-n",
+            "candy-test-ns",
+            "addr",
+            "add",
+            "172.31.254.2/24",
+            "dev",
+            "candy-test-vn",
+        ],
+    );
+    run(
+        "ip",
+        &["-n", "candy-test-ns", "link", "set", "candy-test-vn", "up"],
+    );
+    run("ip", &["-n", "candy-test-ns", "link", "set", "lo", "up"]);
+    run(
+        "ip",
+        &[
+            "-n",
+            "candy-test-ns",
+            "route",
+            "add",
+            "default",
+            "via",
+            "172.31.254.1",
+        ],
+    );
+    run("nft", &["add", "table", "ip", "candy_test_docker"]);
+    run(
+        "nft",
+        &[
+            "add",
+            "chain",
+            "ip",
+            "candy_test_docker",
+            "postrouting",
+            "{ type nat hook postrouting priority srcnat; policy accept; }",
+        ],
+    );
+    run(
+        "nft",
+        &[
+            "add",
+            "rule",
+            "ip",
+            "candy_test_docker",
+            "postrouting",
+            "ip saddr 172.31.254.0/24 oifname != \"candy-test-br\" masquerade",
+        ],
+    );
+    fixture
+}
+
+fn read_ipv4_source(tun: RawFd) -> [u8; 4] {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut packet = [0_u8; 2048];
+    loop {
+        match nix::unistd::read(tun, &mut packet) {
+            Ok(length) if length >= 20 && packet[0] >> 4 == 4 => {
+                return packet[12..16].try_into().unwrap();
+            }
+            Ok(_) | Err(nix::errno::Errno::EAGAIN) => {}
+            Err(error) => panic!("read candy0 packet failed: {error}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no IPv4 packet arrived on candy0"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
 
 #[test]
 #[ignore = "requires an isolated Linux network namespace with CAP_NET_ADMIN"]
@@ -37,6 +170,10 @@ fn real_linux_backend_prepares_commits_and_rolls_back() {
             RouteDeclaration {
                 prefix: Ipv4Prefix::new([10, 255, 254, 0], 24).unwrap(),
                 kind: RouteKind::Remote,
+            },
+            RouteDeclaration {
+                prefix: Ipv4Prefix::new([172, 31, 254, 0], 24).unwrap(),
+                kind: RouteKind::Local,
             },
         ],
         exclusions: vec![UnderlayExclusion {
@@ -81,6 +218,36 @@ fn real_linux_backend_prepares_commits_and_rolls_back() {
     let ruleset = String::from_utf8(output.stdout).unwrap();
     assert!(ruleset.contains("candy_sdwan_20999"));
     assert!(ruleset.contains("tcp option maxseg size set rt mtu"));
+    assert!(
+        ruleset.contains("oifname \"candy0\"")
+            && ruleset.contains("@nh,96,32 & 0xffffff00 == 0xac1ffe00")
+            && ruleset.contains("snat ip to @nh,96,32"),
+        "identity-SNAT rule is missing: {ruleset}"
+    );
+
+    let namespace = install_docker_style_source_namespace();
+    let mut ping = Command::new("ip")
+        .args([
+            "netns",
+            "exec",
+            "candy-test-ns",
+            "ping",
+            "-c",
+            "1",
+            "-W",
+            "1",
+            "10.255.253.1",
+        ])
+        .spawn()
+        .expect("start namespace ping");
+    assert_eq!(
+        read_ipv4_source(tun.as_raw_fd()),
+        [172, 31, 254, 2],
+        "Docker-style masquerade changed a signed local source before candy0"
+    );
+    let _ = ping.kill();
+    let _ = ping.wait();
+    drop(namespace);
 
     let output = Command::new("ip")
         .args(["-4", "rule", "show"])
@@ -142,6 +309,15 @@ fn real_linux_backend_prepares_commits_and_rolls_back() {
     );
     let rules = String::from_utf8(output.stdout).unwrap();
     assert!(!rules.lines().any(|line| line.contains("lookup 20999")));
+
+    let output = Command::new("nft")
+        .args(["list", "table", "inet", "candy_sdwan_20999"])
+        .output()
+        .expect("execute post-rollback nft table lookup");
+    assert!(
+        !output.status.success(),
+        "owned nft table survived rollback"
+    );
 
     assert!(!state.join("netd.journal").exists());
     fs::remove_dir_all(state).unwrap();

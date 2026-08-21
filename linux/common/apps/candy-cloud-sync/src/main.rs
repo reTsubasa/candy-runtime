@@ -1375,9 +1375,32 @@ fn virtual_interface(interface_name: &str) -> bool {
     interface_name.contains("candy")
         || interface_name.starts_with("tun")
         || interface_name.starts_with("utun")
-        || ["docker", "virbr", "veth", "wg", "tailscale", "zt"]
-            .iter()
-            .any(|prefix| interface_name.starts_with(prefix))
+        || docker_managed_bridge(&interface_name)
+        || [
+            "docker",
+            "podman",
+            "cni",
+            "flannel",
+            "cali",
+            "kube",
+            "nerdctl",
+            "lxc",
+            "lxdbr",
+            "incusbr",
+            "virbr",
+            "veth",
+            "wg",
+            "tailscale",
+            "zt",
+        ]
+        .iter()
+        .any(|prefix| interface_name.starts_with(prefix))
+}
+
+fn docker_managed_bridge(interface_name: &str) -> bool {
+    interface_name.strip_prefix("br-").is_some_and(|suffix| {
+        suffix.len() == 12 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 fn canonical_ipv4_cidr(value: &str) -> Option<(Ipv4Addr, u8, String)> {
@@ -4577,6 +4600,9 @@ default via 192.0.2.1 dev eth0 proto static
 192.168.6.0/33 dev eth0 proto kernel scope link src 192.168.6.1
 192.168.7.0/24 dev eth0 proto kernel scope link src invalid
 192.168.8.0/24 dev eth0 proto kernel scope link src 192.168.9.1
+172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1
+172.18.0.0/16 dev br-a1b2c3d4e5f6 proto kernel scope link src 172.18.0.1
+10.42.0.0/16 dev cni0 proto kernel scope link src 10.42.0.1
 10.0.0.0/8 dev br-home proto kernel scope link src 10.0.0.1
 "#;
 
@@ -4590,6 +4616,17 @@ default via 192.0.2.1 dev eth0 proto static
                 kind: "direct_ipv4",
             }]
         );
+    }
+
+    #[test]
+    fn container_bridge_detection_does_not_hide_operator_bridges() {
+        assert!(virtual_interface("docker0"));
+        assert!(virtual_interface("br-a1b2c3d4e5f6"));
+        assert!(virtual_interface("podman1"));
+        assert!(virtual_interface("cni-podman0"));
+        assert!(!virtual_interface("br-lan"));
+        assert!(!virtual_interface("br-office"));
+        assert!(!virtual_interface("eth0"));
     }
 
     #[test]
