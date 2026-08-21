@@ -10,7 +10,7 @@ EXPECTED_PROCESS_API=${CANDY_EXPECTED_CORE_PROCESS_API:-1}
 EXPECTED_CORE_API=${CANDY_EXPECTED_CORE_API:-1}
 HOST_ARCH=${CANDY_CORE_TARGET_ARCH:-$(uname -m)}
 HOST_LIBC=${CANDY_CORE_TARGET_LIBC:-}
-LAUNCHER=${CANDY_SERVER_LAUNCHER:-/opt/candy/current/serverd-linux}
+LAUNCHER=${CANDY_SERVER_LAUNCHER:-/opt/candy/current/candy-server}
 SERVER_CONFIG=${CANDY_SERVER_CONFIG:-/etc/candy/server.toml}
 SERVICE_NAME=${CANDY_SERVER_SERVICE:-candy-server}
 SYSTEMCTL=${CANDY_SYSTEMCTL:-systemctl}
@@ -291,12 +291,17 @@ service_active() {
 	"$SYSTEMCTL" is-active --quiet "$SERVICE_NAME" >/dev/null 2>&1
 }
 
-validate_server_role() {
+validate_server_config() {
 	local directory
 	directory=$1
-	[ -x "$LAUNCHER" ] || fail "server Runtime launcher is missing: $LAUNCHER"
-	[ -f "$SERVER_CONFIG" ] || fail "server config is missing: $SERVER_CONFIG"
-	CANDY_CORE_BINARY="$directory/candy-core" "$LAUNCHER" --config "$SERVER_CONFIG" --check-config >/dev/null || return 1
+	[ -x "$LAUNCHER" ] || return 1
+	[ -f "$SERVER_CONFIG" ] || return 1
+	CANDY_CORE_BINARY="$directory/candy-core" "$LAUNCHER" --config "$SERVER_CONFIG" --check-config >/dev/null
+}
+
+preflight_server_role() {
+	local directory
+	directory=$1
 	CANDY_CORE_BINARY="$directory/candy-core" "$LAUNCHER" --config "$SERVER_CONFIG" --preflight >/dev/null || return 1
 }
 
@@ -306,12 +311,17 @@ activate_core() {
 	directory=$(version_path "$version") || fail "invalid Core version"
 	[ -d "$directory" ] || fail "Core $version is not installed"
 	validate_core_directory "$directory" "$version" || fail "installed Core $version failed validation"
+	validate_server_config "$directory" || fail "Core $version failed server config validation"
 	old=$(link_version "$CURRENT_LINK")
 	old_previous=$(link_version "$PREVIOUS_LINK")
 	[ "$old" != "$version" ] || { printf '%s\n' "Core $version is already active"; return; }
 	was_active=0
 	service_active && was_active=1
 	[ "$was_active" = 0 ] || "$SYSTEMCTL" stop "$SERVICE_NAME" || fail "cannot stop $SERVICE_NAME"
+	if ! preflight_server_role "$directory"; then
+		[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		fail "Core $version failed server preflight; current Core preserved"
+	fi
 	if [ -n "$old" ] && ! atomic_link "$PREVIOUS_LINK" "$old"; then
 		[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
 		fail "cannot preserve previous Core"
@@ -321,12 +331,6 @@ activate_core() {
 		[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
 		fail "cannot activate Core $version"
 	}
-	if ! validate_server_role "$directory"; then
-		restore_link "$CURRENT_LINK" "$old" || true
-		restore_link "$PREVIOUS_LINK" "$old_previous" || true
-		[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
-		fail "Core $version failed server config/preflight; previous Core restored"
-	fi
 	if [ "$was_active" = 1 ]; then
 		if ! "$SYSTEMCTL" start "$SERVICE_NAME" || ! service_active || [ ! -x "$HEALTH_CHECK" ] || ! "$HEALTH_CHECK"; then
 			"$SYSTEMCTL" stop "$SERVICE_NAME" >/dev/null 2>&1 || true

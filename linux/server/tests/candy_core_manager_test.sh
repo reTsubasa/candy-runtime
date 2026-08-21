@@ -87,7 +87,14 @@ case "\${1:-}" in
 		shift
 		printf '%s\n' "\$*" >> "\$FAKE_ROLE_LOG"
 		case "\$*" in
-			*--check-config*|*--preflight*) exit $server_result ;;
+			*--preflight*)
+				if [ -n "\${FAKE_EXPECT_CURRENT:-}" ] &&
+					[ "\$(readlink "\$CANDY_CORE_CURRENT_LINK")" != "\$FAKE_EXPECT_CURRENT" ]; then
+					exit 52
+				fi
+				exit "\${FAKE_PREFLIGHT_RESULT:-$server_result}"
+				;;
+			*--check-config*) exit "\${FAKE_CHECK_RESULT:-$server_result}" ;;
 			*) exit "\${FAKE_SERVER_RUN_EXIT:-0}" ;;
 		esac
 		;;
@@ -155,13 +162,14 @@ bundle_bad_role=$tmp/core-1.0.2.tar.gz
 make_bundle 1.0.2 1 1 "$host_arch" 51 "$bundle_bad_role"
 sha_bad_role=$(sha256sum "$bundle_bad_role" | awk '{ print $1 }')
 "$manager" install 1.0.2 "$bundle_bad_role" "$sha_bad_role" >/dev/null
-if "$manager" activate 1.0.2 > "$tmp/bad-role.out" 2>&1; then
+if FAKE_CHECK_RESULT=0 FAKE_PREFLIGHT_RESULT=51 FAKE_EXPECT_CURRENT=1.0.1 \
+	"$manager" activate 1.0.2 > "$tmp/bad-role.out" 2>&1; then
 	fail "Core with failed server preflight was activated"
 fi
 [ "$(readlink "$cores/current")" = 1.0.1 ] || fail "failed activation did not restore current Core"
 [ "$(readlink "$cores/previous")" = 1.0.0 ] || fail "failed activation did not restore rollback Core"
 [ "$(cat "$service_state")" = active ] || fail "failed activation did not restore the old service"
-grep -F 'previous Core restored' "$tmp/bad-role.out" >/dev/null || fail "failed activation error is not actionable"
+grep -F 'current Core preserved' "$tmp/bad-role.out" >/dev/null || fail "failed activation error is not actionable"
 
 bundle_bad_api=$tmp/core-2.0.0.tar.gz
 make_bundle 2.0.0 2 1 "$host_arch" 0 "$bundle_bad_api"

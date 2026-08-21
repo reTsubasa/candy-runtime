@@ -55,6 +55,9 @@ edge_stage=$dist/client/x86_64
 [ -x "$stage/usr/local/libexec/candy-cloud-enroll" ] || fail "server Cloud enrollment client was not staged"
 [ -x "$stage/usr/local/libexec/candy-cloud-sync" ] || fail "server Cloud Runtime synchronizer was not staged"
 [ -x "$stage/usr/local/bin/candy-core-manager" ] || fail "Core bundle manager was not staged"
+grep -F 'LAUNCHER=${CANDY_SERVER_LAUNCHER:-/opt/candy/current/candy-server}' \
+	"$stage/usr/local/bin/candy-core-manager" >/dev/null ||
+	fail "Core manager does not use the installed public server launcher"
 [ -x "$stage/usr/local/libexec/candy-server-health-check" ] || fail "server health check was not staged"
 [ -f "$stage/etc/candy/server.toml.example" ] || fail "server example config was not staged"
 [ -f "$stage/etc/candy/cloud-sync.env.example" ] || fail "server Cloud sync endpoint example was not staged"
