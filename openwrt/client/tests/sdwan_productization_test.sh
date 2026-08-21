@@ -76,6 +76,10 @@ fi
 grep -F 'sdwan_reconcile()' "$init" >/dev/null || fail "Cloud activation reconcile command is missing"
 grep -F 'start_sdwan_supervision' "$init" >/dev/null || fail "SD-WAN supervision is not independent from ordinary Candy"
 grep -F 'ensure_sdwan_instance_id' "$init" >/dev/null || fail "SD-WAN instance identity is not bootstrapped"
+grep -F 'hexdump -v -e' "$init" >/dev/null || fail "SD-WAN instance identity must use the OpenWrt-supported hexdump"
+if grep -F ' | od ' "$init" >/dev/null; then
+	 fail "SD-WAN init must not depend on od, which is absent from the base image"
+fi
 grep -F 'ensure_sdwan_generation' "$init" >/dev/null || fail "SD-WAN transaction generation is not persisted"
 grep -F '"$CANDY_SDWAN_AGENT" --socket "$CANDY_NETD_SOCKET"' "$init" >/dev/null || fail "SD-WAN agent lifecycle contract is missing"
 grep -F -- '--activation "$CANDY_SDWAN_CANDIDATE"' "$init" >/dev/null || fail "Cloud activation pointer is not passed to the agent"

@@ -695,7 +695,9 @@ ensure_sdwan_instance_id() {
 			*) return 1 ;;
 		esac
 	fi
-	value=$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+	# OpenWrt base images do not guarantee `od`; hexdump is part of the
+	# supported BusyBox tool set and produces the same fixed-width hex value.
+	value=$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | hexdump -v -e '/1 "%02x"' | tr -d ' \n')
 	case "$value" in
 		????????????????????????????????)
 			case "$value" in *[!0-9A-Fa-f]*) return 1 ;; esac
