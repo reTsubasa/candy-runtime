@@ -92,6 +92,11 @@ if grep -F -- '--status "$CANDY_SDWAN_STATUS_FILE"' "$init" >/dev/null; then
 	fail "Runtime product status is still shared with Core readiness"
 fi
 grep -F 'cleanup_stale_sdwan_core_statuses' "$init" >/dev/null || fail "root startup does not migrate stale Core status files"
+supervision=$(sed -n '/^start_sdwan_supervision() {$/,/^}$/p' "$init")
+prepare_line=$(printf '%s\n' "$supervision" | grep -n 'if ! prepare_sdwan_state; then' | cut -d: -f1)
+cleanup_line=$(printf '%s\n' "$supervision" | grep -n 'if ! cleanup_stale_sdwan_core_statuses; then' | cut -d: -f1)
+[ -n "$prepare_line" ] && [ -n "$cleanup_line" ] || fail "SD-WAN root startup ordering is incomplete"
+[ "$prepare_line" -lt "$cleanup_line" ] || fail "SD-WAN runtime directory is prepared after stale status cleanup"
 grep -F 'sdwan_uid=$(id -u candy-sdwan' "$init" >/dev/null || fail "netd caller UID is not dedicated"
 grep -F -- '--allowed-uid "$sdwan_uid"' "$init" >/dev/null || fail "netd caller UID is not passed"
 if grep -F -- '--client-args' "$init" >/dev/null || grep -F -- '--netd-socket' "$init" >/dev/null; then
