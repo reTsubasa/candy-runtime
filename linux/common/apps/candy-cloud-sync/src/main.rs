@@ -2747,7 +2747,7 @@ fn render_transport_config(
         )
     };
     Ok(format!(
-        "server = {}\nserver_name = {}\nserver_pin = {}\nkey_id = {}\nsecret = \"\"\nauth_profile = \"cloud_grant_v1\"\n\n[cloud_auth]\ngrant_envelope_path = {}\ndevice_signing_key_path = {}\n\n[transport]\nprofile = \"linux\"\ncongestion = \"candy_bbr\"\ncandy_bbr_preset = {}\nautomatic_bbr_fallback = false\n",
+        "server = {}\nserver_name = {}\nserver_pin = {}\nkey_id = {}\nsecret = \"\"\nauth_profile = \"cloud_grant_v1\"\n\n[cloud_auth]\ngrant_envelope_path = {}\ndevice_signing_key_path = {}\n\n[transport]\nprofile = \"linux\"\ncongestion = \"candy-bbr\"\ncandy_bbr_preset = {}\nautomatic_bbr_fallback = false\n",
         quote(&candidate.endpoint)?,
         quote(&candidate.server_name)?,
         quote(&format!("sha256:{}", candidate.server_cert_sha256))?,
@@ -2850,8 +2850,8 @@ fn build_netd_declaration(
         }))
         .collect::<Vec<_>>();
     routes.sort_by(|left, right| {
-        left.prefix
-            .cmp(&right.prefix)
+        netd_prefix_sort_key(&left.prefix)
+            .cmp(&netd_prefix_sort_key(&right.prefix))
             .then(left.kind.cmp(right.kind))
     });
     let mut exclusions = BTreeMap::<String, &'static str>::new();
@@ -2861,15 +2861,25 @@ fn build_netd_declaration(
     for prefix in cloud_ipv4_exclusions(cloud)? {
         exclusions.insert(prefix, "cloud-api");
     }
+    let mut exclusions = exclusions
+        .into_iter()
+        .map(|(prefix, kind)| NetdExclusion { prefix, kind })
+        .collect::<Vec<_>>();
+    // candy-netd-proto validates declarations in canonical numeric IPv4 order.
+    // A lexical String/BTreeMap order puts `104.x` before `47.x`, which is
+    // rejected even though both prefixes are otherwise valid. Keep the wire
+    // declaration deterministic and aligned with the shared protocol order.
+    exclusions.sort_by(|left, right| {
+        netd_prefix_sort_key(&left.prefix)
+            .cmp(&netd_prefix_sort_key(&right.prefix))
+            .then(left.kind.cmp(right.kind))
+    });
     Ok(NetdDeclaration {
         table_id: discovery.netd.table_id,
         overlay_router_ipv4: discovery.netd.overlay_router_ipv4.clone(),
         effective_mtu: discovery.netd.max_inner_mtu,
         routes,
-        exclusions: exclusions
-            .into_iter()
-            .map(|(prefix, kind)| NetdExclusion { prefix, kind })
-            .collect(),
+        exclusions,
         firewall: NetdFirewall {
             allow_forward: true,
             clamp_tcp_mss: true,
@@ -2877,6 +2887,19 @@ fn build_netd_declaration(
             manage_rp_filter: true,
         },
     })
+}
+
+fn netd_prefix_sort_key(prefix: &str) -> (u32, u8) {
+    let Some((address, length)) = prefix.split_once('/') else {
+        return (u32::MAX, u8::MAX);
+    };
+    let Ok(address) = address.parse::<Ipv4Addr>() else {
+        return (u32::MAX, u8::MAX);
+    };
+    let Ok(length) = length.parse::<u8>() else {
+        return (u32::MAX, u8::MAX);
+    };
+    (u32::from(address), length)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3588,6 +3611,28 @@ mod tests {
         assert_eq!(eth1.kind, "direct_ipv4");
         assert_eq!(eth1.network_id.len(), 64);
         assert!(eth1.network_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn netd_declaration_sorts_prefixes_numerically_not_lexically() {
+        let mut report = discovery();
+        report.netd.underlay_ipv4_exclusions = vec!["104.243.28.153/32".into()];
+        let declaration = build_netd_declaration(
+            &report,
+            &Url::parse("https://47-83-1-189.sslip.io").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            declaration
+                .exclusions
+                .iter()
+                .map(|item| (item.prefix.as_str(), item.kind))
+                .collect::<Vec<_>>(),
+            vec![
+                ("47.83.1.189/32", "cloud-api"),
+                ("104.243.28.153/32", "hub-endpoint"),
+            ]
+        );
     }
 
     #[test]

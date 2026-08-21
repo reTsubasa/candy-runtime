@@ -26,6 +26,17 @@ const MAX_STATUS_BYTES: u64 = 256 * 1024;
 const MAX_ACTIVATION_BYTES: u64 = 64 * 1024;
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+fn sanitize_log_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '\n' | '\r' | '\t' => ' ',
+            character if character.is_control() => '?',
+            character => character,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 static RUN_TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
 
@@ -915,6 +926,11 @@ fn fail_before_prepare(
     error_code: &'static str,
     error: anyhow::Error,
 ) -> Result<()> {
+    eprintln!(
+        "level=error event=sdwan_activation_rejected error_code={} error={}",
+        error_code,
+        sanitize_log_value(&format!("{error:#}"))
+    );
     match args.core_role {
         CoreRole::ClientSdwan => Err(error),
         CoreRole::Server => {
@@ -936,6 +952,11 @@ fn fail_after_rollback(
     error_code: &'static str,
     error: anyhow::Error,
 ) -> Result<()> {
+    eprintln!(
+        "level=error event=sdwan_activation_failed error_code={} error={}",
+        error_code,
+        sanitize_log_value(&format!("{error:#}"))
+    );
     stop_core(child);
     let rollback = rollback_or_report(netd, cause);
     let receipt_code = if rollback.is_err() {
@@ -967,6 +988,11 @@ fn fail_without_core(
     error_code: &'static str,
     error: anyhow::Error,
 ) -> Result<()> {
+    eprintln!(
+        "level=error event=sdwan_activation_failed error_code={} error={}",
+        error_code,
+        sanitize_log_value(&format!("{error:#}"))
+    );
     let rollback = rollback_or_report(netd, cause);
     let receipt_code = if rollback.is_err() {
         "rollback_failed"
