@@ -1135,6 +1135,7 @@ CANDY_STALE_CLIENT=1 "$CANDY_CLIENT_BIN" --config "$RUNTIME_CONFIG" --format can
 stale_client_pid=$!
 TEST_SDWAN_ENABLED=1
 sdwan_enabled() { [ "${TEST_SDWAN_ENABLED:-0}" = 1 ]; }
+prepare_sdwan_state() { mkdir -p "$RUNTIME_DIR" && chmod 0770 "$RUNTIME_DIR"; }
 start_sdwan_netd() { printf '%s\n' sdwan-netd >> "$runtime_dir/procd.log"; }
 wait_for_sdwan_netd() { return 0; }
 start_service

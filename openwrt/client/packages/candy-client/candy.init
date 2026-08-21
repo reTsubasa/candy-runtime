@@ -851,6 +851,14 @@ start_sdwan_supervision() {
 	# procd launches the data-plane supervisor as candy-sdwan. Migrate stale
 	# per-activation Core readiness files while this startup hook still has
 	# root authority; the stable Runtime/LuCI status is intentionally retained.
+	# Prepare the shared runtime directory before cleanup and before either
+	# unprivileged process can observe a Cloud candidate. Waiting until netd has
+	# a candidate leaves the ordinary client's 0755 directory in place and makes
+	# a later candy-sdwan activation unable to replace its own status file.
+	if ! prepare_sdwan_state; then
+		log_event error sdwan_state_prepare "result=failed ordinary_client=preserved"
+		return 1
+	fi
 	if ! cleanup_stale_sdwan_core_statuses; then
 		log_event error sdwan_status_cleanup "result=failed ordinary_client=preserved"
 		return 1
