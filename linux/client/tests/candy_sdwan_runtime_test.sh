@@ -206,12 +206,18 @@ privileged_bin=$tmp/privileged-bin
 privileged_state=$tmp/root-owned-state
 privileged_run=$tmp/root-owned-run
 privileged_calls=$tmp/privileged.calls
-mkdir -p "$privileged_bin" "$privileged_state/identity"
+compatibility_root=$privileged_state/activations/test/compatibility-generations/generation-3
+compatibility_peers=$compatibility_root/peer-projections
+mkdir -p "$privileged_bin" "$privileged_state/identity" "$compatibility_peers"
 printf '%s\n' legacy >"$privileged_state/identity/device-identity-v1.json"
+printf '%s\n' segment >"$compatibility_root/segment.snapshot"
+printf '%s\n' projection >"$compatibility_peers/peer.projection"
 printf '%s\n' outside >"$tmp/outside-state"
 ln -s "$tmp/outside-state" "$privileged_state/outside-link"
 chmod 0755 "$privileged_state" "$privileged_state/identity"
 chmod 0644 "$privileged_state/identity/device-identity-v1.json" "$tmp/outside-state"
+chmod 0700 "$compatibility_root" "$compatibility_peers"
+chmod 0600 "$compatibility_root/segment.snapshot" "$compatibility_peers/peer.projection"
 cat >"$privileged_bin/id" <<'EOF'
 #!/bin/sh
 case "${1:-}" in
@@ -233,10 +239,17 @@ PATH="$privileged_bin:$PATH" FAKE_PRIVILEGED_CALLS="$privileged_calls" \
 	fail "legacy SD-WAN state directory was not restored to mode 0700"
 [ "$(stat -c '%a' "$privileged_state/identity/device-identity-v1.json" 2>/dev/null || stat -f '%Lp' "$privileged_state/identity/device-identity-v1.json")" = 600 ] ||
 	fail "legacy SD-WAN state file was not restored to mode 0600"
+[ "$(stat -c '%a' "$compatibility_root" 2>/dev/null || stat -f '%Lp' "$compatibility_root")" = 500 ] ||
+	fail "compatibility generation directory was not kept read-only"
+[ "$(stat -c '%a' "$compatibility_root/segment.snapshot" 2>/dev/null || stat -f '%Lp' "$compatibility_root/segment.snapshot")" = 400 ] ||
+	fail "compatibility segment snapshot was not kept read-only"
+[ "$(stat -c '%a' "$compatibility_peers/peer.projection" 2>/dev/null || stat -f '%Lp' "$compatibility_peers/peer.projection")" = 400 ] ||
+	fail "compatibility peer projection was not kept read-only"
 [ "$(stat -c '%a' "$tmp/outside-state" 2>/dev/null || stat -f '%Lp' "$tmp/outside-state")" = 644 ] ||
 	fail "state delegation followed a symbolic link outside the state root"
 grep -F '<candy-service:candy-service>' "$privileged_calls" >/dev/null ||
 	fail "root-owned SD-WAN state was not delegated to the configured service identity"
+chmod -R u+w "$privileged_state"
 
 systemd_bin=$tmp/systemd-bin
 systemd_state=$tmp/systemd-state

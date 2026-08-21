@@ -94,6 +94,16 @@ delegate_state() {
 	[ -d "$state_dir" ] && [ ! -L "$state_dir" ] || fail "SD-WAN state directory is invalid"
 	find "$state_dir" -xdev -type d -exec chmod 0700 {} \; || fail "could not protect SD-WAN state directories"
 	find "$state_dir" -xdev -type f -exec chmod 0600 {} \; || fail "could not protect SD-WAN state files"
+	for compatibility_root in \
+		"$state_dir"/generations/*/compatibility-generations \
+		"$state_dir"/activations/*/compatibility-generations; do
+		[ -d "$compatibility_root" ] || continue
+		[ ! -L "$compatibility_root" ] || fail "compatibility catalog must not be a symbolic link"
+		find "$compatibility_root" -xdev -type f -exec chmod 0400 {} \; ||
+			fail "could not make compatibility catalog objects read-only"
+		find "$compatibility_root" -xdev -type d -exec chmod 0500 {} \; ||
+			fail "could not make compatibility catalog directories read-only"
+	done
 	find "$state_dir" -xdev ! -type l -exec chown "$state_user:$state_group" {} \; ||
 		fail "could not delegate SD-WAN state to $state_user"
 }

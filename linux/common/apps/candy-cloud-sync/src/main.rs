@@ -32,8 +32,13 @@ const MAX_CONFIGURATION_BYTES: u64 = 3 * 1024 * 1024;
 const MAX_ROUTE_ENVELOPE_BYTES: usize = 1024 * 1024;
 const MAX_LOCAL_ROUTE_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_LOCAL_NETWORKS: usize = 64;
+const MAX_COMPATIBILITY_GENERATIONS: usize = 1;
+const MAX_COMPATIBILITY_PROJECTIONS: usize = 256;
 const LOCAL_ROUTE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
-const ACTIVATION_REVALIDATION_SECONDS: u64 = 300;
+// Peer listeners and dialers consume the same Cloud generation asynchronously.
+// Keep the failed candidate withdrawn, but re-fetch soon enough that the later
+// side of a normal rolling activation can wake the earlier side without user action.
+const ACTIVATION_REVALIDATION_SECONDS: u64 = 60;
 const CONFIGURATION_MEDIA_TYPE: &str = "application/vnd.candy.runtime-configuration.v1+json";
 const PUBLIC_ENDPOINT_ENV: &str = "CANDY_PUBLIC_ENDPOINT";
 
@@ -98,7 +103,25 @@ struct RuntimeConfiguration {
     segment_snapshot: String,
     site_projection: String,
     peer_projection_catalog: Vec<RuntimePeerProjection>,
+    #[serde(default)]
+    compatibility_generations: Vec<RuntimeCompatibilityGeneration>,
     grant_verification_keys: Vec<RuntimeGrantVerificationKey>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeCompatibilityGeneration {
+    segment_generation: u64,
+    segment_content_hash: String,
+    segment_snapshot: String,
+    peer_projection_catalog: Vec<RuntimePeerProjection>,
+}
+
+#[derive(Debug)]
+struct DecodedCompatibilityGeneration {
+    segment_generation: u64,
+    segment: Vec<u8>,
+    peer_projections: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -132,8 +155,18 @@ struct VerifiedControlReport {
     device_id: String,
     device_key_id: String,
     segment_generation: u64,
+    #[serde(default)]
+    segment_content_hash: Option<String>,
+    #[serde(default)]
+    segment_not_before: Option<u64>,
+    #[serde(default)]
+    segment_stale_until: Option<u64>,
     projection_generation: u64,
     projection_content_hash: String,
+    #[serde(default)]
+    projection_not_before: Option<u64>,
+    #[serde(default)]
+    projection_stale_until: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -450,6 +483,13 @@ struct ServerOutboundPeerActivation {
     transport_config: PathBuf,
 }
 
+#[derive(Debug)]
+struct ServerCompatibilityGenerationPaths {
+    segment_generation: u64,
+    segment_snapshot: PathBuf,
+    peer_projections: Vec<PathBuf>,
+}
+
 #[derive(Debug, Serialize)]
 struct NetdDeclaration {
     table_id: u32,
@@ -752,14 +792,21 @@ fn sync_once_with_retry(
             let configuration: RuntimeConfiguration =
                 serde_json::from_slice(&bytes).context("parse Runtime configuration")?;
             validate_configuration(&configuration, &identity)?;
+            if args.server_config.is_none() && !configuration.compatibility_generations.is_empty() {
+                bail!("Cloud sent an inbound compatibility catalog to a non-server Runtime")
+            }
             let segment = decode_envelope(&configuration.segment_snapshot, "segment snapshot")?;
             let projection = decode_envelope(&configuration.site_projection, "site projection")?;
             let peer_projections = decode_peer_projections(&configuration.peer_projection_catalog)?;
+            let compatibility_generations =
+                decode_compatibility_generations(&configuration.compatibility_generations)?;
             let signed_objects_hash = configuration_objects_digest(
                 &segment,
                 &projection,
                 &configuration.peer_projection_catalog,
                 &peer_projections,
+                &configuration.compatibility_generations,
+                &compatibility_generations,
             );
             let digest = configuration_delivery_digest(&configuration, &signed_objects_hash)?;
             let expected = etag
@@ -786,6 +833,24 @@ fn sync_once_with_retry(
                     Some("core_verification_failed"),
                 )
                 .context("report rejected Core verification to Cloud")?;
+                return Err(error);
+            }
+            if let Err(error) = verify_compatibility_with_core(
+                &args.state_dir,
+                args.core.as_deref(),
+                &configuration,
+                &identity,
+                &compatibility_generations,
+            ) {
+                report_configuration_status(
+                    &client,
+                    &cloud,
+                    &configuration,
+                    &etag,
+                    "rejected",
+                    Some("core_compatibility_verification_failed"),
+                )
+                .context("report rejected compatibility verification to Cloud")?;
                 return Err(error);
             }
             let discovery = match discover_control_with_core(
@@ -840,6 +905,8 @@ fn sync_once_with_retry(
                 &projection,
                 &configuration.peer_projection_catalog,
                 &peer_projections,
+                &configuration.compatibility_generations,
+                &compatibility_generations,
                 configuration.route_signing_public_key.as_bytes(),
                 &bytes,
                 &discovery_bytes,
@@ -870,6 +937,7 @@ fn sync_once_with_retry(
                         &segment,
                         &projection,
                         &peer_projections,
+                        &compatibility_generations,
                         &discovery,
                         &resolved_grants,
                     )
@@ -1994,32 +2062,92 @@ fn verify_control_with_core(
         let projection_path = verification.join("site.projection");
         atomic_bytes(&segment_path, segment, 0o600)?;
         atomic_bytes(&projection_path, projection, 0o600)?;
-        let output = ProcessCommand::new(&core)
-            .args(["client", "sdwan", "verify-control", "--segment-snapshot"])
-            .arg(&segment_path)
-            .arg("--site-projection")
-            .arg(&projection_path)
-            .arg("--route-signing-public-key")
-            .arg(&configuration.route_signing_public_key)
-            .arg("--route-signing-key-id")
-            .arg(&configuration.route_signing_key_id)
-            .output()
-            .context("run Candy Core signed-control verification")?;
-        if !output.status.success() {
-            let detail = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "Candy Core rejected signed SD-WAN control: {}",
-                detail.chars().take(1024).collect::<String>()
-            )
-        }
-        if output.stdout.is_empty() || output.stdout.len() > 64 * 1024 {
-            bail!("Candy Core returned an invalid signed-control report")
-        }
-        let report: VerifiedControlReport = serde_json::from_slice(&output.stdout)
-            .context("parse Candy Core verification report")?;
+        let report =
+            run_core_control_verification(&core, configuration, &segment_path, &projection_path)?;
         validate_verified_report(&report, configuration, identity)
     })();
     let cleanup = fs::remove_dir_all(&verification).context("remove Core verification staging");
+    result.and(cleanup)
+}
+
+fn run_core_control_verification(
+    core: &Path,
+    configuration: &RuntimeConfiguration,
+    segment_path: &Path,
+    projection_path: &Path,
+) -> Result<VerifiedControlReport> {
+    let output = ProcessCommand::new(core)
+        .args(["client", "sdwan", "verify-control", "--segment-snapshot"])
+        .arg(segment_path)
+        .arg("--site-projection")
+        .arg(projection_path)
+        .arg("--route-signing-public-key")
+        .arg(&configuration.route_signing_public_key)
+        .arg("--route-signing-key-id")
+        .arg(&configuration.route_signing_key_id)
+        .output()
+        .context("run Candy Core signed-control verification")?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Candy Core rejected signed SD-WAN control: {}",
+            detail.chars().take(1024).collect::<String>()
+        )
+    }
+    if output.stdout.is_empty() || output.stdout.len() > 64 * 1024 {
+        bail!("Candy Core returned an invalid signed-control report")
+    }
+    serde_json::from_slice(&output.stdout).context("parse Candy Core verification report")
+}
+
+fn verify_compatibility_with_core(
+    state_dir: &Path,
+    requested_core: Option<&Path>,
+    configuration: &RuntimeConfiguration,
+    identity: &DeviceIdentity,
+    decoded: &[DecodedCompatibilityGeneration],
+) -> Result<()> {
+    if decoded.is_empty() {
+        return Ok(());
+    }
+    let core = resolve_core(requested_core)?;
+    let verification = state_dir.join(format!(".verify-compatibility.{}", Uuid::new_v4()));
+    ensure_private_directory(&verification)?;
+    let result = (|| {
+        for (generation, decoded_generation) in
+            configuration.compatibility_generations.iter().zip(decoded)
+        {
+            if generation.segment_generation != decoded_generation.segment_generation {
+                bail!("decoded compatibility generation does not match its manifest")
+            }
+            let generation_directory = verification.join(generation.segment_generation.to_string());
+            ensure_private_directory(&generation_directory)?;
+            let segment_path = generation_directory.join("segment.snapshot");
+            atomic_bytes(&segment_path, &decoded_generation.segment, 0o600)?;
+            for (entry, envelope) in generation
+                .peer_projection_catalog
+                .iter()
+                .zip(&decoded_generation.peer_projections)
+            {
+                let projection_path = generation_directory.join(format!(
+                    "{}-{}.projection",
+                    entry.projection_id.simple(),
+                    entry.projection_generation
+                ));
+                atomic_bytes(&projection_path, envelope, 0o600)?;
+                let report = run_core_control_verification(
+                    &core,
+                    configuration,
+                    &segment_path,
+                    &projection_path,
+                )?;
+                validate_compatibility_report(&report, configuration, generation, entry, identity)?;
+            }
+        }
+        Ok(())
+    })();
+    let cleanup =
+        fs::remove_dir_all(&verification).context("remove compatibility verification staging");
     result.and(cleanup)
 }
 
@@ -2426,6 +2554,65 @@ fn validate_verified_report(
     Ok(())
 }
 
+fn validate_compatibility_report(
+    report: &VerifiedControlReport,
+    configuration: &RuntimeConfiguration,
+    generation: &RuntimeCompatibilityGeneration,
+    projection: &RuntimePeerProjection,
+    identity: &DeviceIdentity,
+) -> Result<()> {
+    let uuid_hex = |value: Uuid| value.simple().to_string();
+    let now = unix_now()?;
+    validate_hex(&report.device_id, 16, "compatibility projection device id")?;
+    validate_hex(
+        &report.device_key_id,
+        16,
+        "compatibility projection device key id",
+    )?;
+    if report.device_id.bytes().all(|byte| byte == b'0')
+        || report.device_key_id.bytes().all(|byte| byte == b'0')
+    {
+        bail!("compatibility projection has an invalid device identity")
+    }
+    if report.schema_version != 1
+        || !report.ok
+        || identity.tenant_id.map(uuid_hex).as_deref() != Some(report.tenant_id.as_str())
+        || report.segment_id != uuid_hex(configuration.segment_id)
+        || report.segment_generation != generation.segment_generation
+        || report.segment_content_hash.as_deref() != Some(generation.segment_content_hash.as_str())
+        || !signed_compatibility_window_is_valid(
+            now,
+            report.segment_not_before,
+            report.segment_stale_until,
+        )
+        || report.projection_id != uuid_hex(projection.projection_id)
+        || report.projection_generation != projection.projection_generation
+        || report.projection_content_hash != projection.projection_content_hash
+        || !signed_compatibility_window_is_valid(
+            now,
+            report.projection_not_before,
+            report.projection_stale_until,
+        )
+        || report.device_id == uuid_hex(identity.device_id)
+        || report.device_key_id == uuid_hex(identity.device_key_id)
+    {
+        bail!("Candy Core compatibility report does not match the authenticated N-1 peer catalog")
+    }
+    Ok(())
+}
+
+fn signed_compatibility_window_is_valid(
+    now: u64,
+    not_before: Option<u64>,
+    stale_until: Option<u64>,
+) -> bool {
+    matches!(
+        (not_before, stale_until),
+        (Some(not_before), Some(stale_until))
+            if not_before > 0 && not_before <= now && now <= stale_until
+    )
+}
+
 fn validate_identity(identity: &DeviceIdentity) -> Result<()> {
     if identity.schema_version != 1
         || identity.organization_id.is_nil()
@@ -2472,6 +2659,7 @@ fn validate_configuration(value: &RuntimeConfiguration, identity: &DeviceIdentit
         "route signing public key",
     )?;
     validate_catalog(&value.peer_projection_catalog)?;
+    validate_compatibility_generations(value)?;
     validate_grant_verification_keys(&value.grant_verification_keys)?;
     if identity.tenant_id.is_none() || identity.site_id.is_none() {
         bail!("local Cloud identity has no assigned tenant or Site")
@@ -2590,6 +2778,24 @@ fn decode_peer_projections(catalog: &[RuntimePeerProjection]) -> Result<Vec<Vec<
         .collect()
 }
 
+fn decode_compatibility_generations(
+    generations: &[RuntimeCompatibilityGeneration],
+) -> Result<Vec<DecodedCompatibilityGeneration>> {
+    generations
+        .iter()
+        .map(|generation| {
+            Ok(DecodedCompatibilityGeneration {
+                segment_generation: generation.segment_generation,
+                segment: decode_envelope(
+                    &generation.segment_snapshot,
+                    "compatibility segment snapshot",
+                )?,
+                peer_projections: decode_peer_projections(&generation.peer_projection_catalog)?,
+            })
+        })
+        .collect()
+}
+
 fn validate_catalog(catalog: &[RuntimePeerProjection]) -> Result<()> {
     let mut previous: Option<(Uuid, u64)> = None;
     for projection in catalog {
@@ -2606,6 +2812,36 @@ fn validate_catalog(catalog: &[RuntimePeerProjection]) -> Result<()> {
             bail!("Peer projection catalog is not strictly ordered")
         }
         previous = Some(current);
+    }
+    Ok(())
+}
+
+fn validate_compatibility_generations(configuration: &RuntimeConfiguration) -> Result<()> {
+    if configuration.compatibility_generations.len() > MAX_COMPATIBILITY_GENERATIONS {
+        bail!("Cloud Runtime configuration contains too many compatibility generations")
+    }
+    for generation in &configuration.compatibility_generations {
+        if generation.segment_generation == 0
+            || generation.segment_generation.checked_add(1)
+                != Some(configuration.segment_generation)
+            || generation.peer_projection_catalog.is_empty()
+            || generation.peer_projection_catalog.len() > MAX_COMPATIBILITY_PROJECTIONS
+        {
+            bail!("Cloud Runtime compatibility generation must be the non-empty N-1 catalog")
+        }
+        validate_hex(
+            &generation.segment_content_hash,
+            32,
+            "compatibility segment content hash",
+        )?;
+        if generation
+            .segment_content_hash
+            .bytes()
+            .all(|byte| byte == b'0')
+        {
+            bail!("compatibility segment content hash must not be zero")
+        }
+        validate_catalog(&generation.peer_projection_catalog)?;
     }
     Ok(())
 }
@@ -2633,6 +2869,8 @@ fn configuration_objects_digest(
     projection: &[u8],
     catalog: &[RuntimePeerProjection],
     peer_projections: &[Vec<u8>],
+    compatibility: &[RuntimeCompatibilityGeneration],
+    decoded_compatibility: &[DecodedCompatibilityGeneration],
 ) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"candy/runtime-configuration-v1\0");
@@ -2647,6 +2885,31 @@ fn configuration_objects_digest(
         digest.update(decode_hex_32(&entry.projection_content_hash).expect("validated catalog"));
         digest.update((envelope.len() as u64).to_be_bytes());
         digest.update(envelope);
+    }
+    digest.update((compatibility.len() as u64).to_be_bytes());
+    for (generation, decoded) in compatibility.iter().zip(decoded_compatibility) {
+        digest.update(generation.segment_generation.to_be_bytes());
+        digest.update(
+            decode_hex_32(&generation.segment_content_hash)
+                .expect("validated compatibility generation"),
+        );
+        digest.update((decoded.segment.len() as u64).to_be_bytes());
+        digest.update(&decoded.segment);
+        digest.update((generation.peer_projection_catalog.len() as u64).to_be_bytes());
+        for (entry, envelope) in generation
+            .peer_projection_catalog
+            .iter()
+            .zip(&decoded.peer_projections)
+        {
+            digest.update(entry.projection_id.as_bytes());
+            digest.update(entry.projection_generation.to_be_bytes());
+            digest.update(
+                decode_hex_32(&entry.projection_content_hash)
+                    .expect("validated compatibility catalog"),
+            );
+            digest.update((envelope.len() as u64).to_be_bytes());
+            digest.update(envelope);
+        }
     }
     digest.finalize().into()
 }
@@ -2804,6 +3067,7 @@ fn render_server_activation_config(
     segment_path: &Path,
     local_projection_path: &Path,
     peer_projection_paths: &[PathBuf],
+    compatibility_generations: &[ServerCompatibilityGenerationPaths],
     outbound_peers: &[ServerOutboundPeerActivation],
 ) -> Result<String> {
     use std::str::FromStr;
@@ -2859,6 +3123,30 @@ fn render_server_activation_config(
         "route_signing_public_key",
         value(&configuration.route_signing_public_key),
     );
+    let mut compatibility = ArrayOfTables::new();
+    for generation in compatibility_generations {
+        let mut entry = Table::new();
+        entry.insert(
+            "segment_generation",
+            value(i64::try_from(generation.segment_generation)?),
+        );
+        entry.insert(
+            "segment_snapshot",
+            value(path(&generation.segment_snapshot)?),
+        );
+        let mut peer_projections = Array::new();
+        for projection in &generation.peer_projections {
+            peer_projections.push(path(projection)?);
+        }
+        entry.insert("peer_projections", value(peer_projections));
+        compatibility.push(entry);
+    }
+    if !compatibility.is_empty() {
+        sdwan.insert(
+            "compatibility_generations",
+            Item::ArrayOfTables(compatibility),
+        );
+    }
     let mut outbound = ArrayOfTables::new();
     for peer in outbound_peers {
         let mut entry = Table::new();
@@ -2870,6 +3158,35 @@ fn render_server_activation_config(
     sdwan.insert("outbound_peers", Item::ArrayOfTables(outbound));
     document["sdwan"] = Item::Table(sdwan);
     Ok(document.to_string())
+}
+
+fn server_compatibility_paths(
+    parent: &Path,
+    catalogs: &[RuntimeCompatibilityGeneration],
+) -> Vec<ServerCompatibilityGenerationPaths> {
+    catalogs
+        .iter()
+        .map(|catalog| {
+            let directory = parent
+                .join("compatibility-generations")
+                .join(compatibility_directory_name(catalog.segment_generation));
+            ServerCompatibilityGenerationPaths {
+                segment_generation: catalog.segment_generation,
+                segment_snapshot: directory.join("segment.snapshot"),
+                peer_projections: catalog
+                    .peer_projection_catalog
+                    .iter()
+                    .map(|entry| {
+                        directory.join("peer-projections").join(format!(
+                            "{}-{}.projection",
+                            entry.projection_id.simple(),
+                            entry.projection_generation
+                        ))
+                    })
+                    .collect(),
+            }
+        })
+        .collect()
 }
 
 fn build_netd_declaration(
@@ -3135,6 +3452,7 @@ fn publish_server_activation(
     segment: &[u8],
     projection: &[u8],
     peer_projections: &[Vec<u8>],
+    compatibility_generations: &[DecodedCompatibilityGeneration],
     discovery: &DiscoveredControlReport,
     resolved_grants: &[(grant::GrantSubject, grant::CachedGrant)],
 ) -> Result<String> {
@@ -3227,6 +3545,15 @@ fn publish_server_activation(
                 staged_peer_paths.push(staged_peers.join(&name));
                 final_peer_paths.push(generation.join("peer-projections").join(name));
             }
+            let staged_compatibility = write_compatibility_directories(
+                &staging,
+                &configuration.compatibility_generations,
+                compatibility_generations,
+                0o600,
+                0o700,
+            )?;
+            let final_compatibility =
+                server_compatibility_paths(&generation, &configuration.compatibility_generations);
             let core_config_path = staging.join("core.toml");
             let staged_config = render_server_activation_config(
                 ordinary_config,
@@ -3234,6 +3561,7 @@ fn publish_server_activation(
                 &staged_segment,
                 &staged_local,
                 &staged_peer_paths,
+                &staged_compatibility,
                 &staged_outbound,
             )?;
             atomic_bytes(&core_config_path, staged_config.as_bytes(), 0o600)?;
@@ -3282,6 +3610,7 @@ fn publish_server_activation(
                 &generation.join("segment.snapshot"),
                 &generation.join("site.projection"),
                 &final_peer_paths,
+                &final_compatibility,
                 &final_outbound,
             )?;
             atomic_bytes(&core_config_path, final_config.as_bytes(), 0o600)?;
@@ -3320,6 +3649,12 @@ fn publish_server_activation(
                 },
                 0o600,
             )?;
+            seal_compatibility_directories(&staging, &configuration.compatibility_generations)?;
+            verify_compatibility_directories(
+                &staging,
+                &configuration.compatibility_generations,
+                compatibility_generations,
+            )?;
             File::open(&staging).and_then(|directory| directory.sync_all())?;
             fs::rename(&staging, &generation)
                 .context("publish immutable Server SD-WAN activation")?;
@@ -3327,6 +3662,10 @@ fn publish_server_activation(
             Ok(())
         })();
         if result.is_err() {
+            let _ = make_compatibility_directories_writable(
+                &staging,
+                &configuration.compatibility_generations,
+            );
             let _ = fs::remove_dir_all(&staging);
         }
         result?;
@@ -3357,6 +3696,223 @@ fn publish_pointer(state_dir: &Path, name: &str, target: PathBuf) -> Result<()> 
     Ok(())
 }
 
+fn compatibility_directory_name(segment_generation: u64) -> String {
+    format!("generation-{segment_generation}")
+}
+
+fn write_compatibility_directories(
+    parent: &Path,
+    catalogs: &[RuntimeCompatibilityGeneration],
+    decoded: &[DecodedCompatibilityGeneration],
+    file_mode: u32,
+    directory_mode: u32,
+) -> Result<Vec<ServerCompatibilityGenerationPaths>> {
+    if catalogs.len() != decoded.len() {
+        bail!("compatibility catalog and decoded object counts disagree")
+    }
+    if catalogs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = parent.join("compatibility-generations");
+    ensure_private_directory(&root)?;
+    let mut output = Vec::with_capacity(catalogs.len());
+    for (catalog, decoded_generation) in catalogs.iter().zip(decoded) {
+        if catalog.segment_generation != decoded_generation.segment_generation
+            || catalog.peer_projection_catalog.len() != decoded_generation.peer_projections.len()
+        {
+            bail!("compatibility catalog and decoded objects disagree")
+        }
+        let directory = root.join(compatibility_directory_name(catalog.segment_generation));
+        ensure_private_directory(&directory)?;
+        let segment_snapshot = directory.join("segment.snapshot");
+        atomic_bytes(&segment_snapshot, &decoded_generation.segment, file_mode)?;
+        let peers = directory.join("peer-projections");
+        ensure_private_directory(&peers)?;
+        let mut peer_projections = Vec::with_capacity(catalog.peer_projection_catalog.len());
+        for (entry, envelope) in catalog
+            .peer_projection_catalog
+            .iter()
+            .zip(&decoded_generation.peer_projections)
+        {
+            let path = peers.join(format!(
+                "{}-{}.projection",
+                entry.projection_id.simple(),
+                entry.projection_generation
+            ));
+            atomic_bytes(&path, envelope, file_mode)?;
+            peer_projections.push(path);
+        }
+        set_mode(&peers, directory_mode)?;
+        set_mode(&directory, directory_mode)?;
+        output.push(ServerCompatibilityGenerationPaths {
+            segment_generation: catalog.segment_generation,
+            segment_snapshot,
+            peer_projections,
+        });
+    }
+    set_mode(&root, directory_mode)?;
+    Ok(output)
+}
+
+fn seal_compatibility_directories(
+    parent: &Path,
+    catalogs: &[RuntimeCompatibilityGeneration],
+) -> Result<()> {
+    if catalogs.is_empty() {
+        return Ok(());
+    }
+    let root = parent.join("compatibility-generations");
+    for catalog in catalogs {
+        let directory = root.join(compatibility_directory_name(catalog.segment_generation));
+        set_mode(&directory.join("segment.snapshot"), 0o400)?;
+        let peers = directory.join("peer-projections");
+        for entry in &catalog.peer_projection_catalog {
+            set_mode(
+                &peers.join(format!(
+                    "{}-{}.projection",
+                    entry.projection_id.simple(),
+                    entry.projection_generation
+                )),
+                0o400,
+            )?;
+        }
+        set_mode(&peers, 0o500)?;
+        set_mode(&directory, 0o500)?;
+    }
+    set_mode(&root, 0o500)
+}
+
+fn make_compatibility_directories_writable(
+    parent: &Path,
+    catalogs: &[RuntimeCompatibilityGeneration],
+) -> Result<()> {
+    if catalogs.is_empty() {
+        return Ok(());
+    }
+    let root = parent.join("compatibility-generations");
+    if !root.exists() {
+        return Ok(());
+    }
+    set_mode(&root, 0o700)?;
+    for catalog in catalogs {
+        let directory = root.join(compatibility_directory_name(catalog.segment_generation));
+        if !directory.exists() {
+            continue;
+        }
+        set_mode(&directory, 0o700)?;
+        let peers = directory.join("peer-projections");
+        if peers.exists() {
+            set_mode(&peers, 0o700)?;
+            for entry in &catalog.peer_projection_catalog {
+                let path = peers.join(format!(
+                    "{}-{}.projection",
+                    entry.projection_id.simple(),
+                    entry.projection_generation
+                ));
+                if path.exists() {
+                    set_mode(&path, 0o600)?;
+                }
+            }
+        }
+        let segment = directory.join("segment.snapshot");
+        if segment.exists() {
+            set_mode(&segment, 0o600)?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_compatibility_directories(
+    parent: &Path,
+    catalogs: &[RuntimeCompatibilityGeneration],
+    decoded: &[DecodedCompatibilityGeneration],
+) -> Result<()> {
+    if catalogs.len() != decoded.len() {
+        bail!("compatibility catalog and decoded object counts disagree")
+    }
+    let root = parent.join("compatibility-generations");
+    if catalogs.is_empty() {
+        if root.exists() {
+            bail!("immutable Runtime generation has an unexpected compatibility directory")
+        }
+        return Ok(());
+    }
+    require_read_only_directory(&root)?;
+    for (catalog, decoded_generation) in catalogs.iter().zip(decoded) {
+        let directory = root.join(compatibility_directory_name(catalog.segment_generation));
+        require_read_only_directory(&directory)?;
+        if read_bounded(
+            &directory.join("segment.snapshot"),
+            MAX_ROUTE_ENVELOPE_BYTES as u64,
+        )? != decoded_generation.segment
+        {
+            bail!("immutable compatibility segment snapshot has conflicting content")
+        }
+        require_read_only_file(&directory.join("segment.snapshot"))?;
+        let peers = directory.join("peer-projections");
+        require_read_only_directory(&peers)?;
+        for (entry, envelope) in catalog
+            .peer_projection_catalog
+            .iter()
+            .zip(&decoded_generation.peer_projections)
+        {
+            if read_bounded(
+                &peers.join(format!(
+                    "{}-{}.projection",
+                    entry.projection_id.simple(),
+                    entry.projection_generation
+                )),
+                MAX_ROUTE_ENVELOPE_BYTES as u64,
+            )? != *envelope
+            {
+                bail!("immutable compatibility Peer projection has conflicting content")
+            }
+            require_read_only_file(&peers.join(format!(
+                "{}-{}.projection",
+                entry.projection_id.simple(),
+                entry.projection_generation
+            )))?;
+        }
+    }
+    Ok(())
+}
+
+fn require_read_only_file(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect read-only compatibility file: {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("compatibility catalog object must be a regular file")
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o222 != 0 {
+            bail!("compatibility catalog object must be read-only")
+        }
+    }
+    Ok(())
+}
+
+fn require_read_only_directory(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "inspect read-only compatibility directory: {}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("compatibility catalog path must be a real directory")
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o222 != 0 {
+            bail!("compatibility catalog directory must be read-only")
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn publish_configuration_generation(
     state_dir: &Path,
@@ -3365,6 +3921,8 @@ fn publish_configuration_generation(
     projection: &[u8],
     peer_catalog: &[RuntimePeerProjection],
     peer_projections: &[Vec<u8>],
+    compatibility_catalogs: &[RuntimeCompatibilityGeneration],
+    decoded_compatibility: &[DecodedCompatibilityGeneration],
     route_key: &[u8],
     manifest: &[u8],
     discovery: &[u8],
@@ -3392,9 +3950,22 @@ fn publish_configuration_generation(
                     0o600,
                 )?;
             }
+            write_compatibility_directories(
+                &staging,
+                compatibility_catalogs,
+                decoded_compatibility,
+                0o600,
+                0o700,
+            )?;
             atomic_bytes(&staging.join("route-signing-public-key"), route_key, 0o600)?;
             atomic_bytes(&staging.join("configuration-v1.json"), manifest, 0o600)?;
             atomic_bytes(&staging.join("discovery-v1.json"), discovery, 0o600)?;
+            seal_compatibility_directories(&staging, compatibility_catalogs)?;
+            verify_compatibility_directories(
+                &staging,
+                compatibility_catalogs,
+                decoded_compatibility,
+            )?;
             File::open(&staging)
                 .and_then(|directory| directory.sync_all())
                 .context("sync staged Runtime configuration")?;
@@ -3405,6 +3976,7 @@ fn publish_configuration_generation(
                 .context("sync Runtime generation directory")
         })();
         if write_result.is_err() {
+            let _ = make_compatibility_directories_writable(&staging, compatibility_catalogs);
             let _ = fs::remove_dir_all(&staging);
         }
         write_result?;
@@ -3444,6 +4016,11 @@ fn publish_configuration_generation(
                 bail!("immutable Peer projection has conflicting content")
             }
         }
+        verify_compatibility_directories(
+            &generation,
+            compatibility_catalogs,
+            decoded_compatibility,
+        )?;
     }
 
     let current = state_dir.join("configuration");
@@ -4141,7 +4718,49 @@ default via 192.0.2.1 dev eth0 proto static
             segment_snapshot: "AA".into(),
             site_projection: "AA".into(),
             peer_projection_catalog: Vec::new(),
+            compatibility_generations: Vec::new(),
             grant_verification_keys: Vec::new(),
+        }
+    }
+
+    fn compatibility_generation() -> RuntimeCompatibilityGeneration {
+        RuntimeCompatibilityGeneration {
+            segment_generation: 3,
+            segment_content_hash: "55".repeat(32),
+            segment_snapshot: URL_SAFE_NO_PAD.encode(b"compatibility-segment"),
+            peer_projection_catalog: vec![RuntimePeerProjection {
+                projection_id: Uuid::from_bytes([10; 16]),
+                projection_generation: 4,
+                projection_content_hash: "66".repeat(32),
+                site_projection: URL_SAFE_NO_PAD.encode(b"compatibility-peer"),
+            }],
+        }
+    }
+
+    fn compatibility_report(
+        configuration: &RuntimeConfiguration,
+        generation: &RuntimeCompatibilityGeneration,
+    ) -> VerifiedControlReport {
+        let projection = &generation.peer_projection_catalog[0];
+        let now = unix_now().unwrap();
+        VerifiedControlReport {
+            schema_version: 1,
+            ok: true,
+            tenant_id: identity().tenant_id.unwrap().simple().to_string(),
+            segment_id: configuration.segment_id.simple().to_string(),
+            site_id: Uuid::from_bytes([12; 16]).simple().to_string(),
+            attachment_id: Uuid::from_bytes([13; 16]).simple().to_string(),
+            projection_id: projection.projection_id.simple().to_string(),
+            device_id: Uuid::from_bytes([14; 16]).simple().to_string(),
+            device_key_id: Uuid::from_bytes([15; 16]).simple().to_string(),
+            segment_generation: generation.segment_generation,
+            segment_content_hash: Some(generation.segment_content_hash.clone()),
+            segment_not_before: Some(now.saturating_sub(1)),
+            segment_stale_until: Some(now + 60),
+            projection_generation: projection.projection_generation,
+            projection_content_hash: projection.projection_content_hash.clone(),
+            projection_not_before: Some(now.saturating_sub(1)),
+            projection_stale_until: Some(now + 60),
         }
     }
 
@@ -4200,12 +4819,99 @@ default via 192.0.2.1 dev eth0 proto static
             &[4, 5],
             &configuration.peer_projection_catalog,
             &peers,
+            &[],
+            &[],
         );
         let first = configuration_delivery_digest(&configuration, &objects).unwrap();
         configuration.route_signing_key_id = "route-2".into();
         let second = configuration_delivery_digest(&configuration, &objects).unwrap();
         assert_ne!(first, second);
         assert_eq!(first.len(), 64);
+
+        configuration.compatibility_generations = vec![compatibility_generation()];
+        let decoded =
+            decode_compatibility_generations(&configuration.compatibility_generations).unwrap();
+        let with_compatibility = configuration_objects_digest(
+            &[1, 2, 3],
+            &[4, 5],
+            &configuration.peer_projection_catalog,
+            &peers,
+            &configuration.compatibility_generations,
+            &decoded,
+        );
+        assert_ne!(objects, with_compatibility);
+    }
+
+    #[test]
+    fn compatibility_catalog_accepts_only_one_exact_previous_generation() {
+        let identity = identity();
+        let mut configuration = configuration();
+        configuration.compatibility_generations = vec![compatibility_generation()];
+        validate_configuration(&configuration, &identity).unwrap();
+
+        configuration.compatibility_generations[0].segment_generation = 2;
+        assert!(validate_configuration(&configuration, &identity).is_err());
+        configuration.compatibility_generations[0].segment_generation = 3;
+        configuration.compatibility_generations[0]
+            .peer_projection_catalog
+            .clear();
+        assert!(validate_configuration(&configuration, &identity).is_err());
+
+        let generation = compatibility_generation();
+        configuration.compatibility_generations = vec![generation.clone(), generation];
+        assert!(validate_configuration(&configuration, &identity).is_err());
+    }
+
+    #[test]
+    fn compatibility_report_rejects_mixed_generation_hash_and_device_identity() {
+        let identity = identity();
+        let mut configuration = configuration();
+        configuration.compatibility_generations = vec![compatibility_generation()];
+        let generation = &configuration.compatibility_generations[0];
+        let projection = &generation.peer_projection_catalog[0];
+        let mut report = compatibility_report(&configuration, generation);
+        validate_compatibility_report(&report, &configuration, generation, projection, &identity)
+            .unwrap();
+
+        report.segment_generation = configuration.segment_generation;
+        assert!(validate_compatibility_report(
+            &report,
+            &configuration,
+            generation,
+            projection,
+            &identity,
+        )
+        .is_err());
+        report = compatibility_report(&configuration, generation);
+        report.segment_content_hash = Some("77".repeat(32));
+        assert!(validate_compatibility_report(
+            &report,
+            &configuration,
+            generation,
+            projection,
+            &identity,
+        )
+        .is_err());
+        report = compatibility_report(&configuration, generation);
+        report.device_key_id = identity.device_key_id.simple().to_string();
+        assert!(validate_compatibility_report(
+            &report,
+            &configuration,
+            generation,
+            projection,
+            &identity,
+        )
+        .is_err());
+        report = compatibility_report(&configuration, generation);
+        report.projection_stale_until = Some(unix_now().unwrap().saturating_sub(1));
+        assert!(validate_compatibility_report(
+            &report,
+            &configuration,
+            generation,
+            projection,
+            &identity,
+        )
+        .is_err());
     }
 
     #[test]
@@ -4223,8 +4929,13 @@ default via 192.0.2.1 dev eth0 proto static
             device_id: identity.device_id.simple().to_string(),
             device_key_id: identity.device_key_id.simple().to_string(),
             segment_generation: configuration.segment_generation,
+            segment_content_hash: None,
+            segment_not_before: None,
+            segment_stale_until: None,
             projection_generation: configuration.projection_generation,
             projection_content_hash: configuration.projection_content_hash.clone(),
+            projection_not_before: None,
+            projection_stale_until: None,
         };
         validate_verified_report(&report, &configuration, &identity).unwrap();
         report.device_id = Uuid::new_v4().simple().to_string();
@@ -4250,6 +4961,8 @@ default via 192.0.2.1 dev eth0 proto static
             b"projection-1",
             &[],
             &[],
+            &[],
+            &[],
             b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             br#"{"generation":1}"#,
             br#"{"schema_version":1}"#,
@@ -4272,6 +4985,8 @@ default via 192.0.2.1 dev eth0 proto static
             b"projection-2",
             &[],
             &[],
+            &[],
+            &[],
             b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             br#"{"generation":2}"#,
             br#"{"schema_version":1}"#,
@@ -4286,6 +5001,52 @@ default via 192.0.2.1 dev eth0 proto static
                 .unwrap()
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn compatibility_generation_is_published_in_an_independent_read_only_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = compatibility_generation();
+        let decoded = decode_compatibility_generations(std::slice::from_ref(&catalog)).unwrap();
+        let paths = write_compatibility_directories(
+            directory.path(),
+            std::slice::from_ref(&catalog),
+            &decoded,
+            0o400,
+            0o500,
+        )
+        .unwrap();
+        verify_compatibility_directories(
+            directory.path(),
+            std::slice::from_ref(&catalog),
+            &decoded,
+        )
+        .unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(
+            fs::metadata(&paths[0].segment_snapshot)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o400
+        );
+        assert!(paths[0]
+            .segment_snapshot
+            .starts_with(directory.path().join("compatibility-generations")));
+
+        make_compatibility_directories_writable(directory.path(), std::slice::from_ref(&catalog))
+            .unwrap();
+        assert_eq!(
+            fs::metadata(paths[0].segment_snapshot.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
         );
     }
 
@@ -4548,6 +5309,11 @@ default via 192.0.2.1 dev eth0 proto static
             Path::new("/secure/segment.snapshot"),
             Path::new("/secure/local.projection"),
             &[PathBuf::from("/secure/peer.projection")],
+            &[ServerCompatibilityGenerationPaths {
+                segment_generation: 3,
+                segment_snapshot: PathBuf::from("/secure/compatibility/segment.snapshot"),
+                peer_projections: vec![PathBuf::from("/secure/compatibility/peer.projection")],
+            }],
             &[ServerOutboundPeerActivation {
                 candidate_id: "13".repeat(16),
                 tunnel_id: 42,
@@ -4570,6 +5336,14 @@ default via 192.0.2.1 dev eth0 proto static
         assert_eq!(
             document["sdwan"]["peer_projections"][0].as_str(),
             Some("/secure/peer.projection")
+        );
+        assert_eq!(
+            document["sdwan"]["compatibility_generations"][0]["segment_generation"].as_integer(),
+            Some(3)
+        );
+        assert_eq!(
+            document["sdwan"]["compatibility_generations"][0]["peer_projections"][0].as_str(),
+            Some("/secure/compatibility/peer.projection")
         );
         assert_eq!(
             document["sdwan"]["outbound_peers"][0]["candidate_id"].as_str(),
@@ -4596,6 +5370,7 @@ default via 192.0.2.1 dev eth0 proto static
             Path::new("segment"),
             Path::new("local"),
             &[PathBuf::from("peer")],
+            &[],
             &[],
         )
         .is_err());
