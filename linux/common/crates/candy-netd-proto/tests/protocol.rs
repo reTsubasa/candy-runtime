@@ -156,6 +156,16 @@ fn lifecycle_is_two_phase_idempotent_and_generation_bound() {
     assert!(session.apply(&commit).is_ok());
     assert!(session.apply(&rollback).is_ok());
 
+    let mut replacement = prepare.clone();
+    replacement.owner.pid += 1;
+    assert!(session.apply(&replacement).is_ok());
+    let replacement_rollback = NetdRequest {
+        request_id: 4,
+        owner: replacement.owner,
+        operation: NetdOperation::Rollback,
+    };
+    assert!(session.apply(&replacement_rollback).is_ok());
+
     let mut divergent = prepare;
     let NetdOperation::Prepare(ref mut declaration) = divergent.operation else {
         unreachable!()

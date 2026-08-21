@@ -591,16 +591,22 @@ impl NetdSession {
             .map_err(|_| NetdSessionError::InvalidDeclaration)?;
         let mut advancing_generation = false;
         if let Some(owner) = self.owner {
-            if owner.instance_id != request.owner.instance_id || owner.pid != request.owner.pid {
+            let stopped_prepare = self.phase == SessionPhase::Stopped
+                && matches!(request.operation, NetdOperation::Prepare(_));
+            if stopped_prepare && request.owner.generation > owner.generation {
+                advancing_generation = true;
+            } else if stopped_prepare
+                && owner.instance_id == request.owner.instance_id
+                && owner.generation == request.owner.generation
+            {
+                // A completed rollback may be retried by a replacement agent
+                // process, but only for the exact retained declaration below.
+            } else if owner.instance_id != request.owner.instance_id
+                || owner.pid != request.owner.pid
+            {
                 return Err(NetdSessionError::OwnerMismatch);
-            }
-            if owner.generation != request.owner.generation {
-                advancing_generation = self.phase == SessionPhase::Stopped
-                    && request.owner.generation > owner.generation
-                    && matches!(request.operation, NetdOperation::Prepare(_));
-                if !advancing_generation {
-                    return Err(NetdSessionError::GenerationConflict);
-                }
+            } else if owner.generation != request.owner.generation {
+                return Err(NetdSessionError::GenerationConflict);
             }
         }
         if advancing_generation {
@@ -614,6 +620,7 @@ impl NetdSession {
                         return Err(NetdSessionError::GenerationConflict);
                     }
                     if self.phase == SessionPhase::Stopped {
+                        self.owner = Some(request.owner);
                         self.phase = SessionPhase::Prepared;
                     }
                     return Ok(());

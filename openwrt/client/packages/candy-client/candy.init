@@ -2122,10 +2122,12 @@ generate_config() {
 		json_string "$dns_egress_resolver"
 		printf ',"bootstrap_resolvers":'
 		json_string_list "$dns_bootstrap_resolvers"
-		printf ',"rules":['
-		FIRST_DNS_RULE=1
-		config_foreach write_dns_rule dns_rule
-		printf ']'
+		if uci -q show candy 2>/dev/null | grep -q "=dns_rule"; then
+			printf ',"rules":['
+			FIRST_DNS_RULE=1
+			config_foreach write_dns_rule dns_rule
+			printf ']'
+		fi
 		printf '}'
 		printf '}'
 		printf ',"performance":{"mode":'
