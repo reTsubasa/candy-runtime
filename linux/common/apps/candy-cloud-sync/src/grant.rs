@@ -340,14 +340,24 @@ pub fn fetch_from_cloud(
     match classify_grant_http_status(status) {
         "success" => {}
         "transient" => {
+            let detail = response
+                .text()
+                .ok()
+                .filter(|body| !body.is_empty() && body.len() <= 4096)
+                .unwrap_or_default();
             return Err(FetchFailure::Transient(anyhow::anyhow!(
-                "Cloud Grant issuance is temporarily unavailable with HTTP {status}"
-            )))
+                "Cloud Grant issuance is temporarily unavailable with HTTP {status}{detail}"
+            )));
         }
         _ => {
+            let detail = response
+                .text()
+                .ok()
+                .filter(|body| !body.is_empty() && body.len() <= 4096)
+                .unwrap_or_default();
             return Err(FetchFailure::Denied(anyhow::anyhow!(
-                "Cloud rejected Grant issuance with HTTP {status}"
-            )))
+                "Cloud rejected Grant issuance with HTTP {status}{detail}"
+            )));
         }
     }
     let content_type = response

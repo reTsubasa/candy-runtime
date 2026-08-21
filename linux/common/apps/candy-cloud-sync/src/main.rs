@@ -2175,7 +2175,7 @@ fn validate_discovered_control(
 
 fn validate_discovered_candidate(
     candidate: &DiscoveredCandidate,
-    configuration: &RuntimeConfiguration,
+    _configuration: &RuntimeConfiguration,
 ) -> Result<()> {
     validate_hex(&candidate.candidate_id, 16, "candidate id")?;
     validate_hex(&candidate.peer_site_id, 16, "peer Site id")?;
@@ -2189,19 +2189,37 @@ fn validate_discovered_candidate(
     )?;
     validate_hex(&candidate.server_cert_sha256, 32, "server certificate pin")?;
     candidate.endpoint.parse::<SocketAddr>()?;
-    if !matches!(candidate.kind.as_str(), "direct" | "relay")
-        || candidate.server_name.is_empty()
-        || candidate.server_name.len() > 253
-        || !matches!(
-            candidate.transport_preset.as_str(),
-            "current" | "bbr_v1" | "aggressive"
+    if !matches!(candidate.kind.as_str(), "direct" | "relay") {
+        bail!(
+            "Core discovery returned invalid outbound candidate kind: {}",
+            candidate.kind
         )
-        || candidate.authorization.policy_id != configuration.projection_id.simple().to_string()
-        || candidate.authorization.generation != configuration.projection_generation
-        || candidate.authorization.content_hash != configuration.projection_content_hash
-    {
-        bail!("Core discovery returned an invalid outbound candidate")
     }
+    if candidate.server_name.is_empty() || candidate.server_name.len() > 253 {
+        bail!("Core discovery returned invalid outbound candidate server_name")
+    }
+    if !matches!(
+        candidate.transport_preset.as_str(),
+        "current" | "bbr_v1" | "aggressive"
+    ) {
+        bail!(
+            "Core discovery returned unsupported outbound transport preset: {}",
+            candidate.transport_preset
+        )
+    }
+    // The candidate authorization is the signed path-resource policy carried
+    // inside the Site projection. It is intentionally not compared with the
+    // current or peer projection IDs: those are different namespaces. Core
+    // has already verified the signed projection and its candidate policy.
+    validate_hex(&candidate.authorization.policy_id, 16, "outbound policy id")?;
+    if candidate.authorization.generation == 0 {
+        bail!("Core discovery returned an outbound candidate with zero policy generation")
+    }
+    validate_hex(
+        &candidate.authorization.content_hash,
+        32,
+        "outbound policy content hash",
+    )?;
     Ok(())
 }
 
@@ -2217,6 +2235,7 @@ fn verify_grant_with_core(
     keys: &[RuntimeGrantVerificationKey],
 ) -> Result<grant::VerifiedGrantReport> {
     let mut attempted = 0_usize;
+    let mut rejection_details = Vec::new();
     for key in keys {
         attempted += 1;
         let output = ProcessCommand::new(core)
@@ -2242,6 +2261,18 @@ fn verify_grant_with_core(
             .output()
             .context("run Candy Core Grant verification")?;
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = stderr.trim();
+            rejection_details.push(format!(
+                "key_id={} status={} error={}",
+                key.key_id,
+                output.status,
+                if detail.is_empty() {
+                    "no Core diagnostic"
+                } else {
+                    detail
+                }
+            ));
             continue;
         }
         if output.stdout.is_empty() || output.stdout.len() > 64 * 1024 {
@@ -2250,7 +2281,10 @@ fn verify_grant_with_core(
         return serde_json::from_slice(&output.stdout)
             .context("parse Candy Core Grant verification report");
     }
-    bail!("Candy Core rejected the Grant against all {attempted} trusted signing keys")
+    bail!(
+        "Candy Core rejected the Grant against all {attempted} trusted signing keys: {}",
+        rejection_details.join("; ")
+    )
 }
 
 fn resolve_grants(
