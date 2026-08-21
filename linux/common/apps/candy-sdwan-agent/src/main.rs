@@ -213,6 +213,12 @@ enum ReadinessState {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadinessWait {
+    Ready,
+    ShutdownRequested,
+}
+
 fn parse_ipv4(value: &str) -> Result<[u8; 4]> {
     let mut octets = value.split('.');
     let result = [
@@ -822,14 +828,20 @@ fn wait_for_core_readiness(
     child: &mut Child,
     readiness_token: &str,
     netd: &mut NetdClient,
-) -> Result<()> {
+) -> Result<ReadinessWait> {
     let deadline = Instant::now()
         .checked_add(Duration::from_millis(args.readiness_timeout_ms))
         .context("Core readiness deadline overflow")?;
     let renew_every = Duration::from_millis((args.lease_ms / 3).max(1_000));
     let mut next_renewal = Instant::now() + renew_every;
     loop {
+        if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+            return Ok(ReadinessWait::ShutdownRequested);
+        }
         if let Some(status) = child.try_wait().context("wait for candidate Candy Core")? {
+            if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+                return Ok(ReadinessWait::ShutdownRequested);
+            }
             bail!(
                 "Candy Core exited before SD-WAN readiness with status {}",
                 status.code().unwrap_or(1)
@@ -837,8 +849,11 @@ fn wait_for_core_readiness(
         }
         let readiness =
             read_core_readiness(&args.status, args.generation, child.id(), readiness_token)?;
+        if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+            return Ok(ReadinessWait::ShutdownRequested);
+        }
         if matches!(readiness, Some(ReadinessState::Ready)) {
-            return Ok(());
+            return Ok(ReadinessWait::Ready);
         }
         let server_listener_ready = args.core_role == CoreRole::Server
             && matches!(readiness, Some(ReadinessState::ListenerReady));
@@ -847,9 +862,6 @@ fn wait_for_core_readiness(
         // complete; netd remains prepared but uncommitted until Active.
         if Instant::now() >= deadline && !server_listener_ready {
             bail!("Candy Core SD-WAN readiness timed out")
-        }
-        if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
-            bail!("SD-WAN agent shutdown requested before Core route readiness")
         }
         if !activation_pointer_unchanged(args)? {
             bail!("Cloud candidate changed before Core route readiness")
@@ -1061,6 +1073,8 @@ fn run(args: RuntimeArgs) -> Result<()> {
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
         .expect("SD-WAN agent test lock poisoned");
+    #[cfg(test)]
+    SHUTDOWN_REQUESTED.store(false, Ordering::Relaxed);
 
     if args.generation == 0 {
         return fail_before_prepare(
@@ -1180,15 +1194,30 @@ fn run(args: RuntimeArgs) -> Result<()> {
             );
         }
     };
-    if let Err(error) = wait_for_core_readiness(&args, &mut child, &readiness_token, &mut netd) {
-        return fail_after_rollback(
-            &args,
-            &mut child,
-            &mut netd,
-            "Candy Core readiness failed",
-            "core_readiness_failed",
-            error,
-        );
+    match wait_for_core_readiness(&args, &mut child, &readiness_token, &mut netd) {
+        Ok(ReadinessWait::Ready) => {}
+        Ok(ReadinessWait::ShutdownRequested) => {
+            stop_core(&mut child);
+            let rollback = rollback_or_report(&mut netd, "SD-WAN agent shutdown before readiness");
+            let receipt = remove_activation_receipt(args.activation_ready.as_deref());
+            rollback?;
+            receipt?;
+            eprintln!(
+                "level=info event=sdwan_stopped generation={} phase=readiness rollback_ok=true",
+                owner.generation
+            );
+            return Ok(());
+        }
+        Err(error) => {
+            return fail_after_rollback(
+                &args,
+                &mut child,
+                &mut netd,
+                "Candy Core readiness failed",
+                "core_readiness_failed",
+                error,
+            )
+        }
     }
     if let Err(error) = netd.commit() {
         return fail_after_rollback(
@@ -1532,6 +1561,33 @@ sleep 30
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
+    fn install_fake_shutdown_core(path: &Path) {
+        let script = r#"#!/bin/sh
+set -eu
+status=
+token=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --status) shift; status=$1 ;;
+        --readiness-token) shift; token=$1 ;;
+    esac
+    shift
+done
+[ -n "$status" ]
+[ -n "$token" ]
+rm -f "$0"
+umask 077
+status_tmp="$status.$$".tmp
+trap 'rm -f "$status_tmp"' EXIT
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"starting","configured_peers":0,"active_peers":0,"required_route_owners":0,"ready_route_owners":0,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+kill -TERM "$PPID"
+sleep 30
+"#;
+        fs::write(path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
     #[test]
     fn activation_descriptor_is_bound_to_immutable_candidate_target() {
         let (_root, candidate, activation_id) = activation_fixture();
@@ -1639,6 +1695,25 @@ sleep 30
         );
         let value: serde_json::Value = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
         assert_eq!(value["error_code"], "core_readiness_failed");
+    }
+
+    #[test]
+    fn server_shutdown_during_readiness_rolls_back_without_rejection_or_fallback() {
+        let (_root, mut args) = server_runtime_fixture();
+        install_fake_shutdown_core(&args.core);
+        let receipt = args.activation_ready.clone().unwrap();
+        write_private(&receipt, b"stale receipt");
+        args.readiness_timeout_ms = 2_000;
+        let netd = start_netd_mock(&args.socket, None);
+
+        let result = run(args);
+
+        netd.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            !receipt.exists(),
+            "normal shutdown retained or replaced the activation receipt"
+        );
     }
 
     #[test]

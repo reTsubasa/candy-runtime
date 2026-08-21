@@ -82,9 +82,15 @@ audit_event() {
 ensure_directories() {
 	umask 077
 	[ ! -L "$state_dir" ] || fail "SD-WAN state directory must not be a symbolic link"
-	mkdir -p "$state_dir" "$run_dir"
+	mkdir -p "$state_dir"
 	chmod 0700 "$state_dir"
-	chmod 0755 "$run_dir"
+	if [ -e "$run_dir" ] || [ -L "$run_dir" ]; then
+		[ -d "$run_dir" ] && [ ! -L "$run_dir" ] ||
+			fail "SD-WAN runtime directory must be a real directory"
+	else
+		mkdir -p "$run_dir"
+		chmod 0755 "$run_dir"
+	fi
 }
 
 delegate_state() {

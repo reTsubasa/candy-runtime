@@ -100,9 +100,16 @@ grep -F '"state":"reconnecting"' "$run/sdwan-status.json" >/dev/null || fail "re
 run_runtime stopped
 grep -F '"state":"stopped"' "$run/sdwan-status.json" >/dev/null || fail "stopped state missing"
 
+chmod 0770 "$run"
+run_runtime stopped
+run_mode=$(stat -c '%a' "$run" 2>/dev/null || stat -f '%Lp' "$run")
+[ "$run_mode" = 770 ] || fail "stopped changed existing runtime directory mode to $run_mode"
+
 run_runtime fail-open core-exit
 grep -F '"state":"fail-open"' "$run/sdwan-status.json" >/dev/null || fail "fail-open state missing"
 [ -f "$state/config-v1.json" ] || fail "fail-open removed durable enrollment intent"
+run_mode=$(stat -c '%a' "$run" 2>/dev/null || stat -f '%Lp' "$run")
+[ "$run_mode" = 770 ] || fail "fail-open changed existing runtime directory mode to $run_mode"
 
 mkdir -p "$state/generations/test-generation"
 mkdir -p "$state/activations/test-activation" "$state/grants/test-pool"
