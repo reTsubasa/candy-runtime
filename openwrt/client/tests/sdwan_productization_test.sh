@@ -81,6 +81,9 @@ if grep -F ' | od ' "$init" >/dev/null; then
 	 fail "SD-WAN init must not depend on od, which is absent from the base image"
 fi
 grep -F 'ensure_sdwan_generation' "$init" >/dev/null || fail "SD-WAN transaction generation is not persisted"
+grep -F 'sdwan_activation_committed()' "$init" >/dev/null || fail "SD-WAN activation receipt is not consumed"
+grep -F 'result=activation_in_progress' "$init" >/dev/null || fail "SD-WAN reconciliation does not preserve an in-flight data plane"
+grep -F 'result=activated' "$init" >/dev/null || fail "SD-WAN reconciliation does not promote a committed activation"
 grep -F '"$CANDY_SDWAN_AGENT" --socket "$CANDY_NETD_SOCKET"' "$init" >/dev/null || fail "SD-WAN agent lifecycle contract is missing"
 grep -F -- '--activation "$CANDY_SDWAN_CANDIDATE"' "$init" >/dev/null || fail "Cloud activation pointer is not passed to the agent"
 grep -F -- '--status "$CANDY_SDWAN_STATUS_FILE"' "$init" >/dev/null || fail "SD-WAN agent does not pass the Core status path"

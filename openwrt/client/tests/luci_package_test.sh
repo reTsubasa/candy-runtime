@@ -1032,6 +1032,11 @@ assert_contains "$core_view" 'core\.current_manifest'
 assert_contains "$core_view" 'process_api_version'
 assert_contains "$core_view" 'protocol_version'
 assert_contains "$core_view" 'target_arch'
+assert_contains "$core_view" 'candyCoreBindForm'
+assert_contains "$core_view" 'event\.preventDefault\(\)'
+assert_contains "$core_view" 'X-Requested-With'
+assert_not_contains "$core_view" 'location\.reload'
+assert_contains "$controller" 'HTTP_X_REQUESTED_WITH.*XMLHttpRequest'
 assert_not_contains "$update_view" 'data\.core && data\.core\.installed'
 assert_not_contains "$update_view" 'candy-update-core-installed'
 assert_contains "$update_view" 'candyUpdateCorePageUrl'
@@ -1507,10 +1512,12 @@ source = source.replace(/"<%=[\s\S]*?%>"/g, '"/test"').replace(/<%=[\s\S]*?%>/g,
 source = source.replace(/\nrefreshCandyCoreStatus\(\);\s*$/, "");
 
 class Element {
-	constructor(tag) { this.tagName = tag; this.children = []; this.style = {}; this.disabled = false; this._text = ""; }
+	constructor(tag) { this.tagName = tag; this.children = []; this.style = {}; this.disabled = false; this._text = ""; this.dataset = {}; this.listeners = {}; this.action = "/core"; }
 	appendChild(child) { this.children.push(child); return child; }
 	set textContent(value) { this._text = String(value); this.children = []; }
 	get textContent() { return this._text; }
+	addEventListener(name, handler) { this.listeners[name] = handler; }
+	getElementsByTagName(tag) { return this.children.filter((child) => child.tagName === tag); }
 }
 
 const elements = {};
@@ -1547,13 +1554,11 @@ const data = {
 };
 context.candyCoreRender(data);
 const rows = elements["candy-core-installed"].children;
-assert.equal(rows.length, 4, "catalog candidates and locally installed Core versions must be merged");
-assert.deepEqual(rows.map((row) => row.children[1].children[0].children.map((tag) => tag.textContent)), [["Latest"], ["Current"], ["Installed"], ["Installed"]]);
-assert.deepEqual([...new Set(rows.flatMap((row) => row.children[1].children[0].children.map((tag) => tag.textContent)))].sort(), ["Current", "Installed", "Latest"]);
-assert.equal(rows[0].children[3].children[0].children[0].name, "version_key");
-assert.equal(rows[0].children[3].children[0].children[0].value, "v0_3_10", "latest download must submit only the signed catalog key");
-assert.deepEqual(rows[1].children[3].children.map((form) => form.children[2].textContent), ["Remove"], "stopped current Core must be removable");
-assert.deepEqual(rows[2].children[3].children.map((form) => form.children[2].textContent), ["Activate", "Remove"], "rollback Core must be removable");
+assert.equal(rows.length, 3, "Core page must only render locally installed versions");
+assert.deepEqual(rows.map((row) => row.children[1].children[0].children.map((tag) => tag.textContent)), [["Current"], ["Installed"], ["Installed"]]);
+assert.deepEqual([...new Set(rows.flatMap((row) => row.children[1].children[0].children.map((tag) => tag.textContent)))].sort(), ["Current", "Installed"]);
+assert.deepEqual(rows[0].children[3].children.map((form) => form.children[2].textContent), ["Remove"], "stopped current Core must be removable");
+assert.deepEqual(rows[1].children[3].children.map((form) => form.children[2].textContent), ["Activate", "Remove"], "rollback Core must be removable");
 assert.equal(elements["candy-core-operation"].textContent, "Core 0.3.7 was removed", "completed removal must use the localized operation template");
 
 data.operation = { state: "completed", action: "install-core", version_key: "v0_3_10", updated_at: 2, message: "untranslated update message" };
@@ -1563,7 +1568,7 @@ assert.equal(elements["candy-core-operation"].textContent, "Core installed; acti
 
 data.core.service_running = true;
 context.candyCoreRender(data);
-assert.equal(elements["candy-core-installed"].children[1].children[3].children.length, 0, "running current Core must not expose removal");
+assert.equal(elements["candy-core-installed"].children[0].children[3].children.length, 0, "running current Core must not expose removal");
 NODE
 
 if grep -R "carrier" "$app_dir" >/dev/null 2>&1; then

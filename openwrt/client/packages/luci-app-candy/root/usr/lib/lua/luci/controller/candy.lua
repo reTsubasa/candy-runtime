@@ -639,6 +639,12 @@ local function start_core_operation(argv)
 		luci.http.status(500, "Internal Server Error")
 		return false
 	end
+	if luci.http.getenv("HTTP_X_REQUESTED_WITH") == "XMLHttpRequest" then
+		luci.http.status(202, "Accepted")
+		luci.http.prepare_content("application/json")
+		luci.http.write('{"accepted":true}\n')
+		return true
+	end
 	luci.http.redirect(luci.dispatcher.build_url("admin", "services", "candy", "core"))
 	return true
 end
@@ -664,6 +670,12 @@ function action_core_install()
 	end
 	if not process.run({ CORE_UPDATE_MANAGER, "install-core", version_key }, { background = true, output = "/tmp/candy-update-manager.log", append = true }) then
 		luci.http.status(500, "Internal Server Error")
+		return
+	end
+	if luci.http.getenv("HTTP_X_REQUESTED_WITH") == "XMLHttpRequest" then
+		luci.http.status(202, "Accepted")
+		luci.http.prepare_content("application/json")
+		luci.http.write('{"accepted":true}\n')
 		return
 	end
 	luci.http.redirect(luci.dispatcher.build_url("admin", "services", "candy", "core"))

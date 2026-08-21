@@ -319,6 +319,18 @@ fi
 "$manager" remove 0.4.2 >/dev/null
 [ ! -e "$cores/0.4.2" ]
 [ ! -e "$cores/previous" ]
+final_status=$($manager status)
+grep -q '"current_version":null' <<EOF
+$final_status
+EOF
+grep -q '"previous_version":null' <<EOF
+$final_status
+EOF
+installed_section=$(printf '%s\n' "$final_status" | sed -n 's/.*,"installed"://p')
+! printf '%s' "$installed_section" | grep -q '"version":"0.4.1"'
+! printf '%s' "$installed_section" | grep -q '"version":"0.4.2"'
+printf '%s' "$installed_section" | grep -q '"version":"0.4.4"'
+printf '%s' "$installed_section" | grep -q '"version":"0.4.5"'
 
 [ "$(wc -l < "$FAKE_SERVICE_LOG")" -ge 3 ]
 

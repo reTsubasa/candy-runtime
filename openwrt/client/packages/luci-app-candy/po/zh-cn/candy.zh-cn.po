@@ -1539,6 +1539,12 @@ msgstr "正在下载并校验 Core"
 msgid "Core installed; activation remains manual"
 msgstr "Core 已安装，仍需手动启用"
 
+msgid "Submitting Core operation"
+msgstr "正在提交核心操作"
+
+msgid "Core operation failed; check Logs for details"
+msgstr "核心操作失败，请查看日志详情"
+
 msgid "Downloading and validating Runtime packages"
 msgstr "正在下载并校验 Runtime 软件包"
 

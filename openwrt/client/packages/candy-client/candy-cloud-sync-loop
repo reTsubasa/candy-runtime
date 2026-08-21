@@ -8,6 +8,7 @@ IDENTITY_FILE=${CANDY_CLOUD_IDENTITY_FILE:-$STATE_DIR/identity/device-identity-v
 INTERVAL=${CANDY_CLOUD_SYNC_INTERVAL:-30}
 RUN_USER=${CANDY_CLOUD_SYNC_USER:-candy-sdwan}
 CANDY_INIT=${CANDY_INIT:-/etc/init.d/candy}
+CANDY_CORE_BIN=${CANDY_CORE_BIN:-/usr/lib/candy/cores/current/candy-core}
 
 reconcile_sdwan() {
 	if "$CANDY_INIT" sdwan_reconcile >/dev/null 2>&1; then
@@ -30,7 +31,7 @@ command -v start-stop-daemon >/dev/null 2>&1 || exit 1
 
 trap 'exit 0' TERM INT
 while identity_available; do
-	if output=$(start-stop-daemon -S -c "$RUN_USER" -x "$SYNC_BIN" -- --state-dir "$STATE_DIR" sync-once 2>&1); then
+	if output=$(start-stop-daemon -S -c "$RUN_USER" -x "$SYNC_BIN" -- --state-dir "$STATE_DIR" --core "$CANDY_CORE_BIN" sync-once 2>&1); then
 		state=$(printf '%s' "$output" | jsonfilter -e '@.state' 2>/dev/null || true)
 		case "$state" in
 			waiting_for_network_configuration|configuration_unchanged|configuration_updated|activation_pending|activation_rejected) ;;

@@ -122,6 +122,14 @@ log_event() {
 		return 0
 	fi
 	mkdir -p "$(dirname "$LOG_FILE")"
+	# The isolated SD-WAN supervisor runs as candy-sdwan but shares the
+	# service log with the root-owned ordinary supervisor. Normalize the
+	# existing file before append so a previous boot cannot turn diagnostics
+	# into a permission error.
+	if [ -e "$LOG_FILE" ] && [ ! -w "$LOG_FILE" ]; then
+		chmod 0660 "$LOG_FILE" 2>/dev/null || true
+		chown root:candy-sdwan "$LOG_FILE" 2>/dev/null || true
+	fi
 	if mkdir "$LOG_FILE.rotate.lock" 2>/dev/null; then
 		rotate_log_file "$LOG_FILE" 1048576 5
 		rmdir "$LOG_FILE.rotate.lock" 2>/dev/null || true
@@ -3359,6 +3367,13 @@ start_service() {
 	rotate_log_file "$LOG_FILE"
 	rotate_log_file "$TRAFFIC_LOG_FILE" 2097152 5
 	log_msg "start requested"
+	# Both the root ordinary service and the isolated candy-sdwan supervisor
+	# write structured lifecycle events. Keep the shared file group-readable
+	# across restarts, including upgrades from older 0600 installations.
+	mkdir -p "$(dirname "$LOG_FILE")"
+	touch "$LOG_FILE" 2>/dev/null || true
+	chmod 0660 "$LOG_FILE" 2>/dev/null || true
+	chown root:candy-sdwan "$LOG_FILE" 2>/dev/null || true
 	sdwan_runtime_state publish || true
 	migrate_legacy_config
 	migrate_candy_node_rule_targets
@@ -3702,6 +3717,21 @@ clear_sdwan_active() {
 	[ ! -e "$CANDY_SDWAN_ACTIVE" ]
 }
 
+sdwan_activation_committed() {
+	local receipt activation_id candidate_target state receipt_target
+	receipt="$CANDY_SDWAN_READY_FILE"
+	[ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+	command -v jsonfilter >/dev/null 2>&1 || return 1
+	state=$(jsonfilter -i "$receipt" -e '@.state' 2>/dev/null || true)
+	activation_id=$(jsonfilter -i "$receipt" -e '@.activation_id' 2>/dev/null || true)
+	receipt_target=$(jsonfilter -i "$receipt" -e '@.candidate_target' 2>/dev/null || true)
+	[ "$state" = committed ] || return 1
+	[ "$activation_id" = "$CANDY_SDWAN_CANDIDATE_HASH" ] || return 1
+	candidate_target="$CANDY_SDWAN_CANDIDATE_TARGET"
+	[ "$receipt_target" = "$candidate_target" ] || return 1
+	return 0
+}
+
 interrupt_sdwan_processes() {
 	local pids
 	pids=$(sdwan_process_pids)
@@ -3716,6 +3746,23 @@ sdwan_reconcile() {
 		active_target=$(sdwan_active_target 2>/dev/null || true)
 		if [ "$active_target" = "$CANDY_SDWAN_CANDIDATE_TARGET" ]; then
 			log_event info sdwan_reconcile "result=unchanged activation=$CANDY_SDWAN_CANDIDATE_HASH ordinary_client=preserved"
+			return 0
+		fi
+		# candy-sdwan-agent publishes this receipt only after Core readiness and
+		# netd commit. Promote the immutable candidate at that point so the next
+		# Cloud poll is idempotent and does not restart a healthy data plane.
+		if sdwan_activation_committed; then
+			if promote_sdwan_active "$CANDY_SDWAN_CANDIDATE_TARGET"; then
+				log_event info sdwan_reconcile "result=activated activation=$CANDY_SDWAN_CANDIDATE_HASH ordinary_client=preserved"
+				return 0
+			fi
+			log_event error sdwan_reconcile "result=activation_pointer_failed activation=$CANDY_SDWAN_CANDIDATE_HASH ordinary_client=preserved"
+			return 1
+		fi
+		# The initial supervisor may still be waiting for the candidate or for
+		# netd. Leave it alone; killing it here creates a reconnect loop.
+		if [ -n "$(sdwan_process_pids)" ] || [ -n "$(sdwan_netd_pids)" ]; then
+			log_event info sdwan_reconcile "result=activation_in_progress activation=$CANDY_SDWAN_CANDIDATE_HASH ordinary_client=preserved"
 			return 0
 		fi
 		sdwan_runtime_state reconnect || true

@@ -40,7 +40,7 @@ end
 			<tr class="tr"><td class="td left"><%:Architecture%></td><td id="candy-core-architecture" class="td left">-</td></tr>
 		</table>
 		<div class="candy-core-actions">
-			<form method="post" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core_rollback')%>">
+			<form id="candy-core-rollback-form" method="post" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core_rollback')%>">
 				<input type="hidden" name="token" value="<%=xml.pcdata(auth_token)%>" />
 				<button id="candy-core-rollback" class="cbi-button cbi-button-action" type="submit"><%:Rollback%></button>
 			</form>
@@ -81,6 +81,8 @@ var candyCoreLabels = {
 	installedCore: <%=js_string(i18n.translate("Core %s was installed"))%>,
 	downloadingCore: <%=js_string(i18n.translate("Downloading and validating Core"))%>,
 	coreReady: <%=js_string(i18n.translate("Core installed; activation remains manual"))%>,
+	submitting: <%=js_string(i18n.translate("Submitting Core operation"))%>,
+	submitFailed: <%=js_string(i18n.translate("Core operation failed; check Logs for details"))%>,
 	none: <%=js_string(i18n.translate("None"))%>
 };
 
@@ -109,11 +111,49 @@ function candyCoreActionForm(url, field, value, label, className, confirmation) 
 	button.type = "submit";
 	button.className = className;
 	button.textContent = label;
-	if (confirmation) form.onsubmit = function() { return window.confirm(confirmation.replace("%s", value)); };
 	form.appendChild(input);
 	form.appendChild(token);
 	form.appendChild(button);
+	candyCoreBindForm(form, url, field, value, confirmation);
 	return form;
+}
+
+function candyCoreBindForm(form, url, field, value, confirmation) {
+	if (!form || form.dataset.candyCoreAsync === "1") return;
+	form.dataset.candyCoreAsync = "1";
+	form.addEventListener("submit", function(event) {
+		event.preventDefault();
+		if (confirmation && !window.confirm(confirmation.replace("%s", value || ""))) return false;
+		var button = form.getElementsByTagName("button")[0];
+		if (button) button.disabled = true;
+		var operationNode = document.getElementById("candy-core-operation");
+		if (operationNode) {
+			operationNode.style.display = "";
+			operationNode.className = "candy-core-operation running";
+			operationNode.textContent = candyCoreLabels.submitting;
+		}
+		var xhr = new XMLHttpRequest();
+		xhr.open("POST", url, true);
+		xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+		xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+		xhr.onreadystatechange = function() {
+			if (xhr.readyState !== 4) return;
+			if (xhr.status >= 200 && xhr.status < 300) {
+				refreshCandyCoreStatus();
+				return;
+			}
+			if (button) button.disabled = false;
+			if (operationNode) {
+				operationNode.className = "candy-core-operation error";
+				operationNode.style.display = "";
+				operationNode.textContent = candyCoreLabels.submitFailed;
+			}
+		};
+		var parts = ["token=" + encodeURIComponent(candyCoreToken)];
+		if (field) parts.push(encodeURIComponent(field) + "=" + encodeURIComponent(value || ""));
+		xhr.send(parts.join("&"));
+		return false;
+	});
 }
 
 function candyCoreState(label, className) {
@@ -149,19 +189,18 @@ function candyCoreRender(data) {
 	var operationNode = document.getElementById("candy-core-operation");
 	var rollbackButton = document.getElementById("candy-core-rollback");
 	var body = document.getElementById("candy-core-installed");
-	var installed = core.installed || [], candidates = Array.isArray(data.core_candidates) ? data.core_candidates.slice(0, 5) : [];
+	var installed = Array.isArray(core.installed) ? core.installed : [], candidates = Array.isArray(data.core_candidates) ? data.core_candidates.slice(0, 5) : [];
 	var installedByVersion = {}, rendered = {}, rows = [];
 	var busy = coreOperation.state === "running" || updateOperation.state === "running";
 	var row, cell, actions, states;
 	installed.forEach(function(item) { if (item && item.version) installedByVersion[String(item.version)] = item; });
 	candidates.forEach(function(candidate) {
 		if (!candidate || !candidate.version) return;
-		rows.push({ candidate: candidate, local: installedByVersion[String(candidate.version)] || null });
-		rendered[String(candidate.version)] = true;
+		if (installedByVersion[String(candidate.version)]) rendered[String(candidate.version)] = candidate;
 	});
 	installed.forEach(function(item) {
-		if (!item || !item.version || rendered[String(item.version)]) return;
-		rows.push({ candidate: null, local: item });
+		if (!item || !item.version) return;
+		rows.push({ candidate: rendered[String(item.version)] || null, local: item });
 	});
 	candyCoreSetText("candy-core-current", core.current_version);
 	candyCoreSetText("candy-core-previous", core.previous_version);
@@ -190,8 +229,8 @@ function candyCoreRender(data) {
 	rows.forEach(function(entry) {
 		var candidate = entry.candidate, item = entry.local;
 		var version = candidate ? candidate.version : item.version;
-		var isInstalled = candidate ? candidate.installed === true : true;
-		var isCurrent = candidate ? candidate.active === true : item.active === true;
+		var isInstalled = true;
+		var isCurrent = String(version) === String(core.current_version || "");
 		var isLatest = !!(candidate && candidate.latest === true);
 		row = document.createElement("tr"); row.className = "tr";
 		cell = document.createElement("td"); cell.className = "td"; cell.textContent = candyCoreText(version); row.appendChild(cell);
@@ -206,7 +245,6 @@ function candyCoreRender(data) {
 		if (!busy && item && item.managed && (!isCurrent || core.service_running === false)) {
 			actions.appendChild(candyCoreActionForm(candyCoreRemoveUrl, "version", version, candyCoreLabels.remove, "cbi-button cbi-button-negative", isCurrent ? candyCoreLabels.removeCurrentConfirm : candyCoreLabels.removeConfirm));
 		}
-		if (!busy && candidate && isLatest && !isInstalled && candidate.version_key && candidate.compatible !== false && candidate.installable !== false) actions.appendChild(candyCoreActionForm(candyCoreInstallUrl, "version_key", candidate.version_key, candyCoreLabels.downloadLatest, "cbi-button cbi-button-apply"));
 		row.appendChild(actions); body.appendChild(row);
 	});
 }
@@ -224,6 +262,9 @@ function refreshCandyCoreStatus() {
 	};
 	xhr.send(null);
 }
+
+var candyCoreRollbackForm = document.getElementById("candy-core-rollback-form");
+if (candyCoreRollbackForm) candyCoreBindForm(candyCoreRollbackForm, candyCoreRollbackForm.action, null, null, null);
 
 refreshCandyCoreStatus();
 </script>
