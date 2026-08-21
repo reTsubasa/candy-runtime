@@ -12,7 +12,7 @@ mod backend {
     use netlink_packet_route::{
         link::{InfoKind, LinkAttribute, LinkInfo},
         route::{RouteAttribute, RouteMetric, RouteProtocol, RouteScope, RouteType},
-        rule::RuleAttribute,
+        rule::{RuleAction, RuleAttribute},
     };
     use rtnetlink::{new_connection, Handle, LinkUnspec, RouteMessageBuilder};
     use std::fs::OpenOptions;
@@ -391,6 +391,7 @@ mod backend {
                         )
                         .table_id(plan.route_table)
                         .priority(plan.policy_priority)
+                        .action(RuleAction::ToTable)
                         .execute()
                         .await
                         .map_err(|_| NetworkError::Backend)?;

@@ -55,44 +55,93 @@ fn real_linux_backend_prepares_commits_and_rolls_back() {
     let mut transaction = NetworkTransaction::new(backend, journal).unwrap();
     transaction.prepare(owner, declaration).unwrap();
     transaction.commit(owner).unwrap();
-    if let Ok(output) = Command::new("ip")
+    let output = Command::new("ip")
         .args(["-4", "route", "show", "table", "20999"])
         .output()
-    {
-        assert!(output.status.success());
-        let routes = String::from_utf8(output.stdout).unwrap();
-        assert!(routes.contains("10.255.253.0/24 dev candy0"));
-        assert!(routes.contains("10.255.254.0/24 dev candy0"));
-        assert!(routes.contains("throw 192.0.2.254"));
-    }
-    if let Ok(output) = Command::new("nft")
+        .expect("execute ip route show");
+    assert!(
+        output.status.success(),
+        "route table lookup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let routes = String::from_utf8(output.stdout).unwrap();
+    assert!(routes.contains("10.255.253.0/24 dev candy0"));
+    assert!(routes.contains("10.255.254.0/24 dev candy0"));
+    assert!(routes.contains("throw 192.0.2.254"));
+
+    let output = Command::new("nft")
         .args(["list", "table", "inet", "candy_sdwan_20999"])
         .output()
-    {
-        assert!(output.status.success());
-        let ruleset = String::from_utf8(output.stdout).unwrap();
-        assert!(ruleset.contains("candy_sdwan_20999"));
-        assert!(ruleset.contains("tcp option maxseg size set rt mtu"));
+        .expect("execute nft list table");
+    assert!(
+        output.status.success(),
+        "nft table lookup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ruleset = String::from_utf8(output.stdout).unwrap();
+    assert!(ruleset.contains("candy_sdwan_20999"));
+    assert!(ruleset.contains("tcp option maxseg size set rt mtu"));
+
+    let output = Command::new("ip")
+        .args(["-4", "rule", "show"])
+        .output()
+        .expect("execute ip rule show");
+    assert!(
+        output.status.success(),
+        "policy rule lookup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rules = String::from_utf8(output.stdout).unwrap();
+    let owned = rules
+        .lines()
+        .filter(|line| line.contains("lookup 20999"))
+        .collect::<Vec<_>>();
+    assert_eq!(owned.len(), 2);
+    assert!(owned.iter().any(|line| line.contains("to 10.255.253.0/24")));
+    assert!(owned.iter().any(|line| line.contains("to 10.255.254.0/24")));
+    assert!(owned.iter().all(|line| !line.contains(" none ")));
+    for destination in ["10.255.253.1", "10.255.254.1"] {
+        let output = Command::new("ip")
+            .args(["-4", "route", "get", destination])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "route lookup for {destination} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let route = String::from_utf8(output.stdout).unwrap();
+        assert!(route.contains("dev candy0"), "unexpected route: {route}");
+        assert!(route.contains("table 20999"), "unexpected route: {route}");
     }
-    if let Ok(output) = Command::new("ip").args(["-4", "rule", "show"]).output() {
-        assert!(output.status.success());
-        let rules = String::from_utf8(output.stdout).unwrap();
-        let owned = rules
-            .lines()
-            .filter(|line| line.contains("lookup 20999"))
-            .collect::<Vec<_>>();
-        assert_eq!(owned.len(), 2);
-        assert!(owned.iter().any(|line| line.contains("to 10.255.253.0/24")));
-        assert!(owned.iter().any(|line| line.contains("to 10.255.254.0/24")));
+    if let Ok(output) = Command::new("ip")
+        .args(["-details", "-4", "rule", "show"])
+        .output()
+    {
+        if output.status.success() {
+            let rules = String::from_utf8(output.stdout).unwrap();
+            for rule in rules.lines().filter(|line| line.contains("lookup 20999")) {
+                assert!(
+                    !rule.contains(" none "),
+                    "policy rule has no action: {rule}"
+                );
+            }
+        }
     }
     transaction.rollback(owner).unwrap();
     drop(tun);
 
-    if let Ok(output) = Command::new("ip").args(["-4", "rule", "show"]).output() {
-        assert!(output.status.success());
-        let rules = String::from_utf8(output.stdout).unwrap();
-        assert!(!rules.lines().any(|line| line.contains("lookup 20999")));
-    }
+    let output = Command::new("ip")
+        .args(["-4", "rule", "show"])
+        .output()
+        .expect("execute post-rollback ip rule show");
+    assert!(
+        output.status.success(),
+        "post-rollback policy rule lookup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rules = String::from_utf8(output.stdout).unwrap();
+    assert!(!rules.lines().any(|line| line.contains("lookup 20999")));
 
     assert!(!state.join("netd.journal").exists());
     fs::remove_dir_all(state).unwrap();
