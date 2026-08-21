@@ -157,6 +157,7 @@ fn lifecycle_is_two_phase_idempotent_and_generation_bound() {
     assert!(session.apply(&rollback).is_ok());
 
     let mut replacement = prepare.clone();
+    replacement.owner.instance_id = [2; 16];
     replacement.owner.pid += 1;
     assert!(session.apply(&replacement).is_ok());
     let replacement_rollback = NetdRequest {
@@ -176,9 +177,71 @@ fn lifecycle_is_two_phase_idempotent_and_generation_bound() {
         NetdSessionError::GenerationConflict
     );
 
+    let mut changed_exclusion = replacement.clone();
+    changed_exclusion.owner.instance_id = [3; 16];
+    changed_exclusion.owner.pid += 1;
+    let NetdOperation::Prepare(ref mut declaration) = changed_exclusion.operation else {
+        unreachable!()
+    };
+    declaration.exclusions[0].prefix = Ipv4Prefix::new([198, 51, 100, 2], 32).unwrap();
+    assert!(session.apply(&changed_exclusion).is_ok());
+    let changed_exclusion_rollback = NetdRequest {
+        request_id: 5,
+        owner: changed_exclusion.owner,
+        operation: NetdOperation::Rollback,
+    };
+    assert!(session.apply(&changed_exclusion_rollback).is_ok());
+
+    let mut downgrade = replacement.clone();
+    downgrade.owner.instance_id = [4; 16];
+    downgrade.owner.generation -= 1;
+    assert_eq!(
+        session.apply(&downgrade).unwrap_err(),
+        NetdSessionError::GenerationConflict
+    );
+
     divergent.owner.generation = 8;
     assert!(session.apply(&divergent).is_ok());
     assert_eq!(session.phase(), candy_netd_proto::SessionPhase::Prepared);
+}
+
+#[test]
+fn active_generation_rejects_replacement_activation_takeover() {
+    let prepare = NetdRequest {
+        request_id: 1,
+        owner: owner(),
+        operation: NetdOperation::Prepare(declaration()),
+    };
+    let commit = NetdRequest {
+        request_id: 2,
+        owner: owner(),
+        operation: NetdOperation::Commit,
+    };
+    let mut session = NetdSession::new();
+    session.apply(&prepare).unwrap();
+    session.apply(&commit).unwrap();
+
+    let mut takeover = prepare;
+    takeover.owner.instance_id = [2; 16];
+    takeover.owner.pid += 1;
+    assert_eq!(
+        session.apply(&takeover).unwrap_err(),
+        NetdSessionError::OwnerMismatch
+    );
+
+    let mut changed_exclusion = NetdRequest {
+        request_id: 3,
+        owner: owner(),
+        operation: NetdOperation::Prepare(declaration()),
+    };
+    let NetdOperation::Prepare(ref mut declaration) = changed_exclusion.operation else {
+        unreachable!()
+    };
+    declaration.exclusions[0].prefix = Ipv4Prefix::new([198, 51, 100, 2], 32).unwrap();
+    assert_eq!(
+        session.apply(&changed_exclusion).unwrap_err(),
+        NetdSessionError::GenerationConflict
+    );
 }
 
 #[test]

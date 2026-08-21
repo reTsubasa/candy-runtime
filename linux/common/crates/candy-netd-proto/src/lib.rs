@@ -595,12 +595,12 @@ impl NetdSession {
                 && matches!(request.operation, NetdOperation::Prepare(_));
             if stopped_prepare && request.owner.generation > owner.generation {
                 advancing_generation = true;
-            } else if stopped_prepare
-                && owner.instance_id == request.owner.instance_id
-                && owner.generation == request.owner.generation
-            {
-                // A completed rollback may be retried by a replacement agent
-                // process, but only for the exact retained declaration below.
+            } else if stopped_prepare && owner.generation == request.owner.generation {
+                // A completed rollback owns no network state. A replacement
+                // activation may therefore retry this generation, subject to
+                // the retained declaration checks below.
+            } else if stopped_prepare && request.owner.generation < owner.generation {
+                return Err(NetdSessionError::GenerationConflict);
             } else if owner.instance_id != request.owner.instance_id
                 || owner.pid != request.owner.pid
             {
@@ -617,7 +617,13 @@ impl NetdSession {
             NetdOperation::Prepare(declaration) => {
                 if let Some(existing) = &self.declaration {
                     if existing != declaration {
-                        return Err(NetdSessionError::GenerationConflict);
+                        if self.phase == SessionPhase::Stopped
+                            && same_generation_retry_except_exclusions(existing, declaration)
+                        {
+                            self.declaration = Some(declaration.clone());
+                        } else {
+                            return Err(NetdSessionError::GenerationConflict);
+                        }
                     }
                     if self.phase == SessionPhase::Stopped {
                         self.owner = Some(request.owner);
@@ -675,6 +681,22 @@ impl NetdSession {
             }
         }
     }
+}
+
+fn same_generation_retry_except_exclusions(
+    retained: &PrepareDeclaration,
+    retry: &PrepareDeclaration,
+) -> bool {
+    // Exclusions are runtime-derived safety constraints (for example current
+    // Cloud DNS answers), not overlay selectors. Both declarations have
+    // already passed validation, which forbids an exclusion from overlapping
+    // any local or remote route. Keeping every steering field identical means
+    // this retry cannot expand the traffic selected for the overlay.
+    retained.table_id == retry.table_id
+        && retained.overlay_router_ipv4 == retry.overlay_router_ipv4
+        && retained.effective_mtu == retry.effective_mtu
+        && retained.routes == retry.routes
+        && retained.firewall == retry.firewall
 }
 
 impl Default for NetdSession {

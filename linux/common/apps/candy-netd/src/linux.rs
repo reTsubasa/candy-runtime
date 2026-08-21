@@ -229,10 +229,11 @@ mod backend {
             Ok(())
         }
 
-        async fn find_policy_rule(
+        async fn find_policy_rules(
             handle: &Handle,
             plan: &LinuxNetworkPlan,
-        ) -> Result<Option<netlink_packet_route::rule::RuleMessage>, NetworkError> {
+        ) -> Result<Vec<netlink_packet_route::rule::RuleMessage>, NetworkError> {
+            let mut found = Vec::new();
             let mut rules = handle.rule().get(rtnetlink::IpVersion::V4).execute();
             while let Some(rule) = rules.try_next().await.map_err(|_| NetworkError::Backend)? {
                 let priority = rule.attributes.iter().find_map(|value| match value {
@@ -244,10 +245,10 @@ mod backend {
                     _ => None,
                 });
                 if priority == Some(plan.policy_priority) && table == Some(plan.route_table) {
-                    return Ok(Some(rule));
+                    found.push(rule);
                 }
             }
-            Ok(None)
+            Ok(found)
         }
     }
 
@@ -379,15 +380,22 @@ mod backend {
             let plan = Self::plan(declaration)?;
             let handle = self.handle.clone();
             self.with_async(async move {
-                handle
-                    .rule()
-                    .add()
-                    .v4()
-                    .table_id(plan.route_table)
-                    .priority(plan.policy_priority)
-                    .execute()
-                    .await
-                    .map_err(|_| NetworkError::Backend)
+                for destination in &plan.remote_routes {
+                    handle
+                        .rule()
+                        .add()
+                        .v4()
+                        .destination_prefix(
+                            Ipv4Addr::from(destination.network),
+                            destination.prefix_len,
+                        )
+                        .table_id(plan.route_table)
+                        .priority(plan.policy_priority)
+                        .execute()
+                        .await
+                        .map_err(|_| NetworkError::Backend)?;
+                }
+                Ok(())
             })
         }
 
@@ -398,13 +406,15 @@ mod backend {
             let plan = Self::plan(declaration)?;
             let handle = self.handle.clone();
             self.with_async(async move {
-                if let Some(rule) = Self::find_policy_rule(&handle, &plan).await? {
-                    handle
-                        .rule()
-                        .del(rule)
-                        .execute()
-                        .await
-                        .map_err(|_| NetworkError::Backend)?;
+                let rules = Self::find_policy_rules(&handle, &plan).await?;
+                let mut failed = false;
+                for rule in rules {
+                    if handle.rule().del(rule).execute().await.is_err() {
+                        failed = true;
+                    }
+                }
+                if failed {
+                    return Err(NetworkError::Backend);
                 }
                 Ok(())
             })
@@ -581,15 +591,16 @@ impl LinuxNetworkPlan {
         let policy_priority = CANDY_POLICY_PRIORITY_MIN
             .checked_add(declaration.table_id - CANDY_TABLE_MIN)
             .ok_or(NetworkError::Backend)?;
+        let remote_routes = declaration
+            .routes
+            .iter()
+            .filter_map(|route| (route.kind == RouteKind::Remote).then_some(route.prefix))
+            .collect::<Vec<_>>();
         Ok(Self {
             interface_name: CANDY_INTERFACE_NAME,
             route_table: declaration.table_id,
             policy_priority,
-            remote_routes: declaration
-                .routes
-                .iter()
-                .filter_map(|route| (route.kind == RouteKind::Remote).then_some(route.prefix))
-                .collect(),
+            remote_routes,
             exclusions: declaration.exclusions.clone(),
             nft_table_name: format!("candy_sdwan_{}", declaration.table_id),
             route_mtu: declaration.effective_mtu,

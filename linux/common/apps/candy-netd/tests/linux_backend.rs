@@ -29,10 +29,16 @@ fn real_linux_backend_prepares_commits_and_rolls_back() {
         table_id: CANDY_TABLE_MAX,
         overlay_router_ipv4: [100, 127, 255, 254],
         effective_mtu: 1180,
-        routes: vec![RouteDeclaration {
-            prefix: Ipv4Prefix::new([10, 255, 254, 0], 24).unwrap(),
-            kind: RouteKind::Remote,
-        }],
+        routes: vec![
+            RouteDeclaration {
+                prefix: Ipv4Prefix::new([10, 255, 253, 0], 24).unwrap(),
+                kind: RouteKind::Remote,
+            },
+            RouteDeclaration {
+                prefix: Ipv4Prefix::new([10, 255, 254, 0], 24).unwrap(),
+                kind: RouteKind::Remote,
+            },
+        ],
         exclusions: vec![UnderlayExclusion {
             prefix: Ipv4Prefix::new([192, 0, 2, 254], 32).unwrap(),
             kind: UnderlayKind::Management,
@@ -55,6 +61,7 @@ fn real_linux_backend_prepares_commits_and_rolls_back() {
     {
         assert!(output.status.success());
         let routes = String::from_utf8(output.stdout).unwrap();
+        assert!(routes.contains("10.255.253.0/24 dev candy0"));
         assert!(routes.contains("10.255.254.0/24 dev candy0"));
         assert!(routes.contains("throw 192.0.2.254"));
     }
@@ -67,8 +74,25 @@ fn real_linux_backend_prepares_commits_and_rolls_back() {
         assert!(ruleset.contains("candy_sdwan_20999"));
         assert!(ruleset.contains("tcp option maxseg size set rt mtu"));
     }
+    if let Ok(output) = Command::new("ip").args(["-4", "rule", "show"]).output() {
+        assert!(output.status.success());
+        let rules = String::from_utf8(output.stdout).unwrap();
+        let owned = rules
+            .lines()
+            .filter(|line| line.contains("lookup 20999"))
+            .collect::<Vec<_>>();
+        assert_eq!(owned.len(), 2);
+        assert!(owned.iter().any(|line| line.contains("to 10.255.253.0/24")));
+        assert!(owned.iter().any(|line| line.contains("to 10.255.254.0/24")));
+    }
     transaction.rollback(owner).unwrap();
     drop(tun);
+
+    if let Ok(output) = Command::new("ip").args(["-4", "rule", "show"]).output() {
+        assert!(output.status.success());
+        let rules = String::from_utf8(output.stdout).unwrap();
+        assert!(!rules.lines().any(|line| line.contains("lookup 20999")));
+    }
 
     assert!(!state.join("netd.journal").exists());
     fs::remove_dir_all(state).unwrap();

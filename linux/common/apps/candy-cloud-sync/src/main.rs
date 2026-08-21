@@ -1597,7 +1597,7 @@ fn read_active_core_status(state_dir: &Path, run_dir: &Path) -> Result<Option<Co
     if status.generation != descriptor.projection_generation {
         return Ok(None);
     }
-    if !matches!(status.schema_version, 1 | 2 | 3)
+    if !matches!(status.schema_version, 1..=3)
         || status.pid == 0
         || !process_is_alive(status.pid)
         || !matches!(
