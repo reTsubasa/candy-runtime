@@ -7,6 +7,7 @@ use candy_netd_proto::{
 use clap::{Parser, ValueEnum};
 use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -15,7 +16,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_DECLARATION_BYTES: u64 = 1024 * 1024;
 const MIN_LEASE_MS: u64 = 5_000;
@@ -25,6 +26,10 @@ const MAX_READINESS_TIMEOUT_MS: u64 = 120_000;
 const MAX_STATUS_BYTES: u64 = 256 * 1024;
 const MAX_ACTIVATION_BYTES: u64 = 64 * 1024;
 const CORE_TERMINATION_GRACE: Duration = Duration::from_secs(5);
+const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+const RETRY_STABLE_RESET: Duration = Duration::from_secs(60);
+const RETRY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn sanitize_log_value(value: &str) -> String {
@@ -89,7 +94,7 @@ enum CoreRole {
     Server,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct ActivationDescriptor {
     schema_version: u8,
@@ -121,6 +126,9 @@ struct RuntimeArgs {
     readiness_timeout_ms: u64,
     activation_link: Option<PathBuf>,
     activation_target: Option<PathBuf>,
+    activation_descriptor: Option<ActivationDescriptor>,
+    activation_config_sha256: Option<[u8; 32]>,
+    activation_declaration_sha256: Option<[u8; 32]>,
     activation_ready: Option<PathBuf>,
     ordinary_config: Option<PathBuf>,
 }
@@ -393,6 +401,13 @@ fn relative_activation_file(directory: &Path, value: &str, label: &str) -> Resul
     Ok(path)
 }
 
+fn sha256_file(path: &Path) -> Result<[u8; 32]> {
+    Ok(Sha256::digest(
+        fs::read(path).with_context(|| format!("read activation file {}", path.display()))?,
+    )
+    .into())
+}
+
 fn resolve_activation(link: &Path) -> Result<(ActivationDescriptor, PathBuf, PathBuf, PathBuf)> {
     let metadata = fs::symlink_metadata(link)
         .with_context(|| format!("inspect activation pointer {}", link.display()))?;
@@ -470,6 +485,8 @@ fn resolve_runtime_args(args: Args) -> Result<RuntimeArgs> {
             requested_activation
         };
         let (descriptor, relative_target, config, declaration) = resolve_activation(link)?;
+        let config_sha256 = sha256_file(&config)?;
+        let declaration_sha256 = sha256_file(&declaration)?;
         let ordinary_config = args.ordinary_config.clone();
         if descriptor.core_role == CoreRole::Server {
             let ordinary = ordinary_config
@@ -497,6 +514,9 @@ fn resolve_runtime_args(args: Args) -> Result<RuntimeArgs> {
             readiness_timeout_ms: args.readiness_timeout_ms,
             activation_link: Some(link.to_path_buf()),
             activation_target: Some(relative_target),
+            activation_descriptor: Some(descriptor),
+            activation_config_sha256: Some(config_sha256),
+            activation_declaration_sha256: Some(declaration_sha256),
             activation_ready: args.activation_ready,
             ordinary_config,
         });
@@ -524,6 +544,9 @@ fn resolve_runtime_args(args: Args) -> Result<RuntimeArgs> {
         readiness_timeout_ms: args.readiness_timeout_ms,
         activation_link: None,
         activation_target: None,
+        activation_descriptor: None,
+        activation_config_sha256: None,
+        activation_declaration_sha256: None,
         activation_ready: args.activation_ready,
         ordinary_config: None,
     })
@@ -730,6 +753,57 @@ fn activation_pointer_unchanged(args: &RuntimeArgs) -> Result<bool> {
     }
 }
 
+fn activation_binding_unchanged(args: &RuntimeArgs) -> Result<bool> {
+    let (
+        Some(link),
+        Some(expected_target),
+        Some(expected_descriptor),
+        Some(expected_config_sha256),
+        Some(expected_declaration_sha256),
+    ) = (
+        args.activation_link.as_deref(),
+        args.activation_target.as_deref(),
+        args.activation_descriptor.as_ref(),
+        args.activation_config_sha256,
+        args.activation_declaration_sha256,
+    )
+    else {
+        return Ok(false);
+    };
+    if !activation_pointer_unchanged(args)? {
+        return Ok(false);
+    }
+    let (descriptor, target, config, declaration) = resolve_activation(link)?;
+    Ok(descriptor == *expected_descriptor
+        && target == expected_target
+        && config == args.config
+        && declaration == args.declaration
+        && sha256_file(&config)? == expected_config_sha256
+        && sha256_file(&declaration)? == expected_declaration_sha256
+        && descriptor.core_role == args.core_role
+        && descriptor.projection_generation == args.generation)
+}
+
+fn activation_retry_eligible(args: &RuntimeArgs) -> Result<bool> {
+    if !activation_binding_unchanged(args)? {
+        return Ok(false);
+    }
+    let descriptor = args
+        .activation_descriptor
+        .as_ref()
+        .context("retry requires an authenticated activation descriptor")?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("read system time before SD-WAN retry")?
+        .as_secs();
+    Ok(grant_retry_eligible(descriptor, now))
+}
+
+fn grant_retry_eligible(descriptor: &ActivationDescriptor, now: u64) -> bool {
+    (descriptor.grant_refresh_after_unix == 0 && descriptor.grant_expires_at_unix == 0)
+        || descriptor.grant_expires_at_unix > now
+}
+
 fn validate_activation_command(
     activation: &Path,
     expected_core_role: CoreRole,
@@ -843,10 +917,14 @@ fn wait_for_core_readiness(
             if shutdown_requested() {
                 return Ok(ReadinessWait::ShutdownRequested);
             }
-            bail!(
+            // Preserve an authenticated Core rejection or malformed readiness
+            // report as a hard failure. Only an exit without such evidence is
+            // eligible for reconnect retry.
+            read_core_readiness(&args.status, args.generation, child.id(), readiness_token)?;
+            return Err(anyhow::Error::new(TransientReadinessFailure(format!(
                 "Candy Core exited before SD-WAN readiness with status {}",
                 status.code().unwrap_or(1)
-            )
+            ))));
         }
         let readiness =
             read_core_readiness(&args.status, args.generation, child.id(), readiness_token)?;
@@ -862,7 +940,9 @@ fn wait_for_core_readiness(
         // connected. Keep Core alive in that phase so the peer's next dial can
         // complete; netd remains prepared but uncommitted until Active.
         if Instant::now() >= deadline && !server_listener_ready {
-            bail!("Candy Core SD-WAN readiness timed out")
+            return Err(anyhow::Error::new(TransientReadinessFailure(
+                "Candy Core SD-WAN readiness timed out".into(),
+            )));
         }
         if !activation_pointer_unchanged(args)? {
             bail!("Cloud candidate changed before Core route readiness")
@@ -1019,6 +1099,162 @@ fn finish_shutdown_after_rollback(
     Ok(())
 }
 
+#[derive(Debug)]
+struct RetryableFailure {
+    error_code: &'static str,
+    detail: String,
+}
+
+impl std::fmt::Display for RetryableFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.error_code, self.detail)
+    }
+}
+
+impl std::error::Error for RetryableFailure {}
+
+#[derive(Debug)]
+struct TransientReadinessFailure(String);
+
+impl std::fmt::Display for TransientReadinessFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TransientReadinessFailure {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetryWait {
+    Retry,
+    Stop,
+}
+
+#[derive(Debug)]
+struct RetryBackoff {
+    next: Duration,
+}
+
+impl RetryBackoff {
+    fn new() -> Self {
+        Self {
+            next: RETRY_INITIAL_DELAY,
+        }
+    }
+
+    fn delay_after_failure(&mut self, attempt_uptime: Duration) -> Duration {
+        if attempt_uptime >= RETRY_STABLE_RESET {
+            self.next = RETRY_INITIAL_DELAY;
+        }
+        let delay = self.next;
+        self.next = self.next.saturating_mul(2).min(RETRY_MAX_DELAY);
+        delay
+    }
+}
+
+fn retry_after_rollback(
+    args: &RuntimeArgs,
+    child: &mut Child,
+    netd: &mut NetdClient,
+    cause: &str,
+    error_code: &'static str,
+    error: anyhow::Error,
+) -> Result<()> {
+    eprintln!(
+        "level=warn event=sdwan_runtime_interrupted error_code={} error={}",
+        error_code,
+        sanitize_log_value(&format!("{error:#}"))
+    );
+    stop_core(child);
+    rollback_or_report(netd, cause)?;
+    remove_activation_receipt(args.activation_ready.as_deref())?;
+    remove_stale_status(&args.status)?;
+    if shutdown_requested() {
+        eprintln!(
+            "level=info event=sdwan_stopped generation={} phase=runtime_failure rollback_ok=true",
+            args.generation
+        );
+        return Ok(());
+    }
+    Err(anyhow::Error::new(RetryableFailure {
+        error_code,
+        detail: format!("{error:#}"),
+    }))
+}
+
+fn wait_before_retry(args: &RuntimeArgs, delay: Duration) -> Result<RetryWait> {
+    let mut ordinary_child: Option<Child> = if args.core_role == CoreRole::Server {
+        #[cfg(not(test))]
+        {
+            Some(spawn_ordinary_server(args)?)
+        }
+        #[cfg(test)]
+        {
+            None
+        }
+    } else {
+        None
+    };
+    if ordinary_child.is_some() {
+        eprintln!(
+            "level=info event=sdwan_retry_fail_open generation={} mode=ordinary_only",
+            args.generation
+        );
+    }
+    let deadline = Instant::now()
+        .checked_add(delay)
+        .context("SD-WAN retry deadline overflow")?;
+    loop {
+        if shutdown_requested() {
+            if let Some(child) = ordinary_child.as_mut() {
+                stop_core(child);
+            }
+            remove_activation_receipt(args.activation_ready.as_deref())?;
+            return Ok(RetryWait::Stop);
+        }
+        if !activation_pointer_unchanged(args)? {
+            if let Some(child) = ordinary_child.as_mut() {
+                stop_core(child);
+            }
+            remove_activation_receipt(args.activation_ready.as_deref())?;
+            eprintln!(
+                "level=info event=sdwan_retry_cancelled generation={} reason=candidate_changed",
+                args.generation
+            );
+            return Ok(RetryWait::Stop);
+        }
+        if let Some(child) = ordinary_child.as_mut() {
+            if let Some(status) = child
+                .try_wait()
+                .context("wait for ordinary Candy Server during SD-WAN retry")?
+            {
+                eprintln!(
+                    "level=warn event=sdwan_retry_fail_open_exit generation={} exit={}",
+                    args.generation,
+                    status.code().unwrap_or(1)
+                );
+                ordinary_child = None;
+            }
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(RETRY_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
+    }
+    if let Some(child) = ordinary_child.as_mut() {
+        stop_core(child);
+    }
+    if !activation_retry_eligible(args)? {
+        remove_activation_receipt(args.activation_ready.as_deref())?;
+        eprintln!(
+            "level=info event=sdwan_retry_cancelled generation={} reason=candidate_invalid_or_expired",
+            args.generation
+        );
+        return Ok(RetryWait::Stop);
+    }
+    Ok(RetryWait::Retry)
+}
+
 fn fail_before_prepare(
     args: &RuntimeArgs,
     cause: &str,
@@ -1121,21 +1357,10 @@ fn fail_without_core(
     }
 }
 
-fn run(args: RuntimeArgs) -> Result<()> {
-    // `run` installs process-wide signal handlers and exercises a shared child
-    // process lifecycle. Serialize the in-process fixtures so parallel test
-    // scheduling cannot make readiness timing or signal ownership nondeterministic.
-    #[cfg(test)]
-    let _test_guard = RUN_TEST_LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .expect("SD-WAN agent test lock poisoned");
-    #[cfg(test)]
-    SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
-
+fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     if args.generation == 0 {
         return fail_before_prepare(
-            &args,
+            args,
             "invalid SD-WAN generation",
             "invalid_generation",
             anyhow::anyhow!("generation must be non-zero"),
@@ -1143,7 +1368,7 @@ fn run(args: RuntimeArgs) -> Result<()> {
     }
     if !(MIN_LEASE_MS..=MAX_LEASE_MS).contains(&args.lease_ms) {
         return fail_before_prepare(
-            &args,
+            args,
             "invalid SD-WAN lease",
             "invalid_lease",
             anyhow::anyhow!("lease-ms is outside the supported bound"),
@@ -1151,7 +1376,7 @@ fn run(args: RuntimeArgs) -> Result<()> {
     }
     if !(MIN_READINESS_TIMEOUT_MS..=MAX_READINESS_TIMEOUT_MS).contains(&args.readiness_timeout_ms) {
         return fail_before_prepare(
-            &args,
+            args,
             "invalid Core readiness timeout",
             "invalid_readiness_timeout",
             anyhow::anyhow!("readiness-timeout-ms is outside the supported bound"),
@@ -1159,7 +1384,7 @@ fn run(args: RuntimeArgs) -> Result<()> {
     }
     if let Err(error) = install_shutdown_handlers() {
         return fail_before_prepare(
-            &args,
+            args,
             "install SD-WAN shutdown handlers",
             "signal_handler_failed",
             error,
@@ -1169,7 +1394,7 @@ fn run(args: RuntimeArgs) -> Result<()> {
         Ok(declaration) => declaration,
         Err(error) => {
             return fail_before_prepare(
-                &args,
+                args,
                 "invalid netd declaration",
                 "declaration_invalid",
                 error,
@@ -1183,7 +1408,7 @@ fn run(args: RuntimeArgs) -> Result<()> {
         Ok(deadline) => deadline,
         Err(error) => {
             return fail_before_prepare(
-                &args,
+                args,
                 "invalid monotonic lease deadline",
                 "lease_clock_failed",
                 error,
@@ -1194,7 +1419,7 @@ fn run(args: RuntimeArgs) -> Result<()> {
         Ok(instance_id) => instance_id,
         Err(error) => {
             return fail_before_prepare(
-                &args,
+                args,
                 "invalid SD-WAN instance identity",
                 "instance_id_invalid",
                 error,
@@ -1215,12 +1440,12 @@ fn run(args: RuntimeArgs) -> Result<()> {
     let prepared = match netd.prepare(declaration).context("netd prepare") {
         Ok(prepared) => prepared,
         Err(error) => {
-            return fail_before_prepare(&args, "netd prepare failed", "netd_prepare_failed", error)
+            return fail_before_prepare(args, "netd prepare failed", "netd_prepare_failed", error)
         }
     };
     if let Err(error) = remove_stale_status(&args.status) {
         return fail_without_core(
-            &args,
+            args,
             &mut netd,
             "stale Core readiness cleanup failed",
             "status_cleanup_failed",
@@ -1231,7 +1456,7 @@ fn run(args: RuntimeArgs) -> Result<()> {
         Ok(token) => token,
         Err(error) => {
             return fail_without_core(
-                &args,
+                args,
                 &mut netd,
                 "Core readiness token generation failed",
                 "readiness_token_failed",
@@ -1239,11 +1464,11 @@ fn run(args: RuntimeArgs) -> Result<()> {
             )
         }
     };
-    let mut child = match spawn_core(&args, &prepared.tun, &readiness_token) {
+    let mut child = match spawn_core(args, &prepared.tun, &readiness_token) {
         Ok(child) => child,
         Err(error) => {
             return fail_without_core(
-                &args,
+                args,
                 &mut netd,
                 "Candy Core start failed",
                 "core_start_failed",
@@ -1251,7 +1476,7 @@ fn run(args: RuntimeArgs) -> Result<()> {
             );
         }
     };
-    match wait_for_core_readiness(&args, &mut child, &readiness_token, &mut netd) {
+    match wait_for_core_readiness(args, &mut child, &readiness_token, &mut netd) {
         Ok(ReadinessWait::Ready) => {}
         Ok(ReadinessWait::ShutdownRequested) => {
             stop_core(&mut child);
@@ -1266,29 +1491,51 @@ fn run(args: RuntimeArgs) -> Result<()> {
             return Ok(());
         }
         Err(error) => {
-            return fail_after_rollback(
-                &args,
-                &mut child,
-                &mut netd,
-                "Candy Core readiness failed",
-                "core_readiness_failed",
-                error,
-            )
+            return if error.downcast_ref::<TransientReadinessFailure>().is_some() {
+                retry_after_rollback(
+                    args,
+                    &mut child,
+                    &mut netd,
+                    "Candy Core readiness failed",
+                    "core_readiness_failed",
+                    error,
+                )
+            } else {
+                fail_after_rollback(
+                    args,
+                    &mut child,
+                    &mut netd,
+                    "Candy Core readiness failed",
+                    "core_readiness_failed",
+                    error,
+                )
+            }
         }
     }
     if let Err(error) = netd.commit() {
-        return fail_after_rollback(
-            &args,
-            &mut child,
-            &mut netd,
-            "netd commit failed",
-            "netd_commit_failed",
-            error.into(),
-        );
+        return if recovery_attempt {
+            retry_after_rollback(
+                args,
+                &mut child,
+                &mut netd,
+                "netd recovery commit failed",
+                "netd_commit_failed",
+                error.into(),
+            )
+        } else {
+            fail_after_rollback(
+                args,
+                &mut child,
+                &mut netd,
+                "netd commit failed",
+                "netd_commit_failed",
+                error.into(),
+            )
+        };
     }
-    if let Err(error) = write_runtime_activation_receipt(&args, "committed", None) {
+    if let Err(error) = write_runtime_activation_receipt(args, "committed", None) {
         return fail_after_rollback(
-            &args,
+            args,
             &mut child,
             &mut netd,
             "activation receipt publication failed",
@@ -1303,11 +1550,11 @@ fn run(args: RuntimeArgs) -> Result<()> {
     let renew_every = Duration::from_millis((args.lease_ms / 3).max(1_000));
     let mut next_renewal = Instant::now() + renew_every;
     loop {
-        match activation_pointer_unchanged(&args) {
+        match activation_pointer_unchanged(args) {
             Ok(true) => {}
             Ok(false) => {
                 return fail_after_rollback(
-                    &args,
+                    args,
                     &mut child,
                     &mut netd,
                     "Cloud candidate was withdrawn or replaced",
@@ -1317,7 +1564,7 @@ fn run(args: RuntimeArgs) -> Result<()> {
             }
             Err(error) => {
                 return fail_after_rollback(
-                    &args,
+                    args,
                     &mut child,
                     &mut netd,
                     "Cloud candidate pointer inspection failed",
@@ -1341,8 +1588,8 @@ fn run(args: RuntimeArgs) -> Result<()> {
         let child_status = match child.try_wait().context("wait for Candy Core") {
             Ok(status) => status,
             Err(error) => {
-                return fail_after_rollback(
-                    &args,
+                return retry_after_rollback(
+                    args,
                     &mut child,
                     &mut netd,
                     "Candy Core process inspection failed",
@@ -1353,8 +1600,9 @@ fn run(args: RuntimeArgs) -> Result<()> {
         };
         if let Some(status) = child_status {
             let code = status.code().unwrap_or(1);
-            return fail_without_core(
-                &args,
+            return retry_after_rollback(
+                args,
+                &mut child,
                 &mut netd,
                 "Candy Core SD-WAN exited",
                 "core_exit",
@@ -1364,8 +1612,8 @@ fn run(args: RuntimeArgs) -> Result<()> {
         match read_core_readiness(&args.status, args.generation, child.id(), &readiness_token) {
             Ok(Some(ReadinessState::Ready)) => {}
             Ok(Some(ReadinessState::ListenerReady)) => {
-                return fail_after_rollback(
-                    &args,
+                return retry_after_rollback(
+                    args,
                     &mut child,
                     &mut netd,
                     "Candy Core lost SD-WAN route readiness",
@@ -1376,8 +1624,8 @@ fn run(args: RuntimeArgs) -> Result<()> {
                 );
             }
             Ok(Some(ReadinessState::Waiting)) | Ok(None) => {
-                return fail_after_rollback(
-                    &args,
+                return retry_after_rollback(
+                    args,
                     &mut child,
                     &mut netd,
                     "Candy Core lost SD-WAN readiness",
@@ -1387,8 +1635,8 @@ fn run(args: RuntimeArgs) -> Result<()> {
             }
             Ok(Some(ReadinessState::Failed)) => unreachable!("failed readiness returns an error"),
             Err(error) => {
-                return fail_after_rollback(
-                    &args,
+                return retry_after_rollback(
+                    args,
                     &mut child,
                     &mut netd,
                     "Candy Core reported SD-WAN failure",
@@ -1407,8 +1655,8 @@ fn run(args: RuntimeArgs) -> Result<()> {
         }) {
             Ok(deadline) => deadline,
             Err(error) => {
-                return fail_after_rollback(
-                    &args,
+                return retry_after_rollback(
+                    args,
                     &mut child,
                     &mut netd,
                     "netd lease clock failed",
@@ -1418,8 +1666,8 @@ fn run(args: RuntimeArgs) -> Result<()> {
             }
         };
         if let Err(error) = netd.renew_lease(next_deadline) {
-            return fail_after_rollback(
-                &args,
+            return retry_after_rollback(
+                args,
                 &mut child,
                 &mut netd,
                 "netd lease renewal failed",
@@ -1428,6 +1676,47 @@ fn run(args: RuntimeArgs) -> Result<()> {
             );
         }
         next_renewal = Instant::now() + renew_every;
+    }
+}
+
+fn run(args: RuntimeArgs) -> Result<()> {
+    // The signal latch and child lifecycle are process-wide. Keep the test
+    // fixture lock across every retry and reset the latch only after taking it.
+    #[cfg(test)]
+    let _test_guard = RUN_TEST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("SD-WAN agent test lock poisoned");
+    #[cfg(test)]
+    SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+
+    let mut retry_backoff = RetryBackoff::new();
+    let mut recovery_attempt = false;
+    loop {
+        let attempt_started = Instant::now();
+        match run_once(&args, recovery_attempt) {
+            Err(error) if error.downcast_ref::<RetryableFailure>().is_some() => {
+                let error_code = error
+                    .downcast_ref::<RetryableFailure>()
+                    .expect("retryable failure downcast changed")
+                    .error_code;
+                if args.activation_link.is_none() {
+                    return Err(error);
+                }
+                let retry_delay = retry_backoff.delay_after_failure(attempt_started.elapsed());
+                eprintln!(
+                    "level=info event=sdwan_retry_scheduled generation={} error_code={} delay_ms={}",
+                    args.generation,
+                    error_code,
+                    retry_delay.as_millis()
+                );
+                match wait_before_retry(&args, retry_delay)? {
+                    RetryWait::Retry => recovery_attempt = true,
+                    RetryWait::Stop => return Ok(()),
+                }
+            }
+            result => return result,
+        }
     }
 }
 
@@ -1489,8 +1778,8 @@ mod tests {
                 "core_role": "client_sdwan",
                 "core_config": "core.toml",
                 "netd_declaration": "declaration.json",
-                "grant_refresh_after_unix": 100,
-                "grant_expires_at_unix": 200
+                "grant_refresh_after_unix": 4_000_000_000_u64,
+                "grant_expires_at_unix": 4_102_444_800_u64
             })
             .to_string()
             .as_bytes(),
@@ -1524,9 +1813,12 @@ mod tests {
             instance_id: activation_id[..32].to_owned(),
             generation: 7,
             lease_ms: 30_000,
-            readiness_timeout_ms: 1_000,
+            readiness_timeout_ms: 5_000,
             activation_link: Some(candidate),
             activation_target: Some(target),
+            activation_descriptor: None,
+            activation_config_sha256: None,
+            activation_declaration_sha256: None,
             activation_ready: Some(root.path().join("activation-ready-v1.json")),
             ordinary_config: Some(ordinary),
         };
@@ -1651,6 +1943,32 @@ printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","life
 mv -f "$status_tmp" "$status"
 kill -TERM "$PPID"
 sleep 30
+"#;
+        fs::write(path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    fn install_fake_exiting_core(path: &Path) {
+        let script = r#"#!/bin/sh
+set -eu
+status=
+token=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --status) shift; status=$1 ;;
+        --readiness-token) shift; token=$1 ;;
+    esac
+    shift
+done
+[ -n "$status" ]
+[ -n "$token" ]
+umask 077
+status_tmp="$status.$$".tmp
+trap 'rm -f "$status_tmp"' EXIT
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"active","configured_peers":1,"active_peers":1,"required_route_owners":1,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+sleep 1
+exit 17
 "#;
         fs::write(path, script).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1851,6 +2169,9 @@ sleep 30
             readiness_timeout_ms: 20_000,
             activation_link: Some(candidate.clone()),
             activation_target: Some(Path::new("activations").join(activation_id)),
+            activation_descriptor: None,
+            activation_config_sha256: None,
+            activation_declaration_sha256: None,
             activation_ready: None,
             ordinary_config: None,
         };
@@ -1863,6 +2184,260 @@ sleep 30
         .unwrap();
         assert!(!activation_pointer_unchanged(&args).unwrap());
         drop(root);
+    }
+
+    #[test]
+    fn retry_backoff_is_exponential_capped_and_resets_after_stability() {
+        let mut backoff = RetryBackoff::new();
+        assert_eq!(
+            backoff.delay_after_failure(Duration::ZERO),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            backoff.delay_after_failure(Duration::ZERO),
+            Duration::from_secs(2)
+        );
+        for _ in 0..10 {
+            backoff.delay_after_failure(Duration::ZERO);
+        }
+        assert_eq!(
+            backoff.delay_after_failure(Duration::ZERO),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            backoff.delay_after_failure(RETRY_STABLE_RESET),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn retry_wait_is_cancelled_by_candidate_withdrawal() {
+        let (_root, candidate, _) = activation_fixture();
+        let args = resolve_runtime_args(
+            Args::try_parse_from([
+                "candy-sdwan-agent",
+                "run",
+                "--core",
+                "/bin/true",
+                "--activation",
+                candidate.to_str().unwrap(),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        fs::remove_file(&candidate).unwrap();
+        assert_eq!(
+            wait_before_retry(&args, Duration::ZERO).unwrap(),
+            RetryWait::Stop
+        );
+    }
+
+    #[test]
+    fn non_expiring_server_activation_remains_retry_eligible() {
+        let (_root, candidate, _) = activation_fixture();
+        let mut args = resolve_runtime_args(
+            Args::try_parse_from([
+                "candy-sdwan-agent",
+                "run",
+                "--core",
+                "/bin/true",
+                "--activation",
+                candidate.to_str().unwrap(),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        let descriptor = args.activation_descriptor.as_mut().unwrap();
+        descriptor.grant_refresh_after_unix = 0;
+        descriptor.grant_expires_at_unix = 0;
+        assert!(grant_retry_eligible(
+            args.activation_descriptor.as_ref().unwrap(),
+            u64::MAX
+        ));
+    }
+
+    #[test]
+    fn retry_wait_is_cancelled_by_descriptor_change() {
+        let (_root, candidate, _) = activation_fixture();
+        let args = resolve_runtime_args(
+            Args::try_parse_from([
+                "candy-sdwan-agent",
+                "run",
+                "--core",
+                "/bin/true",
+                "--activation",
+                candidate.to_str().unwrap(),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        let descriptor_path = candidate.join("activation-v1.json");
+        let mut descriptor: serde_json::Value =
+            serde_json::from_slice(&fs::read(&descriptor_path).unwrap()).unwrap();
+        descriptor["projection_content_hash"] = serde_json::Value::String("d".repeat(64));
+        write_private(
+            &descriptor_path,
+            serde_json::to_string(&descriptor).unwrap().as_bytes(),
+        );
+        assert_eq!(
+            wait_before_retry(&args, Duration::ZERO).unwrap(),
+            RetryWait::Stop
+        );
+    }
+
+    #[test]
+    fn retry_wait_is_cancelled_by_activation_content_change() {
+        let (_root, candidate, _) = activation_fixture();
+        let args = resolve_runtime_args(
+            Args::try_parse_from([
+                "candy-sdwan-agent",
+                "run",
+                "--core",
+                "/bin/true",
+                "--activation",
+                candidate.to_str().unwrap(),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        write_private(
+            &candidate.join("core.toml"),
+            b"schema_version = 1\nchanged = true\n",
+        );
+        assert_eq!(
+            wait_before_retry(&args, Duration::ZERO).unwrap(),
+            RetryWait::Stop
+        );
+    }
+
+    #[test]
+    fn retry_wait_is_interrupted_by_shutdown() {
+        let _test_guard = RUN_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("SD-WAN agent test lock poisoned");
+        let (_root, candidate, _) = activation_fixture();
+        let args = resolve_runtime_args(
+            Args::try_parse_from([
+                "candy-sdwan-agent",
+                "run",
+                "--core",
+                "/bin/true",
+                "--activation",
+                candidate.to_str().unwrap(),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+        let result = wait_before_retry(&args, Duration::from_secs(30));
+        SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+        assert_eq!(result.unwrap(), RetryWait::Stop);
+    }
+
+    #[test]
+    fn committed_core_exit_rolls_back_before_becoming_retryable() {
+        let (_root, candidate, _) = activation_fixture();
+        let activation = candidate
+            .parent()
+            .unwrap()
+            .join("activations")
+            .join("a".repeat(64));
+        write_private(
+            &activation.join("declaration.json"),
+            br#"{"table_id":20000,"overlay_router_ipv4":"10.250.0.1","effective_mtu":1180,"routes":[{"prefix":"10.0.0.0/24","kind":"local"}],"exclusions":[{"prefix":"198.51.100.1/32","kind":"cloud-api"}],"firewall":{"allow_forward":true,"clamp_tcp_mss":true,"require_ipv4_forwarding":true,"manage_rp_filter":true}}"#,
+        );
+        let core = candidate.parent().unwrap().join("fake-core");
+        install_fake_exiting_core(&core);
+        let socket = candidate.parent().unwrap().join("netd.sock");
+        let receipt = candidate.parent().unwrap().join("activation-ready-v1.json");
+        let core_status = candidate.parent().unwrap().join("core-status.json");
+        let args = resolve_runtime_args(
+            Args::try_parse_from([
+                "candy-sdwan-agent",
+                "run",
+                "--socket",
+                socket.to_str().unwrap(),
+                "--core",
+                core.to_str().unwrap(),
+                "--activation",
+                candidate.to_str().unwrap(),
+                "--activation-ready",
+                receipt.to_str().unwrap(),
+                "--status",
+                core_status.to_str().unwrap(),
+                "--readiness-timeout-ms",
+                "2000",
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+        let status = args.status.clone();
+        let netd = start_netd_mock(&socket, Some(true));
+
+        let error = run_once(&args, false).unwrap_err();
+
+        netd.join().unwrap();
+        let failure = error
+            .downcast_ref::<RetryableFailure>()
+            .expect("committed Core exit was not classified as retryable");
+        assert_eq!(failure.error_code, "core_exit");
+        assert!(!receipt.exists(), "committed receipt survived fail-open");
+        assert!(!status.exists(), "stale Core status survived fail-open");
+        assert!(activation_retry_eligible(&args).unwrap());
+    }
+
+    #[test]
+    fn transient_readiness_exit_remains_retryable_without_rejection() {
+        let (_root, candidate, _) = activation_fixture();
+        let activation = candidate
+            .parent()
+            .unwrap()
+            .join("activations")
+            .join("a".repeat(64));
+        write_private(
+            &activation.join("declaration.json"),
+            br#"{"table_id":20000,"overlay_router_ipv4":"10.250.0.1","effective_mtu":1180,"routes":[{"prefix":"10.0.0.0/24","kind":"local"}],"exclusions":[{"prefix":"198.51.100.1/32","kind":"cloud-api"}],"firewall":{"allow_forward":true,"clamp_tcp_mss":true,"require_ipv4_forwarding":true,"manage_rp_filter":true}}"#,
+        );
+        let core = candidate.parent().unwrap().join("early-exit-core");
+        fs::write(&core, "#!/bin/sh\nexit 17\n").unwrap();
+        fs::set_permissions(&core, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = candidate.parent().unwrap().join("recovery-netd.sock");
+        let receipt = candidate.parent().unwrap().join("activation-ready-v1.json");
+        let core_status = candidate.parent().unwrap().join("recovery-status.json");
+        let args = resolve_runtime_args(
+            Args::try_parse_from([
+                "candy-sdwan-agent",
+                "run",
+                "--socket",
+                socket.to_str().unwrap(),
+                "--core",
+                core.to_str().unwrap(),
+                "--activation",
+                candidate.to_str().unwrap(),
+                "--activation-ready",
+                receipt.to_str().unwrap(),
+                "--status",
+                core_status.to_str().unwrap(),
+                "--readiness-timeout-ms",
+                "2000",
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+        let netd = start_netd_mock(&socket, None);
+
+        let error = run_once(&args, true).unwrap_err();
+
+        netd.join().unwrap();
+        let failure = error
+            .downcast_ref::<RetryableFailure>()
+            .expect("recovery readiness failure was not retryable");
+        assert_eq!(failure.error_code, "core_readiness_failed");
+        assert!(!receipt.exists(), "recovery published a rejection receipt");
+        assert!(!core_status.exists(), "recovery retained stale Core status");
     }
     #[test]
     fn rejects_noncanonical_prefix() {
