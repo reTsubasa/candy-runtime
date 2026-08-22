@@ -212,6 +212,15 @@ struct CoreReadinessStatus {
     fail_open_required: bool,
     #[serde(default)]
     last_error_code: Option<String>,
+    #[serde(default)]
+    paths: Option<Vec<CoreReadinessPath>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreReadinessPath {
+    rtt_sample_count: u64,
+    rx_bytes: u64,
+    rx_idle_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -877,7 +886,16 @@ fn read_core_readiness(
         "active"
             if !status.fail_open_required
                 && status.required_route_owners > 0
-                && status.ready_route_owners > 0 =>
+                && status.ready_route_owners > 0
+                && status.schema_version >= 3
+                && status.paths.as_ref().is_some_and(|paths| {
+                    paths.len() >= status.required_route_owners
+                        && paths.iter().all(|path| {
+                            path.rtt_sample_count > 0
+                                && path.rx_bytes > 0
+                                && path.rx_idle_ms <= 30_000
+                        })
+                }) =>
         {
             ReadinessState::Ready
         }
@@ -1911,7 +1929,7 @@ rm -f "$0"
 umask 077
 status_tmp="$status.$$".tmp
 trap 'rm -f "$status_tmp"' EXIT
-printf '{{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"{}","configured_peers":1,"active_peers":1,"required_route_owners":1,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null}}\n' "$$" "$token" >"$status_tmp"
+printf '{{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"{}","configured_peers":1,"active_peers":1,"required_route_owners":1,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null,"paths":[{{"rtt_sample_count":1,"rx_bytes":1,"rx_idle_ms":0}}]}}\n' "$$" "$token" >"$status_tmp"
 mv -f "$status_tmp" "$status"
 sleep 30
 "#,
@@ -1965,7 +1983,7 @@ done
 umask 077
 status_tmp="$status.$$".tmp
 trap 'rm -f "$status_tmp"' EXIT
-printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"active","configured_peers":1,"active_peers":1,"required_route_owners":1,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null}\n' "$$" "$token" >"$status_tmp"
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"active","configured_peers":1,"active_peers":1,"required_route_owners":1,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null,"paths":[{"rtt_sample_count":1,"rx_bytes":1,"rx_idle_ms":0}]}\n' "$$" "$token" >"$status_tmp"
 mv -f "$status_tmp" "$status"
 sleep 1
 exit 17
@@ -2478,7 +2496,8 @@ exit 17
             "inbound_listener_ready": false,
             "inbound_listener_endpoints": [],
             "fail_open_required": false,
-            "last_error_code": null
+            "last_error_code": null,
+            "paths": if lifecycle == "active" { serde_json::json!([{"rtt_sample_count": 1, "rx_bytes": 1, "rx_idle_ms": 0}]) } else { serde_json::json!([]) }
         })
         .to_string()
     }
@@ -2494,6 +2513,38 @@ exit 17
             Some(ReadinessState::Waiting)
         );
         fs::write(&path, status(9, "active", 1, 1)).unwrap();
+        let mut no_path =
+            serde_json::from_str::<serde_json::Value>(&status(9, "active", 1, 1)).unwrap();
+        no_path.as_object_mut().unwrap().remove("paths");
+        fs::write(&path, serde_json::to_vec(&no_path).unwrap()).unwrap();
+        assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
+        let mut active =
+            serde_json::from_str::<serde_json::Value>(&status(9, "active", 1, 1)).unwrap();
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Ready)
+        );
+        active["paths"] = serde_json::json!([]);
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
+        active["paths"] =
+            serde_json::json!([{ "rtt_sample_count": 0, "rx_bytes": 1, "rx_idle_ms": 0 }]);
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
+        active["configured_peers"] = serde_json::json!(2);
+        active["active_peers"] = serde_json::json!(2);
+        active["required_route_owners"] = serde_json::json!(2);
+        active["ready_route_owners"] = serde_json::json!(2);
+        active["paths"] =
+            serde_json::json!([{ "rtt_sample_count": 1, "rx_bytes": 1, "rx_idle_ms": 0 }]);
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
+        active["paths"] = serde_json::json!([
+            { "rtt_sample_count": 1, "rx_bytes": 1, "rx_idle_ms": 0 },
+            { "rtt_sample_count": 2, "rx_bytes": 1, "rx_idle_ms": 0 }
+        ]);
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
         assert_eq!(
             read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
             Some(ReadinessState::Ready)

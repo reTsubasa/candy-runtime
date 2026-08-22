@@ -91,6 +91,17 @@ CANDY_SDWAN_STATE_DIR="$state" CANDY_SDWAN_RUN_DIR="$run" \
 	CANDY_SDWAN_STATUS_CACHE="$state/status-v1.json" \
 	CANDY_SDWAN_STATUS_FILE="$run/sdwan-status.json" "$runtime" status >/dev/null ||
 	fail "read-only status unexpectedly requires root"
+
+reordered_status='{"dns":{"state":"unavailable"},"registration":{"state":"registered"},"schema_version":1}'
+printf '%s\n' "$reordered_status" >"$run/sdwan-status.json"
+[ "$(run_runtime status)" = "$reordered_status" ] ||
+	fail "status reader rejected a valid Runtime status with reordered fields"
+rm -f "$run/sdwan-status.json"
+printf '%s\n' "$reordered_status" >"$state/status-v1.json"
+[ "$(run_runtime status)" = "$reordered_status" ] ||
+	fail "status reader rejected a valid durable status with reordered fields"
+printf '%s\n' "$reordered_status" >"$run/sdwan-status.json"
+
 inode_before=$(stat -c '%i' "$run/sdwan-status.json" 2>/dev/null || stat -f '%i' "$run/sdwan-status.json")
 run_runtime reconnect
 inode_after=$(stat -c '%i' "$run/sdwan-status.json" 2>/dev/null || stat -f '%i' "$run/sdwan-status.json")

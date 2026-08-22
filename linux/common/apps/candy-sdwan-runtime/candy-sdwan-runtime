@@ -255,27 +255,28 @@ current_registration_state() {
 	fi
 }
 
+valid_status_file() {
+	candidate=$1
+	[ -f "$candidate" ] && [ ! -L "$candidate" ] && [ -r "$candidate" ] || return 1
+	bytes=$(wc -c <"$candidate" | tr -d ' ')
+	[ "$bytes" -gt 0 ] && [ "$bytes" -le 65536 ] || return 1
+	LC_ALL=C grep -Eq '^\{.*"schema_version":[[:space:]]*1([[:space:]]*,.*\}|[[:space:]]*\})[[:space:]]*$' "$candidate"
+}
+
 publish_status() {
 	ensure_directories
-	if [ -f "$durable_status_file" ] && [ ! -L "$durable_status_file" ]; then
-		bytes=$(wc -c <"$durable_status_file" | tr -d ' ')
-		if [ "$bytes" -gt 0 ] && [ "$bytes" -le 65536 ] &&
-			grep -q '^{"schema_version":1,' "$durable_status_file"; then
-			atomic_copy "$durable_status_file" "$published_status_file" 0644
-			return
-		fi
+	if valid_status_file "$durable_status_file"; then
+		atomic_copy "$durable_status_file" "$published_status_file" 0644
+		return
 	fi
 	write_status "$(current_registration_state)" stopped ""
 }
 
 show_status() {
 	for candidate in "$published_status_file" "$durable_status_file"; do
-		if [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ -r "$candidate" ]; then
-			bytes=$(wc -c <"$candidate" | tr -d ' ')
-			if [ "$bytes" -gt 0 ] && [ "$bytes" -le 65536 ] && grep -q '^{"schema_version":1,' "$candidate"; then
-				cat "$candidate"
-				return
-			fi
+		if valid_status_file "$candidate"; then
+			cat "$candidate"
+			return
 		fi
 	done
 	printf '%s\n' '{"schema_version":1,"registration":{"state":"unregistered","cloud_address":"","last_error":""},"runtime":{"state":"unavailable","updated_at":null,"last_error":""},"site":null,"segment":null,"tun":{"state":"unavailable","full_duplex":null},"peers":[],"path":null,"egress":{"local":null,"remote":null},"dns":{"state":"unavailable"}}'
