@@ -2337,6 +2337,10 @@ exit 17
 
     #[test]
     fn committed_core_exit_rolls_back_before_becoming_retryable() {
+        let _test_guard = RUN_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("SD-WAN agent test lock poisoned");
         let (_root, candidate, _) = activation_fixture();
         let activation = candidate
             .parent()
@@ -2390,6 +2394,10 @@ exit 17
 
     #[test]
     fn transient_readiness_exit_remains_retryable_without_rejection() {
+        let _test_guard = RUN_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("SD-WAN agent test lock poisoned");
         let (_root, candidate, _) = activation_fixture();
         let activation = candidate
             .parent()
