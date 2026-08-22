@@ -581,15 +581,23 @@ fn run(args: Args) -> Result<()> {
 }
 
 fn verified_local_runtime_state(state_dir: &Path, run_dir: &Path) -> Result<&'static str> {
+    Ok(verified_local_runtime_snapshot(state_dir, run_dir)?.0)
+}
+
+fn verified_local_runtime_snapshot(
+    state_dir: &Path,
+    run_dir: &Path,
+) -> Result<(&'static str, Option<CoreRuntimeStatus>, Option<String>)> {
     let Some((descriptor, proof)) = read_active_activation(state_dir)? else {
         return if fs::symlink_metadata(state_dir.join("active")).is_ok() {
-            Ok("fail-open")
+            Ok(("fail-open", None, None))
         } else {
-            Ok("reconnecting")
+            Ok(("reconnecting", None, None))
         };
     };
+    let activation_id = Some(descriptor.activation_id.clone());
     if !process_is_alive_and_owned_by_state(proof.agent_pid, state_dir)? {
-        return Ok("fail-open");
+        return Ok(("fail-open", None, activation_id));
     }
     let status_path = run_dir.join(format!("sdwan-{}.status.json", descriptor.activation_id));
     let status = match fs::symlink_metadata(&status_path) {
@@ -598,14 +606,16 @@ fn verified_local_runtime_state(state_dir: &Path, run_dir: &Path) -> Result<&'st
                 .context("read activation-specific Core Runtime status")?
         }
         Ok(_) => bail!("activation-specific Core Runtime status must be a regular file"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok("fail-open"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(("fail-open", None, activation_id))
+        }
         Err(error) => return Err(error).context("inspect activation-specific Core Runtime status"),
     };
     if status.generation != descriptor.projection_generation
         || !valid_core_status_metadata(&status)?
         || !process_is_alive_and_owned_by_state(status.pid, state_dir)?
     {
-        return Ok("fail-open");
+        return Ok(("fail-open", None, activation_id));
     }
     if status.fail_open_required
         || status.last_error_code.is_some()
@@ -614,7 +624,7 @@ fn verified_local_runtime_state(state_dir: &Path, run_dir: &Path) -> Result<&'st
             "failed" | "stopping" | "stopped" | "degraded"
         )
     {
-        return Ok("fail-open");
+        return Ok(("fail-open", Some(status), activation_id));
     }
     if status.lifecycle == "active" {
         if status.configured_peers > 0
@@ -623,18 +633,18 @@ fn verified_local_runtime_state(state_dir: &Path, run_dir: &Path) -> Result<&'st
             && status.ready_route_owners == status.required_route_owners
             && status.last_error_code.is_none()
         {
-            return Ok("running");
+            return Ok(("running", Some(status), activation_id));
         }
-        return Ok("fail-open");
+        return Ok(("fail-open", Some(status), activation_id));
     }
     if status.lifecycle == "starting" {
-        return Ok("reconnecting");
+        return Ok(("reconnecting", Some(status), activation_id));
     }
-    Ok("fail-open")
+    Ok(("fail-open", Some(status), activation_id))
 }
 
 fn project_verified_local_runtime_status(state_dir: &Path, run_dir: &Path) -> Result<&'static str> {
-    let state = verified_local_runtime_state(state_dir, run_dir)?;
+    let (state, core_status, activation_id) = verified_local_runtime_snapshot(state_dir, run_dir)?;
     let durable_path = state_dir.join("status-v1.json");
     let mut document: serde_json::Value = read_bounded_json(&durable_path, MAX_PROFILE_BYTES)
         .context("read product Runtime status")?;
@@ -660,17 +670,14 @@ fn project_verified_local_runtime_status(state_dir: &Path, run_dir: &Path) -> Re
         }),
     );
     clear_product_network_status(&mut document)?;
-    match read_active_product_control(state_dir) {
+    match read_active_product_control(state_dir, activation_id.as_deref()) {
         Ok(Some(control)) => {
-            let projection =
-                read_active_core_status(state_dir, run_dir, false).and_then(|core_status| {
-                    project_product_network_status(
-                        &mut document,
-                        state,
-                        &control,
-                        core_status.as_ref(),
-                    )
-                });
+            let projection = project_product_network_status(
+                &mut document,
+                state,
+                &control,
+                core_status.as_ref(),
+            );
             if let Err(error) = projection {
                 clear_product_network_status(&mut document)?;
                 eprintln!(
@@ -702,13 +709,24 @@ fn clear_product_network_status(document: &mut serde_json::Value) -> Result<()> 
     );
     object.insert("peers".into(), serde_json::json!([]));
     object.insert("path".into(), serde_json::Value::Null);
+    object.insert(
+        "egress".into(),
+        serde_json::json!({"local": null, "remote": null}),
+    );
+    object.insert("dns".into(), serde_json::json!({"state": "unavailable"}));
     Ok(())
 }
 
-fn read_active_product_control(state_dir: &Path) -> Result<Option<VerifiedProductControl>> {
+fn read_active_product_control(
+    state_dir: &Path,
+    expected_activation_id: Option<&str>,
+) -> Result<Option<VerifiedProductControl>> {
     let Some((descriptor, _)) = read_active_activation(state_dir)? else {
         return Ok(None);
     };
+    if expected_activation_id.is_some_and(|expected| expected != descriptor.activation_id) {
+        bail!("active product configuration changed during status projection")
+    }
     let identity: DeviceIdentity = read_bounded_json(
         &state_dir.join("identity/device-identity-v1.json"),
         MAX_PROFILE_BYTES,
@@ -767,6 +785,15 @@ fn read_active_product_control(state_dir: &Path) -> Result<Option<VerifiedProduc
     {
         bail!("active Core inputs do not match the verified product configuration")
     }
+    verify_active_peer_projections(&activation, &configuration.peer_projection_catalog, &peers)?;
+    if descriptor.core_role == "server" {
+        verify_compatibility_directories(
+            &activation,
+            &configuration.compatibility_generations,
+            &compatibility,
+        )
+        .context("verify active Core compatibility inputs")?;
+    }
     let discovery: DiscoveredControlReport =
         read_bounded_json(&generation.join("discovery-v1.json"), 1024 * 1024)
             .context("read verified Core discovery report")?;
@@ -776,6 +803,28 @@ fn read_active_product_control(state_dir: &Path) -> Result<Option<VerifiedProduc
         segment_id: canonical_uuid_hex(&discovery.segment_id)?,
         discovery,
     }))
+}
+
+fn verify_active_peer_projections(
+    activation: &Path,
+    catalog: &[RuntimePeerProjection],
+    decoded: &[Vec<u8>],
+) -> Result<()> {
+    if catalog.len() != decoded.len() {
+        bail!("active Core Peer catalog and decoded input counts disagree")
+    }
+    let active_peers = activation.join("peer-projections");
+    for (entry, envelope) in catalog.iter().zip(decoded) {
+        let path = active_peers.join(format!(
+            "{}-{}.projection",
+            entry.projection_id.simple(),
+            entry.projection_generation
+        ));
+        if read_bounded(&path, MAX_ROUTE_ENVELOPE_BYTES as u64)? != *envelope {
+            bail!("active Core Peer input does not match the verified product configuration")
+        }
+    }
+    Ok(())
 }
 
 fn project_product_network_status(
@@ -802,20 +851,27 @@ fn project_product_network_status(
                 && status.ready_route_owners == status.required_route_owners
                 && !status.fail_open_required
         });
+    let projected_state = if fully_ready {
+        "running"
+    } else if runtime_state == "running" {
+        "fail-open"
+    } else {
+        runtime_state
+    };
     object.insert(
         "tun".into(),
         serde_json::json!({
-            "state": if fully_ready { "running" } else { runtime_state },
+            "state": projected_state,
             "full_duplex": fully_ready
         }),
     );
 
-    let mut peer_sites = BTreeMap::<String, String>::new();
+    let mut peer_sites = BTreeMap::<String, Option<String>>::new();
     let mut candidate_kinds = BTreeMap::<String, (String, Option<String>)>::new();
     for candidate in &control.discovery.outbound_candidates {
         let attachment = canonical_uuid_hex(&candidate.peer_attachment_id)?;
         let site = canonical_uuid_hex(&candidate.peer_site_id)?;
-        peer_sites.insert(attachment.clone(), site);
+        peer_sites.insert(attachment.clone(), Some(site));
         candidate_kinds.insert(
             canonical_uuid_hex(&candidate.candidate_id)?,
             (attachment, Some(candidate.kind.clone())),
@@ -823,9 +879,7 @@ fn project_product_network_status(
     }
     for inbound in &control.discovery.inbound_expected {
         let attachment = canonical_uuid_hex(&inbound.peer_attachment_id)?;
-        peer_sites
-            .entry(attachment.clone())
-            .or_insert_with(|| attachment.clone());
+        peer_sites.entry(attachment.clone()).or_insert(None);
         candidate_kinds
             .entry(canonical_uuid_hex(&inbound.candidate_id)?)
             .or_insert((attachment, None));
@@ -864,10 +918,10 @@ fn project_product_network_status(
                 "id": attachment_id,
                 "name": site_id,
                 "attachment_id": attachment_id,
-                "state": if fully_ready && path.is_some() { "running" } else { runtime_state },
+                "state": if fully_ready && path.is_some() { "running" } else { "unavailable" },
                 "path": path.map(|(_, kind)| serde_json::json!({
                     "kind": kind,
-                    "state": if fully_ready { "running" } else { runtime_state }
+                    "state": if fully_ready { "running" } else { projected_state }
                 }))
             })
         })
@@ -885,7 +939,7 @@ fn project_product_network_status(
             "path".into(),
             serde_json::json!({
                 "kind": path_kinds[0],
-                "state": if fully_ready { "running" } else { runtime_state }
+                "state": if fully_ready { "running" } else { projected_state }
             }),
         );
     }
@@ -5971,13 +6025,50 @@ default via 192.0.2.1 dev eth0 proto static
     }
 
     #[test]
+    fn product_projection_without_bound_core_status_fails_closed() {
+        let mut discovery = discovery();
+        discovery.outbound_candidates.push(DiscoveredCandidate {
+            candidate_id: "13".repeat(16),
+            peer_site_id: "14".repeat(16),
+            peer_attachment_id: "12".repeat(16),
+            kind: "direct".into(),
+            priority: 10,
+            endpoint: "203.0.113.8:8443".into(),
+            node_pool_id: "15".repeat(16),
+            transport_node_id: "16".repeat(16),
+            transport_node_key_id: "17".repeat(16),
+            server_name: "peer.example.test".into(),
+            server_cert_sha256: "18".repeat(32),
+            transport_preset: "current".into(),
+            authorization: CorePolicyRef {
+                policy_id: "19".repeat(16),
+                generation: 1,
+                content_hash: "20".repeat(32),
+            },
+        });
+        let control = VerifiedProductControl {
+            site_id: "05050505-0505-0505-0505-050505050505".into(),
+            segment_id: "06060606-0606-0606-0606-060606060606".into(),
+            discovery,
+        };
+        let mut document = serde_json::json!({});
+        project_product_network_status(&mut document, "running", &control, None).unwrap();
+        assert_eq!(document["tun"]["state"], "fail-open");
+        assert_eq!(document["tun"]["full_duplex"], false);
+        assert_eq!(document["peers"][0]["state"], "unavailable");
+        assert!(document["path"].is_null());
+    }
+
+    #[test]
     fn clearing_product_projection_removes_stale_network_identity() {
         let mut document = serde_json::json!({
             "site": {"id": "stale"},
             "segment": {"id": "stale"},
             "tun": {"state": "running", "full_duplex": true},
             "peers": [{"id": "stale"}],
-            "path": {"kind": "direct"}
+            "path": {"kind": "direct"},
+            "egress": {"local": {"name": "stale"}, "remote": {"name": "stale"}},
+            "dns": {"state": "running"}
         });
         clear_product_network_status(&mut document).unwrap();
         assert!(document["site"].is_null());
@@ -5985,6 +6076,38 @@ default via 192.0.2.1 dev eth0 proto static
         assert_eq!(document["tun"]["state"], "unavailable");
         assert!(document["peers"].as_array().unwrap().is_empty());
         assert!(document["path"].is_null());
+        assert!(document["egress"]["local"].is_null());
+        assert!(document["egress"]["remote"].is_null());
+        assert_eq!(document["dns"]["state"], "unavailable");
+    }
+
+    #[test]
+    fn active_peer_inputs_are_bound_to_the_verified_catalog() {
+        let root = tempfile::tempdir().unwrap();
+        let peers = root.path().join("peer-projections");
+        fs::create_dir(&peers).unwrap();
+        let catalog = vec![RuntimePeerProjection {
+            projection_id: Uuid::from_bytes([10; 16]),
+            projection_generation: 7,
+            projection_content_hash: "33".repeat(32),
+            site_projection: URL_SAFE_NO_PAD.encode(b"signed-peer"),
+        }];
+        let decoded = decode_peer_projections(&catalog).unwrap();
+        let peer_path = peers.join(format!(
+            "{}-{}.projection",
+            catalog[0].projection_id.simple(),
+            catalog[0].projection_generation
+        ));
+        atomic_bytes(&peer_path, &decoded[0], 0o600).unwrap();
+        verify_active_peer_projections(root.path(), &catalog, &decoded).unwrap();
+
+        atomic_bytes(&peer_path, b"different-signed-peer", 0o600).unwrap();
+        assert!(
+            verify_active_peer_projections(root.path(), &catalog, &decoded)
+                .unwrap_err()
+                .to_string()
+                .contains("active Core Peer input")
+        );
     }
 
     #[test]
@@ -6054,7 +6177,7 @@ default via 192.0.2.1 dev eth0 proto static
             &state.join("active-activation-v1.json"),
             &ActiveActivationProof {
                 schema_version: 1,
-                activation_id,
+                activation_id: activation_id.clone(),
                 candidate_target: target.to_str().unwrap().into(),
                 projection_generation: configuration.projection_generation,
                 delivery_etag: format!("\"sha256-{delivery}\""),
@@ -6066,7 +6189,9 @@ default via 192.0.2.1 dev eth0 proto static
         )
         .unwrap();
 
-        let control = read_active_product_control(&state).unwrap().unwrap();
+        let control = read_active_product_control(&state, Some(&activation_id))
+            .unwrap()
+            .unwrap();
         assert_eq!(control.site_id, "05050505-0505-0505-0505-050505050505");
         assert_eq!(control.segment_id, "06060606-0606-0606-0606-060606060606");
 
@@ -6076,7 +6201,7 @@ default via 192.0.2.1 dev eth0 proto static
             0o600,
         )
         .unwrap();
-        assert!(read_active_product_control(&state)
+        assert!(read_active_product_control(&state, Some(&activation_id))
             .unwrap_err()
             .to_string()
             .contains("active Core inputs"));

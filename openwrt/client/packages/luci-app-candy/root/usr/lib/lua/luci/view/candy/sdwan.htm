@@ -96,14 +96,18 @@ local tenant_name = type(profile.tenant_name) == "string" and profile.tenant_nam
 organization_id = type(profile.organization_id) == "string" and profile.organization_id or organization_id
 tenant_id = type(profile.tenant_id) == "string" and profile.tenant_id or tenant_id
 device_id = type(profile.device_id) == "string" and profile.device_id or device_id
-local site_value = type(profile.site_name) == "string" and profile.site_name or object_value(status and status.site, "name")
-local segment_value = type(profile.segment_name) == "string" and profile.segment_name or object_value(status and status.segment, "name")
+local status_site_id = object_value(status and status.site, "id")
+local status_segment_id = object_value(status and status.segment, "id")
+local site_value = status_site_id
+local segment_value = status_segment_id
+if type(profile.site_id) == "string" and profile.site_id == status_site_id and type(profile.site_name) == "string" then site_value = profile.site_name end
+if type(profile.segment_id) == "string" and profile.segment_id == status_segment_id and type(profile.segment_name) == "string" then segment_value = profile.segment_name end
 local peers = type(status and status.peers) == "table" and status.peers or {}
 local path = type(status and status.path) == "table" and status.path or nil
 local tun = type(status and status.tun) == "table" and status.tun or {}
 local egress = type(status and status.egress) == "table" and status.egress or {}
 local dns = type(status and status.dns) == "table" and status.dns or {}
-local network_ready = registration_state == "registered" and site_value ~= nil and site_value ~= "" and segment_value ~= nil and segment_value ~= ""
+local network_ready = registration_state == "registered" and status_site_id ~= nil and status_site_id ~= "" and status_segment_id ~= nil and status_segment_id ~= ""
 local runtime_active = runtime.state == "running" and tun.state ~= "unavailable"
 local sync_failed = sync_status.state == "error"
 local profile_state = registration_state ~= "registered" and "disconnected" or (sync_failed and "error" or (not network_ready and "waiting" or (runtime_active and "active" or "applying")))
