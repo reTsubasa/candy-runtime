@@ -433,6 +433,13 @@ struct LocalRuntimeState {
     state: String,
 }
 
+#[derive(Debug)]
+struct VerifiedProductControl {
+    site_id: String,
+    segment_id: String,
+    discovery: DiscoveredControlReport,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ActivationReadyReceipt {
@@ -652,9 +659,237 @@ fn project_verified_local_runtime_status(state_dir: &Path, run_dir: &Path) -> Re
             String::new()
         }),
     );
+    clear_product_network_status(&mut document)?;
+    match read_active_product_control(state_dir) {
+        Ok(Some(control)) => {
+            let projection =
+                read_active_core_status(state_dir, run_dir, false).and_then(|core_status| {
+                    project_product_network_status(
+                        &mut document,
+                        state,
+                        &control,
+                        core_status.as_ref(),
+                    )
+                });
+            if let Err(error) = projection {
+                clear_product_network_status(&mut document)?;
+                eprintln!(
+                    "level=warn event=product_status_projection_omitted reason={}",
+                    sanitize_log_value(&format!("{error:#}"))
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!(
+            "level=warn event=product_status_projection_omitted reason={}",
+            sanitize_log_value(&format!("{error:#}"))
+        ),
+    }
     atomic_json(&durable_path, &document, 0o600)?;
     atomic_public_json(&run_dir.join("sdwan-status.json"), &document, 0o644)?;
     Ok(state)
+}
+
+fn clear_product_network_status(document: &mut serde_json::Value) -> Result<()> {
+    let object = document
+        .as_object_mut()
+        .context("product Runtime status must be a JSON object")?;
+    object.insert("site".into(), serde_json::Value::Null);
+    object.insert("segment".into(), serde_json::Value::Null);
+    object.insert(
+        "tun".into(),
+        serde_json::json!({"state": "unavailable", "full_duplex": null}),
+    );
+    object.insert("peers".into(), serde_json::json!([]));
+    object.insert("path".into(), serde_json::Value::Null);
+    Ok(())
+}
+
+fn read_active_product_control(state_dir: &Path) -> Result<Option<VerifiedProductControl>> {
+    let Some((descriptor, _)) = read_active_activation(state_dir)? else {
+        return Ok(None);
+    };
+    let identity: DeviceIdentity = read_bounded_json(
+        &state_dir.join("identity/device-identity-v1.json"),
+        MAX_PROFILE_BYTES,
+    )
+    .context("read active product identity")?;
+    validate_identity(&identity)?;
+
+    let generation = state_dir
+        .join("generations")
+        .join(&descriptor.delivery_sha256);
+    let metadata = fs::symlink_metadata(&generation)
+        .context("inspect active product configuration generation")?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("active product configuration generation must be a real directory")
+    }
+    let manifest_bytes = read_bounded(
+        &generation.join("configuration-v1.json"),
+        MAX_CONFIGURATION_BYTES,
+    )?;
+    let configuration: RuntimeConfiguration = serde_json::from_slice(&manifest_bytes)
+        .context("parse active product configuration manifest")?;
+    validate_configuration(&configuration, &identity)?;
+    let segment = decode_envelope(&configuration.segment_snapshot, "active segment snapshot")?;
+    let projection = decode_envelope(&configuration.site_projection, "active Site projection")?;
+    let peers = decode_peer_projections(&configuration.peer_projection_catalog)?;
+    let compatibility = decode_compatibility_generations(&configuration.compatibility_generations)?;
+    let objects_hash = configuration_objects_digest(
+        &segment,
+        &projection,
+        &configuration.peer_projection_catalog,
+        &peers,
+        &configuration.compatibility_generations,
+        &compatibility,
+    );
+    let delivery_digest = configuration_delivery_digest(&configuration, &objects_hash)?;
+    if delivery_digest != descriptor.delivery_sha256
+        || descriptor.delivery_etag != format!("\"sha256-{delivery_digest}\"")
+        || configuration.projection_publication_id != descriptor.projection_publication_id
+        || configuration.projection_content_hash != descriptor.projection_content_hash
+        || configuration.segment_generation != descriptor.segment_generation
+        || configuration.projection_generation != descriptor.projection_generation
+    {
+        bail!("active product configuration is not bound to the committed activation")
+    }
+    let activation = state_dir
+        .join("activations")
+        .join(&descriptor.activation_id);
+    if read_bounded(
+        &activation.join("segment.snapshot"),
+        MAX_ROUTE_ENVELOPE_BYTES as u64,
+    )? != segment
+        || read_bounded(
+            &activation.join("site.projection"),
+            MAX_ROUTE_ENVELOPE_BYTES as u64,
+        )? != projection
+    {
+        bail!("active Core inputs do not match the verified product configuration")
+    }
+    let discovery: DiscoveredControlReport =
+        read_bounded_json(&generation.join("discovery-v1.json"), 1024 * 1024)
+            .context("read verified Core discovery report")?;
+    validate_discovered_control(&discovery, &configuration, &identity)?;
+    Ok(Some(VerifiedProductControl {
+        site_id: canonical_uuid_hex(&discovery.site_id)?,
+        segment_id: canonical_uuid_hex(&discovery.segment_id)?,
+        discovery,
+    }))
+}
+
+fn project_product_network_status(
+    document: &mut serde_json::Value,
+    runtime_state: &str,
+    control: &VerifiedProductControl,
+    core_status: Option<&CoreRuntimeStatus>,
+) -> Result<()> {
+    let object = document
+        .as_object_mut()
+        .context("product Runtime status must be a JSON object")?;
+    object.insert("site".into(), serde_json::json!({"id": control.site_id}));
+    object.insert(
+        "segment".into(),
+        serde_json::json!({"id": control.segment_id}),
+    );
+
+    let fully_ready = runtime_state == "running"
+        && core_status.is_some_and(|status| {
+            status.lifecycle == "active"
+                && status.configured_peers > 0
+                && status.active_peers == status.configured_peers
+                && status.required_route_owners > 0
+                && status.ready_route_owners == status.required_route_owners
+                && !status.fail_open_required
+        });
+    object.insert(
+        "tun".into(),
+        serde_json::json!({
+            "state": if fully_ready { "running" } else { runtime_state },
+            "full_duplex": fully_ready
+        }),
+    );
+
+    let mut peer_sites = BTreeMap::<String, String>::new();
+    let mut candidate_kinds = BTreeMap::<String, (String, Option<String>)>::new();
+    for candidate in &control.discovery.outbound_candidates {
+        let attachment = canonical_uuid_hex(&candidate.peer_attachment_id)?;
+        let site = canonical_uuid_hex(&candidate.peer_site_id)?;
+        peer_sites.insert(attachment.clone(), site);
+        candidate_kinds.insert(
+            canonical_uuid_hex(&candidate.candidate_id)?,
+            (attachment, Some(candidate.kind.clone())),
+        );
+    }
+    for inbound in &control.discovery.inbound_expected {
+        let attachment = canonical_uuid_hex(&inbound.peer_attachment_id)?;
+        peer_sites
+            .entry(attachment.clone())
+            .or_insert_with(|| attachment.clone());
+        candidate_kinds
+            .entry(canonical_uuid_hex(&inbound.candidate_id)?)
+            .or_insert((attachment, None));
+    }
+
+    let mut active_paths = BTreeMap::<String, (&CorePathStatus, String)>::new();
+    if let Some(status) = core_status.filter(|status| status.schema_version >= 2) {
+        for path in &status.paths {
+            let attachment = canonical_uuid_hex(&path.peer_attachment_id)?;
+            if let Some(candidate_id) = path.candidate_id.as_deref() {
+                let candidate_id = canonical_uuid_hex(candidate_id)?;
+                let Some((candidate_attachment, candidate_kind)) =
+                    candidate_kinds.get(&candidate_id)
+                else {
+                    bail!("active Core path is absent from verified control discovery")
+                };
+                if candidate_attachment != &attachment
+                    || candidate_kind
+                        .as_deref()
+                        .is_some_and(|kind| kind != path.path_kind)
+                {
+                    bail!("active Core path does not match verified control discovery")
+                }
+            } else if !peer_sites.contains_key(&attachment) {
+                bail!("active Core path peer is absent from verified control discovery")
+            }
+            active_paths.insert(attachment, (path, path.path_kind.clone()));
+        }
+    }
+
+    let peers = peer_sites
+        .into_iter()
+        .map(|(attachment_id, site_id)| {
+            let path = active_paths.get(&attachment_id);
+            serde_json::json!({
+                "id": attachment_id,
+                "name": site_id,
+                "attachment_id": attachment_id,
+                "state": if fully_ready && path.is_some() { "running" } else { runtime_state },
+                "path": path.map(|(_, kind)| serde_json::json!({
+                    "kind": kind,
+                    "state": if fully_ready { "running" } else { runtime_state }
+                }))
+            })
+        })
+        .collect::<Vec<_>>();
+    object.insert("peers".into(), serde_json::Value::Array(peers));
+
+    let mut path_kinds = active_paths
+        .values()
+        .map(|(_, kind)| kind.as_str())
+        .collect::<Vec<_>>();
+    path_kinds.sort_unstable();
+    path_kinds.dedup();
+    if path_kinds.len() == 1 {
+        object.insert(
+            "path".into(),
+            serde_json::json!({
+                "kind": path_kinds[0],
+                "state": if fully_ready { "running" } else { runtime_state }
+            }),
+        );
+    }
+    Ok(())
 }
 
 fn sync_once(args: &Args) -> Result<()> {
@@ -5627,6 +5862,224 @@ default via 192.0.2.1 dev eth0 proto static
             outbound_candidates: Vec::new(),
             inbound_expected: Vec::new(),
         }
+    }
+
+    fn product_core_status() -> CoreRuntimeStatus {
+        CoreRuntimeStatus {
+            schema_version: 3,
+            generation: 5,
+            pid: std::process::id(),
+            lifecycle: "active".into(),
+            configured_peers: 1,
+            active_peers: 1,
+            required_route_owners: 1,
+            ready_route_owners: 1,
+            fail_open_required: false,
+            last_error_code: None,
+            counters: CorePacketCounters::default(),
+            paths: vec![CorePathStatus {
+                peer_attachment_id: "12".repeat(16),
+                candidate_id: Some("13".repeat(16)),
+                path_kind: "direct".into(),
+                transport: "quic_udp".into(),
+                connection_epoch: 1,
+                rtt_micros: 10_000,
+                rtt_variance_micros: 1_000,
+                rtt_sample_count: 2,
+                tx_bytes: 1,
+                rx_bytes: 1,
+                sent_packets: 1,
+                lost_packets: 0,
+                congestion_window_bytes: 12_000,
+                path_mtu: 1_280,
+                reconnects: 0,
+                path_changes: 0,
+            }],
+            reconnects: 0,
+            path_changes: 0,
+        }
+    }
+
+    #[test]
+    fn product_projection_exposes_verified_network_and_per_peer_path() {
+        let mut discovery = discovery();
+        discovery.outbound_candidates.push(DiscoveredCandidate {
+            candidate_id: "13".repeat(16),
+            peer_site_id: "14".repeat(16),
+            peer_attachment_id: "12".repeat(16),
+            kind: "direct".into(),
+            priority: 10,
+            endpoint: "203.0.113.8:8443".into(),
+            node_pool_id: "15".repeat(16),
+            transport_node_id: "16".repeat(16),
+            transport_node_key_id: "17".repeat(16),
+            server_name: "peer.example.test".into(),
+            server_cert_sha256: "18".repeat(32),
+            transport_preset: "current".into(),
+            authorization: CorePolicyRef {
+                policy_id: "19".repeat(16),
+                generation: 1,
+                content_hash: "20".repeat(32),
+            },
+        });
+        let control = VerifiedProductControl {
+            site_id: canonical_uuid_hex(&discovery.site_id).unwrap(),
+            segment_id: canonical_uuid_hex(&discovery.segment_id).unwrap(),
+            discovery,
+        };
+        let status = product_core_status();
+        let mut document = serde_json::json!({
+            "schema_version": 1,
+            "runtime": {"state": "running"},
+            "site": null,
+            "segment": null,
+            "tun": {"state": "unavailable", "full_duplex": null},
+            "peers": [],
+            "path": null
+        });
+        project_product_network_status(&mut document, "running", &control, Some(&status)).unwrap();
+        assert_eq!(
+            document["site"]["id"],
+            "05050505-0505-0505-0505-050505050505"
+        );
+        assert_eq!(
+            document["segment"]["id"],
+            "06060606-0606-0606-0606-060606060606"
+        );
+        assert_eq!(document["tun"]["state"], "running");
+        assert_eq!(document["tun"]["full_duplex"], true);
+        assert_eq!(document["peers"][0]["state"], "running");
+        assert_eq!(document["peers"][0]["path"]["kind"], "direct");
+        assert_eq!(document["path"]["kind"], "direct");
+    }
+
+    #[test]
+    fn product_projection_rejects_core_path_outside_verified_control() {
+        let control = VerifiedProductControl {
+            site_id: "05050505-0505-0505-0505-050505050505".into(),
+            segment_id: "06060606-0606-0606-0606-060606060606".into(),
+            discovery: discovery(),
+        };
+        let status = product_core_status();
+        let mut document = serde_json::json!({});
+        assert!(
+            project_product_network_status(&mut document, "running", &control, Some(&status))
+                .unwrap_err()
+                .to_string()
+                .contains("absent from verified control discovery")
+        );
+    }
+
+    #[test]
+    fn clearing_product_projection_removes_stale_network_identity() {
+        let mut document = serde_json::json!({
+            "site": {"id": "stale"},
+            "segment": {"id": "stale"},
+            "tun": {"state": "running", "full_duplex": true},
+            "peers": [{"id": "stale"}],
+            "path": {"kind": "direct"}
+        });
+        clear_product_network_status(&mut document).unwrap();
+        assert!(document["site"].is_null());
+        assert!(document["segment"].is_null());
+        assert_eq!(document["tun"]["state"], "unavailable");
+        assert!(document["peers"].as_array().unwrap().is_empty());
+        assert!(document["path"].is_null());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn active_product_control_is_bound_to_delivery_and_core_inputs() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(state.join("identity")).unwrap();
+        atomic_json(
+            &state.join("identity/device-identity-v1.json"),
+            &identity(),
+            0o600,
+        )
+        .unwrap();
+
+        let mut configuration = configuration();
+        configuration.segment_snapshot = URL_SAFE_NO_PAD.encode(b"signed-segment");
+        configuration.site_projection = URL_SAFE_NO_PAD.encode(b"signed-site");
+        let segment = decode_envelope(&configuration.segment_snapshot, "segment").unwrap();
+        let projection = decode_envelope(&configuration.site_projection, "projection").unwrap();
+        let objects = configuration_objects_digest(&segment, &projection, &[], &[], &[], &[]);
+        let delivery = configuration_delivery_digest(&configuration, &objects).unwrap();
+        let generation = state.join("generations").join(&delivery);
+        fs::create_dir_all(&generation).unwrap();
+        atomic_json(
+            &generation.join("configuration-v1.json"),
+            &configuration,
+            0o600,
+        )
+        .unwrap();
+        let mut discovery = discovery();
+        discovery.netd.table_id = 20_001;
+        atomic_json(&generation.join("discovery-v1.json"), &discovery, 0o600).unwrap();
+
+        let activation_id = "ab".repeat(32);
+        let activation = state.join("activations").join(&activation_id);
+        fs::create_dir_all(&activation).unwrap();
+        atomic_bytes(&activation.join("segment.snapshot"), &segment, 0o600).unwrap();
+        atomic_bytes(&activation.join("site.projection"), &projection, 0o600).unwrap();
+        atomic_json(
+            &activation.join("activation-v1.json"),
+            &ActivationDescriptor {
+                schema_version: 1,
+                activation_id: activation_id.clone(),
+                delivery_etag: format!("\"sha256-{delivery}\""),
+                delivery_sha256: delivery.clone(),
+                projection_publication_id: configuration.projection_publication_id,
+                projection_content_hash: configuration.projection_content_hash.clone(),
+                segment_generation: configuration.segment_generation,
+                projection_generation: configuration.projection_generation,
+                core_role: "client_sdwan".into(),
+                core_config: "core.toml".into(),
+                netd_declaration: "declaration.json".into(),
+                grant_refresh_after_unix: 0,
+                grant_expires_at_unix: 0,
+            },
+            0o600,
+        )
+        .unwrap();
+        let target = Path::new("activations").join(&activation_id);
+        symlink(&target, state.join("active")).unwrap();
+        atomic_json(
+            &state.join("active-activation-v1.json"),
+            &ActiveActivationProof {
+                schema_version: 1,
+                activation_id,
+                candidate_target: target.to_str().unwrap().into(),
+                projection_generation: configuration.projection_generation,
+                delivery_etag: format!("\"sha256-{delivery}\""),
+                agent_pid: std::process::id(),
+                state: "committed".into(),
+                committed_at_unix: 1,
+            },
+            0o600,
+        )
+        .unwrap();
+
+        let control = read_active_product_control(&state).unwrap().unwrap();
+        assert_eq!(control.site_id, "05050505-0505-0505-0505-050505050505");
+        assert_eq!(control.segment_id, "06060606-0606-0606-0606-060606060606");
+
+        atomic_bytes(
+            &activation.join("site.projection"),
+            b"different-signed-site",
+            0o600,
+        )
+        .unwrap();
+        assert!(read_active_product_control(&state)
+            .unwrap_err()
+            .to_string()
+            .contains("active Core inputs"));
     }
 
     #[test]

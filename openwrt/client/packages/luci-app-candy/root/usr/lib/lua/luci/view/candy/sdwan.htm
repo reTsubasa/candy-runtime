@@ -215,7 +215,7 @@ local result = luci.http.formvalue("result") or ""
 				<div><dt><%:Site%></dt><dd><%=label(site_value)%></dd></div>
 				<div><dt><%:Segment%></dt><dd><%=label(segment_value)%></dd></div>
 				<div><dt><%:TUN%></dt><dd><%=runtime_state_label(tun.state)%><% if tun.full_duplex == true then %> / <%:Full duplex%><% end %></dd></div>
-				<div><dt><%:Peer%></dt><dd><% if #peers == 0 then %><%=translate("Unavailable")%><% else %><ul class="candy-sdwan-peers"><% for _, peer in ipairs(peers) do %><li><%=label(peer.name or peer.id)%> / <%=runtime_state_label(peer.state)%></li><% end %></ul><% end %></dd></div>
+				<div><dt><%:Peer%></dt><dd><% if #peers == 0 then %><%=translate("Unavailable")%><% else %><ul class="candy-sdwan-peers"><% for _, peer in ipairs(peers) do %><li><%=label(peer.name or peer.id)%> / <%=runtime_state_label(peer.state)%><% if type(peer.path) == "table" and (peer.path.kind == "direct" or peer.path.kind == "relay") then %> / <%=peer.path.kind == "direct" and translate("Direct") or translate("Relay")%><% end %></li><% end %></ul><% end %></dd></div>
 				<div><dt><%:Path%></dt><dd><% if path and (path.kind == "direct" or path.kind == "relay") then %><%=path.kind == "direct" and translate("Direct") or translate("Relay")%><% else %><%=translate("Unavailable")%><% end %></dd></div>
 				<div><dt><%:Local egress%></dt><dd><%=object_label(egress["local"], "name")%></dd></div>
 				<div><dt><%:Remote egress%></dt><dd><%=object_label(egress.remote, "name")%></dd></div>

@@ -153,6 +153,14 @@ local function read_sdwan_status(_uci)
 		if type(value) ~= "string" or #value > (limit or 256) then return nil end
 		return value
 	end
+	local function safe_identity_object(value)
+		if type(value) == "string" then return safe_string(value, 128) end
+		if type(value) ~= "table" then return nil end
+		local id = safe_string(value.id, 128)
+		local name = safe_string(value.name, 128)
+		if not id and not name then return nil end
+		return { id = id, name = name }
+	end
 	local registration = type(status.registration) == "table" and status.registration or {}
 	local runtime = type(status.runtime) == "table" and status.runtime or {}
 	local registration_state = safe_string(registration.state, 32) or "unregistered"
@@ -165,8 +173,8 @@ local function read_sdwan_status(_uci)
 		phase = registration_state,
 		registration = { state = registration_state, cloud_address = safe_string(registration.cloud_address, 2048) or "", last_error = safe_string(registration.last_error, 512) or "" },
 		runtime = { state = safe_string(runtime.state, 32) or "unavailable", updated_at = tonumber(runtime.updated_at), last_error = safe_string(runtime.last_error, 512) or "" },
-		site = safe_string(status.site, 128),
-		segment = safe_string(status.segment, 128),
+		site = safe_identity_object(status.site),
+		segment = safe_identity_object(status.segment),
 		tun = { state = "unavailable", full_duplex = nil },
 		peers = {},
 		path = nil,
@@ -180,7 +188,12 @@ local function read_sdwan_status(_uci)
 	if type(status.peers) == "table" then
 		for _, peer in ipairs(status.peers) do
 			if type(peer) == "table" then
-				result.peers[#result.peers + 1] = { name = safe_string(peer.name or peer.id, 128) or "", state = safe_string(peer.state, 32) or "unavailable" }
+				local path
+				if type(peer.path) == "table" then
+					local kind = safe_string(peer.path.kind, 16)
+					if kind == "direct" or kind == "relay" then path = { kind = kind, state = safe_string(peer.path.state, 32) or "unavailable" } end
+				end
+				result.peers[#result.peers + 1] = { id = safe_string(peer.id, 128) or "", name = safe_string(peer.name, 128), state = safe_string(peer.state, 32) or "unavailable", path = path }
 			end
 		end
 	end
