@@ -75,6 +75,7 @@ make_bundle() {
 	arch=$4
 	server_result=$5
 	bundle=$6
+	libc=${7:-gnu}
 	stage=$tmp/stage-$version-$$
 	mkdir -p "$stage"
 	cat > "$stage/candy-core" <<EOF
@@ -104,7 +105,7 @@ EOF
 	chmod 0755 "$stage/candy-core"
 	executable_sha=$(sha256sum "$stage/candy-core" | awk '{ print $1 }')
 	cat > "$stage/manifest.json" <<EOF
-{"schema_version":1,"process_api_version":$process_api,"core":{"schema_version":1,"core_api_version":$core_api,"core_version":"$version","target_os":"linux","target_arch":"$arch","protocol_version":{"major":0,"minor":3},"features":[]},"artifact":{"target_os":"linux","target_arch":"$arch","libc":"gnu","executable":"candy-core","executable_sha256":"$executable_sha"}}
+{"schema_version":1,"process_api_version":$process_api,"core":{"schema_version":1,"core_api_version":$core_api,"core_version":"$version","target_os":"linux","target_arch":"$arch","protocol_version":{"major":0,"minor":3},"features":[]},"artifact":{"target_os":"linux","target_arch":"$arch","libc":"$libc","executable":"candy-core","executable_sha256":"$executable_sha"}}
 EOF
 	printf '%s\n' trusted-linux-core-signature > "$stage/manifest.sig"
 	tar -czf "$bundle" -C "$stage" manifest.json manifest.sig candy-core
@@ -183,6 +184,19 @@ make_bundle 1.1.0 1 2 "$host_arch" 0 "$bundle_bad_process"
 sha_bad_process=$(sha256sum "$bundle_bad_process" | awk '{ print $1 }')
 if "$manager" install 1.1.0 "$bundle_bad_process" "$sha_bad_process" >/dev/null 2>&1; then
 	fail "incompatible process API bundle was accepted"
+fi
+
+bundle_static_musl=$tmp/core-1.1.1.tar.gz
+make_bundle 1.1.1 1 1 "$host_arch" 0 "$bundle_static_musl" musl
+sha_static_musl=$(sha256sum "$bundle_static_musl" | awk '{ print $1 }')
+"$manager" install 1.1.1 "$bundle_static_musl" "$sha_static_musl" >/dev/null ||
+	fail "portable musl Core was rejected on a GNU/Linux host"
+
+bundle_gnu=$tmp/core-1.1.2.tar.gz
+make_bundle 1.1.2 1 1 "$host_arch" 0 "$bundle_gnu" gnu
+sha_gnu=$(sha256sum "$bundle_gnu" | awk '{ print $1 }')
+if CANDY_CORE_TARGET_LIBC=musl "$manager" install 1.1.2 "$bundle_gnu" "$sha_gnu" >/dev/null 2>&1; then
+	fail "GNU Core was accepted on a musl host"
 fi
 
 if "$manager" install 1.2.0 "$bundle_1" "$(printf '0%.0s' $(seq 1 64))" >/dev/null 2>&1; then

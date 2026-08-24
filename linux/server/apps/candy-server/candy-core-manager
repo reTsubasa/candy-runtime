@@ -82,6 +82,16 @@ detect_libc() {
 	fi
 }
 
+compatible_libc() {
+	local artifact_libc host_libc
+	artifact_libc=$1
+	host_libc=$(detect_libc) || return 1
+	case "$artifact_libc:$host_libc" in
+		gnu:gnu|musl:musl|musl:gnu) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
 version_path() {
 	local version
 	version=$1
@@ -182,7 +192,7 @@ validate_manifest() {
 	[ "$(manifest_value "$manifest" '.core.target_arch')" = "$artifact_arch" ] || return 1
 	[ "$(normalize_arch "$artifact_arch")" = "$(normalize_arch "$HOST_ARCH")" ] || return 1
 	[ "$(manifest_value "$manifest" '.artifact.target_os')" = linux ] || return 1
-	[ "$(manifest_value "$manifest" '.artifact.libc')" = "$(detect_libc)" ] || return 1
+	compatible_libc "$(manifest_value "$manifest" '.artifact.libc')" || return 1
 	[ "$(manifest_value "$manifest" '.artifact.executable')" = candy-core ] || return 1
 	valid_sha256 "$(manifest_value "$manifest" '.artifact.executable_sha256')" || return 1
 }
