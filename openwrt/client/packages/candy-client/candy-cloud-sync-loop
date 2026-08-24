@@ -23,6 +23,12 @@ identity_available() {
 	[ -s "$IDENTITY_FILE" ] && [ -f "$IDENTITY_FILE" ] && [ ! -L "$IDENTITY_FILE" ]
 }
 
+sync_state_from_output() {
+	json=$(printf '%s\n' "$1" | awk '/^\{.*\}$/ { value = $0 } END { print value }')
+	[ -n "$json" ] || return 1
+	printf '%s' "$json" | jsonfilter -e '@.state' 2>/dev/null
+}
+
 case "$INTERVAL" in ''|*[!0-9]*|0) INTERVAL=30 ;; esac
 [ -x "$SYNC_BIN" ] || exit 1
 [ -x "$CANDY_INIT" ] || exit 1
@@ -32,7 +38,12 @@ command -v start-stop-daemon >/dev/null 2>&1 || exit 1
 trap 'exit 0' TERM INT
 while identity_available; do
 	if output=$(start-stop-daemon -S -c "$RUN_USER" -x "$SYNC_BIN" -- --state-dir "$STATE_DIR" --core "$CANDY_CORE_BIN" sync-once 2>&1); then
-		state=$(printf '%s' "$output" | jsonfilter -e '@.state' 2>/dev/null || true)
+		printf '%s\n' "$output" | while IFS= read -r line; do
+			case "$line" in
+				level=warn\ event=*|level=error\ event=*) logger -t candy -- "$line" ;;
+			esac
+		done
+		state=$(sync_state_from_output "$output" || true)
 		case "$state" in
 			waiting_for_network_configuration|configuration_unchanged|configuration_updated|activation_pending|activation_rejected) ;;
 			*) state=unknown ;;
@@ -41,7 +52,8 @@ while identity_available; do
 		reconcile_sdwan || true
 	else
 		rc=$?
-		logger -t candy -- "level=warn event=cloud_sync result=failed exit=$rc activation=unchanged"
+		detail=$(printf '%s' "$output" | tr '\r\n' '  ' | cut -c 1-384)
+		logger -t candy -- "level=warn event=cloud_sync result=failed exit=$rc activation=unchanged detail=$detail"
 	fi
 	sleep "$INTERVAL"
 done

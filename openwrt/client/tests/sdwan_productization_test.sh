@@ -36,6 +36,18 @@ grep -F 'start-stop-daemon -S -c "$RUN_USER" -x "$SYNC_BIN"' "$cloud_sync_loop" 
 grep -F '"$CANDY_INIT" sdwan_reconcile' "$cloud_sync_loop" >/dev/null || fail "root supervisor does not retain activation reconciliation"
 grep -F '"$(id -u 2>/dev/null || printf 1)" = 0' "$cloud_sync_loop" >/dev/null || fail "Cloud synchronization supervisor has no root boundary"
 grep -F 'activation=unchanged' "$cloud_sync_loop" >/dev/null || fail "failed Cloud synchronization can disturb the last-good activation"
+grep -F 'level=warn\ event=*|level=error\ event=*' "$cloud_sync_loop" >/dev/null || fail "successful Cloud synchronization still hides Runtime telemetry warnings"
+grep -F 'detail=$(printf' "$cloud_sync_loop" >/dev/null || fail "failed Cloud synchronization does not retain bounded diagnostic detail"
+state_parser=$(sed -n '/^sync_state_from_output() {$/,/^}$/p' "$cloud_sync_loop")
+[ -n "$state_parser" ] || fail "Cloud synchronization state parser is missing"
+eval "$state_parser"
+jsonfilter() {
+	input=$(cat)
+	printf '%s\n' "$input" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p'
+}
+mixed_output='level=warn event=runtime_telemetry_report_failed error=conflict
+{"schema_version":1,"state":"configuration_unchanged","network_ready":true}'
+[ "$(sync_state_from_output "$mixed_output")" = configuration_unchanged ] || fail "mixed Runtime warning and JSON output loses synchronization state"
 grep -F 'exec "$core_bin" client sdwan "$@"' "$root/candy-client/candy-sdwan" >/dev/null || fail "candy-sdwan does not use the Core process API"
 grep -F 'runtime-api-version' "$root/candy-client/candy-sdwan" >/dev/null || fail "candy-sdwan does not bootstrap the Core process API"
 if grep -F '/usr/lib/candy/cores/current/candy-' "$makefile" >/dev/null; then
