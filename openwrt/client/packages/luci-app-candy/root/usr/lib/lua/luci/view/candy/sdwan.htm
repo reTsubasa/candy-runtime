@@ -150,6 +150,8 @@ local result = luci.http.formvalue("result") or ""
 .candy-sdwan-next strong { display:block; margin-bottom:.25em; }
 .candy-sdwan-next p { color:#555; margin:.25em 0 .8em; line-height:1.6; }
 .candy-sdwan-details { margin-top:1.3em; }
+.candy-sdwan-routing-note { margin-top:1em; padding:.85em 1em; background:#f6f8fb; border-left:4px solid #879bb8; color:#555; line-height:1.65; }
+.candy-sdwan-routing-note strong { color:#333; }
 .candy-sdwan-details h3 { margin:0 0 .5em; font-size:1.05em; }
 .candy-sdwan-profile-management { display:flex; align-items:center; justify-content:space-between; gap:1.25em; margin-top:1.2em; padding:.9em 0; border-top:1px solid rgba(128,128,128,.25); }
 .candy-sdwan-profile-management strong, .candy-sdwan-profile-management span { display:block; }
@@ -225,7 +227,8 @@ local result = luci.http.formvalue("result") or ""
 				<div><dt><%:Remote egress%></dt><dd><%=object_label(egress.remote, "name")%></dd></div>
 				<div><dt><%:Internal DNS%></dt><dd><%=runtime_state_label(dns.state)%></dd></div>
 				<div><dt><%:Runtime%></dt><dd><%=runtime_state_label(runtime.state)%></dd></div>
-			</dl></div>
+				</dl></div>
+				<div class="candy-sdwan-routing-note"><strong><%:How traffic is selected%></strong><br /><%:Published remote site networks always use the SD-WAN full-duplex TUN because their routes are more specific. When a policy selects a remote Internet egress, traffic uses the TUN to reach that site's Candy egress. Traffic that does not match an SD-WAN network or remote-egress policy continues through this router's normal Candy node and DNS rules. If SD-WAN fails, only its own routes are withdrawn and ordinary Candy traffic remains on its normal path.%></div>
 			<% if network_ready then %><div class="candy-sdwan-actions"><form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_reconnect')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-action" type="submit"><%:Reconnect%></button></form></div><% end %>
 		<% end %>
 		<div class="candy-sdwan-profile-management">
