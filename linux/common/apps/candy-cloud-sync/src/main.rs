@@ -5919,6 +5919,7 @@ default via 192.0.2.1 dev eth0 proto static
                 local_prefixes: vec!["10.0.0.0/24".into()],
                 remote_routes: vec![DiscoveredRoute {
                     destination: "10.1.0.0/24".into(),
+                    kind: "remote".into(),
                     owner_attachment_ids: vec!["12".repeat(16)],
                 }],
                 underlay_ipv4_exclusions: vec!["198.51.100.1/32".into()],

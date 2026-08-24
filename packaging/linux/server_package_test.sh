@@ -43,7 +43,7 @@ PATH="$fake_bin:$PATH" CANDY_LINUX_DIST_DIR="$dist" CANDY_SDWAN_AGENT_BINARY="$a
 	CANDY_NETD_BINARY="$netd" \
 	CANDY_CLOUD_ENROLL_BINARY="$enroll" \
 	CANDY_CLOUD_SYNC_BINARY="$sync" \
-	CANDY_RELEASE_VERSION=0.4.0 CANDY_RELEASE_REVISION=60 \
+	CANDY_RELEASE_VERSION=0.4.0 CANDY_RELEASE_REVISION=61 \
 	"$root/packaging/linux/build.sh" x86_64-unknown-linux-gnu >/dev/null
 
 stage=$dist/server/x86_64
@@ -71,9 +71,9 @@ grep -F 'ExecStart=/opt/candy/current/candy-server --config /etc/candy/server.to
 [ ! -e "$stage/systemd/candy-sdwan.service" ] || fail "server package must not stage a second SD-WAN service"
 [ -x "$stage/install/install-candy-server.sh" ] || fail "installer was not staged"
 [ -x "$stage/install/upgrade-candy-server.sh" ] || fail "full Runtime upgrader was not staged"
-[ "$(cat "$stage/RUNTIME-RELEASE")" = 0.4.0-r60 ] || fail "server bundle release identity is missing or invalid"
+[ "$(cat "$stage/RUNTIME-RELEASE")" = 0.4.0-r61 ] || fail "server bundle release identity is missing or invalid"
 [ "$(cat "$stage/RUNTIME-ARCH")" = x86_64 ] || fail "server bundle architecture identity is missing or invalid"
-[ "$(cat "$edge_stage/RUNTIME-RELEASE")" = 0.4.0-r60 ] || fail "edge bundle release identity is missing or invalid"
+[ "$(cat "$edge_stage/RUNTIME-RELEASE")" = 0.4.0-r61 ] || fail "edge bundle release identity is missing or invalid"
 [ "$(cat "$edge_stage/RUNTIME-ARCH")" = x86_64 ] || fail "edge bundle architecture identity is missing or invalid"
 [ -x "$dist/candy-server-x86_64" ] || fail "product release launcher artifact was not staged"
 [ -s "$dist/candy-server-runtime-x86_64.tar.gz" ] || fail "complete server Runtime bundle was not staged"
