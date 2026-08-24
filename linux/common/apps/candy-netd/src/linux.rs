@@ -585,6 +585,7 @@ pub struct LinuxNetworkPlan {
     pub nft_table_name: String,
     pub route_mtu: u16,
     pub tcp_advmss: u16,
+    pub remote_egress: bool,
 }
 
 impl LinuxNetworkPlan {
@@ -593,10 +594,20 @@ impl LinuxNetworkPlan {
         let policy_priority = CANDY_POLICY_PRIORITY_MIN
             .checked_add(declaration.table_id - CANDY_TABLE_MIN)
             .ok_or(NetworkError::Backend)?;
+        let remote_egress = declaration
+            .routes
+            .iter()
+            .any(|route| route.kind == RouteKind::RemoteEgressGateway);
         let remote_routes = declaration
             .routes
             .iter()
-            .filter_map(|route| (route.kind == RouteKind::Remote).then_some(route.prefix))
+            .filter_map(|route| {
+                matches!(
+                    route.kind,
+                    RouteKind::Remote | RouteKind::RemoteEgress | RouteKind::RemoteEgressGateway
+                )
+                .then_some(route.prefix)
+            })
             .collect::<Vec<_>>();
         let local_prefixes = declaration
             .routes
@@ -616,6 +627,7 @@ impl LinuxNetworkPlan {
                 .effective_mtu
                 .checked_sub(40)
                 .ok_or(NetworkError::Backend)?,
+            remote_egress,
         })
     }
 }

@@ -270,6 +270,8 @@ fn route_kind(value: &str) -> Result<RouteKind> {
     match value {
         "local" => Ok(RouteKind::Local),
         "remote" => Ok(RouteKind::Remote),
+        "remote-egress" => Ok(RouteKind::RemoteEgress),
+        "remote-egress-gateway" => Ok(RouteKind::RemoteEgressGateway),
         _ => bail!("unknown route kind"),
     }
 }

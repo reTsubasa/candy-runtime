@@ -60,6 +60,13 @@ impl PartialOrd for Ipv4Prefix {
 pub enum RouteKind {
     Local = 1,
     Remote = 2,
+    /// A signed default-route slice owned by Candy for remote egress.
+    /// It is allowed to overlap site routes because normal longest-prefix
+    /// routing keeps private site prefixes more specific.
+    RemoteEgress = 3,
+    /// A normal signed Site route on a node authorized to provide remote
+    /// Internet egress. The route remains routable and also enables NAT.
+    RemoteEgressGateway = 4,
 }
 
 impl TryFrom<u64> for RouteKind {
@@ -69,6 +76,8 @@ impl TryFrom<u64> for RouteKind {
         match value {
             1 => Ok(Self::Local),
             2 => Ok(Self::Remote),
+            3 => Ok(Self::RemoteEgress),
+            4 => Ok(Self::RemoteEgressGateway),
             _ => Err(NetdProtocolError::UnknownEnum),
         }
     }
@@ -138,17 +147,21 @@ impl PrepareDeclaration {
         }
         if !strictly_sorted_by(&self.routes, |route| (route.prefix, route.kind as u64))
             || !strictly_sorted_by(&self.exclusions, |value| (value.prefix, value.kind as u64))
-            || has_prefix_overlap(self.routes.iter().map(|route| route.prefix))
+            || has_prefix_overlap(self.routes.iter().filter_map(|route| {
+                (route.kind != RouteKind::RemoteEgress).then_some(route.prefix)
+            }))
             || has_prefix_overlap(self.exclusions.iter().map(|value| value.prefix))
             || self.routes.iter().any(|route| {
-                self.exclusions
-                    .iter()
-                    .any(|exclusion| route.prefix.overlaps(exclusion.prefix))
+                route.kind != RouteKind::RemoteEgress
+                    && self
+                        .exclusions
+                        .iter()
+                        .any(|exclusion| route.prefix.overlaps(exclusion.prefix))
             })
-            || self
-                .routes
-                .iter()
-                .any(|route| route.prefix.contains(self.overlay_router_ipv4))
+            || self.routes.iter().any(|route| {
+                route.kind != RouteKind::RemoteEgress
+                    && route.prefix.contains(self.overlay_router_ipv4)
+            })
             || self
                 .exclusions
                 .iter()

@@ -23,9 +23,10 @@ identity_available() {
 	[ -s "$IDENTITY_FILE" ] && [ -f "$IDENTITY_FILE" ] && [ ! -L "$IDENTITY_FILE" ]
 }
 
-sync_state_from_output() {
-	json=$(printf '%s\n' "$1" | awk '/^\{.*\}$/ { value = $0 } END { print value }')
+sync_state_from_stdout() {
+	json=$(printf '%s\n' "$1" | awk 'NF { value = $0 } END { print value }')
 	[ -n "$json" ] || return 1
+	[ "$(printf '%s' "$json" | jsonfilter -e '@.schema_version' 2>/dev/null)" = 1 ] || return 1
 	printf '%s' "$json" | jsonfilter -e '@.state' 2>/dev/null
 }
 
@@ -37,13 +38,10 @@ command -v start-stop-daemon >/dev/null 2>&1 || exit 1
 
 trap 'exit 0' TERM INT
 while identity_available; do
-	if output=$(start-stop-daemon -S -c "$RUN_USER" -x "$SYNC_BIN" -- --state-dir "$STATE_DIR" --core "$CANDY_CORE_BIN" sync-once 2>&1); then
-		printf '%s\n' "$output" | while IFS= read -r line; do
-			case "$line" in
-				level=warn\ event=*|level=error\ event=*) logger -t candy -- "$line" ;;
-			esac
-		done
-		state=$(sync_state_from_output "$output" || true)
+	# stdout is the machine-readable result channel. stderr remains attached to
+	# procd so Runtime diagnostics stay visible without entering state parsing.
+	if output=$(start-stop-daemon -S -c "$RUN_USER" -x "$SYNC_BIN" -- --state-dir "$STATE_DIR" --core "$CANDY_CORE_BIN" sync-once); then
+		state=$(sync_state_from_stdout "$output" || true)
 		case "$state" in
 			waiting_for_network_configuration|configuration_unchanged|configuration_updated|activation_pending|activation_rejected) ;;
 			*) state=unknown ;;

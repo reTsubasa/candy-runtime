@@ -29,6 +29,7 @@ scripts/openwrt_runtime_health_check_test.sh
 openwrt/client/tests/luci_package_test.sh
 openwrt/client/tests/update_luci_test.sh
 openwrt/client/tests/sdwan_luci_upload_test.sh
+openwrt/client/tests/cloud_sync_loop_test.sh
 openwrt/client/tests/sdwan_productization_test.sh
 packaging/openwrt/tests/package_gate_test.sh
 packaging/openwrt/tests/sdk_container_profile_test.sh

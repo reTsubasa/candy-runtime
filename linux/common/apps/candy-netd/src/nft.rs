@@ -123,7 +123,7 @@ pub fn stage_firewall(
             tcp_mss_clamp_rule(plan),
         );
     }
-    if !plan.local_prefixes.is_empty() {
+    if !plan.local_prefixes.is_empty() || plan.remote_egress {
         batch.push(
             nft_type(nix::libc::NFT_MSG_NEWCHAIN),
             create_flags(),
@@ -142,6 +142,13 @@ pub fn stage_firewall(
                 identity_snat_rule(plan, *prefix),
             );
         }
+    }
+    if plan.remote_egress {
+        batch.push(
+            nft_type(nix::libc::NFT_MSG_NEWRULE),
+            create_flags(),
+            remote_egress_masquerade_rule(plan),
+        );
     }
     send_batch(&socket, batch)
 }
@@ -265,6 +272,16 @@ fn identity_snat_rule(
             u32_attr(NFTA_NAT_REG_ADDR_MIN, nix::libc::NFT_REG_1 as u32),
         ],
     ));
+    vec![
+        string_attr(NFTA_RULE_TABLE, &plan.nft_table_name),
+        string_attr(NFTA_RULE_CHAIN, NFT_POSTROUTING_CHAIN_NAME),
+        nested_attr(NFTA_RULE_EXPRESSIONS, expressions),
+    ]
+}
+
+fn remote_egress_masquerade_rule(plan: &LinuxNetworkPlan) -> Vec<Attribute> {
+    let mut expressions = interface_match_expressions(plan, nix::libc::NFT_META_IIFNAME as u32);
+    expressions.push(expression("masq", Vec::new()));
     vec![
         string_attr(NFTA_RULE_TABLE, &plan.nft_table_name),
         string_attr(NFTA_RULE_CHAIN, NFT_POSTROUTING_CHAIN_NAME),

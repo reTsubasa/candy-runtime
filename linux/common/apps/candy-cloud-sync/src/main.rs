@@ -213,7 +213,13 @@ struct DiscoveredNetd {
 #[serde(deny_unknown_fields)]
 struct DiscoveredRoute {
     destination: String,
+    #[serde(default = "default_remote_route_kind")]
+    kind: String,
     owner_attachment_ids: Vec<String>,
+}
+
+fn default_remote_route_kind() -> String {
+    "remote".into()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -3781,7 +3787,11 @@ fn build_netd_declaration(
         })
         .chain(discovery.netd.remote_routes.iter().map(|route| NetdRoute {
             prefix: route.destination.clone(),
-            kind: "remote",
+            kind: match route.kind.as_str() {
+                "remote-egress" => "remote-egress",
+                "remote-egress-gateway" => "remote-egress-gateway",
+                _ => "remote",
+            },
         }))
         .collect::<Vec<_>>();
     routes.sort_by(|left, right| {

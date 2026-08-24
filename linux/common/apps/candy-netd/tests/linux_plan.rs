@@ -44,6 +44,35 @@ fn linux_plan_installs_only_signed_remote_routes_with_fixed_owned_names() {
     assert_eq!(plan.nft_table_name, "candy_sdwan_20000");
     assert_eq!(plan.route_mtu, 1180);
     assert_eq!(plan.tcp_advmss, 1140);
+    assert!(!plan.remote_egress);
+}
+
+#[test]
+fn linux_plan_marks_only_the_authorized_egress_site_for_nat() {
+    let declaration = PrepareDeclaration {
+        table_id: CANDY_TABLE_MIN,
+        overlay_router_ipv4: [100, 64, 0, 3],
+        effective_mtu: 1180,
+        routes: vec![RouteDeclaration {
+            prefix: Ipv4Prefix::new([192, 168, 1, 0], 24).unwrap(),
+            kind: RouteKind::RemoteEgressGateway,
+        }],
+        exclusions: vec![UnderlayExclusion {
+            prefix: Ipv4Prefix::new([47, 83, 1, 189], 32).unwrap(),
+            kind: UnderlayKind::CloudApi,
+        }],
+        firewall: FirewallPolicy {
+            allow_forward: true,
+            clamp_tcp_mss: true,
+            require_ipv4_forwarding: true,
+            manage_rp_filter: true,
+        },
+    };
+    assert!(
+        LinuxNetworkPlan::compile(&declaration)
+            .unwrap()
+            .remote_egress
+    );
 }
 
 #[test]
