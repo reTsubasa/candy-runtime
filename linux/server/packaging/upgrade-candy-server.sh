@@ -108,6 +108,12 @@ usr/local/libexec/candy-netd
 usr/local/libexec/candy-cloud-enroll
 usr/local/libexec/candy-cloud-sync
 usr/local/libexec/candy-server-health-check'
+# Releases before the managed Runtime layout installed the Core manager in
+# sbin. Root shells commonly search sbin before bin, so leaving that file in
+# place silently selects the stale manager after an otherwise successful
+# upgrade. Treat it as transaction-owned migration state: remove it only after
+# backups exist, and restore it on rollback.
+legacy_files='usr/local/sbin/candy-core-manager'
 unit_files='candy-server.service
 candy-netd.service
 candy-cloud-sync.service
@@ -150,6 +156,7 @@ restore_service_state() {
 
 restore_files() {
 	for relative in $managed_files; do restore_one "/$relative"; done
+	for relative in $legacy_files; do restore_one "/$relative"; done
 	for unit in $unit_files; do restore_one "/etc/systemd/system/$unit"; done
 	restore_one /usr/lib/tmpfiles.d/candy.conf
 }
@@ -332,6 +339,7 @@ chown root:root "$release_stage" "$release_stage/candy-server"
 
 record_service_state
 for relative in $managed_files; do backup_one "/$relative"; done
+for relative in $legacy_files; do backup_one "/$relative"; done
 for unit in $unit_files; do backup_one "/etc/systemd/system/$unit"; done
 backup_one /usr/lib/tmpfiles.d/candy.conf
 transaction_started=1
@@ -343,6 +351,7 @@ current_temporary=$(host_path "/opt/candy/.current.$$")
 replace_symlink "$release_dir" "$current_link" "$current_temporary"
 
 for relative in $managed_files; do install_one "$extract_dir/$relative" "/$relative" 0755; done
+for relative in $legacy_files; do rm -f "$(host_path "/$relative")"; done
 for unit in $unit_files; do
 	unit_source=$extract_dir/systemd/$unit
 	[ "$unit" != candy-server.service ] || unit_source=$server_unit_source
