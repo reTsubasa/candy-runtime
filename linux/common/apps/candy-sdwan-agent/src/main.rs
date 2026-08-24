@@ -643,6 +643,60 @@ fn remove_stale_status(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn is_activation_status_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(activation_id) = name
+        .strip_prefix("sdwan-")
+        .and_then(|value| value.strip_suffix(".status.json"))
+    else {
+        return false;
+    };
+    activation_id.len() == 64
+        && activation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+// Each activation owns a distinct Core status file so a replacement cannot
+// mistake an earlier Core's readiness for its own. The agent is the sole
+// activation supervisor, therefore old files in this namespace are safe to
+// reclaim once its current status has been removed before a new Core starts.
+fn cleanup_superseded_activation_statuses(current: &Path) -> Result<usize> {
+    let Some(directory) = current.parent() else {
+        bail!("SD-WAN Core status path has no parent directory")
+    };
+    let Some(current_name) = current.file_name() else {
+        bail!("SD-WAN Core status path has no file name")
+    };
+    if !is_activation_status_name(current_name) {
+        return Ok(0);
+    }
+
+    let mut removed = 0;
+    for entry in fs::read_dir(directory).context("list SD-WAN Core status directory")? {
+        let entry = entry.context("inspect SD-WAN Core status directory entry")?;
+        if entry.file_name() == current_name || !is_activation_status_name(&entry.file_name()) {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect superseded SD-WAN Core status {}", path.display()))?;
+        if !metadata.file_type().is_file() {
+            eprintln!(
+                "level=warn event=sdwan_status_cleanup_skipped path={} reason=not_regular_file",
+                path.display()
+            );
+            continue;
+        }
+        fs::remove_file(&path)
+            .with_context(|| format!("remove superseded SD-WAN Core status {}", path.display()))?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
 fn remove_activation_receipt(path: Option<&Path>) -> Result<()> {
     let Some(path) = path else {
         return Ok(());
@@ -1469,6 +1523,20 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
             "status_cleanup_failed",
             error,
         );
+    }
+    match cleanup_superseded_activation_statuses(&args.status) {
+        Ok(removed) if removed > 0 => eprintln!(
+            "level=info event=sdwan_status_cleanup removed={} status={}",
+            removed,
+            args.status.display()
+        ),
+        Ok(_) => {}
+        // Status cleanup must not turn a working candidate into an outage.
+        Err(error) => eprintln!(
+            "level=warn event=sdwan_status_cleanup_failed status={} error={}",
+            args.status.display(),
+            sanitize_log_value(&format!("{error:#}"))
+        ),
     }
     let readiness_token = match generate_readiness_token() {
         Ok(token) => token,
@@ -2605,6 +2673,36 @@ exit 17
         {
             std::os::unix::fs::symlink(directory.path().join("target"), &path).unwrap();
             assert!(remove_stale_status(&path).is_err());
+        }
+    }
+
+    #[test]
+    fn superseded_activation_statuses_are_reclaimed_without_touching_other_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory
+            .path()
+            .join(format!("sdwan-{}.status.json", "a".repeat(64)));
+        let stale = directory
+            .path()
+            .join(format!("sdwan-{}.status.json", "b".repeat(64)));
+        let unrelated = directory.path().join("sdwan-status.json");
+        fs::write(&current, status(9, "active", 1, 1)).unwrap();
+        fs::write(&stale, status(8, "active", 1, 1)).unwrap();
+        fs::write(&unrelated, "runtime product status").unwrap();
+
+        assert_eq!(cleanup_superseded_activation_statuses(&current).unwrap(), 1);
+        assert!(current.exists());
+        assert!(!stale.exists());
+        assert!(unrelated.exists());
+
+        #[cfg(unix)]
+        {
+            let link = directory
+                .path()
+                .join(format!("sdwan-{}.status.json", "c".repeat(64)));
+            std::os::unix::fs::symlink(directory.path().join("target"), &link).unwrap();
+            assert_eq!(cleanup_superseded_activation_statuses(&current).unwrap(), 0);
+            assert!(link.exists() || fs::symlink_metadata(&link).is_ok());
         }
     }
 
