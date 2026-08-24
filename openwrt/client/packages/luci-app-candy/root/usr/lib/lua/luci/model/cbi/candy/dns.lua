@@ -202,7 +202,8 @@ end
 
 o = s:option(ListValue, "target", translate("Resolve through"))
 o:value("direct", translate("Domestic DNS (direct)"))
-uci:foreach("candy", "node", function(node)
+local node_uci = require "luci.model.uci".cursor()
+node_uci:foreach("candy", "node", function(node)
 	if node[".name"] and node[".name"] ~= "" and node.enabled ~= "0" then
 		o:value(node[".name"], node.name and node.name ~= "" and (node.name .. " (Candy node)") or node[".name"])
 	end

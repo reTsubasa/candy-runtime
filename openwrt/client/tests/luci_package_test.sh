@@ -67,6 +67,7 @@ update_view=luci-app-candy/root/usr/lib/lua/luci/view/candy/update.htm
 diagnostics=luci-app-candy/root/usr/lib/lua/luci/view/candy/diagnostics.htm
 dns_tunnel_status=luci-app-candy/root/usr/lib/lua/luci/view/candy/dns_tunnel_status.htm
 logs=luci-app-candy/root/usr/lib/lua/luci/view/candy/log.htm
+sdwan=luci-app-candy/root/usr/lib/lua/luci/view/candy/sdwan.htm
 
 assert_file "candy-client/rulesets/cn-ip.cidr"
 assert_file "candy-client/rulesets/manifest.json"
@@ -791,6 +792,9 @@ assert_contains "$controller" 'contains_credential_field'
 assert_contains "$controller" 'read_multi_node_passive_status'
 assert_contains "$controller" 'runtime\.multi_node = nil'
 assert_contains "$dns" 'normalize_resolver_list'
+assert_contains "$dns" 'local node_uci = require "luci.model.uci".cursor\(\)'
+assert_contains "$dns" 'node_uci:foreach\("candy", "node"'
+assert_contains "$sdwan" 'How traffic is selected'
 assert_not_contains "$controller" 'luci\.sys\.call\(cmd\)'
 assert_not_contains "$dns" 'luci\.sys\.call\(cmd\)'
 

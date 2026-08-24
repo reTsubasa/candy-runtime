@@ -1960,3 +1960,9 @@ msgstr "国内 DNS（直连）"
 
 msgid "A Candy node resolves through its encrypted data path; domestic DNS uses the router/direct path."
 msgstr "通过 Candy 节点解析会使用加密数据路径；国内 DNS 使用路由器直连路径。"
+
+msgid "How traffic is selected"
+msgstr "流量如何选路"
+
+msgid "Published remote site networks always use the SD-WAN full-duplex TUN because their routes are more specific. When a policy selects a remote Internet egress, traffic uses the TUN to reach that site's Candy egress. Traffic that does not match an SD-WAN network or remote-egress policy continues through this router's normal Candy node and DNS rules. If SD-WAN fails, only its own routes are withdrawn and ordinary Candy traffic remains on its normal path."
+msgstr "已发布的远端站点网段始终通过 SD-WAN 全双工 TUN 转发，因为这些路由更精确。策略指定远端互联网出口时，流量先经 TUN 到达该站点，再使用其 Candy 出口。未匹配 SD-WAN 网段或远端出口策略的流量，继续遵循本路由器原有的 Candy 节点和 DNS 规则。SD-WAN 发生故障时，仅撤销其自身路由，普通 Candy 流量保持原有路径。"
