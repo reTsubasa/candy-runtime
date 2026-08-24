@@ -3758,18 +3758,14 @@ fail_open() {
 }
 
 sdwan_fail_open() {
-	local reason="${1:-sdwan_failure}" rc=0
-	log_event warn sdwan_fail_open "reason=$reason removing only SD-WAN-owned network state"
-	if [ -s "$CANDY_NETD_JOURNAL" ]; then
-		run_with_timeout 15 "$CANDY_NETD_BIN" --recover --journal "$CANDY_NETD_JOURNAL" >/dev/null 2>&1 || rc=1
-	fi
-	sdwan_runtime_state fail-open "$reason" || rc=1
-	if [ "$rc" -eq 0 ]; then
-		log_event info sdwan_fail_open "reason=$reason cleanup=completed ordinary_client=preserved"
-	else
-		log_event error sdwan_fail_open "reason=$reason cleanup=failed ordinary_client=preserved"
-	fi
-	return "$rc"
+	local reason="${1:-sdwan_failure}"
+	# SD-WAN is part of Candy's managed network path. Leaving the ordinary
+	# client alive after a failed SD-WAN activation can retain Candy-owned DNS,
+	# firewall, or policy steering and is therefore not fail-open. Reuse the
+	# single full cleanup path so the resulting network is equivalent to Candy
+	# not running at all.
+	log_event warn sdwan_fail_open "reason=$reason escalating=full_fail_open"
+	fail_open "sdwan:$reason"
 }
 
 sdwan_active_target() {

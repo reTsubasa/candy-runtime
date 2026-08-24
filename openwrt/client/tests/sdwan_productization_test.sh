@@ -64,12 +64,9 @@ grep -F 'procd_open_instance sdwan-netd' "$init" >/dev/null || fail "netd procd 
 grep -F 'run_sdwan' "$init" >/dev/null || fail "unprivileged SD-WAN supervisor is missing"
 grep -F 'procd_open_instance ordinary' "$init" >/dev/null || fail "ordinary Candy is not a named parallel instance"
 grep -F 'procd_open_instance sdwan' "$init" >/dev/null || fail "SD-WAN is not an additive parallel instance"
-grep -F 'run_detached_direct_command sdwan_fail_open' "$init" >/dev/null || fail "SD-WAN exit still uses global fail-open"
+grep -F 'run_detached_direct_command sdwan_fail_open' "$init" >/dev/null || fail "SD-WAN exit is not supervised"
 sdwan_failure_body=$(sed -n '/^sdwan_fail_open()/,/^}/p' "$init")
-printf '%s\n' "$sdwan_failure_body" | grep -F 'CANDY_NETD_JOURNAL' >/dev/null || fail "isolated SD-WAN fail-open does not recover netd state"
-if printf '%s\n' "$sdwan_failure_body" | grep -E 'stop_candy_clients|network_cleanup|disable' >/dev/null; then
-	fail "isolated SD-WAN fail-open can stop ordinary Candy"
-fi
+printf '%s\n' "$sdwan_failure_body" | grep -F 'fail_open "sdwan:$reason"' >/dev/null || fail "SD-WAN failure does not enter full fail-open"
 grep -F 'procd_set_param user candy-sdwan' "$init" >/dev/null || fail "SD-WAN supervisor is not unprivileged"
 grep -F 'wait_for_sdwan_netd' "$init" >/dev/null || fail "client start does not wait for netd"
 grep -F 'CANDY_SDWAN_CANDIDATE=${CANDY_SDWAN_CANDIDATE:-$CANDY_SDWAN_STATE_DIR/candidate}' "$init" >/dev/null || fail "Cloud activation candidate is not explicit"
