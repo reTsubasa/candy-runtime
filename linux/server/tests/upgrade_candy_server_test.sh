@@ -143,10 +143,10 @@ printf '%s\n' config-preserved >"$host/etc/candy/server.toml"
 printf '%s\n' identity-preserved >"$host/var/lib/candy/sdwan/identity/device-identity-v1.json"
 printf '%s\n' state-preserved >"$host/var/lib/candy/sdwan/state.json"
 printf '%s\n' core-preserved >"$host/opt/candy/cores/current/candy-core"
-make_bundle "$tmp/good" x86_64 0.4.0-r58
+make_bundle "$tmp/good" x86_64 0.4.0-r59
 good_sha=$(sha256 "$tmp/good.tar.gz")
 reset_service_state
-run_upgrade --bundle-file "$tmp/good.tar.gz" --sha256 "$good_sha" --version 0.4.0-r58 >/dev/null
+run_upgrade --bundle-file "$tmp/good.tar.gz" --sha256 "$good_sha" --version 0.4.0-r59 >/dev/null
 
 active_release=$(readlink "$host/opt/candy/current")
 [ "$active_release" != "$original_current" ] || fail "current Runtime release was not switched"
@@ -166,16 +166,16 @@ done
 
 # Integrity and architecture failures happen before services or files are touched.
 : >"$tmp/systemd.log"
-if run_upgrade --bundle-file "$tmp/good.tar.gz" --sha256 "$(printf '%064d' 0)" --version 0.4.0-r58 >"$tmp/bad-sha.out" 2>&1; then fail "wrong checksum was accepted"; fi
+if run_upgrade --bundle-file "$tmp/good.tar.gz" --sha256 "$(printf '%064d' 0)" --version 0.4.0-r59 >"$tmp/bad-sha.out" 2>&1; then fail "wrong checksum was accepted"; fi
 [ ! -s "$tmp/systemd.log" ] || fail "checksum rejection changed systemd state"
 [ "$(readlink "$host/opt/candy/current")" = "$active_release" ] || fail "checksum rejection changed the active Runtime"
-make_bundle "$tmp/wrong-arch" aarch64 0.4.0-r58
+make_bundle "$tmp/wrong-arch" aarch64 0.4.0-r59
 : >"$tmp/systemd.log"
-if run_upgrade --bundle-file "$tmp/wrong-arch.tar.gz" --sha256 "$(sha256 "$tmp/wrong-arch.tar.gz")" --version 0.4.0-r58 >"$tmp/bad-arch.out" 2>&1; then fail "wrong architecture was accepted"; fi
+if run_upgrade --bundle-file "$tmp/wrong-arch.tar.gz" --sha256 "$(sha256 "$tmp/wrong-arch.tar.gz")" --version 0.4.0-r59 >"$tmp/bad-arch.out" 2>&1; then fail "wrong architecture was accepted"; fi
 [ ! -s "$tmp/systemd.log" ] || fail "architecture rejection changed systemd state"
 make_bundle "$tmp/wrong-version" x86_64 0.4.0-r45
 : >"$tmp/systemd.log"
-if run_upgrade --bundle-file "$tmp/wrong-version.tar.gz" --sha256 "$(sha256 "$tmp/wrong-version.tar.gz")" --version 0.4.0-r58 >"$tmp/bad-version.out" 2>&1; then fail "wrong release identity was accepted"; fi
+if run_upgrade --bundle-file "$tmp/wrong-version.tar.gz" --sha256 "$(sha256 "$tmp/wrong-version.tar.gz")" --version 0.4.0-r59 >"$tmp/bad-version.out" 2>&1; then fail "wrong release identity was accepted"; fi
 [ ! -s "$tmp/systemd.log" ] || fail "release identity rejection changed systemd state"
 
 # A post-switch health failure must restore every file and exact prior service state.
@@ -190,13 +190,13 @@ mkdir -p "$host/usr/local/sbin"
 printf '#!/bin/sh\nprintf "%%s\\n" rollback-legacy-core-manager\n' >"$host/usr/local/sbin/candy-core-manager"
 chmod 0755 "$host/usr/local/sbin/candy-core-manager"
 cp "$host/usr/local/sbin/candy-core-manager" "$tmp/before-legacy-core-manager"
-make_bundle "$tmp/rollback-candidate" x86_64 0.4.0-r58 broken
+make_bundle "$tmp/rollback-candidate" x86_64 0.4.0-r59 broken
 rollback_sha=$(sha256 "$tmp/rollback-candidate.tar.gz")
 reset_service_state
-if FAKE_HEALTH_FAIL=1 run_upgrade --bundle-file "$tmp/rollback-candidate.tar.gz" --sha256 "$rollback_sha" --version 0.4.0-r58 >"$tmp/rollback.out" 2>&1; then fail "failed health verification was accepted"; fi
+if FAKE_HEALTH_FAIL=1 run_upgrade --bundle-file "$tmp/rollback-candidate.tar.gz" --sha256 "$rollback_sha" --version 0.4.0-r59 >"$tmp/rollback.out" 2>&1; then fail "failed health verification was accepted"; fi
 cmp "$tmp/before-server" "$before_current/candy-server" >/dev/null || fail "Runtime executable rollback failed"
 [ "$(readlink "$host/opt/candy/current")" = "$before_current" ] || fail "current Runtime link rollback failed"
-failed_release="$host/opt/candy/releases/0.4.0-r58-$(printf '%s' "$rollback_sha" | cut -c 1-12)"
+failed_release="$host/opt/candy/releases/0.4.0-r59-$(printf '%s' "$rollback_sha" | cut -c 1-12)"
 [ ! -e "$failed_release" ] || fail "failed Runtime release directory survived rollback"
 cmp "$tmp/before-unit" "$host/etc/systemd/system/candy-server.service" >/dev/null || fail "systemd unit rollback failed"
 [ ! -e "$host/usr/local/libexec/serverd-linux" ] || fail "newly introduced Runtime file was not removed during rollback"
@@ -210,12 +210,12 @@ for service in candy-netd.service candy-server.service candy-cloud-sync.timer; d
 done
 
 # Links and other non-regular archive members are rejected before mutation.
-make_bundle "$tmp/link-bundle" x86_64 0.4.0-r58
+make_bundle "$tmp/link-bundle" x86_64 0.4.0-r59
 rm "$tmp/link-bundle/usr/local/libexec/candy-cloud-sync"
 ln -s /etc/passwd "$tmp/link-bundle/usr/local/libexec/candy-cloud-sync"
 tar -C "$tmp/link-bundle" -czf "$tmp/link-bundle.tar.gz" .
 : >"$tmp/systemd.log"
-if run_upgrade --bundle-file "$tmp/link-bundle.tar.gz" --sha256 "$(sha256 "$tmp/link-bundle.tar.gz")" --version 0.4.0-r58 >"$tmp/link.out" 2>&1; then fail "symlink member was accepted"; fi
+if run_upgrade --bundle-file "$tmp/link-bundle.tar.gz" --sha256 "$(sha256 "$tmp/link-bundle.tar.gz")" --version 0.4.0-r59 >"$tmp/link.out" 2>&1; then fail "symlink member was accepted"; fi
 [ ! -s "$tmp/systemd.log" ] || fail "link rejection changed systemd state"
 
 printf '%s\n' "Candy Linux server Runtime upgrade test passed"
