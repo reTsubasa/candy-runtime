@@ -1966,3 +1966,36 @@ msgstr "流量如何选路"
 
 msgid "Published remote site networks always use the SD-WAN full-duplex TUN because their routes are more specific. When a policy selects a remote Internet egress, traffic uses the TUN to reach that site's Candy egress. Traffic that does not match an SD-WAN network or remote-egress policy continues through this router's normal Candy node and DNS rules. If SD-WAN fails, only its own routes are withdrawn and ordinary Candy traffic remains on its normal path."
 msgstr "已发布的远端站点网段始终通过 SD-WAN 全双工 TUN 转发，因为这些路由更精确。策略指定远端互联网出口时，流量先经 TUN 到达该站点，再使用其 Candy 出口。未匹配 SD-WAN 网段或远端出口策略的流量，继续遵循本路由器原有的 Candy 节点和 DNS 规则。SD-WAN 发生故障时，仅撤销其自身路由，普通 Candy 流量保持原有路径。"
+
+msgid "What is SD-WAN?"
+msgstr "什么是 SD-WAN？"
+
+msgid "Candy SD-WAN securely connects sites across the Internet with full-duplex encrypted tunnels. It auto-discovers peers, selects the best path (direct or relay), and applies egress policies published from Candy Cloud — all without manual VPN configuration."
+msgstr "Candy SD-WAN 通过全双工加密隧道在互联网上安全连接各个站点。它自动发现对端、选择最佳路径（直连或中继），并应用 Candy Cloud 发布的出口策略——全程无需手动配置 VPN。"
+
+msgid "Congestion control"
+msgstr "拥塞控制"
+
+msgid "Loading topology…"
+msgstr "正在加载拓扑…"
+
+msgid "Resolves private domain names through the SD-WAN network. Configure in Candy Cloud."
+msgstr "通过 SD-WAN 网络解析私有域名。请在 Candy Cloud 中配置。"
+
+msgid "Routes selected traffic through a local Internet breakout. Configure in Candy Cloud."
+msgstr "将选定流量通过本地互联网出口路由。请在 Candy Cloud 中配置。"
+
+msgid "Routes selected traffic through a remote site's Internet breakout. Configure in Candy Cloud."
+msgstr "将选定流量通过远端站点的互联网出口路由。请在 Candy Cloud 中配置。"
+
+msgid "SD-WAN start requested."
+msgstr "已请求启动 SD-WAN。"
+
+msgid "SD-WAN stopped."
+msgstr "SD-WAN 已停止。"
+
+msgid "Throughput & Loss"
+msgstr "吞吐量与丢包"
+
+msgid "Topology"
+msgstr "拓扑"
