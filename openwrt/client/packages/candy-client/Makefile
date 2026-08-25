@@ -96,10 +96,10 @@ if [ -f /etc/init.d/candy.apk-new ]; then
 	rm -f /etc/init.d/candy.apk-new
 fi
 # Create runtime directories under /var/lib/candy (volatile paths are OK here).
-mkdir -p /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache /var/lib/candy/update
+mkdir -p /etc/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache /var/lib/candy/update
 chown root:root /var/lib/candy
 chmod 0711 /var/lib/candy
-chmod 0700 /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache /var/lib/candy/update
+chmod 0700 /etc/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache /var/lib/candy/update
 # Create persistent SD-WAN state directory under /etc/candy/.
 # If legacy data exists at /var/lib/candy/sdwan (real directory, not symlink),
 # migrate it to the persistent location and create a compat symlink.
@@ -112,6 +112,19 @@ if [ -d /var/lib/candy/sdwan ] && [ ! -L /var/lib/candy/sdwan ]; then
 elif [ ! -e /var/lib/candy/sdwan ] && [ ! -L /var/lib/candy/sdwan ]; then
 	mkdir -p /etc/candy/sdwan
 	ln -s /etc/candy/sdwan /var/lib/candy/sdwan || exit 1
+fi
+# Create persistent epochs directory under /etc/candy/ and compat symlink.
+# If legacy epoch data exists at /var/lib/candy/epochs (real directory, not symlink),
+# migrate it to the persistent location.
+if [ -d /var/lib/candy/epochs ] && [ ! -L /var/lib/candy/epochs ]; then
+	if [ ! -d /etc/candy/epochs ]; then
+		mkdir -p /etc/candy
+		mv /var/lib/candy/epochs /etc/candy/epochs || exit 1
+		ln -s /etc/candy/epochs /var/lib/candy/epochs || exit 1
+	fi
+elif [ ! -e /var/lib/candy/epochs ] && [ ! -L /var/lib/candy/epochs ]; then
+	mkdir -p /etc/candy/epochs
+	ln -s /etc/candy/epochs /var/lib/candy/epochs || exit 1
 fi
 # Migrate legacy instance-id if it exists at the old location.
 if [ -f /var/lib/candy/instance-id ] && [ ! -L /var/lib/candy/instance-id ] && [ ! -e /etc/candy/instance-id ]; then

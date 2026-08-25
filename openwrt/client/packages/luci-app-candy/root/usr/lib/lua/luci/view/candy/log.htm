@@ -45,7 +45,7 @@ end
 
 local service_log = read_log_history("/tmp/candy.log")
 local traffic_log = read_log_history("/tmp/candy-traffic.log")
-local sdwan_lifecycle_log = read_log_tail("/var/lib/candy/sdwan/events-v1.log")
+local sdwan_lifecycle_log = read_log_tail("/etc/candy/sdwan/events-v1.log")
 local _, raw_system_log = process.capture({ "/sbin/logread" })
 
 local function candy_system_log(text)

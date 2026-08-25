@@ -251,30 +251,68 @@ end
   color: var(--arcogray-7);
 }
 .candy-diagnostics-table-scroll .td-telemetry {
-  font-family: "SF Mono", "Menlo", "Monaco", "Consolas", monospace;
   font-size: .88em;
-  white-space: pre-line;
-  min-width: 10em;
+  min-width: 11em;
+  line-height: 1.6;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .candy-diagnostics-table-scroll .td-status {
-  white-space: pre-line;
   line-height: 1.9;
   min-width: 8em;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.candy-telemetry-row {
+  display: flex;
+  align-items: baseline;
+  gap: .35em;
+  flex-wrap: wrap;
+}
+.candy-telemetry-label {
+  color: var(--arcogray-5);
+  font-size: .82em;
+  flex-shrink: 0;
+}
+.candy-telemetry-value {
+  font-weight: 600;
+  color: var(--arcogray-7);
+  font-variant-numeric: tabular-nums;
+}
+.candy-telemetry-sub {
+  font-size: .82em;
+  color: var(--arcogray-5);
+  margin-top: .1em;
 }
 
 /* === Topology visualization === */
 .candy-topology {
   display: flex;
   flex-wrap: wrap;
-  gap: 1em;
+  gap: 1.5em;
   align-items: flex-start;
+}
+.candy-topology-section {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .75em;
+  align-items: flex-start;
+}
+.candy-topology-section-label {
+  width: 100%;
+  font-weight: 600;
+  font-size: .85em;
+  color: var(--arcogray-5);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  margin-bottom: .15em;
 }
 .candy-topology-node {
   background: #fff;
   border: 1px solid var(--arcogray-3);
   border-radius: var(--arcoradius);
   padding: .75em 1em;
-  min-width: 10em;
+  min-width: 12em;
   box-shadow: var(--arcoshadow);
 }
 .candy-topology-node.local {
@@ -290,21 +328,11 @@ end
   font-size: .82em;
   color: var(--arcogray-5);
 }
-.candy-topology-arrow {
-  display: flex;
-  align-items: center;
-  font-size: 1.5em;
-  color: var(--arcogray-4);
-  padding: 0 .25em;
-}
-.candy-topology-arrow.active { color: var(--arcogreen); }
-.candy-topology-arrow.relay  { color: var(--arcoorange); }
-.candy-topology-arrow.inactive { color: var(--arcored); }
-.candy-topology-link-label {
-  font-size: .72em;
+.candy-topology-node-server {
+  font-size: .78em;
   color: var(--arcogray-5);
-  text-align: center;
-  margin-top: .2em;
+  margin-top: .3em;
+  overflow-wrap: anywhere;
 }
 
 /* === Charts === */
@@ -375,7 +403,6 @@ end
 }
 @media (max-width: 640px) {
   .candy-topology { flex-direction: column; }
-  .candy-topology-arrow { transform: rotate(90deg); }
 }
 </style>
 
@@ -597,6 +624,12 @@ function candyDiagnosticsNodeStateBadge(state) {
 	return candyDiagnosticsStatusBadge(text, "error");
 }
 
+function candyDiagnosticsTelemetryRow(label, value) {
+	return '<div class="candy-telemetry-row"><span class="candy-telemetry-label">' + label + '</span><span class="candy-telemetry-value">' + value + '</span></div>';
+}
+function candyDiagnosticsTelemetryRowSub(label, value, sub) {
+	return '<div class="candy-telemetry-row"><span class="candy-telemetry-label">' + label + '</span><span class="candy-telemetry-value">' + value + '</span></div><div class="candy-telemetry-sub">' + sub + '</div>';
+}
 /* === Topology rendering === */
 function candyDiagnosticsRenderTopology(data) {
 	var container = document.getElementById("candy-diagnostics-topology");
@@ -614,10 +647,8 @@ function candyDiagnosticsRenderTopology(data) {
 		if (state === "ready") { localNodes.push(node); } else { peerNodes.push(node); }
 	});
 	if (!localNodes.length && peerNodes.length) {
-		/* No ready node: treat first as local */
 		localNodes.push(peerNodes.shift());
 	}
-	/* Render peer nodes first, then local in center */
 	function renderNode(node, isLocal) {
 		var nodeDiv = document.createElement("div");
 		nodeDiv.className = "candy-topology-node" + (isLocal ? " local" : "");
@@ -629,25 +660,37 @@ function candyDiagnosticsRenderTopology(data) {
 		stateDiv.className = "candy-topology-node-state";
 		stateDiv.innerHTML = candyDiagnosticsNodeStateBadge(node.state);
 		nodeDiv.appendChild(stateDiv);
+		/* Show server info */
+		if (node.server) {
+			var serverDiv = document.createElement("div");
+			serverDiv.className = "candy-topology-node-server";
+			serverDiv.textContent = candyDiagnosticsText(node.server);
+			nodeDiv.appendChild(serverDiv);
+		}
 		return nodeDiv;
 	}
-	/* Render: peer → arrow → local → arrow → peer ... */
-	peerNodes.forEach(function(peer, idx) {
-		container.appendChild(renderNode(peer, false));
-		var arrow = document.createElement("div");
-		arrow.className = "candy-topology-arrow";
-		var peerState = candyDiagnosticsText(peer.state);
-		if (peerState === "ready") arrow.className += " active";
-		else if (peerState === "connecting" || peerState === "reconnecting") arrow.className += " relay";
-		else arrow.className += " inactive";
-		arrow.innerHTML = "&#8596;";
-		container.appendChild(arrow);
-		if (idx === 0 && localNodes.length) {
-			container.appendChild(renderNode(localNodes[0], true));
-		}
+	/* Render local nodes first, then peer nodes in a clean grid */
+	var section = document.createElement("div");
+	section.className = "candy-topology-section";
+	var label = document.createElement("div");
+	label.className = "candy-topology-section-label";
+	label.textContent = "Local";
+	section.appendChild(label);
+	localNodes.forEach(function(node) {
+		section.appendChild(renderNode(node, true));
 	});
-	if (!peerNodes.length && localNodes.length) {
-		container.appendChild(renderNode(localNodes[0], true));
+	container.appendChild(section);
+	if (peerNodes.length) {
+		var peerSection = document.createElement("div");
+		peerSection.className = "candy-topology-section";
+		var peerLabel = document.createElement("div");
+		peerLabel.className = "candy-topology-section-label";
+		peerLabel.textContent = "Peers (" + peerNodes.length + ")";
+		peerSection.appendChild(peerLabel);
+		peerNodes.forEach(function(node) {
+			peerSection.appendChild(renderNode(node, false));
+		});
+		container.appendChild(peerSection);
 	}
 }
 function candyDiagnosticsRenderFeatureMatrix(data) {
@@ -870,31 +913,31 @@ function candyDiagnosticsRender(data) {
 
 		/* Latency cell with link quality indicator */
 		var latencyHtml = '<div class="candy-status-row">' + candyDiagnosticsLinkQuality(rtt, lost, estCap) + '</div>'
-			+ 'RTT: ' + candyDiagnosticsMicros(rtt) + '\n'
-			+ candyDiagnosticsLabels.rttVariation + ': ' + candyDiagnosticsMicros(rttVar);
+			+ candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.rtt, candyDiagnosticsMicros(rtt))
+			+ candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.rttVariation, candyDiagnosticsMicros(rttVar));
 		candyDiagnosticsAppendTelemetryCell(row, latencyHtml);
 
 		/* Throughput & Loss */
-		var throughputHtml = candyDiagnosticsLabels.goodput + ': ' + candyDiagnosticsGoodput(goodput) + '\n'
-			+ candyDiagnosticsLabels.estimatedCapacity + ': ' + candyDiagnosticsBps(estCap) + '\n'
-			+ candyDiagnosticsLabels.loss + ': ' + candyDiagnosticsText(lost);
+		var throughputHtml = candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.goodput, candyDiagnosticsGoodput(goodput))
+			+ candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.estimatedCapacity, candyDiagnosticsBps(estCap))
+			+ candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.loss, candyDiagnosticsText(lost));
 		candyDiagnosticsAppendTelemetryCell(row, throughputHtml);
 
 		/* Congestion control: flight + pacing + cwnd bar */
-		var ccHtml = candyDiagnosticsLabels.inFlight + ': ' + candyDiagnosticsBytes(inFlight)
-			+ ' / ' + candyDiagnosticsBytes(cwnd) + ' '
-			+ candyDiagnosticsCwndBar(inFlight, cwnd) + '\n'
-			+ candyDiagnosticsLabels.pacing + ': ' + candyDiagnosticsBps(pacing);
+		var ccHtml = candyDiagnosticsTelemetryRowSub(candyDiagnosticsLabels.inFlight,
+				candyDiagnosticsBytes(inFlight) + ' / ' + candyDiagnosticsBytes(cwnd),
+				candyDiagnosticsCwndBar(inFlight, cwnd))
+			+ candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.pacing, candyDiagnosticsBps(pacing));
 		candyDiagnosticsAppendTelemetryCell(row, ccHtml);
 
 		/* Status: congestion mode + recovery state + controller */
-		var statusHtml = candyDiagnosticsCongestionModeBadge(congMode) + '\n'
-			+ candyDiagnosticsRecoveryStateBadge(recState) + '\n'
+		var statusHtml = '<div style="margin-bottom:3px">' + candyDiagnosticsCongestionModeBadge(congMode) + '</div>'
+			+ '<div style="margin-bottom:3px">' + candyDiagnosticsRecoveryStateBadge(recState) + '</div>'
 			+ candyDiagnosticsStatusBadge(candyDiagnosticsController(applied, passive), "info");
 		candyDiagnosticsAppendStatusCell(row, statusHtml);
 
 		/* MTU */
-		candyDiagnosticsAppendCell(row, "MTU: " + candyDiagnosticsText(mtu));
+		candyDiagnosticsAppendCell(row, candyDiagnosticsText(mtu));
 		body.appendChild(row);
 	});
 }

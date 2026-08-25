@@ -5,9 +5,9 @@ local fs = require "nixio.fs"
 local jsonc = require "luci.jsonc"
 local xml = require "luci.xml"
 local status_file = "/var/run/candy/sdwan-status.json"
-local identity_file = "/var/lib/candy/sdwan/identity/device-identity-v1.json"
-local profile_file = "/var/lib/candy/sdwan/profile-v1.json"
-local sync_status_file = "/var/lib/candy/sdwan/cloud-sync-status-v1.json"
+local identity_file = "/etc/candy/sdwan/identity/device-identity-v1.json"
+local profile_file = "/etc/candy/sdwan/profile-v1.json"
+local sync_status_file = "/etc/candy/sdwan/cloud-sync-status-v1.json"
 local max_bytes = 65536
 local status = nil
 local stat = fs.stat(status_file)
@@ -171,11 +171,12 @@ local result = luci.http.formvalue("result") or ""
 .candy-sdwan-hero { padding:1em 1.1em; margin-bottom:1em; background:linear-gradient(135deg,#eef4ff 0%,#f0f5ff 100%); border:1px solid rgba(72,118,184,.25); border-radius:6px; }
 .candy-sdwan-hero strong { display:block; margin-bottom:.35em; font-size:1.05em; color:#1a3a5c; }
 .candy-sdwan-hero p { margin:0; color:#4a5568; line-height:1.65; }
-.candy-sdwan-peer-table { display:grid; grid-template-columns:minmax(0,1.2fr) minmax(0,.8fr) minmax(0,1fr); gap:0; margin:0; }
-.candy-sdwan-peer-header { display:contents; }
-.candy-sdwan-peer-header span { padding:.35em .5em; font-weight:600; color:#555; font-size:.88em; border-bottom:2px solid rgba(128,128,128,.35); }
-.candy-sdwan-peer-row { display:contents; }
-.candy-sdwan-peer-row span { padding:.4em .5em; border-bottom:1px solid rgba(128,128,128,.18); overflow-wrap:anywhere; }
+.candy-sdwan-peer-table { width:100%; border-collapse:collapse; margin:0; font-size:.92em; }
+.candy-sdwan-peer-table th { padding:.35em .5em; font-weight:600; color:#555; font-size:.88em; border-bottom:2px solid rgba(128,128,128,.35); text-align:left; }
+.candy-sdwan-peer-table td { padding:.4em .5em; border-bottom:1px solid rgba(128,128,128,.18); overflow-wrap:anywhere; vertical-align:top; }
+.candy-sdwan-peer-table th:first-child, .candy-sdwan-peer-table td:first-child { width:auto; }
+.candy-sdwan-peer-table th:nth-child(2), .candy-sdwan-peer-table td:nth-child(2) { width:8em; }
+.candy-sdwan-peer-table th:nth-child(3), .candy-sdwan-peer-table td:nth-child(3) { width:6em; }
 .candy-sdwan-hint { display:block; margin-top:.25em; color:#888; font-size:.88em; font-style:italic; }
 </style>
 
@@ -232,15 +233,15 @@ local result = luci.http.formvalue("result") or ""
 				<div><dt><%:Site%></dt><dd><%=label(site_value)%></dd></div>
 				<div><dt><%:Segment%></dt><dd><%=label(segment_value)%></dd></div>
 				<div><dt><%:TUN%></dt><dd><%=runtime_state_label(tun.state)%><% if tun.full_duplex == true then %> / <%:Full duplex%><% end %></dd></div>
-				<div><dt><%:Peer%></dt><dd><% if #peers == 0 then %><%=translate("Unavailable")%><% else %><div class="candy-sdwan-peer-table"><div class="candy-sdwan-peer-header"><span><%:Name%></span><span><%:Status%></span><span><%:Path%></span></div><% for _, peer in ipairs(peers) do %><div class="candy-sdwan-peer-row"><span><%=label(peer.name or peer.id)%></span><span><%=runtime_state_label(peer.state)%></span><span><% if type(peer.path) == "table" and (peer.path.kind == "direct" or peer.path.kind == "relay") then %><%=peer.path.kind == "direct" and translate("Direct") or translate("Relay")%><% else %>—<% end %></span></div><% end %></div><% end %></dd></div>
+				<div><dt><%:Peer%></dt><dd><% if #peers == 0 then %><%=translate("Unavailable")%><% else %><table class="candy-sdwan-peer-table"><thead><tr><th><%:Name%></th><th><%:Status%></th><th><%:Path%></th></tr></thead><tbody><% for _, peer in ipairs(peers) do %><tr><td><%=label(peer.name or peer.id)%></td><td><%=runtime_state_label(peer.state)%></td><td><% if type(peer.path) == "table" and (peer.path.kind == "direct" or peer.path.kind == "relay") then %><%=peer.path.kind == "direct" and translate("Direct") or translate("Relay")%><% else %>—<% end %></td></tr><% end %></tbody></table><% end %></dd></div>
 				<div><dt><%:Path%></dt><dd><% if path and (path.kind == "direct" or path.kind == "relay") then %><%=path.kind == "direct" and translate("Direct") or translate("Relay")%><% else %><%=translate("Unavailable")%><% end %></dd></div>
-				<div><dt><%:Local egress%></dt><dd><%=object_label(egress["local"], "name")%><% if type(egress["local"]) ~= "table" or (not egress["local"].name and not egress["local"].id) then %><small class="candy-sdwan-hint"><%:Assign a local egress policy in Candy Cloud%></small><% end %></dd></div>
-				<div><dt><%:Remote egress%></dt><dd><%=object_label(egress.remote, "name")%><% if type(egress.remote) ~= "table" or (not egress.remote.name and not egress.remote.id) then %><small class="candy-sdwan-hint"><%:Assign a remote egress policy in Candy Cloud%></small><% end %></dd></div>
-				<div><dt><%:Internal DNS%></dt><dd><%=runtime_state_label(dns.state)%><% if dns.state == "unavailable" or dns.state == nil or dns.state == "" then %><small class="candy-sdwan-hint"><%:Configure internal DNS in Candy Cloud%></small><% end %></dd></div>
+				<div><dt><%:Local egress%></dt><dd><%=object_label(egress["local"], "name")%><% if type(egress["local"]) ~= "table" or (not egress["local"].name and not egress["local"].id) then %><small class="candy-sdwan-hint"><%:Routes selected traffic through a local Internet breakout. Configure in Candy Cloud.%></small><% end %></dd></div>
+				<div><dt><%:Remote egress%></dt><dd><%=object_label(egress.remote, "name")%><% if type(egress.remote) ~= "table" or (not egress.remote.name and not egress.remote.id) then %><small class="candy-sdwan-hint"><%:Routes selected traffic through a remote site's Internet breakout. Configure in Candy Cloud.%></small><% end %></dd></div>
+				<div><dt><%:Internal DNS%></dt><dd><%=runtime_state_label(dns.state)%><% if dns.state == "unavailable" or dns.state == nil or dns.state == "" then %><small class="candy-sdwan-hint"><%:Resolves private domain names through the SD-WAN network. Configure in Candy Cloud.%></small><% end %></dd></div>
 				<div><dt><%:Runtime%></dt><dd><%=runtime_state_label(runtime.state)%></dd></div>
 				</dl></div>
 				<div class="candy-sdwan-routing-note"><strong><%:How traffic is selected%></strong><br /><%:Published remote site networks always use the SD-WAN full-duplex TUN because their routes are more specific. When a policy selects a remote Internet egress, traffic uses the TUN to reach that site's Candy egress. Traffic that does not match an SD-WAN network or remote-egress policy continues through this router's normal Candy node and DNS rules. If SD-WAN fails, only its own routes are withdrawn and ordinary Candy traffic remains on its normal path.%></div>
-			<% if network_ready then %><div class="candy-sdwan-actions"><form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_start')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-apply" type="submit"><%:Start%></button></form><form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_stop')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-reset" type="submit"><%:Stop%></button></form><form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_reconnect')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-action" type="submit"><%:Reconnect%></button></form></div><% end %>
+			<% if registration_state == "registered" then %><div class="candy-sdwan-actions"><form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_start')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-apply" type="submit"><%:Start%></button></form><form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_stop')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-reset" type="submit"><%:Stop%></button></form><form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_reconnect')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-action" type="submit"><%:Reconnect%></button></form></div><% end %>
 		<% end %>
 		<div class="candy-sdwan-profile-management">
 			<div><strong><%:Profile management%></strong><span><%:Leaving removes this device's local Cloud identity and SD-WAN configuration. The node record remains in Cloud until an administrator deletes it.%></span></div>
