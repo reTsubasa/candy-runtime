@@ -620,6 +620,8 @@ function index()
 	entry({"admin", "services", "candy", "sdwan_join"}, call("action_sdwan_join")).leaf = true
 	entry({"admin", "services", "candy", "sdwan_reconnect"}, call("action_sdwan_reconnect")).leaf = true
 	entry({"admin", "services", "candy", "sdwan_leave"}, call("action_sdwan_leave")).leaf = true
+tentry({"admin", "services", "candy", "sdwan_start"}, call("action_sdwan_start")).leaf = true
+tentry({"admin", "services", "candy", "sdwan_stop"}, call("action_sdwan_stop")).leaf = true
 	entry({"admin", "services", "candy", "congestion_test"}, call("action_congestion_test")).leaf = true
 	entry({"admin", "services", "candy", "congestion_test_status"}, call("action_congestion_test_status")).leaf = true
 	entry({"admin", "services", "candy", "core_status"}, call("action_core_status")).leaf = true
@@ -972,6 +974,30 @@ function action_sdwan_leave()
 		log:close()
 	end
 	redirect_sdwan("left")
+end
+
+function action_sdwan_start()
+	if not require_post() then return end
+	local status = read_sdwan_status(require "luci.model.uci".cursor())
+	if not status.registration or status.registration.state ~= "registered" then
+		luci.http.status(409, "Conflict")
+		return
+	end
+	process.run({ "/etc/init.d/candy-cloud-sync", "restart" }, { background = true, timeout = 10 })
+	if not process.run({ "/etc/init.d/candy", "sdwan_start" }, { background = true, timeout = 30 }) then
+		redirect_sdwan("error")
+		return
+	end
+	redirect_sdwan("starting")
+end
+
+function action_sdwan_stop()
+	if not require_post() then return end
+	if not run_sdwan_lifecycle("stop", { "/etc/init.d/candy", "sdwan_stop" }, 30) then
+		redirect_sdwan("error")
+		return
+	end
+	redirect_sdwan("stopped")
 end
 
 function action_runtime_mode()
