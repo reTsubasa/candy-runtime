@@ -916,6 +916,7 @@ prepare_sdwan_state() {
 	# /etc/candy/ before any other process touches the state directory.
 	migrate_sdwan_state || return 1
 	mkdir -p "$RUNTIME_DIR" "$CANDY_NETD_RUNTIME_DIR" /var/lib/candy /etc/candy "$(dirname "$CANDY_SDWAN_GENERATION_FILE")" "$CANDY_EPOCH_DIRECTORY" || return 1
+	chown -R candy-sdwan:candy-sdwan "$CANDY_SDWAN_STATE_DIR" 2>/dev/null || true
 	ensure_sdwan_instance_id || return 1
 	ensure_sdwan_generation || return 1
 	chown root:candy-sdwan "$RUNTIME_DIR" 2>/dev/null || return 1

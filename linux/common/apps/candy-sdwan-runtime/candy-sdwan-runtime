@@ -91,6 +91,9 @@ ensure_directories() {
 	[ ! -L "$state_dir" ] || fail "SD-WAN state directory must not be a symbolic link"
 	mkdir -p "$state_dir"
 	chmod 0700 "$state_dir"
+	if [ "${CANDY_SDWAN_TEST_MODE:-0}" != 1 ] && [ "$(id -u)" = 0 ] && id "$state_user" >/dev/null 2>&1; then
+		chown "$state_user:$state_group" "$state_dir" 2>/dev/null || true
+	fi
 	if [ -e "$run_dir" ] || [ -L "$run_dir" ]; then
 		[ -d "$run_dir" ] && [ ! -L "$run_dir" ] ||
 			fail "SD-WAN runtime directory must be a real directory"
@@ -103,7 +106,7 @@ ensure_directories() {
 delegate_state() {
 	[ "${CANDY_SDWAN_TEST_MODE:-0}" != 1 ] || return 0
 	[ "$(id -u)" = 0 ] || return 0
-	id "$state_user" >/dev/null 2>&1 || fail "SD-WAN service user does not exist: $state_user"
+	id "$state_user" >/dev/null 2>&1 || { printf '%s\n' "candy: SD-WAN service user does not exist yet: $state_user" >&2; return 0; }
 	[ -d "$state_dir" ] && [ ! -L "$state_dir" ] || fail "SD-WAN state directory is invalid"
 	find "$state_dir" -xdev -type d -exec chmod 0700 {} \; || fail "could not protect SD-WAN state directories"
 	find "$state_dir" -xdev -type f -exec chmod 0600 {} \; || fail "could not protect SD-WAN state files"
