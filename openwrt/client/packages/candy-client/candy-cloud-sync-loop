@@ -3,7 +3,7 @@
 set -u
 
 SYNC_BIN=${CANDY_CLOUD_SYNC_BIN:-/usr/libexec/candy-cloud-sync}
-STATE_DIR=${CANDY_SDWAN_STATE_DIR:-/var/lib/candy/sdwan}
+STATE_DIR=${CANDY_SDWAN_STATE_DIR:-/etc/candy/sdwan}
 IDENTITY_FILE=${CANDY_CLOUD_IDENTITY_FILE:-$STATE_DIR/identity/device-identity-v1.json}
 INTERVAL=${CANDY_CLOUD_SYNC_INTERVAL:-30}
 RUN_USER=${CANDY_CLOUD_SYNC_USER:-candy-sdwan}

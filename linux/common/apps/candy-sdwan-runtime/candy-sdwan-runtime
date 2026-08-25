@@ -3,7 +3,7 @@ set -eu
 
 # Runtime owns this cache. Core and Cloud may supply real state later through a
 # versioned agent boundary; this skeleton never infers protocol state.
-state_dir=${CANDY_SDWAN_STATE_DIR:-/var/lib/candy/sdwan}
+state_dir=${CANDY_SDWAN_STATE_DIR:-/etc/candy/sdwan}
 run_dir=${CANDY_SDWAN_RUN_DIR:-/run/candy}
 config_file=${CANDY_SDWAN_CONFIG_CACHE:-$state_dir/config-v1.json}
 durable_status_file=${CANDY_SDWAN_STATUS_CACHE:-$state_dir/status-v1.json}

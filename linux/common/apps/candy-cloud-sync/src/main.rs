@@ -49,7 +49,7 @@ const PUBLIC_ENDPOINT_ENV: &str = "CANDY_PUBLIC_ENDPOINT";
     about = "Candy Cloud Runtime synchronizer"
 )]
 struct Args {
-    #[arg(long, default_value = "/var/lib/candy/sdwan")]
+    #[arg(long, default_value = "/etc/candy/sdwan")]
     state_dir: PathBuf,
     #[arg(long, default_value = "/run/candy")]
     run_dir: PathBuf,

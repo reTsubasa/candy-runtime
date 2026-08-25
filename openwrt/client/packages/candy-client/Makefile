@@ -4,7 +4,7 @@ PKG_NAME:=candy-client
 PKG_VERSION:=0.4.0
 # OpenWrt requires a package revision. This is internal metadata, not part of
 # the Candy product version shown to users.
-PKG_RELEASE:=62
+PKG_RELEASE:=63
 CANDY_RUNTIME_BIN_DIR?=
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
@@ -95,20 +95,47 @@ if [ -f /etc/init.d/candy.apk-new ]; then
 	chmod 0755 /etc/init.d/candy
 	rm -f /etc/init.d/candy.apk-new
 fi
-[ ! -L /var/lib/candy/sdwan ] || exit 1
-mkdir -p /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache /var/lib/candy/update /var/lib/candy/sdwan
+# Create runtime directories under /var/lib/candy (volatile paths are OK here).
+mkdir -p /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache /var/lib/candy/update
 chown root:root /var/lib/candy
 chmod 0711 /var/lib/candy
 chmod 0700 /var/lib/candy/epochs /var/lib/candy/policy-cache /var/lib/candy/grant-cache /var/lib/candy/update
+# Create persistent SD-WAN state directory under /etc/candy/.
+# If legacy data exists at /var/lib/candy/sdwan (real directory, not symlink),
+# migrate it to the persistent location and create a compat symlink.
+if [ -d /var/lib/candy/sdwan ] && [ ! -L /var/lib/candy/sdwan ]; then
+	if [ ! -d /etc/candy/sdwan ]; then
+		mkdir -p /etc/candy
+		mv /var/lib/candy/sdwan /etc/candy/sdwan || exit 1
+		ln -s /etc/candy/sdwan /var/lib/candy/sdwan || exit 1
+	fi
+elif [ ! -e /var/lib/candy/sdwan ] && [ ! -L /var/lib/candy/sdwan ]; then
+	mkdir -p /etc/candy/sdwan
+	ln -s /etc/candy/sdwan /var/lib/candy/sdwan || exit 1
+fi
+# Migrate legacy instance-id if it exists at the old location.
+if [ -f /var/lib/candy/instance-id ] && [ ! -L /var/lib/candy/instance-id ] && [ ! -e /etc/candy/instance-id ]; then
+	mkdir -p /etc/candy
+	cp -p /var/lib/candy/instance-id /etc/candy/instance-id || exit 1
+	chown root:candy-sdwan /etc/candy/instance-id 2>/dev/null || true
+	chmod 0640 /etc/candy/instance-id || true
+fi
+# Migrate legacy fault state if it exists at the old location.
+if [ -f /var/lib/candy/runtime-fault.json ] && [ ! -L /var/lib/candy/runtime-fault.json ] && [ ! -e /etc/candy/runtime-fault.json ]; then
+	mkdir -p /etc/candy
+	cp -p /var/lib/candy/runtime-fault.json /etc/candy/runtime-fault.json || exit 1
+	chmod 0600 /etc/candy/runtime-fault.json || true
+fi
 if [ -d /usr/lib/candy/cores ] && [ ! -L /usr/lib/candy/cores ]; then
 	for core_dir in /usr/lib/candy/cores/*; do
 		[ -d "$$core_dir" ] && [ ! -L "$$core_dir" ] || continue
 		chmod 0755 "$$core_dir" || exit 1
 	done
 fi
-find /var/lib/candy/sdwan -xdev -type d -exec chmod 0700 {} \;
-find /var/lib/candy/sdwan -xdev -type f -exec chmod 0600 {} \;
-find /var/lib/candy/sdwan -xdev ! -type l -exec chown candy-sdwan:candy-sdwan {} \;
+# Apply permissions to the persistent SD-WAN state.
+find /etc/candy/sdwan -xdev -type d -exec chmod 0700 {} \;
+find /etc/candy/sdwan -xdev -type f -exec chmod 0600 {} \;
+find /etc/candy/sdwan -xdev ! -type l -exec chown candy-sdwan:candy-sdwan {} \;
 exit 0
 endef
 
