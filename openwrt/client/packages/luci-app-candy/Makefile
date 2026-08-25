@@ -3,7 +3,7 @@ include $(TOPDIR)/rules.mk
 PKG_NAME:=luci-app-candy
 PKG_VERSION:=0.4.0
 # Internal OpenWrt package revision; LuCI displays PKG_VERSION only.
-PKG_RELEASE:=63
+PKG_RELEASE:=64
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
 
