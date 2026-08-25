@@ -781,8 +781,8 @@ migrate_sdwan_state() {
 	# Persistent directory already exists; ensure compat symlink.
 	if [ -d "$persistent" ]; then
 		if [ ! -e "$legacy" ] && [ ! -L "$legacy" ]; then
-			mkdir -p "$(dirname "$legacy")" 2>/dev/null || true
-			ln -s "$persistent" "$legacy" 2>/dev/null || true
+			mkdir -p "$(dirname "$legacy")" || return 1
+			ln -s "$persistent" "$legacy" || return 1
 		fi
 		return 0
 	fi
@@ -818,8 +818,8 @@ migrate_sdwan_state() {
 		mkdir -p "$persistent" || return 1
 	fi
 	if [ ! -e "$legacy" ] && [ ! -L "$legacy" ]; then
-		mkdir -p "$(dirname "$legacy")" 2>/dev/null || true
-		ln -s "$persistent" "$legacy" 2>/dev/null || true
+		mkdir -p "$(dirname "$legacy")" || return 1
+		ln -s "$persistent" "$legacy" || return 1
 	fi
 
 	# Migrate legacy instance-id if it exists at the old location.
