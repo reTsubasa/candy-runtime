@@ -25,7 +25,7 @@ const MIN_READINESS_TIMEOUT_MS: u64 = 1_000;
 const MAX_READINESS_TIMEOUT_MS: u64 = 120_000;
 const MAX_STATUS_BYTES: u64 = 256 * 1024;
 const MAX_ACTIVATION_BYTES: u64 = 64 * 1024;
-const CORE_TERMINATION_GRACE: Duration = Duration::from_secs(5);
+const CORE_TERMINATION_GRACE: Duration = Duration::from_secs(15);
 const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 const RETRY_STABLE_RESET: Duration = Duration::from_secs(60);
@@ -592,7 +592,48 @@ fn clear_cloexec(fd: &OwnedFd) -> Result<()> {
     Ok(())
 }
 
+/// Set OS resource limits appropriate for a constrained OpenWRT device.
+/// Prevents the Core process from exhausting file descriptors or memory
+/// and taking down the entire router.
+fn set_resource_limits() -> Result<()> {
+    // Raise the soft fd limit to a reasonable ceiling. Core with QUIC
+    // connections can use dozens of fds; the default 1024 on OpenWRT is
+    // often too low under load. 4096 is safe for typical WRT hardware.
+    let mut rlim = nix::libc::rlimit {
+        rlim_cur: 4096,
+        rlim_max: 4096,
+    };
+    let rc = unsafe {
+        nix::libc::setrlimit(nix::libc::RLIMIT_NOFILE, &rlim)
+    };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        eprintln!(
+            "level=warn event=sdwan_rlimit_nofile_failed error={}",
+            sanitize_log_value(&err.to_string())
+        );
+        // Non-fatal: the default limit may still work.
+    }
+
+    // Prevent the Core process from locking too much memory.
+    rlim.rlim_cur = 64 * 1024 * 1024; // 64 MiB
+    rlim.rlim_max = 64 * 1024 * 1024;
+    let rc = unsafe {
+        nix::libc::setrlimit(nix::libc::RLIMIT_MEMLOCK, &rlim)
+    };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        eprintln!(
+            "level=warn event=sdwan_rlimit_memlock_failed error={}",
+            sanitize_log_value(&err.to_string())
+        );
+    }
+
+    Ok(())
+}
+
 fn spawn_core(args: &RuntimeArgs, tun: &OwnedFd, readiness_token: &str) -> Result<Child> {
+    set_resource_limits()?;
     clear_cloexec(tun)?;
     let fd = tun.as_raw_fd().to_string();
     let mut command = Command::new(&args.core);

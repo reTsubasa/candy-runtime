@@ -46,7 +46,7 @@ TRAFFIC_LOG_FILE=${TRAFFIC_LOG_FILE:-/tmp/candy-traffic.log}
 NODE_STATUS_FILE=/tmp/candy.nodes
 STATUS_PROBE_LOCK_DIR=${STATUS_PROBE_LOCK_DIR:-/tmp/candy-status-probe.lock}
 CANDY_LIFECYCLE_FILE=${CANDY_LIFECYCLE_FILE:-/tmp/candy.lifecycle}
-CANDY_FAULT_STATE_FILE=${CANDY_FAULT_STATE_FILE:-/var/lib/candy/runtime-fault.json}
+CANDY_FAULT_STATE_FILE=${CANDY_FAULT_STATE_FILE:-/etc/candy/runtime-fault.json}
 CANDY_DNS_LISTEN=${CANDY_DNS_LISTEN:-127.0.0.1:15353}
 CANDY_LISTENER_WAIT_SECONDS=${CANDY_LISTENER_WAIT_SECONDS:-8}
 CANDY_SERVICE_LOCK_WAIT_SECONDS=${CANDY_SERVICE_LOCK_WAIT_SECONDS:-30}
@@ -65,7 +65,7 @@ CANDY_SDWAN_AGENT=${CANDY_SDWAN_AGENT:-/usr/bin/candy-sdwan-agent}
 CANDY_SDWAN_RUNTIME=${CANDY_SDWAN_RUNTIME:-/usr/libexec/candy-sdwan-runtime}
 CANDY_SDWAN_STATUS_INSPECTOR=${CANDY_SDWAN_STATUS_INSPECTOR:-/usr/libexec/candy-cloud-sync}
 CANDY_CORE_BIN=${CANDY_CORE_BIN:-/usr/lib/candy/cores/current/candy-core}
-CANDY_SDWAN_STATE_DIR=${CANDY_SDWAN_STATE_DIR:-/var/lib/candy/sdwan}
+CANDY_SDWAN_STATE_DIR=${CANDY_SDWAN_STATE_DIR:-/etc/candy/sdwan}
 CANDY_SDWAN_ACTIVATIONS_DIR=${CANDY_SDWAN_ACTIVATIONS_DIR:-$CANDY_SDWAN_STATE_DIR/activations}
 CANDY_SDWAN_CANDIDATE=${CANDY_SDWAN_CANDIDATE:-$CANDY_SDWAN_STATE_DIR/candidate}
 CANDY_SDWAN_ACTIVE=${CANDY_SDWAN_ACTIVE:-$CANDY_SDWAN_STATE_DIR/active}
@@ -77,15 +77,15 @@ CANDY_SDWAN_DECLARATION=
 CANDY_SDWAN_CORE_ROLE=
 CANDY_SDWAN_CANDIDATE_TARGET=
 CANDY_SDWAN_CANDIDATE_HASH=
-CANDY_SDWAN_INSTANCE_ID_FILE=${CANDY_SDWAN_INSTANCE_ID_FILE:-/var/lib/candy/instance-id}
-CANDY_SDWAN_GENERATION_FILE=${CANDY_SDWAN_GENERATION_FILE:-/var/lib/candy/sdwan/generation}
+CANDY_SDWAN_INSTANCE_ID_FILE=${CANDY_SDWAN_INSTANCE_ID_FILE:-/etc/candy/sdwan/instance-id}
+CANDY_SDWAN_GENERATION_FILE=${CANDY_SDWAN_GENERATION_FILE:-/etc/candy/sdwan/generation}
 CANDY_NETD_BIN=${CANDY_NETD_BIN:-/usr/bin/candy-netd}
 CANDY_NETD_RUNTIME_DIR=${CANDY_NETD_RUNTIME_DIR:-/var/run/candy-netd}
 CANDY_NETD_SOCKET=${CANDY_NETD_SOCKET:-$CANDY_NETD_RUNTIME_DIR/netd.sock}
 CANDY_NETD_JOURNAL=${CANDY_NETD_JOURNAL:-/var/lib/candy/netd.journal}
 NETWORK_APPLY_LOCK_DIR=${NETWORK_APPLY_LOCK_DIR:-/var/lib/candy/network-apply.lock}
 CANDY_SERVICE_LOCK_DIR=${CANDY_SERVICE_LOCK_DIR:-/var/lib/candy/service.lock}
-CANDY_EPOCH_DIRECTORY=${CANDY_EPOCH_DIRECTORY:-/var/lib/candy/epochs}
+CANDY_EPOCH_DIRECTORY=${CANDY_EPOCH_DIRECTORY:-/etc/candy/epochs}
 CANDY_SDWAN_STATUS_FILE=${CANDY_SDWAN_STATUS_FILE:-$RUNTIME_DIR/sdwan-status.json}
 CANDY_SDWAN_READY_FILE=${CANDY_SDWAN_READY_FILE:-$CANDY_SDWAN_STATE_DIR/activation-ready-v1.json}
 CANDY_SDWAN_ACTIVE_PROOF=${CANDY_SDWAN_ACTIVE_PROOF:-$CANDY_SDWAN_STATE_DIR/active-activation-v1.json}
@@ -162,7 +162,7 @@ sdwan_runtime_state() {
 	local action="$1"
 	shift
 	[ -x "$CANDY_SDWAN_RUNTIME" ] || return 0
-	CANDY_SDWAN_STATE_DIR=/var/lib/candy/sdwan \
+	CANDY_SDWAN_STATE_DIR="$CANDY_SDWAN_STATE_DIR" \
 	CANDY_SDWAN_RUN_DIR="$RUNTIME_DIR" \
 	CANDY_SDWAN_STATUS_FILE="$CANDY_SDWAN_STATUS_FILE" \
 		"$CANDY_SDWAN_RUNTIME" "$action" "$@" >/dev/null 2>&1 || {
@@ -748,6 +748,105 @@ wait_for_sdwan_candidate() {
 	return 1
 }
 
+
+# Migrate SD-WAN state from the tmpfs-vulnerable /var/lib/candy/ location to
+# persistent /etc/candy/ storage. On many OpenWRT devices /var/lib/ is a tmpfs
+# that is wiped on every reboot. This function is idempotent and safe to call
+# on every service start.
+#
+# Migration logic:
+#   1. If /var/lib/candy/sdwan is a real directory (not a symlink) and
+#      /etc/candy/sdwan does not exist: move the entire tree.
+#   2. Create a backward-compatibility symlink:
+#      /var/lib/candy/sdwan -> /etc/candy/sdwan
+#   3. If already migrated (legacy is a symlink to persistent), do nothing.
+#   4. Migrate legacy instance-id if it exists at the old location.
+migrate_sdwan_state() {
+	local legacy="/var/lib/candy/sdwan"
+	local persistent="$CANDY_SDWAN_STATE_DIR"
+	local legacy_instance_id="/var/lib/candy/instance-id"
+	local legacy_epochs="/var/lib/candy/epochs"
+	local persistent_epochs="$CANDY_EPOCH_DIRECTORY"
+	local legacy_fault="/var/lib/candy/runtime-fault.json"
+
+	# Already migrated: persistent dir exists and legacy symlink points to it.
+	if [ -d "$persistent" ] && [ -L "$legacy" ] && [ "$(readlink "$legacy" 2>/dev/null)" = "$persistent" ]; then
+		# Migrate any remaining legacy instance-id file.
+		if [ -f "$legacy_instance_id" ] && [ ! -L "$legacy_instance_id" ] && [ ! -e "$CANDY_SDWAN_INSTANCE_ID_FILE" ]; then
+			cp -p "$legacy_instance_id" "$CANDY_SDWAN_INSTANCE_ID_FILE" 2>/dev/null || true
+		fi
+		return 0
+	fi
+
+	# Persistent directory already exists; ensure compat symlink.
+	if [ -d "$persistent" ]; then
+		if [ ! -e "$legacy" ] && [ ! -L "$legacy" ]; then
+			mkdir -p "$(dirname "$legacy")" 2>/dev/null || true
+			ln -s "$persistent" "$legacy" 2>/dev/null || true
+		fi
+		return 0
+	fi
+
+	# Migrate from legacy real directory (not a symlink) to persistent storage.
+	if [ -d "$legacy" ] && [ ! -L "$legacy" ]; then
+		log_msg "migrating SD-WAN state from $legacy to $persistent"
+		mkdir -p "$(dirname "$persistent")" || return 1
+		if ! mv "$legacy" "$persistent"; then
+			log_error "SD-WAN state migration failed: cannot move $legacy to $persistent"
+			return 1
+		fi
+		ln -s "$persistent" "$legacy" || {
+			log_error "SD-WAN state migration failed: cannot create compat symlink"
+			return 1
+		}
+		log_msg "SD-WAN state migrated to persistent storage: $persistent"
+		return 0
+	fi
+
+	# Legacy is a symlink pointing elsewhere; follow it.
+	if [ -L "$legacy" ]; then
+		local target
+		target=$(readlink "$legacy" 2>/dev/null || true)
+		if [ -d "$target" ]; then
+			log_msg "SD-WAN state already at $target via symlink $legacy"
+			return 0
+		fi
+	fi
+
+	# Fresh setup: create persistent dir and compat symlink.
+	if [ ! -d "$persistent" ]; then
+		mkdir -p "$persistent" || return 1
+	fi
+	if [ ! -e "$legacy" ] && [ ! -L "$legacy" ]; then
+		mkdir -p "$(dirname "$legacy")" 2>/dev/null || true
+		ln -s "$persistent" "$legacy" 2>/dev/null || true
+	fi
+
+	# Migrate legacy instance-id if it exists at the old location.
+	if [ -f "$legacy_instance_id" ] && [ ! -L "$legacy_instance_id" ] && [ ! -e "$CANDY_SDWAN_INSTANCE_ID_FILE" ] && [ ! -L "$CANDY_SDWAN_INSTANCE_ID_FILE" ]; then
+		cp -p "$legacy_instance_id" "$CANDY_SDWAN_INSTANCE_ID_FILE" 2>/dev/null || true
+	fi
+
+	# Migrate legacy fault state if it exists at the old location.
+	if [ -f "$legacy_fault" ] && [ ! -L "$legacy_fault" ] && [ ! -e "$CANDY_FAULT_STATE_FILE" ] && [ ! -L "$CANDY_FAULT_STATE_FILE" ]; then
+		cp -p "$legacy_fault" "$CANDY_FAULT_STATE_FILE" 2>/dev/null || true
+	fi
+
+	# Migrate epoch data to persistent storage.
+	if [ -d "$legacy_epochs" ] && [ ! -L "$legacy_epochs" ] && [ ! -d "$persistent_epochs" ]; then
+		log_msg "migrating SD-WAN epoch data from $legacy_epochs to $persistent_epochs"
+		mkdir -p "$(dirname "$persistent_epochs")" || return 1
+		if ! mv "$legacy_epochs" "$persistent_epochs"; then
+			log_error "SD-WAN epoch migration failed: cannot move $legacy_epochs to $persistent_epochs"
+			return 1
+		fi
+		ln -s "$persistent_epochs" "$legacy_epochs" || true
+		log_msg "SD-WAN epoch data migrated to persistent storage: $persistent_epochs"
+	fi
+
+	return 0
+}
+
 ensure_sdwan_instance_id() {
 	local value temporary
 	if [ -e "$CANDY_SDWAN_INSTANCE_ID_FILE" ] || [ -L "$CANDY_SDWAN_INSTANCE_ID_FILE" ]; then
@@ -812,8 +911,11 @@ prepare_sdwan_state() {
 	[ "$CANDY_NETD_SOCKET" != "$RUNTIME_DIR/netd.sock" ] || CANDY_NETD_SOCKET="$CANDY_NETD_RUNTIME_DIR/netd.sock"
 	case "$CANDY_NETD_SOCKET" in "$CANDY_NETD_RUNTIME_DIR"/*) ;; *) return 1 ;; esac
 	case "$CANDY_NETD_JOURNAL" in /var/lib/candy/*) ;; *) return 1 ;; esac
-	case "$CANDY_EPOCH_DIRECTORY" in /var/lib/candy/*) ;; *) return 1 ;; esac
-	mkdir -p "$RUNTIME_DIR" "$CANDY_NETD_RUNTIME_DIR" /var/lib/candy "$(dirname "$CANDY_SDWAN_GENERATION_FILE")" "$CANDY_EPOCH_DIRECTORY" || return 1
+	case "$CANDY_EPOCH_DIRECTORY" in /var/lib/candy/*|/etc/candy/*) ;; *) return 1 ;; esac
+	# Migrate SD-WAN state from tmpfs-vulnerable /var/lib/candy/ to persistent
+	# /etc/candy/ before any other process touches the state directory.
+	migrate_sdwan_state || return 1
+	mkdir -p "$RUNTIME_DIR" "$CANDY_NETD_RUNTIME_DIR" /var/lib/candy /etc/candy "$(dirname "$CANDY_SDWAN_GENERATION_FILE")" "$CANDY_EPOCH_DIRECTORY" || return 1
 	ensure_sdwan_instance_id || return 1
 	ensure_sdwan_generation || return 1
 	chown root:candy-sdwan "$RUNTIME_DIR" 2>/dev/null || return 1
