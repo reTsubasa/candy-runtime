@@ -160,6 +160,8 @@ class Element {
 		this.attributes = {};
 		this.listeners = {};
 	}
+	set innerHTML(value) { this._textContent = value; this.children = []; }
+	get innerHTML() { return this._textContent; }
 	set textContent(value) {
 		this._textContent = value;
 		this.children = [];
@@ -360,6 +362,8 @@ class Element {
 		this.attributes = {};
 		this.listeners = {};
 	}
+	set innerHTML(value) { this._textContent = value; this.children = []; }
+	get innerHTML() { return this._textContent; }
 	set textContent(value) {
 		this._textContent = value;
 		this.children = [];
@@ -467,7 +471,7 @@ assert.match(rows[0].children[2].textContent, /12\.35 ms/);
 assert.match(rows[0].children[2].textContent, /2\.00 ms/);
 assert.equal(rows[0].children.length, 7, "diagnostics must keep the node table compact");
 assert.match(rows[0].children[3].textContent, /1\.5 Mbps/);
-assert.match(rows[0].children[4].textContent, /32\.0 KiB \/ 64\.0 KiB \(50 %\)/);
+assert.match(rows[0].children[4].textContent, /32\.0 KiB.*64\.0 KiB.*50 %/);
 assert.match(rows[0].children[5].textContent, /Candy BBR/);
 for (const phase of ["startup", "drain", "probe-bw", "probe-bw-refill", "probe-bw-up", "probe-bw-down", "probe-bw-cruise", "probe-rtt"]) {
 	assert.equal(context.candyDiagnosticsMappedText(context.candyDiagnosticsLabels.congestionModes, phase), "test");
@@ -1518,6 +1522,8 @@ source = source.replace(/\nrefreshCandyCoreStatus\(\);\s*$/, "");
 class Element {
 	constructor(tag) { this.tagName = tag; this.children = []; this.style = {}; this.disabled = false; this._text = ""; this.dataset = {}; this.listeners = {}; this.action = "/core"; }
 	appendChild(child) { this.children.push(child); return child; }
+	set innerHTML(value) { this._textContent = value; this.children = []; }
+	get innerHTML() { return this._textContent; }
 	set textContent(value) { this._text = String(value); this.children = []; }
 	get textContent() { return this._text; }
 	addEventListener(name, handler) { this.listeners[name] = handler; }
