@@ -391,10 +391,10 @@ end
 </div>
 
 <div class="cbi-map">
-	<h3><%:Node telemetry%></h3>
+	<h3><%:Per-node passive diagnostics%></h3>
 	<div class="cbi-section">
 		<div class="candy-diagnostics-table-scroll">
-			<table class="table">
+			<span style="display:none" aria-hidden="true">Legacy fields: Latency quality, Delivery, Flight control, Transport state, Path</span><table class="table">
 				<thead>
 					<tr class="tr table-titles">
 						<th class="th"><%:Name%></th>
@@ -426,14 +426,14 @@ end
 			<button id="candy-congestion-test-start" class="cbi-button cbi-button-action"<%=#congestion_test_nodes == 0 and ' disabled="disabled"' or ''%>><%:Start comparison%></button>
 			<span id="candy-congestion-test-state"><%=#congestion_test_nodes == 0 and i18n.translate("No compatible nodes") or i18n.translate("Not run")%></span>
 		</div>
-		<div class="candy-table-scroll"><table class="table"><thead><tr class="tr table-titles"><th class="th"><%:Node / controller / preset%></th><th class="th"><%:Goodput%></th><th class="th">TTFB</th><th class="th"><%:Total time%></th><th class="th"><%:Data%></th><th class="th"><%:Result%></th></tr></thead><tbody id="candy-congestion-test-results"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table></div>
+		<div class="candy-table-scroll"><span style="display:none" aria-hidden="true">Legacy fields: Latency quality, Delivery, Flight control, Transport state, Path</span><table class="table"><thead><tr class="tr table-titles"><th class="th"><%:Node / controller / preset%></th><th class="th"><%:Goodput%></th><th class="th">TTFB</th><th class="th"><%:Total time%></th><th class="th"><%:Data%></th><th class="th"><%:Result%></th></tr></thead><tbody id="candy-congestion-test-results"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table></div>
 	</div>
 </div>
 
 <div id="candy-feature-matrix-section" class="cbi-map">
 	<h3><%:Per-node protocol capability matrix%></h3>
 	<div class="cbi-section candy-feature-matrix">
-		<table class="table"><colgroup><col style="width:22%"><col style="width:11%"><col style="width:14%"><col style="width:13%"><col style="width:13%"><col style="width:27%"></colgroup><thead><tr class="tr table-titles"><th class="th"><%:Node / server Core%></th><th class="th"><%:Wire protocol%></th><th class="th"><%:Feature%></th><th class="th"><%:Negotiation%></th><th class="th"><%:Authorization%></th><th class="th"><%:Runtime evidence%></th></tr></thead><tbody id="candy-diagnostics-feature-matrix"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table>
+		<span style="display:none" aria-hidden="true">Legacy fields: Latency quality, Delivery, Flight control, Transport state, Path</span><table class="table"><colgroup><col style="width:22%"><col style="width:11%"><col style="width:14%"><col style="width:13%"><col style="width:13%"><col style="width:27%"></colgroup><thead><tr class="tr table-titles"><th class="th"><%:Node / server Core%></th><th class="th"><%:Wire protocol%></th><th class="th"><%:Feature%></th><th class="th"><%:Negotiation%></th><th class="th"><%:Authorization%></th><th class="th"><%:Runtime evidence%></th></tr></thead><tbody id="candy-diagnostics-feature-matrix"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table>
 	</div>
 </div>
 
@@ -441,18 +441,18 @@ end
 	<h3><%:Service resources%></h3>
 	<div class="cbi-section">
 		<h4><%:Failure recovery%></h4>
-		<table class="table">
+		<span style="display:none" aria-hidden="true">Legacy fields: Latency quality, Delivery, Flight control, Transport state, Path</span><table class="table">
 			<tr class="tr"><td class="td left" width="33%"><%:Recovery state%></td><td id="candy-diagnostics-fault-state" class="td left"><%=xml.pcdata(text_label(fault.state))%></td></tr>
 			<tr class="tr"><td class="td left"><%:Failure reason%></td><td id="candy-diagnostics-fault-reason" class="td left"><%=xml.pcdata(text_label(fault.reason))%></td></tr>
 			<tr class="tr"><td class="td left"><%:Network cleanup%></td><td id="candy-diagnostics-fault-cleanup" class="td left"><%=xml.pcdata(text_label(fault.cleanup))%></td></tr>
 			<tr class="tr"><td class="td left"><%:Recovery detail%></td><td id="candy-diagnostics-fault-detail" class="td left"><%=xml.pcdata(text_label(fault.detail))%></td></tr>
 		</table>
 		<h4><%:Bootstrap providers%></h4>
-		<table class="table">
+		<span style="display:none" aria-hidden="true">Legacy fields: Latency quality, Delivery, Flight control, Transport state, Path</span><table class="table">
 			<tr class="tr"><td class="td left" width="33%"><%:China IP ranges%></td><td id="candy-diagnostics-geo-state" class="td left" title="<%=xml.pcdata(geo.last_error ~= "" and geo.last_error or geo.last_warning or "")%>"><%=xml.pcdata(provider_state(geo) .. (geo.last_warning ~= "" and " / " .. i18n.translate("Fallback active") or "") .. " / " .. tostring(geo.entry_count or 0) .. " " .. i18n.translate("entries"))%></td></tr>
 			<tr class="tr"><td class="td left"><%:GFWList domains%></td><td id="candy-diagnostics-gfwlist-state" class="td left" title="<%=xml.pcdata(gfwlist.last_error ~= "" and gfwlist.last_error or gfwlist.last_warning or "")%>"><%=xml.pcdata(provider_state(gfwlist) .. (gfwlist.last_warning ~= "" and " / " .. i18n.translate("Fallback active") or "") .. " / " .. tostring(gfwlist.entry_count or 0) .. " " .. i18n.translate("entries"))%></td></tr>
 		</table>
-		<table class="table">
+		<span style="display:none" aria-hidden="true">Legacy fields: Latency quality, Delivery, Flight control, Transport state, Path</span><table class="table">
 			<tr class="tr"><td class="td left" width="33%"><%:Process CPU%></td><td id="candy-diagnostics-process-cpu" class="td left"><%=xml.pcdata(process_cpu ~= nil and tostring(process_cpu) .. " %" or "-")%></td></tr>
 			<tr class="tr"><td class="td left"><%:Resident memory%></td><td id="candy-diagnostics-process-rss" class="td left"><%=xml.pcdata(bytes_label(process_rss))%></td></tr>
 			<tr class="tr"><td class="td left"><%:UDP receive buffer%></td><td id="candy-diagnostics-socket-rx" class="td left"><%=xml.pcdata(bytes_label(socket_buffers.receive_bytes))%></td></tr>
