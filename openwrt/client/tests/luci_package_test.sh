@@ -509,8 +509,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=64$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=64$'
+assert_contains "$makefile" '^PKG_RELEASE:=65$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=65$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'

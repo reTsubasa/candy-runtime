@@ -620,8 +620,8 @@ function index()
 	entry({"admin", "services", "candy", "sdwan_join"}, call("action_sdwan_join")).leaf = true
 	entry({"admin", "services", "candy", "sdwan_reconnect"}, call("action_sdwan_reconnect")).leaf = true
 	entry({"admin", "services", "candy", "sdwan_leave"}, call("action_sdwan_leave")).leaf = true
-tentry({"admin", "services", "candy", "sdwan_start"}, call("action_sdwan_start")).leaf = true
-tentry({"admin", "services", "candy", "sdwan_stop"}, call("action_sdwan_stop")).leaf = true
+entry({"admin", "services", "candy", "sdwan_start"}, call("action_sdwan_start")).leaf = true
+entry({"admin", "services", "candy", "sdwan_stop"}, call("action_sdwan_stop")).leaf = true
 	entry({"admin", "services", "candy", "congestion_test"}, call("action_congestion_test")).leaf = true
 	entry({"admin", "services", "candy", "congestion_test_status"}, call("action_congestion_test_status")).leaf = true
 	entry({"admin", "services", "candy", "core_status"}, call("action_core_status")).leaf = true
