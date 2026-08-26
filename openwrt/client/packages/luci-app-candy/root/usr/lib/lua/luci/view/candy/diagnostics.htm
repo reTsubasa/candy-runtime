@@ -314,24 +314,21 @@ end
 .candy-resource-item span { display:block; color:var(--arcogray-5); font-size:.86em; }
 .candy-resource-item strong { display:block; margin-top:.2em; overflow-wrap:anywhere; font-variant-numeric:tabular-nums; }
 @media (max-width:560px) { .candy-diagnostics-head { flex-direction:column; } }
-.candy-feature-status {
-  display: inline-block; padding: .15em .45em; border: 1px solid var(--arcogray-4);
-  border-radius: 3px; line-height: 1.25; white-space: nowrap; font-size: .88em;
-}
-.candy-feature-status.active { color: var(--arcogreen); border-color: var(--arcogreen); background: var(--arcogreen-light); }
-.candy-feature-status.available { color: var(--arcogray-5); }
 .candy-feature-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1em; }
 .candy-feature-card { min-width:0; border:1px solid var(--arcogray-3); border-radius:var(--arcoradius); background:#fff; overflow:hidden; }
-.candy-feature-card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:1em; padding:.85em 1em; background:var(--arcogray-1); border-bottom:1px solid var(--arcogray-3); }
+.candy-feature-card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:1em; padding:.75em .9em; background:var(--arcogray-1); border-bottom:1px solid var(--arcogray-3); }
 .candy-feature-card-head strong { display:block; color:var(--arcogray-7); overflow-wrap:anywhere; }
 .candy-feature-card-meta { color:var(--arcogray-5); font-size:.82em; line-height:1.45; text-align:right; white-space:nowrap; }
-.candy-feature-list { margin:0; }
-.candy-feature-item { padding:.75em 1em; }
-.candy-feature-item + .candy-feature-item { border-top:1px solid var(--arcogray-3); }
-.candy-feature-item-head { display:flex; align-items:flex-start; justify-content:space-between; gap:.75em; }
-.candy-feature-name { min-width:0; font-weight:600; color:var(--arcogray-7); overflow-wrap:anywhere; }
-.candy-feature-badges { display:flex; justify-content:flex-end; gap:.35em; flex-wrap:wrap; }
-.candy-feature-evidence { margin-top:.35em; color:var(--arcogray-5); font-size:.82em; font-variant-numeric:tabular-nums; }
+.candy-feature-list { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.35em .5em; padding:.65em .75em; }
+.candy-feature-item { display:flex; align-items:center; gap:.45em; min-width:0; padding:.45em .5em; border-radius:4px; outline:none; }
+.candy-feature-item:hover, .candy-feature-item:focus { background:var(--arcogray-1); }
+.candy-feature-icon { position:relative; display:inline-block; width:1em; height:1em; flex:0 0 1em; border-radius:50%; background:var(--arcogray-4); }
+.candy-feature-icon:after { content:""; position:absolute; inset:.3em; border-radius:50%; background:#fff; opacity:.92; }
+.candy-feature-item.active .candy-feature-icon { background:var(--arcogreen); }
+.candy-feature-item.available .candy-feature-icon { background:var(--arcoblue); }
+.candy-feature-item.limited .candy-feature-icon { background:var(--arcoorange); }
+.candy-feature-item.unavailable .candy-feature-icon { background:var(--arcogray-4); }
+.candy-feature-name { min-width:0; color:var(--arcogray-7); font-size:.9em; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .candy-feature-empty { color:var(--arcogray-5); padding:.9em 0; }
 
 /* === Progress bar for congestion window === */
@@ -357,6 +354,7 @@ end
 @media (max-width: 1000px) {
   .candy-chart-grid { grid-template-columns: 1fr; }
   .candy-feature-grid { grid-template-columns:1fr; }
+  .candy-feature-list { grid-template-columns:repeat(5,minmax(0,1fr)); }
   .candy-resource-band { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .candy-resource-item:nth-child(odd) { border-left:0; }
   .candy-resource-item:nth-child(n+3) { border-top:1px solid var(--arcogray-3); }
@@ -383,9 +381,9 @@ end
 @media (max-width: 440px) {
   .candy-resource-band { grid-template-columns:1fr; }
   .candy-resource-item + .candy-resource-item { border-left:0; border-top:1px solid var(--arcogray-3); }
-  .candy-feature-card-head, .candy-feature-item-head { flex-direction:column; }
-  .candy-feature-card-meta { text-align:left; white-space:normal; }
-  .candy-feature-badges { justify-content:flex-start; }
+  .candy-feature-card-head { display:block; }
+  .candy-feature-card-meta { margin-top:.25em; text-align:left; white-space:normal; }
+  .candy-feature-list { grid-template-columns:repeat(2,minmax(0,1fr)); }
 }
 </style>
 
@@ -624,28 +622,23 @@ function candyDiagnosticsRenderFeatureCards(data) {
 		card.appendChild(header);
 		list.className = "candy-feature-list";
 		definitions.forEach(function(definition) {
-			var value = features[definition.status_key || definition.id] || {}, item = document.createElement("div"), itemHead = document.createElement("div"), name = document.createElement("span"), badges = document.createElement("div"), evidence = document.createElement("div");
-			item.className = "candy-feature-item";
-			itemHead.className = "candy-feature-item-head";
+			var value = features[definition.status_key || definition.id] || {}, item = document.createElement("div"), icon = document.createElement("span"), name = document.createElement("span"), state = value.active === true ? "active" : (value.supported === true && value.authorized === true ? "available" : (value.supported === true ? "limited" : "unavailable"));
+			var details = [
+				value.supported === true ? candyDiagnosticsLabels.negotiated : candyDiagnosticsLabels.notNegotiated,
+				value.authorized === true ? candyDiagnosticsLabels.authorized : candyDiagnosticsLabels.notAuthorized,
+				value.active === true ? candyDiagnosticsLabels.active : candyDiagnosticsLabels.idleFeature,
+				candyDiagnosticsLabels.evidence + " " + candyDiagnosticsText(value.evidence)
+			].join(" · ");
+			item.className = "candy-feature-item " + state;
+			item.setAttribute("title", details);
+			item.setAttribute("aria-label", (definition.short_name || definition.name || definition.id) + ": " + details);
+			item.setAttribute("tabindex", "0");
+			icon.className = "candy-feature-icon";
+			icon.setAttribute("aria-hidden", "true");
 			name.className = "candy-feature-name";
 			name.textContent = definition.short_name || definition.name || definition.id;
-			badges.className = "candy-feature-badges";
-			[
-				[value.supported === true, candyDiagnosticsLabels.negotiated, candyDiagnosticsLabels.notNegotiated],
-				[value.authorized === true, candyDiagnosticsLabels.authorized, candyDiagnosticsLabels.notAuthorized],
-				[value.active === true, candyDiagnosticsLabels.active, candyDiagnosticsLabels.idleFeature]
-			].forEach(function(state) {
-				var badge = document.createElement("span");
-				badge.className = "candy-feature-status " + (state[0] ? "active" : "available");
-				badge.textContent = state[0] ? state[1] : state[2];
-				badges.appendChild(badge);
-			});
-			evidence.className = "candy-feature-evidence";
-			evidence.textContent = candyDiagnosticsLabels.evidence + " " + candyDiagnosticsText(value.evidence);
-			itemHead.appendChild(name);
-			itemHead.appendChild(badges);
-			item.appendChild(itemHead);
-			item.appendChild(evidence);
+			item.appendChild(icon);
+			item.appendChild(name);
 			list.appendChild(item);
 		});
 		card.appendChild(list);

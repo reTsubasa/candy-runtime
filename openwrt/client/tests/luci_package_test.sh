@@ -380,6 +380,16 @@ assert.match(featureCards[0].textContent, /hk/);
 assert.match(featureCards[0].textContent, /Core 0\.3\.25/);
 assert.match(featureCards[0].textContent, /Metrics/);
 assert.match(featureCards[0].textContent, /Early data/);
+const hkFeatures = featureCards[0].children[1].children;
+const sgFeatures = featureCards[1].children[1].children;
+assert.equal(hkFeatures.length, 2, "each manifest feature must render once");
+assert.match(hkFeatures[0].className, /active/, "active features must use the green state");
+assert.match(hkFeatures[1].className, /available/, "authorized inactive features must use the blue state");
+assert.match(sgFeatures[1].className, /limited/, "unauthorized negotiated features must use the yellow state");
+assert.match(hkFeatures[0].attributes.title, /test.*test.*test.*test 4/, "feature details must remain available in the tooltip");
+assert.equal(hkFeatures[0].children.length, 2, "feature tiles must contain only the status icon and name");
+assert.ok(!source.includes("candy-feature-badges"), "feature cards must not render inline status badges");
+assert.ok(!source.includes("candy-feature-evidence"), "feature cards must not render evidence as a separate row");
 
 context.refreshCandyDiagnosticsStatus();
 requests[3].respond(200, { runtime: { performance: {} } });
