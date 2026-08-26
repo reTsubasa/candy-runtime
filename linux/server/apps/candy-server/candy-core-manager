@@ -285,7 +285,9 @@ install_core() {
 	actual_bundle_sha=$(sha256_file "$archive") || { rm -rf "$temporary"; fail "no SHA-256 implementation is available"; }
 	[ "$actual_bundle_sha" = "$(printf '%s' "$expected_bundle_sha" | tr 'A-F' 'a-f')" ] || { rm -rf "$temporary"; fail "Core bundle SHA-256 mismatch"; }
 	safe_archive "$archive" || { rm -rf "$temporary"; fail "Core bundle contains unsafe paths or unexpected files"; }
-	tar -xzf "$archive" -C "$temporary" || { rm -rf "$temporary"; fail "Core bundle extraction failed"; }
+	# Signed bundle metadata is not installation ownership policy. The manager
+	# runs as root in production, so -o makes every extracted file root-owned.
+	tar -oxzf "$archive" -C "$temporary" || { rm -rf "$temporary"; fail "Core bundle extraction failed"; }
 	rm -f "$archive"
 	if find "$temporary" ! -type f ! -type d -print | grep -q .; then
 		rm -rf "$temporary"

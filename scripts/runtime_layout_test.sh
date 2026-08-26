@@ -91,7 +91,12 @@ fi
 [ ! -e "$root/shared/contracts/core-abi-v1.md" ] || fail "obsolete Core shared-library ABI contract remains"
 
 manager="$root/openwrt/client/packages/candy-client/candy-core-manager"
+linux_manager="$root/linux/server/apps/candy-server/candy-core-manager"
 grep -Fq 'executable="$1/candy-core"' "$manager" || fail "OpenWrt manager does not consume the Core executable"
+[ "$(grep -Fc 'tar -oxzf' "$manager")" -eq 2 ] ||
+  fail "OpenWrt manager does not discard archive ownership at every extraction boundary"
+[ "$(grep -Fc 'tar -oxzf' "$linux_manager")" -eq 1 ] ||
+  fail "Linux manager does not discard archive ownership during installation"
 if grep -Eq 'libcandy_core|CANDY_CORE_SRC|git (clone|checkout)' "$client_makefile" "$manager"; then
   fail "OpenWrt Runtime still compiles, fetches, or loads Core source/library artifacts"
 fi

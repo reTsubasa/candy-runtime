@@ -370,7 +370,7 @@ inspect_local_bundle() {
 	probe="$CORE_ROOT/.upload-inspect-$$"
 	rm -rf "$probe"
 	mkdir -m 0700 "$probe" || validation_error archive staging_failed "Cannot create Core inspection directory" || return 1
-	if ! tar -xzf "$LOCAL_UPLOAD_COPY" -C "$probe"; then
+	if ! tar -oxzf "$LOCAL_UPLOAD_COPY" -C "$probe"; then
 		rm -rf "$probe"
 		validation_error archive extraction_failed "Core bundle extraction failed" || return 1
 	fi
@@ -424,7 +424,9 @@ install_core() {
 		rm -rf "$temporary"
 		fail_stage archive archive_unsafe "Core bundle contains unsafe paths, entries, or file types"
 	}
-	tar -xzf "$archive" -C "$temporary" || {
+	# BusyBox tar -o prevents build-runner UID/GID metadata from becoming the
+	# ownership policy for files installed by this root-only manager.
+	tar -oxzf "$archive" -C "$temporary" || {
 		rm -rf "$temporary"
 		fail_stage archive extraction_failed "Core bundle extraction failed"
 	}
