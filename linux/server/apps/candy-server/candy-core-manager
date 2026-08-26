@@ -347,15 +347,16 @@ replace_core_directory() {
 		rm -rf "$candidate"
 		fail "replacement Core $version failed server config validation"
 	}
-	preflight_server_role "$candidate" || {
-		rm -rf "$candidate"
-		fail "replacement Core $version failed server preflight"
-	}
 	if [ "$current" = "$version" ]; then
 		service_active && was_active=1
 		[ "$was_active" = 0 ] || "$SYSTEMCTL" stop "$SERVICE_NAME" || {
 			rm -rf "$candidate"
 			fail "cannot stop $SERVICE_NAME for Core replacement"
+		}
+		preflight_server_role "$candidate" || {
+			[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+			rm -rf "$candidate"
+			fail "replacement Core $version failed server preflight"
 		}
 	fi
 	backup=$CORE_ROOT/.replace-$version-$$

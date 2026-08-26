@@ -94,6 +94,10 @@ case "\${1:-}" in
 					[ "\$(readlink "\$CANDY_CORE_CURRENT_LINK")" != "\$FAKE_EXPECT_CURRENT" ]; then
 					exit 52
 				fi
+				if [ "\${FAKE_PREFLIGHT_REQUIRE_INACTIVE:-0}" = 1 ] &&
+					[ "\$(cat "\$FAKE_SERVICE_STATE")" != inactive ]; then
+					exit 53
+				fi
 				exit "\${FAKE_PREFLIGHT_RESULT:-$server_result}"
 				;;
 			*--check-config*) exit "\${FAKE_CHECK_RESULT:-$server_result}" ;;
@@ -171,11 +175,19 @@ jq --arg sha "$replacement_sha" '.artifact.executable_sha256=$sha' "$replacement
 mv "$replacement_stage/manifest.next" "$replacement_stage/manifest.json"
 tar -czf "$bundle_2_replacement" -C "$replacement_stage" manifest.json manifest.sig candy-core
 sha_2_replacement=$(sha256sum "$bundle_2_replacement" | awk '{ print $1 }')
+export FAKE_PREFLIGHT_REQUIRE_INACTIVE=1
 "$manager" install 1.0.1 "$bundle_2_replacement" "$sha_2_replacement" >"$tmp/replacement.out"
 grep -F 'replaced active Core 1.0.1' "$tmp/replacement.out" >/dev/null || fail "active same-version Core was not replaced"
 grep -F '# corrected same-version build' "$cores/1.0.1/candy-core" >/dev/null || fail "replacement Core executable was not installed"
 [ "$(cat "$cores/1.0.1/.bundle.sha256")" = "$sha_2_replacement" ] || fail "replacement bundle identity was not stored"
 [ "$(cat "$service_state")" = active ] || fail "active same-version replacement did not restore the service"
+
+if FAKE_PREFLIGHT_RESULT=54 "$manager" install 1.0.1 "$bundle_2" "$sha_2" >"$tmp/replacement-preflight-failed.out" 2>&1; then
+	fail "same-version Core replacement with a failed preflight was accepted"
+fi
+grep -F '# corrected same-version build' "$cores/1.0.1/candy-core" >/dev/null || fail "failed replacement preflight changed the active Core"
+[ "$(cat "$cores/1.0.1/.bundle.sha256")" = "$sha_2_replacement" ] || fail "failed replacement preflight changed the bundle identity"
+[ "$(cat "$service_state")" = active ] || fail "failed replacement preflight did not restart the current service"
 
 bundle_2_failed=$tmp/core-1.0.1-failed.tar.gz
 cp "$bundle_2" "$bundle_2_failed"
