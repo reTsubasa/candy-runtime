@@ -1,5 +1,3 @@
-<%+header%>
-
 <%
 local i18n = require "luci.i18n"
 local xml = require "luci.xml"
@@ -9,7 +7,7 @@ local function js_string(value)
 end
 %>
 
-<div class="candy-system-detail-head"><h2 name="content"><%:Core%></h2><a class="cbi-button cbi-button-link" href="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'settings')%>"><%:Back to System%></a></div>
+<h3 id="candy-core-lifecycle"><%:Core lifecycle%></h3>
 
 <style>
 .candy-core-actions { display: flex; flex-wrap: wrap; gap: .5em; align-items: center; }
@@ -24,8 +22,6 @@ end
 .candy-core-operation.error { border-color: #c62828; }
 .candy-core-table-scroll { overflow-x: auto; }
 .candy-core-table-scroll .table { min-width: 46em; }
-.candy-system-detail-head { display:flex; align-items:center; justify-content:space-between; gap:1em; margin-bottom:1em; }
-.candy-system-detail-head h2 { margin:0; }
 </style>
 
 <div id="candy-core-operation" class="candy-core-operation" style="display:none"></div>
@@ -270,5 +266,3 @@ if (candyCoreRollbackForm) candyCoreBindForm(candyCoreRollbackForm, candyCoreRol
 
 refreshCandyCoreStatus();
 </script>
-
-<%+footer%>

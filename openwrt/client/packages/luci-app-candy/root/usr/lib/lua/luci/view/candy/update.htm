@@ -1,5 +1,3 @@
-<%+header%>
-
 <%
 local i18n = require "luci.i18n"
 local xml = require "luci.xml"
@@ -9,7 +7,7 @@ local function js_string(value)
 end
 %>
 
-<div class="candy-system-detail-head"><div><h2 name="content"><%:Updates%></h2><p><%:Candy only installs releases listed by the signed stable catalog. Update checks and installations are manual.%></p></div><a class="cbi-button cbi-button-link" href="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'settings')%>"><%:Back to System%></a></div>
+<p><%:Candy only installs releases listed by the signed stable catalog. Update checks and installations are manual.%></p>
 
 <style>
 .candy-update-toolbar { display: flex; flex-wrap: wrap; gap: .6em; align-items: center; }
@@ -38,10 +36,6 @@ end
 .candy-update-upload-status { flex-basis: 100%; margin: 0; }
 .candy-update-upload-status.error { color: #c62828; }
 .candy-update-upload-status.success { color: #2e7d32; }
-.candy-system-detail-head { display:flex; align-items:flex-start; justify-content:space-between; gap:1em; margin-bottom:1em; }
-.candy-system-detail-head h2 { margin:0; }
-.candy-system-detail-head p { margin:.35em 0 0; }
-@media (max-width:560px) { .candy-system-detail-head { flex-direction:column; } }
 </style>
 
 <div id="candy-update-operation" class="candy-update-operation" style="display:none"></div>
@@ -88,7 +82,7 @@ end
 			<select id="candy-update-core-select" name="version_key" disabled="disabled"></select>
 			<button id="candy-update-core-install" class="cbi-button cbi-button-apply" type="submit" disabled="disabled"><%:Install selected Core%></button>
 		</form>
-		<p class="candy-update-note"><%:A downloaded Core is installed but never activated automatically. Review it on the Core page before activation.%></p>
+		<p class="candy-update-note"><%:A downloaded Core is installed but never activated automatically. Review it in Core lifecycle below before activation.%></p>
 		<details class="candy-update-advanced">
 			<summary><%:Advanced: install a local Core bundle%></summary>
 			<p class="candy-update-note"><%:Upload an official signed Core bundle only. The 128 MiB maximum is installed inactive and is never activated automatically.%></p>
@@ -106,7 +100,7 @@ end
 <script type="text/javascript">
 var candyUpdateStatusUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'update_status')%>";
 var candyUpdateRuntimeUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'update_install_runtime')%>";
-var candyUpdateCorePageUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core')%>";
+var candyUpdateCorePageUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'updates') .. '#candy-core-lifecycle'%>";
 var candyUpdateToken = <%=js_string(auth_token)%>;
 var candyUpdateTimer = null;
 var candyUpdateUploading = false;
@@ -334,5 +328,3 @@ var candyUpdateUploadForm = document.getElementById("candy-update-core-upload-fo
 if (candyUpdateUploadForm) candyUpdateUploadForm.addEventListener("submit", candyUpdateSubmitCoreUpload);
 refreshCandyUpdateStatus();
 </script>
-
-<%+footer%>

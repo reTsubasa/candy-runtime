@@ -1500,8 +1500,8 @@ msgstr "Core 上传失败"
 msgid "Validating uploaded Core"
 msgstr "正在验证上传的 Core"
 
-msgid "A downloaded Core is installed but never activated automatically. Review it on the Core page before activation."
-msgstr "下载的 Core 只会安装，不会自动启用。请在 Core 页面检查后再手动启用。"
+msgid "A downloaded Core is installed but never activated automatically. Review it in Core lifecycle below before activation."
+msgstr "下载的 Core 只会安装，不会自动启用。请在下方 Core 生命周期区域检查后再手动启用。"
 
 msgid "Verified"
 msgstr "已验证"
@@ -2256,3 +2256,60 @@ msgstr "由 Candy Cloud 管理"
 
 msgid "Manage advanced Runtime controls and the installed Candy software."
 msgstr "管理高级 Runtime 控制项和已安装的 Candy 软件。"
+
+msgid "Update Runtime and manage installed Core versions from one page."
+msgstr "在同一页面更新 Runtime，并管理已安装的 Core 版本。"
+
+msgid "Not reported"
+msgstr "未上报"
+
+msgid "Site name pending synchronization"
+msgstr "站点名称等待同步"
+
+msgid "TCP / UDP connections"
+msgstr "TCP / UDP 连接"
+
+msgid "URL test"
+msgstr "URL 测试"
+
+msgid "Telemetry unavailable"
+msgstr "遥测不可用"
+
+msgid "Runtime version"
+msgstr "Runtime 版本"
+
+msgid "Performance trends, per-node telemetry, comparison tests, and runtime resources."
+msgstr "查看性能趋势、节点遥测、对比测试和 Runtime 资源。"
+
+msgid "Performance trends"
+msgstr "性能趋势"
+
+msgid "Quality / packet loss"
+msgstr "链路质量 / 丢包"
+
+msgid "Link quality"
+msgstr "链路质量"
+
+msgid "No packets lost"
+msgstr "无丢包"
+
+msgid "packets"
+msgstr "个数据包"
+
+msgid "Receive rate"
+msgstr "接收速率"
+
+msgid "Send rate"
+msgstr "发送速率"
+
+msgid "Good"
+msgstr "良好"
+
+msgid "Fair"
+msgstr "一般"
+
+msgid "Poor"
+msgstr "较差"
+
+msgid "Connecting"
+msgstr "正在连接"

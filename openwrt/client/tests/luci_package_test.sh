@@ -64,10 +64,10 @@ rules=luci-app-candy/root/usr/lib/lua/luci/view/candy/rules.htm
 status=luci-app-candy/root/usr/lib/lua/luci/view/candy/status.htm
 core_view=luci-app-candy/root/usr/lib/lua/luci/view/candy/core.htm
 update_view=luci-app-candy/root/usr/lib/lua/luci/view/candy/update.htm
+lifecycle_view=luci-app-candy/root/usr/lib/lua/luci/view/candy/lifecycle.htm
 diagnostics=luci-app-candy/root/usr/lib/lua/luci/view/candy/diagnostics.htm
 dns_tunnel_status=luci-app-candy/root/usr/lib/lua/luci/view/candy/dns_tunnel_status.htm
 log_view=luci-app-candy/root/usr/lib/lua/luci/view/candy/log.htm
-logs=luci-app-candy/root/usr/lib/lua/luci/view/candy/log_panel.htm
 settings=luci-app-candy/root/usr/lib/lua/luci/view/candy/settings.htm
 sdwan=luci-app-candy/root/usr/lib/lua/luci/view/candy/sdwan.htm
 
@@ -95,7 +95,7 @@ assert_contains "$controller" 'process\.capture\(\{ CORE_MANAGER, "status" \}, \
 
 lua_syntax_file=$(mktemp)
 trap 'rm -f "$lua_syntax_file"' EXIT HUP INT TERM
-node - "$repo_root" "$lua_syntax_file" "$status" "$sdwan" "$diagnostics" "$logs" "$settings" "$core_view" "$update_view" <<'EOF'
+node - "$repo_root" "$lua_syntax_file" "$status" "$sdwan" "$diagnostics" "$settings" "$core_view" "$update_view" "$lifecycle_view" <<'EOF'
 const fs = require("node:fs");
 
 const root = process.argv[2];
@@ -135,6 +135,10 @@ assert.ok(source.includes("node.last_error"), "overview must expose the latest n
 assert.ok(source.includes("setTimeout(refresh,2000)"), "overview refresh must avoid overlapping intervals");
 assert.ok(source.includes("currentGeneration!==generation"), "overview must ignore stale status responses");
 assert.ok(!source.includes("candy-capability-tags"), "overview must not render protocol capability matrices");
+assert.ok(source.includes("values.tcp===null&&values.udp===null?labels.unreported"), "missing flow telemetry must not be rendered as zero");
+assert.ok(source.includes("node.rx_bps") && source.includes("peer.goodput_bps_rx"), "overview must support flat and nested RX telemetry");
+assert.ok(source.includes("node.tx_bps") && source.includes("peer.goodput_bps_tx"), "overview must support flat and nested TX telemetry");
+assert.ok(source.includes("Runtime version") && source.includes("Core version"), "overview must label Runtime and Core versions explicitly");
 for (const templatePath of [statusPath, logPath]) {
 	const template = fs.readFileSync(root + "/" + templatePath, "utf8");
 	const scripts = Array.from(template.matchAll(/<script type="text\/javascript">([\s\S]*?)<\/script>/g));
@@ -144,6 +148,37 @@ for (const templatePath of [statusPath, logPath]) {
 		assert.doesNotThrow(() => new vm.Script(script), templatePath + " JavaScript must parse");
 	}
 }
+
+const statusScript = source.match(/<script type="text\/javascript">([\s\S]*?)<\/script>/)[1]
+	.replace(/<%=([\s\S]*?)%>/g, (_, expression) => expression.includes("build_url") ? "test" : JSON.stringify("test"));
+class Element {
+	constructor() { this.children=[]; this.style={}; this.className=""; this._text=""; }
+	set textContent(value) { this._text=String(value); this.children=[]; }
+	get textContent() { return this.children.length ? this.children.map((child) => child.textContent).join("") : this._text; }
+	appendChild(child) { this.children.push(child); return child; }
+	setAttribute() {}
+}
+const elements=new Map(), requests=[];
+class FakeXHR {
+	constructor() { requests.push(this); this.readyState=0; this.status=0; }
+	open() {}
+	send() {}
+	abort() {}
+	respond(data) { this.status=200; this.responseText=JSON.stringify(data); this.readyState=4; this.onreadystatechange(); }
+}
+const context={ XMLHttpRequest:FakeXHR, Date, JSON, Array, String, Number, isFinite,
+	document:{ getElementById(id){ if(!elements.has(id)) elements.set(id,new Element()); return elements.get(id); }, createElement(){ return new Element(); }, createTextNode(value){ const node=new Element(); node.textContent=value; return node; } },
+	setTimeout(){ return 1; }, clearTimeout(){} };
+vm.runInNewContext(statusScript,context,{filename:statusPath});
+requests[0].respond({ version:"0.4.0", release:"75", service:{status:"running",enabled:true}, core:{current_version:"0.3.25"}, runtime:{mode:"fallback"}, sdwan:{phase:"registered",runtime:{state:"running"}}, overview:{configured_nodes:1,groups:1,rules:2,dns_capture:true}, nodes:[{ name:"Hong Kong",state:"ready",groups:["Proxy"],active_tcp_flows:null,active_udp_flows:null,rx_bps:12000,tx_bps:8000,passive:{smoothed_rtt_micros:12500},url_test:{status:"ok",latency_ms:42,error:""},last_error:"" }] });
+const cells=elements.get("candy-status-nodes").children[0].children;
+assert.equal(cells[2].textContent,"Proxy","configured node groups must remain visible");
+assert.equal(cells[3].textContent,"12.5 ms","flat RTT telemetry must render");
+assert.equal(cells[4].textContent,"12.0 Kbps / 8.0 Kbps","flat RX/TX telemetry must render");
+assert.equal(cells[5].textContent,"test","null flow telemetry must render as Not reported");
+assert.equal(cells[6].textContent,"test: 42 ms","successful URL tests must expose their result");
+assert.equal(elements.get("candy-metric-flows").textContent,"test","missing aggregate flows must not become zero");
+assert.equal(elements.get("candy-metric-throughput").textContent,"12.0 Kbps / 8.0 Kbps");
 EOF
 
 node - "$repo_root" "$diagnostics" <<'EOF'
@@ -156,7 +191,7 @@ const diagnosticsPath = process.argv[3];
 const source = fs.readFileSync(root + "/" + diagnosticsPath, "utf8");
 assert.ok(source.includes("Per-node telemetry"), "diagnostics must render per-node telemetry");
 assert.ok(source.includes("Service resources"), "diagnostics must separate process resources");
-for (const field of ["RTT / jitter", "Loss", "RX / TX", "Freshness", "Transport"]) {
+for (const field of ["RTT / jitter", "Quality / packet loss", "RX / TX", "Transport"]) {
 	assert.ok(source.includes(field), "diagnostics must expose readable telemetry field: " + field);
 }
 assert.ok(source.includes("candy-diagnostics-nodes"), "diagnostics must expose the node table");
@@ -168,8 +203,12 @@ assert.ok(source.includes("&node="), "congestion comparison must submit the sele
 for (const externalPoint of ["vultr-tokyo", "linode-singapore", "hetzner-ashburn", "ovh-france", "serverius-netherlands"]) {
 	assert.ok(!source.includes(externalPoint), "external test point remains: " + externalPoint);
 }
-for (const usefulField of ["Overall performance trends", "RTT / jitter", "RX / TX", "Freshness", "Transport"]) {
+for (const usefulField of ["Performance trends", "RTT / jitter", "Quality / packet loss", "RX / TX", "Transport"]) {
 	assert.ok(source.includes(usefulField), "diagnostics must retain useful transport field: " + usefulField);
+}
+assert.ok(source.indexOf("Performance trends") < source.indexOf("Per-node telemetry"), "performance trends must precede per-node telemetry");
+for (const removedSection of ["Link status", "Freshness", "Bootstrap providers", "Failure recovery", "Overall performance trends"]) {
+	assert.ok(!source.includes(removedSection), "diagnostics must remove redundant section: " + removedSection);
 }
 for (const redundantField of ["Client UDP multiplier", "Server UDP multiplier", "Peer directional goodput", "Peer trust", "Fallback reason"]) {
 	assert.ok(!source.includes(redundantField), "diagnostics must hide redundant or unavailable field: " + redundantField);
@@ -274,6 +313,8 @@ const response = updated => ({
 	nodes: ["hk", "sg"].map((name, index) => ({
 		id: name,
 		state: "ready",
+		rx_bps: index === 0 ? 12000 : undefined,
+		tx_bps: index === 0 ? 8000 : undefined,
 		passive: {
 			updated_unix_ms: updated + index,
 			local: {
@@ -301,19 +342,21 @@ assert.equal(rows.length, 2, "diagnostics must render one row per node");
 assert.equal(rows[0].children[0].children[0].textContent, "hk");
 assert.match(rows[0].children[2].textContent, /12\.35 ms/);
 assert.match(rows[0].children[2].textContent, /2\.00 ms/);
-assert.equal(rows[0].children.length, 7, "diagnostics must keep the node table compact");
-assert.match(rows[0].children[3].textContent, /0/);
-assert.match(rows[0].children[4].textContent, /2\.0 Kbps/);
-assert.match(rows[0].children[4].textContent, /1\.0 Kbps/);
-assert.notEqual(rows[0].children[5].textContent, "-", "fresh telemetry must expose an age");
-assert.match(rows[0].children[6].textContent, /Candy BBR/);
-assert.match(rows[0].children[6].textContent, /32\.0 KiB.*64\.0 KiB.*50 %/);
+assert.equal(rows[0].children.length, 6, "diagnostics must keep the node table compact");
+assert.notEqual(rows[0].children[1].textContent, "-", "node status must remain visible");
+assert.equal(context.candyDiagnosticsPacketLoss(0), "test", "zero packet loss must have an explicit label");
+assert.equal(context.candyDiagnosticsGoodput(0), "test", "zero throughput must be labelled idle");
+assert.equal(context.candyDiagnosticsGoodput(null), "test", "missing throughput must be labelled not reported");
+assert.match(rows[0].children[4].textContent, /12\.0 Kbps/);
+assert.match(rows[0].children[4].textContent, /8\.0 Kbps/);
+assert.match(rows[0].children[5].textContent, /Candy BBR/);
+assert.match(rows[0].children[5].textContent, /32\.0 KiB.*64\.0 KiB.*50 %/);
 for (const phase of ["startup", "drain", "probe-bw", "probe-bw-refill", "probe-bw-up", "probe-bw-down", "probe-bw-cruise", "probe-rtt"]) {
 	assert.equal(context.candyDiagnosticsMappedText(context.candyDiagnosticsLabels.congestionModes, phase), "test");
 }
 assert.equal(context.candyDiagnosticsMappedText(context.candyDiagnosticsLabels.congestionModes, "future-phase"), "future-phase",
 	"unknown future congestion phases must remain visible");
-assert.match(rows[1].children[6].textContent, /CUBIC/, "passive diagnostics must show the effective CUBIC controller");
+assert.match(rows[1].children[5].textContent, /CUBIC/, "passive diagnostics must show the effective CUBIC controller");
 assert.equal(rows[1].children[0].children[0].textContent, "sg");
 
 context.refreshCandyDiagnosticsStatus();
@@ -323,7 +366,7 @@ assert.equal(elements.get("candy-diagnostics-process-rss").textContent, "-");
 assert.equal(timers.length, 1, "only one diagnostics follow-up refresh timer may be scheduled");
 EOF
 
-for file in "$makefile" "$config" "$init" "$po" "$po2lmo_c" "$po2lmo_lmo" "$po2lmo_h" "$process_helper" "$controller" "$nodes" "$dns" "$advanced" "$rules" "$status" "$core_view" "$update_view" "$diagnostics" "$dns_tunnel_status" "$log_view" "$logs" "$settings" "$sdwan"; do
+for file in "$makefile" "$config" "$init" "$po" "$po2lmo_c" "$po2lmo_lmo" "$po2lmo_h" "$process_helper" "$controller" "$nodes" "$dns" "$advanced" "$rules" "$status" "$core_view" "$update_view" "$lifecycle_view" "$diagnostics" "$dns_tunnel_status" "$log_view" "$settings" "$sdwan"; do
 	assert_file "$file"
 done
 
@@ -344,8 +387,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=74$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=74$'
+assert_contains "$makefile" '^PKG_RELEASE:=75$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=75$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'
@@ -540,7 +583,7 @@ grep -RhoE 'translate\("[^"]+"\)|_\("[^"]+"\)|<%:[^%]+%>' "$repo_root/luci-app-c
 assert_contains "$controller" 'module\("luci.controller.candy"'
 assert_contains "$controller" '/etc/config/candy'
 assert_contains "$controller" '\{"admin", "services", "candy"\}.*_\("Candy"\)'
-for route in overview sdwan traffic settings dns_geo nodes diagnostics logs advanced core; do
+for route in overview sdwan traffic settings dns_geo nodes diagnostics logs updates advanced core; do
 	assert_contains "$controller" "\"$route\""
 done
 assert_contains "$controller" '\{"admin", "services", "candy", "overview"\}.*_\("Overview"\)'
@@ -549,12 +592,13 @@ assert_contains "$controller" '\{"admin", "services", "candy", "traffic"\}.*_\("
 assert_contains "$controller" '\{"admin", "services", "candy", "nodes"\}.*_\("Nodes"\)'
 assert_contains "$controller" '\{"admin", "services", "candy", "dns_geo"\}.*_\("DNS"\)'
 assert_contains "$controller" '\{"admin", "services", "candy", "logs"\}.*_\("Logs"\)'
-assert_contains "$controller" '\{"admin", "services", "candy", "settings"\}.*_\("System"\)'
+assert_contains "$controller" '\{"admin", "services", "candy", "updates"\}.*_\("Software updates"\)'
+assert_contains "$controller" '\{"admin", "services", "candy", "advanced"\}.*_\("Advanced settings"\)'
 assert_contains "$controller" '\{"admin", "services", "candy", "diagnostics"\}.*_\("Diagnostics"\)'
-for hidden_route in advanced core; do
+for hidden_route in settings core update; do
 	assert_contains "$controller" "\{\"admin\", \"services\", \"candy\", \"$hidden_route\"\}.*nil"
 done
-assert_count "$controller" '\{"admin", "services", "candy", "(overview|nodes|traffic|dns_geo|sdwan|logs|diagnostics|settings)"\}.*_\("(Overview|Nodes|Policy|DNS|SD-WAN|Logs|Diagnostics|System)"\)' 8
+assert_count "$controller" '\{"admin", "services", "candy", "(overview|nodes|traffic|dns_geo|sdwan|logs|updates|advanced|diagnostics)"\}.*_\("(Overview|Nodes|Policy|DNS|SD-WAN|Logs|Software updates|Advanced settings|Diagnostics)"\)' 9
 assert_not_contains "$controller" '\{"admin", "services", "candy", "status"\}'
 assert_not_contains "$controller" '\{"admin", "services", "candy", "rules"\}'
 assert_not_contains "$controller" '\{"admin", "services", "candy", "geo"\}'
@@ -637,19 +681,17 @@ assert_contains "$controller" 'MAX_PASSIVE_STATUS_BYTES = 262144'
 assert_contains "$controller" 'contains_credential_field'
 assert_contains "$controller" 'read_multi_node_passive_status'
 assert_contains "$controller" 'runtime\.multi_node = nil'
+assert_contains "$controller" 'local configured_groups = node\.groups'
+assert_contains "$controller" 'key ~= "groups" or type\(value\) ~= "table" or #value > 0'
 assert_contains "$dns" 'normalize_resolver_list'
 assert_contains "$dns" 'local node_uci = require "luci.model.uci".cursor\(\)'
 assert_contains "$dns" 'node_uci:foreach\("candy", "node"'
 assert_contains "$sdwan" 'How traffic is selected'
-assert_contains "$settings" '<%:System%>'
-assert_contains "$settings" '<%:Back to overview%>'
-assert_contains "$settings" '<%:Advanced settings%>'
-assert_contains "$settings" '<%:Core lifecycle%>'
-assert_contains "$settings" '<%:Software updates%>'
-for route in advanced core update; do
-	assert_contains "$settings" "'admin', 'services', 'candy', '$route'"
-done
-assert_not_contains "$settings" "'admin', 'services', 'candy', '(nodes|dns_geo)'"
+assert_contains "$lifecycle_view" '<%:Software updates%>'
+assert_contains "$lifecycle_view" '<%\+candy/update%>'
+assert_contains "$lifecycle_view" '<%\+candy/core%>'
+assert_contains "$update_view" '<%:Runtime updates%>'
+assert_contains "$core_view" '<%:Core lifecycle%>'
 assert_contains "$sdwan" 'Candy SD-WAN connects sites through encrypted links'
 assert_contains "$sdwan" 'Unavailable until Candy Cloud publishes a local-egress configuration\.'
 assert_contains "$sdwan" 'Unavailable until Candy Cloud publishes a remote-egress configuration\.'
@@ -841,6 +883,8 @@ assert_contains "$controller" 'HTTP_X_REQUESTED_WITH.*XMLHttpRequest'
 assert_not_contains "$update_view" 'data\.core && data\.core\.installed'
 assert_not_contains "$update_view" 'candy-update-core-installed'
 assert_contains "$update_view" 'candyUpdateCorePageUrl'
+assert_contains "$update_view" 'updates.*#candy-core-lifecycle'
+assert_contains "$core_view" 'id="candy-core-lifecycle"'
 assert_contains "$update_view" 'data\.core_candidates'
 assert_contains "$update_view" 'candidate\.update_available === true'
 assert_contains "$update_view" 'candidates\.slice\(0, 5\)'
@@ -857,8 +901,10 @@ assert_contains "$status" 'status_json'
 assert_contains "$status" '<%:Function coverage%>'
 assert_contains "$status" '<%:Performance%>'
 assert_contains "$status" 'candy-summary-band'
+assert_contains "$status" 'candy-summary-item > span'
 assert_contains "$status" 'candy-feature-band'
 assert_contains "$status" 'candy-metric-throughput'
+assert_contains "$status" 'candy-node-state'
 assert_contains "$status" 'goodput_bps_rx'
 assert_contains "$status" 'goodput_bps_tx'
 assert_contains "$status" 'active_tcp_flows'
@@ -870,10 +916,10 @@ assert_contains "$status" '<%:Latest result%>'
 assert_contains "$status" 'setTimeout\(refresh,2000\)'
 assert_not_contains "$status" 'candy-capability-tag|candyOverviewCapabilityTags|protocol capability'
 
-assert_count "$diagnostics" '<div class="cbi-map">' 5
+assert_count "$diagnostics" '<div class="cbi-map candy-diagnostics-section">' 4
 assert_contains "$diagnostics" '<%:Diagnostics%>'
 assert_contains "$diagnostics" '<%:Service resources%>'
-assert_contains "$diagnostics" '<%:Link status%>'
+assert_contains "$diagnostics" '<%:Performance trends%>'
 assert_contains "$diagnostics" '<%:Per-node telemetry%>'
 assert_contains "$diagnostics" 'runtime_performance\.passive'
 assert_contains "$diagnostics" 'node\.passive'
@@ -897,13 +943,16 @@ assert_contains "$diagnostics" 'goodput_bps'
 assert_contains "$diagnostics" 'passive\.peer'
 assert_contains "$diagnostics" 'goodput_bps_rx'
 assert_contains "$diagnostics" 'goodput_bps_tx'
-assert_contains "$diagnostics" 'updated_unix_ms'
-assert_contains "$diagnostics" 'candyDiagnosticsFreshness'
 assert_contains "$diagnostics" '<%:RTT / jitter%>'
-assert_contains "$diagnostics" '<%:Loss%>'
+assert_contains "$diagnostics" '<%:Quality / packet loss%>'
 assert_contains "$diagnostics" '<%:RX / TX%>'
-assert_contains "$diagnostics" '<%:Freshness%>'
 assert_contains "$diagnostics" '<%:Transport%>'
+assert_contains "$diagnostics" 'candyDiagnosticsPacketLoss'
+assert_contains "$diagnostics" 'candyDiagnosticsLabels\.notReported'
+assert_contains "$diagnostics" 'candy-resource-band'
+assert_not_contains "$diagnostics" 'candyDiagnosticsFreshness|<%:Freshness%>|candy-diagnostics-link-summary|<%:Link status%>'
+assert_not_contains "$diagnostics" '<%:Bootstrap providers%>|candy-diagnostics-geo-state|candy-diagnostics-gfwlist-state'
+assert_not_contains "$diagnostics" '<%:Failure recovery%>|candy-diagnostics-fault-state|candyDiagnosticsRenderRecovery'
 assert_contains "$diagnostics" 'content: attr\(data-label\)'
 assert_contains "$diagnostics" 'overflow-wrap: anywhere'
 assert_contains "$diagnostics" 'text-overflow: ellipsis'
@@ -978,9 +1027,7 @@ assert_contains "$diagnostics" 'candy-feature-matrix-section'
 assert_contains "$diagnostics" 'candyDiagnosticsRenderFeatureMatrix'
 assert_not_contains "$diagnostics" 'carrier'
 
-assert_contains "$diagnostics" '<%\+candy/log_panel%>'
-assert_contains "$logs" '<%:Service and traffic events%>'
-assert_contains "$logs" "'admin', 'services', 'candy', 'logs'"
+assert_not_contains "$diagnostics" '<%\+candy/log_panel%>'
 assert_contains "$log_view" '<%:All sources%>'
 assert_contains "$log_view" '<%:All levels%>'
 assert_contains "$log_view" '<%:User traffic%>'
@@ -1000,6 +1047,8 @@ assert_contains "$controller" '/tmp/candy-update-manager\.log'
 assert_contains "$controller" '/etc/candy/sdwan/events-v1\.log'
 assert_contains "$controller" 'append_log_entries\(entries, "traffic"'
 assert_contains "$controller" 'append_log_entries\(entries, "system"'
+assert_contains "$controller" 'event = "runtime_fault"'
+assert_contains "$controller" 'fault\.state == "active"'
 assert_contains "$controller" 'event = event'
 assert_contains "$controller" 'result = result'
 

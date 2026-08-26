@@ -11,7 +11,7 @@ function index()
 		return
 	end
 
-	local page = entry({"admin", "services", "candy", "update"}, template("candy/update"), nil)
+	local page = entry({"admin", "services", "candy", "update"}, template("candy/lifecycle"), nil)
 	page.leaf = true
 	entry({"admin", "services", "candy", "update_status"}, call("action_status")).leaf = true
 	entry({"admin", "services", "candy", "update_check"}, call("action_check")).leaf = true

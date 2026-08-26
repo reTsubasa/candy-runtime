@@ -1,0 +1,19 @@
+<%+header%>
+
+<div class="candy-lifecycle-head">
+	<h2 name="content"><%:Software updates%></h2>
+	<p><%:Update Runtime and manage installed Core versions from one page.%></p>
+</div>
+
+<style>
+.candy-lifecycle-head { margin-bottom:1.25em; }
+.candy-lifecycle-head h2 { margin:0; }
+.candy-lifecycle-head p { margin:.35em 0 0; color:#4e5969; line-height:1.5; }
+.candy-lifecycle-divider { margin:2em 0 1.25em; border:0; border-top:1px solid #c9cdd4; }
+</style>
+
+<%+candy/update%>
+<hr class="candy-lifecycle-divider" />
+<%+candy/core%>
+
+<%+footer%>

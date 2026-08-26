@@ -415,9 +415,13 @@ local function merge_multi_node_status(status)
 			status.nodes[#status.nodes + 1] = node
 		end
 		if type(metrics) == "table" then
+			local configured_groups = node.groups
 			for key, value in pairs(metrics) do
-				node[key] = value
+				if key ~= "groups" or type(value) ~= "table" or #value > 0 then
+					node[key] = value
+				end
 			end
+			if type(node.groups) ~= "table" or #node.groups == 0 then node.groups = configured_groups or {} end
 			if type(metrics.url_test) ~= "table" then
 				local error_text = trim(metrics.url_test_error or "")
 				local latency = tonumber(metrics.url_test_latency_ms)
@@ -604,17 +608,23 @@ function index()
 	page = entry({"admin", "services", "candy", "logs"}, template("candy/log"), _("Logs"), 60)
 	page.leaf = true
 
-	page = entry({"admin", "services", "candy", "diagnostics"}, template("candy/diagnostics"), _("Diagnostics"), 70)
+	page = entry({"admin", "services", "candy", "updates"}, template("candy/lifecycle"), _("Software updates"), 70)
 	page.leaf = true
 
-	page = entry({"admin", "services", "candy", "settings"}, template("candy/settings"), _("System"), 80)
+	page = entry({"admin", "services", "candy", "advanced"}, cbi("candy/advanced"), _("Advanced settings"), 80)
 	page.leaf = true
 
-	-- System detail routes remain bookmark-compatible and are reached from System.
-	page = entry({"admin", "services", "candy", "advanced"}, cbi("candy/advanced"), nil)
+	page = entry({"admin", "services", "candy", "diagnostics"}, template("candy/diagnostics"), _("Diagnostics"), 90)
 	page.leaf = true
 
-	page = entry({"admin", "services", "candy", "core"}, template("candy/core"), nil)
+	-- Keep old bookmarks working while routing Core and update pages to one lifecycle view.
+	page = entry({"admin", "services", "candy", "settings"}, template("candy/settings"), nil)
+	page.leaf = true
+
+	page = entry({"admin", "services", "candy", "core"}, template("candy/lifecycle"), nil)
+	page.leaf = true
+
+	page = entry({"admin", "services", "candy", "update"}, template("candy/lifecycle"), nil)
 	page.leaf = true
 
 	entry({"admin", "services", "candy", "action"}, call("action_service")).leaf = true
@@ -1147,6 +1157,21 @@ function action_logs_json()
 	local jsonc = require "luci.jsonc"
 	local entries = {}
 	append_log_entries(entries, "runtime", read_log_history(SERVICE_LOG_FILE))
+	local fault = read_fault_status()
+	if fault and fault.state == "active" then
+		local detail = {}
+		if fault.reason and fault.reason ~= "" then detail[#detail + 1] = "reason=" .. fault.reason end
+		if fault.cleanup and fault.cleanup ~= "" then detail[#detail + 1] = "cleanup=" .. fault.cleanup end
+		if fault.detail and fault.detail ~= "" then detail[#detail + 1] = fault.detail end
+		entries[#entries + 1] = {
+			timestamp = fault.updated_at and os.date("!%Y-%m-%dT%H:%M:%SZ", fault.updated_at) or "",
+			source = "runtime",
+			level = "error",
+			event = "runtime_fault",
+			result = "active",
+			detail = table.concat(detail, "; ")
+		}
+	end
 	append_log_entries(entries, "core", read_log_tail("/tmp/candy-core-manager.log"))
 	append_log_entries(entries, "update", read_log_tail("/tmp/candy-update-manager.log"))
 	append_log_entries(entries, "sdwan", read_log_tail("/etc/candy/sdwan/events-v1.log"))

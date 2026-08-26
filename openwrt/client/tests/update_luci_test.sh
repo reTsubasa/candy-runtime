@@ -7,7 +7,7 @@ view=$root/packages/luci-app-candy/root/usr/lib/lua/luci/view/candy/update.htm
 po=$root/packages/luci-app-candy/po/zh-cn/candy.zh-cn.po
 
 for file in "$controller" "$view" "$po"; do [ -s "$file" ]; done
-grep -F 'template("candy/update")' "$controller" >/dev/null
+grep -F 'template("candy/lifecycle")' "$controller" >/dev/null
 grep -F 'REQUEST_METHOD") ~= "POST"' "$controller" >/dev/null
 grep -F 'formvalue("token")' "$controller" >/dev/null
 grep -F 'value:match("^v[%w_]+$")' "$controller" >/dev/null
@@ -44,12 +44,12 @@ grep -F 'Review Core' "$view" "$po" >/dev/null
 grep -F 'setTimeout(refreshCandyUpdateStatus, 2000)' "$view" >/dev/null
 grep -F 'never activated automatically' "$view" >/dev/null
 grep -F 'Update checks and installations are manual' "$view" >/dev/null
-grep -F 'msgid "Updates"' "$po" >/dev/null
-grep -F 'template("candy/update"), nil' "$controller" >/dev/null || {
+grep -F 'msgid "Software updates"' "$po" >/dev/null
+grep -F 'template("candy/lifecycle"), nil' "$controller" >/dev/null || {
 	printf '%s\n' 'OpenWrt Candy update page must remain under the Settings menu' >&2
 	exit 1
 }
-grep -F 'msgstr "更新"' "$po" >/dev/null
+grep -F 'msgstr "软件更新"' "$po" >/dev/null
 
 upload_root=$(mktemp -d)
 trap 'rm -rf "$upload_root"' EXIT HUP INT TERM
