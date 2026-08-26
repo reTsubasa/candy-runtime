@@ -189,8 +189,10 @@ const vm = require("node:vm");
 const root = process.argv[2];
 const diagnosticsPath = process.argv[3];
 const source = fs.readFileSync(root + "/" + diagnosticsPath, "utf8");
-assert.ok(source.includes("Per-node telemetry"), "diagnostics must render per-node telemetry");
+assert.ok(source.includes("Node telemetry"), "diagnostics must render node telemetry");
 assert.ok(source.includes("Service resources"), "diagnostics must separate process resources");
+assert.ok(source.includes("Node features"), "diagnostics must render node feature cards");
+assert.ok(source.includes("Congestion parameter test"), "diagnostics must render the congestion parameter test");
 for (const field of ["RTT / jitter", "Quality / packet loss", "RX / TX", "Transport"]) {
 	assert.ok(source.includes(field), "diagnostics must expose readable telemetry field: " + field);
 }
@@ -206,7 +208,10 @@ for (const externalPoint of ["vultr-tokyo", "linode-singapore", "hetzner-ashburn
 for (const usefulField of ["Performance trends", "RTT / jitter", "Quality / packet loss", "RX / TX", "Transport"]) {
 	assert.ok(source.includes(usefulField), "diagnostics must retain useful transport field: " + usefulField);
 }
-assert.ok(source.indexOf("Performance trends") < source.indexOf("Per-node telemetry"), "performance trends must precede per-node telemetry");
+const sections = ["Service resources", "Performance trends", "Node telemetry", "Node features", "Congestion parameter test"];
+for (let index = 1; index < sections.length; index++) {
+	assert.ok(source.indexOf(sections[index - 1]) < source.indexOf(sections[index]), "diagnostics section order must place " + sections[index - 1] + " before " + sections[index]);
+}
 for (const removedSection of ["Link status", "Freshness", "Bootstrap providers", "Failure recovery", "Overall performance trends"]) {
 	assert.ok(!source.includes(removedSection), "diagnostics must remove redundant section: " + removedSection);
 }
@@ -310,13 +315,24 @@ assert.equal(requestA.aborted, true, "request B must abort request A");
 
 const response = updated => ({
 	process: { cpu_percent: 1.5, resident_memory_bytes: 2048 },
+	core: { current_manifest: { core: { features: [
+		{ id: "metrics", short_name: "Metrics", status_key: "metrics" },
+		{ id: "early_data", short_name: "Early data", status_key: "early_data" }
+	] } } },
 	nodes: ["hk", "sg"].map((name, index) => ({
 		id: name,
+		name,
 		state: "ready",
+		server_version: "0.3.25",
+		protocol_version: { major: 0, minor: 3 },
 		rx_bps: index === 0 ? 12000 : undefined,
 		tx_bps: index === 0 ? 8000 : undefined,
 		passive: {
 			updated_unix_ms: updated + index,
+			features: {
+				metrics: { supported: true, authorized: true, active: true, evidence: 4 + index },
+				early_data: { supported: true, authorized: index === 0, active: false, evidence: index }
+			},
 			local: {
 				smoothed_rtt_micros: 12345 + index, rtt_variance_micros: 2000,
 				goodput_bps: 1500000, lost_packets: index,
@@ -358,6 +374,12 @@ assert.equal(context.candyDiagnosticsMappedText(context.candyDiagnosticsLabels.c
 	"unknown future congestion phases must remain visible");
 assert.match(rows[1].children[5].textContent, /CUBIC/, "passive diagnostics must show the effective CUBIC controller");
 assert.equal(rows[1].children[0].children[0].textContent, "sg");
+const featureCards = elements.get("candy-diagnostics-feature-cards").children;
+assert.equal(featureCards.length, 2, "diagnostics must render one feature card per node");
+assert.match(featureCards[0].textContent, /hk/);
+assert.match(featureCards[0].textContent, /Core 0\.3\.25/);
+assert.match(featureCards[0].textContent, /Metrics/);
+assert.match(featureCards[0].textContent, /Early data/);
 
 context.refreshCandyDiagnosticsStatus();
 requests[3].respond(200, { runtime: { performance: {} } });
@@ -387,8 +409,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=75$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=75$'
+assert_contains "$makefile" '^PKG_RELEASE:=76$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=76$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'
@@ -916,11 +938,13 @@ assert_contains "$status" '<%:Latest result%>'
 assert_contains "$status" 'setTimeout\(refresh,2000\)'
 assert_not_contains "$status" 'candy-capability-tag|candyOverviewCapabilityTags|protocol capability'
 
-assert_count "$diagnostics" '<div class="cbi-map candy-diagnostics-section">' 4
+assert_count "$diagnostics" '<div class="cbi-map candy-diagnostics-section">' 5
 assert_contains "$diagnostics" '<%:Diagnostics%>'
 assert_contains "$diagnostics" '<%:Service resources%>'
 assert_contains "$diagnostics" '<%:Performance trends%>'
-assert_contains "$diagnostics" '<%:Per-node telemetry%>'
+assert_contains "$diagnostics" '<%:Node telemetry%>'
+assert_contains "$diagnostics" '<%:Node features%>'
+assert_contains "$diagnostics" '<%:Congestion parameter test%>'
 assert_contains "$diagnostics" 'runtime_performance\.passive'
 assert_contains "$diagnostics" 'node\.passive'
 assert_contains "$diagnostics" 'candyDiagnosticsRender'
@@ -1017,14 +1041,14 @@ assert_contains "$diagnostics" 'maximum \* ratio'
 assert_contains "$diagnostics" 'sharedReference'
 assert_not_contains "$diagnostics" 'candy-chart-flight'
 assert_contains "$diagnostics" 'table-layout: fixed'
-assert_contains "$diagnostics" '<colgroup>'
 assert_contains "$diagnostics" 'translate\("Goodput"\)'
 assert_contains "$diagnostics" 'translate\("Estimated capacity"\)'
 assert_contains "$diagnostics" 'translate\("Idle"\)'
 assert_contains "$diagnostics" 'bandwidth_estimate_bps'
 assert_contains "$diagnostics" 'candyDiagnosticsGoodput'
-assert_contains "$diagnostics" 'candy-feature-matrix-section'
-assert_contains "$diagnostics" 'candyDiagnosticsRenderFeatureMatrix'
+assert_contains "$diagnostics" 'candy-diagnostics-feature-cards'
+assert_contains "$diagnostics" 'candyDiagnosticsRenderFeatureCards'
+assert_not_contains "$diagnostics" 'candy-feature-matrix-section|candyDiagnosticsRenderFeatureMatrix'
 assert_not_contains "$diagnostics" 'carrier'
 
 assert_not_contains "$diagnostics" '<%\+candy/log_panel%>'
