@@ -61,6 +61,18 @@ for obsolete in migration bindings platform; do
 done
 
 client_makefile="$root/openwrt/client/packages/candy-client/Makefile"
+common_sync="$root/linux/common/apps/candy-cloud-sync/src/main.rs"
+common_runtime="$root/linux/common/apps/candy-sdwan-runtime/candy-sdwan-runtime"
+openwrt_init="$root/openwrt/client/packages/candy-client/candy.init"
+openwrt_sync_loop="$root/openwrt/client/packages/candy-client/candy-cloud-sync-loop"
+grep -Fq 'default_value = "/var/lib/candy/sdwan"' "$common_sync" ||
+  fail "shared Linux Cloud sync default does not use the canonical Linux state root"
+grep -Fq 'state_dir=${CANDY_SDWAN_STATE_DIR:-/var/lib/candy/sdwan}' "$common_runtime" ||
+  fail "shared Linux lifecycle default does not use the canonical Linux state root"
+grep -Fq 'CANDY_SDWAN_STATE_DIR=${CANDY_SDWAN_STATE_DIR:-/etc/candy/sdwan}' "$openwrt_init" ||
+  fail "OpenWrt lifecycle does not use its persistent state root"
+grep -Fq -- '--state-dir "$STATE_DIR"' "$openwrt_sync_loop" ||
+  fail "OpenWrt Cloud sync does not explicitly pass its persistent state root"
 grep -Fq '$(INSTALL_BIN) ./candy-client $(1)/usr/bin/candy-client' "$client_makefile" ||
   fail "OpenWrt client does not package its Runtime launcher"
 grep -Fq '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-netd' "$client_makefile" ||

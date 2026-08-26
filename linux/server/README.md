@@ -81,6 +81,12 @@ objects, and switch `/etc/candy/sdwan` to a compatibility link only after the
 upgraded services pass health verification. The canonical path ends as a real
 directory; a failed reverse-link migration restores the previous layout.
 
+The shared Linux Runtime defaults also use `/var/lib/candy/sdwan`, and Linux
+service units pass that path explicitly. OpenWrt is the intentional platform
+exception because its `/var` tree is volatile: its package passes
+`/etc/candy/sdwan` explicitly and maintains
+`/var/lib/candy/sdwan -> /etc/candy/sdwan` only as a compatibility link.
+
 Cloud configuration generations and server activation directories are
 content-addressed immutable history. After successful synchronization the
 server keeps at most four entries of each kind by default, always protecting

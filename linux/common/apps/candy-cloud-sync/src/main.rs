@@ -51,7 +51,7 @@ const MAX_CLOUD_ENDPOINTS: usize = 16;
     about = "Candy Cloud Runtime synchronizer"
 )]
 struct Args {
-    #[arg(long, default_value = "/etc/candy/sdwan")]
+    #[arg(long, default_value = "/var/lib/candy/sdwan")]
     state_dir: PathBuf,
     #[arg(long, default_value = "/run/candy")]
     run_dir: PathBuf,
@@ -6970,5 +6970,11 @@ default via 192.0.2.1 dev eth0 proto static
             &[],
         )
         .is_err());
+    }
+
+    #[test]
+    fn linux_default_state_directory_is_canonical() {
+        let args = Args::try_parse_from(["candy-cloud-sync", "sync-once"]).unwrap();
+        assert_eq!(args.state_dir, PathBuf::from("/var/lib/candy/sdwan"));
     }
 }

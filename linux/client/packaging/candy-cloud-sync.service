@@ -9,7 +9,9 @@ Type=oneshot
 User=candy-sdwan
 Group=candy-sdwan
 UMask=0077
-ExecStart=/usr/local/libexec/candy-cloud-sync sync-once
+Environment=CANDY_SDWAN_STATE_DIR=/var/lib/candy/sdwan
+Environment=CANDY_SDWAN_STATE_ROOT=/var/lib/candy/sdwan
+ExecStart=/usr/local/libexec/candy-cloud-sync --state-dir /var/lib/candy/sdwan sync-once
 ExecStartPost=+/usr/local/libexec/candy-sdwan-runtime reconcile candy-sdwan.service
 NoNewPrivileges=true
 PrivateTmp=true

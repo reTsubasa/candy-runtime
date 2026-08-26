@@ -121,6 +121,10 @@ cmp "$root/linux/server/apps/candy-server/candy-server" \
 [ -f "$edge_stage/systemd/candy-cloud-sync.timer" ] || fail "Cloud synchronization timer was not staged"
 grep -F 'ConditionPathExists=/var/lib/candy/sdwan/identity/device-identity-v1.json' "$edge_stage/systemd/candy-cloud-sync.service" >/dev/null ||
 	fail "Cloud synchronization does not wait for an enrolled identity"
+grep -F 'Environment=CANDY_SDWAN_STATE_DIR=/var/lib/candy/sdwan' "$edge_stage/systemd/candy-cloud-sync.service" >/dev/null ||
+	fail "Linux Edge Cloud synchronization does not export the canonical state root"
+grep -F -- '--state-dir /var/lib/candy/sdwan' "$edge_stage/systemd/candy-cloud-sync.service" >/dev/null ||
+	fail "Linux Edge Cloud synchronization does not pass the canonical state root"
 grep -F 'OnActiveSec=15s' "$edge_stage/systemd/candy-cloud-sync.timer" >/dev/null ||
 	fail "Cloud synchronization timer has no post-upgrade first trigger"
 grep -F 'OnUnitInactiveSec=30s' "$edge_stage/systemd/candy-cloud-sync.timer" >/dev/null ||
@@ -159,6 +163,10 @@ grep -F -- '--allowed-user candy --allowed-group candy' "$stage/systemd/candy-ne
 	fail "server netd socket is not bound to the Candy server identity"
 grep -F -- '--server-config /etc/candy/server.toml' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||
 	fail "server Cloud sync does not request a server activation"
+grep -F 'Environment=CANDY_SDWAN_STATE_DIR=/var/lib/candy/sdwan' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||
+	fail "server Cloud sync does not export the canonical state root"
+grep -F -- '--state-dir /var/lib/candy/sdwan' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||
+	fail "server Cloud sync does not pass the canonical state root"
 grep -F 'EnvironmentFile=-/etc/candy/cloud-sync.env' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||
 	fail "server Cloud sync does not load the persisted public endpoint"
 grep -F 'CANDY_PUBLIC_ENDPOINT=203.0.113.10:8443' "$stage/etc/candy/cloud-sync.env.example" >/dev/null ||
