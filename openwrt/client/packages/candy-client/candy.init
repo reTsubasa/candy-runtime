@@ -3,7 +3,7 @@
 START=95
 STOP=10
 USE_PROCD=1
-EXTRA_COMMANDS="provider_update_once provider_update_loop network_apply network_cleanup reload_runtime restart_queued fail_open sdwan_fail_open sdwan_reconcile sdwan_start sdwan_reconnect sdwan_stop health_watchdog congestion_test run_client run_sdwan run_netd"
+EXTRA_COMMANDS="provider_update_once provider_update_loop network_apply network_cleanup reload_runtime restart_queued fail_open sdwan_fail_open sdwan_reconcile sdwan_prune_history sdwan_start sdwan_reconnect sdwan_stop health_watchdog congestion_test run_client run_sdwan run_netd"
 EXTRA_HELP="	provider_update_once	Run due provider auto updates once
 	provider_update_loop	Run provider auto update scheduler loop
 	network_apply	Apply firewall and DNS policy in background
@@ -13,6 +13,7 @@ EXTRA_HELP="	provider_update_once	Run due provider auto updates once
 	fail_open	Stop Candy and remove owned network steering after a fatal failure
 	sdwan_fail_open	Remove only SD-WAN-owned state after an SD-WAN failure
 	sdwan_reconcile	Apply the authenticated Candy Cloud SD-WAN activation
+	sdwan_prune_history	Prune superseded authenticated SD-WAN generations
 	sdwan_start	Enable Candy and start the authenticated SD-WAN activation
 	sdwan_reconnect	Restart only the SD-WAN child and preserve ordinary Candy
 	sdwan_stop	Stop only SD-WAN child processes and owned network state
@@ -22,7 +23,7 @@ EXTRA_HELP="	provider_update_once	Run due provider auto updates once
 	run_netd	Run the privileged SD-WAN network helper"
 
 case "${action:-${1:-}}" in
-status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|fail_open|sdwan_fail_open|sdwan_reconcile|sdwan_start|sdwan_reconnect|sdwan_stop|health_watchdog|congestion_test|run_client|run_sdwan|run_netd)
+status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|fail_open|sdwan_fail_open|sdwan_reconcile|sdwan_prune_history|sdwan_start|sdwan_reconnect|sdwan_stop|health_watchdog|congestion_test|run_client|run_sdwan|run_netd)
 		CANDY_FAST_STATUS_ACTION="${action:-$1}"
 		EXTRA_COMMANDS="$EXTRA_COMMANDS status running"
 		USE_PROCD=
@@ -69,6 +70,7 @@ CANDY_SDWAN_STATUS_INSPECTOR=${CANDY_SDWAN_STATUS_INSPECTOR:-/usr/libexec/candy-
 CANDY_CORE_BIN=${CANDY_CORE_BIN:-/usr/lib/candy/cores/current/candy-core}
 CANDY_SDWAN_STATE_DIR=${CANDY_SDWAN_STATE_DIR:-/etc/candy/sdwan}
 CANDY_SDWAN_ACTIVATIONS_DIR=${CANDY_SDWAN_ACTIVATIONS_DIR:-$CANDY_SDWAN_STATE_DIR/activations}
+CANDY_SDWAN_HISTORY_RETAIN=${CANDY_SDWAN_HISTORY_RETAIN:-4}
 CANDY_SDWAN_CANDIDATE=${CANDY_SDWAN_CANDIDATE:-$CANDY_SDWAN_STATE_DIR/candidate}
 CANDY_SDWAN_ACTIVE=${CANDY_SDWAN_ACTIVE:-$CANDY_SDWAN_STATE_DIR/active}
 CANDY_SDWAN_DESCRIPTOR_NAME=activation-v1.json
@@ -684,6 +686,60 @@ canonical_lower_hex() {
 	local value="$1" length="$2"
 	[ "${#value}" -eq "$length" ] || return 1
 	case "$value" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+sdwan_history_names_protected() {
+	local collection="$1" pointer target name protected=
+	for pointer in configuration candidate active; do
+		[ -L "$CANDY_SDWAN_STATE_DIR/$pointer" ] || continue
+		target=$(readlink "$CANDY_SDWAN_STATE_DIR/$pointer" 2>/dev/null || true)
+		case "$target" in
+			"$collection"/*)
+				name=${target#"$collection"/}
+				canonical_lower_hex "$name" 64 || continue
+				[ "$target" = "$collection/$name" ] || continue
+				case " $protected " in *" $name "*) ;; *) protected="$protected $name" ;; esac
+				;;
+		esac
+	done
+	printf '%s\n' "$protected"
+}
+
+sdwan_prune_history_collection() {
+	local collection="$1" directory directory_real state_real protected protected_count available kept path name
+	directory="$CANDY_SDWAN_STATE_DIR/$collection"
+	[ -e "$directory" ] || [ -L "$directory" ] || return 0
+	[ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+	state_real=$(CDPATH= cd -P -- "$CANDY_SDWAN_STATE_DIR" 2>/dev/null && pwd -P) || return 1
+	directory_real=$(CDPATH= cd -P -- "$directory" 2>/dev/null && pwd -P) || return 1
+	[ "$directory_real" = "$state_real/$collection" ] || return 1
+
+	protected=$(sdwan_history_names_protected "$collection") || return 1
+	protected_count=0
+	for name in $protected; do protected_count=$((protected_count + 1)); done
+	available=$((CANDY_SDWAN_HISTORY_RETAIN - protected_count))
+	[ "$available" -ge 0 ] || available=0
+	kept=0
+	for path in $(LC_ALL=C ls -1dt "$directory"/* 2>/dev/null || true); do
+		name=${path##*/}
+		canonical_lower_hex "$name" 64 || continue
+		[ -d "$path" ] && [ ! -L "$path" ] || continue
+		case " $protected " in *" $name "*) continue ;; esac
+		if [ "$kept" -lt "$available" ]; then
+			kept=$((kept + 1))
+			continue
+		fi
+		find "$path" -xdev -type d -exec chmod u+w {} \; || return 1
+		rm -rf "$path" || return 1
+	done
+}
+
+sdwan_prune_history() {
+	case "$CANDY_SDWAN_HISTORY_RETAIN" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$CANDY_SDWAN_HISTORY_RETAIN" -ge 2 ] && [ "$CANDY_SDWAN_HISTORY_RETAIN" -le 32 ] || return 1
+	[ -d "$CANDY_SDWAN_STATE_DIR" ] && [ ! -L "$CANDY_SDWAN_STATE_DIR" ] || return 1
+	sdwan_prune_history_collection generations || return 1
+	sdwan_prune_history_collection activations
 }
 
 load_sdwan_candidate() {

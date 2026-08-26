@@ -79,6 +79,9 @@ while identity_available; do
 		esac
 		logger -t candy -- "level=info event=cloud_sync result=ok state=$state"
 		reconcile_sdwan || true
+		if ! "$CANDY_INIT" sdwan_prune_history >/dev/null 2>&1; then
+			logger -t candy -- "level=warn event=cloud_sync_history result=failed"
+		fi
 	else
 		rc=$?
 		detail=$(printf '%s' "$output" | tr '\r\n' '  ' | cut -c 1-384)

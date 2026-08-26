@@ -73,6 +73,43 @@ load_sdwan_candidate || fail "valid authenticated activation was rejected"
 ln -s "activations/$hash" "$CANDY_SDWAN_ACTIVE"
 [ "$(readlink "$CANDY_SDWAN_ACTIVE")" = "activations/$hash" ] || fail "active pointer was not atomically promoted"
 
+CANDY_SDWAN_HISTORY_RETAIN=4
+generations=$CANDY_SDWAN_STATE_DIR/generations
+mkdir -p "$generations"
+protected_generation=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+mkdir -p "$generations/$protected_generation"
+ln -s "generations/$protected_generation" "$CANDY_SDWAN_STATE_DIR/configuration"
+for index in 1 2 3 4 5; do
+	name=$(printf '%064d' "$index")
+	mkdir -p "$CANDY_SDWAN_ACTIVATIONS_DIR/$name" "$generations/$name"
+	touch -t "20260826010$index" "$CANDY_SDWAN_ACTIVATIONS_DIR/$name" "$generations/$name"
+done
+mkdir -p "$CANDY_SDWAN_ACTIVATIONS_DIR/unexpected"
+ln -s unexpected "$CANDY_SDWAN_ACTIVATIONS_DIR/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+sdwan_prune_history || fail "bounded SD-WAN history pruning failed"
+activation_count=0
+for path in "$CANDY_SDWAN_ACTIVATIONS_DIR"/*; do
+	[ -d "$path" ] && [ ! -L "$path" ] && canonical_lower_hex "${path##*/}" 64 && activation_count=$((activation_count + 1))
+done
+generation_count=0
+for path in "$generations"/*; do
+	[ -d "$path" ] && [ ! -L "$path" ] && canonical_lower_hex "${path##*/}" 64 && generation_count=$((generation_count + 1))
+done
+[ "$activation_count" -eq 4 ] || fail "activation history retention limit was not enforced"
+[ "$generation_count" -eq 4 ] || fail "generation history retention limit was not enforced"
+[ -d "$activation" ] || fail "active and candidate activation was pruned"
+[ -d "$generations/$protected_generation" ] || fail "configuration generation was pruned"
+[ -d "$CANDY_SDWAN_ACTIVATIONS_DIR/unexpected" ] || fail "unexpected history entry was removed"
+[ -L "$CANDY_SDWAN_ACTIVATIONS_DIR/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" ] || fail "symlinked history entry was followed"
+
+real_state=$CANDY_SDWAN_STATE_DIR
+ln -s "$real_state" "$test_root/sdwan-link"
+CANDY_SDWAN_STATE_DIR=$test_root/sdwan-link
+if sdwan_prune_history; then
+	fail "symlinked SD-WAN state root was accepted for pruning"
+fi
+CANDY_SDWAN_STATE_DIR=$real_state
+
 status_inspector=$test_root/status-inspector
 cat >"$status_inspector" <<'EOF'
 #!/bin/sh

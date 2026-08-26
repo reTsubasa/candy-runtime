@@ -60,7 +60,7 @@ cat >"$tmp/candy.init" <<'EOF'
 case "$1" in
 	enabled) exit 0 ;;
 	status) printf '%s\n' running ;;
-	sdwan_reconcile) printf '%s\n' "$*" >>"$CANDY_TEST_RECONCILE_LOG" ;;
+	sdwan_reconcile|sdwan_prune_history) printf '%s\n' "$*" >>"$CANDY_TEST_RECONCILE_LOG" ;;
 esac
 EOF
 chmod 0755 "$tmp/bin/"* "$tmp/sync" "$tmp/candy.init"
@@ -83,6 +83,7 @@ grep -F '"state":"activation_rejected"' "$stderr_log" >/dev/null || fail "struct
 grep -F 'event=cloud_sync result=ok state=configuration_updated' "$tmp/logger.log" >/dev/null ||
 	fail "stderr contaminated the final stdout state"
 grep -Fx 'sdwan_reconcile' "$tmp/reconcile.log" >/dev/null || fail "successful synchronization was not reconciled"
+grep -Fx 'sdwan_prune_history' "$tmp/reconcile.log" >/dev/null || fail "successful synchronization did not prune SD-WAN history"
 
 # The result contract is the final non-empty stdout record. A trailing stdout
 # diagnostic must invalidate the state rather than reusing an earlier JSON line.
@@ -136,7 +137,9 @@ PATH="$tmp/bin:$PATH" \
 	CANDY_INIT="$tmp/candy.init" \
 	CANDY_CLOUD_SYNC_INTERVAL=1 \
 	"$sync_loop" >/dev/null 2>"$stderr_log" || fail "disabled service handling failed"
-[ ! -s "$tmp/reconcile.log" ] || fail "Cloud sync restarted an explicitly disabled service"
+! grep -Fx start "$tmp/reconcile.log" >/dev/null || fail "Cloud sync restarted an explicitly disabled service"
+! grep -Fx sdwan_reconcile "$tmp/reconcile.log" >/dev/null || fail "Cloud sync reconciled an explicitly disabled service"
+grep -Fx sdwan_prune_history "$tmp/reconcile.log" >/dev/null || fail "disabled service history was left unbounded"
 grep -F 'event=cloud_sync_reconcile result=deferred reason=service_disabled' "$tmp/logger.log" >/dev/null ||
 	fail "disabled reconciliation was not reported as deferred"
 
@@ -150,6 +153,7 @@ case "$1" in
 	enabled) exit 0 ;;
 	status) printf '%s\n' stopped ;;
 	start) printf '%s\n' "$*" >>"$CANDY_TEST_RECONCILE_LOG" ;;
+	sdwan_prune_history) printf '%s\n' "$*" >>"$CANDY_TEST_RECONCILE_LOG" ;;
 	*) exit 1 ;;
 esac
 EOF
@@ -168,6 +172,7 @@ PATH="$tmp/bin:$PATH" \
 grep -Fx start "$tmp/reconcile.log" >/dev/null || fail "stopped enabled service was not restarted"
 grep -F 'event=cloud_sync_reconcile result=recovered reason=service_stopped' "$tmp/logger.log" >/dev/null ||
 	fail "successful service recovery was not logged"
+grep -Fx sdwan_prune_history "$tmp/reconcile.log" >/dev/null || fail "successful Cloud sync did not prune SD-WAN history"
 
 # A completed fail-open is a safety latch. Cloud polling may update the
 # candidate, but only an explicit service start may clear the fault and reclaim
@@ -187,7 +192,9 @@ PATH="$tmp/bin:$PATH" \
 	CANDY_INIT="$tmp/candy.init" \
 	CANDY_CLOUD_SYNC_INTERVAL=1 \
 	"$sync_loop" >/dev/null 2>"$stderr_log" || fail "completed fault handling failed"
-[ ! -s "$tmp/reconcile.log" ] || fail "Cloud sync restarted a service latched in fail-open"
+! grep -Fx start "$tmp/reconcile.log" >/dev/null || fail "Cloud sync restarted a service latched in fail-open"
+! grep -Fx sdwan_reconcile "$tmp/reconcile.log" >/dev/null || fail "Cloud sync reconciled a service latched in fail-open"
+grep -Fx sdwan_prune_history "$tmp/reconcile.log" >/dev/null || fail "fail-open service history was left unbounded"
 grep -F 'event=cloud_sync_reconcile result=deferred reason=runtime_fault' "$tmp/logger.log" >/dev/null ||
 	fail "completed fail-open was not reported as deferred"
 
