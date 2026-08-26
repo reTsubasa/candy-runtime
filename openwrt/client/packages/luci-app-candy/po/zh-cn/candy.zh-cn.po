@@ -1829,6 +1829,7 @@ msgstr "确认离开 Candy Cloud 并移除此节点？"
 
 msgid "Choose the behavior that best matches your connection. Candy will not silently switch to a weaker mode."
 msgstr "请选择最适合当前网络的模式。Candy 不会静默切换到更弱的模式。"
+
 msgid "Wire protocol"
 msgstr "线路协议"
 
@@ -2066,6 +2067,15 @@ msgstr "正在加载链路状态..."
 msgid "Per-node telemetry"
 msgstr "分节点遥测"
 
+msgid "Node telemetry"
+msgstr "节点遥测"
+
+msgid "Node features"
+msgstr "节点特性"
+
+msgid "Congestion parameter test"
+msgstr "拥塞参数测试"
+
 msgid "RTT / jitter"
 msgstr "RTT / 抖动"
 
@@ -2280,6 +2290,9 @@ msgstr "Runtime 版本"
 
 msgid "Performance trends, per-node telemetry, comparison tests, and runtime resources."
 msgstr "查看性能趋势、节点遥测、对比测试和 Runtime 资源。"
+
+msgid "Runtime resources, performance trends, node telemetry, node features, and congestion tests."
+msgstr "查看服务资源、性能趋势、节点遥测、节点特性和拥塞参数测试。"
 
 msgid "Performance trends"
 msgstr "性能趋势"

@@ -1,6 +1,6 @@
 <%+header%>
 
-<div class="candy-diagnostics-head"><div><h2 name="content"><%:Diagnostics%></h2><p><%:Performance trends, per-node telemetry, comparison tests, and runtime resources.%></p></div><a class="cbi-button cbi-button-action" href="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'logs')%>"><%:Open logs%></a></div>
+<div class="candy-diagnostics-head"><div><h2 name="content"><%:Diagnostics%></h2><p><%:Runtime resources, performance trends, node telemetry, node features, and congestion tests.%></p></div><a class="cbi-button cbi-button-action" href="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'logs')%>"><%:Open logs%></a></div>
 
 <%
 local jsonc = require "luci.jsonc"
@@ -302,10 +302,6 @@ end
 .candy-table-scroll .table { min-width: 58em; }
 .candy-diagnostics-alert { border-left: 4px solid var(--arcored); background: var(--arcored-light); padding: .8em 1em; border-radius: var(--arcoradius); }
 .candy-diagnostics-alert strong { display: block; margin-bottom: .35em; }
-.candy-feature-matrix { overflow-x: auto; }
-.candy-feature-matrix .table { min-width: 62em; table-layout: fixed; }
-.candy-feature-matrix .table th, .candy-feature-matrix .table td { vertical-align: middle; overflow-wrap: anywhere; }
-.candy-feature-matrix .table th { white-space: normal; }
 .candy-diagnostics-head { display:flex; align-items:flex-start; justify-content:space-between; gap:1em; margin-bottom:1em; }
 .candy-diagnostics-head h2 { margin:0; }
 .candy-diagnostics-head p { margin:.35em 0 0; color:#4e5969; line-height:1.5; }
@@ -317,9 +313,6 @@ end
 .candy-resource-item + .candy-resource-item { border-left:1px solid var(--arcogray-3); }
 .candy-resource-item span { display:block; color:var(--arcogray-5); font-size:.86em; }
 .candy-resource-item strong { display:block; margin-top:.2em; overflow-wrap:anywhere; font-variant-numeric:tabular-nums; }
-.candy-tech-details { margin-top:1.5em; }
-.candy-tech-details > summary { cursor:pointer; padding:.8em 0; border-top:1px solid #e5e6eb; border-bottom:1px solid #e5e6eb; font-weight:600; }
-.candy-tech-details > p { color:#4e5969; line-height:1.5; }
 @media (max-width:560px) { .candy-diagnostics-head { flex-direction:column; } }
 .candy-feature-status {
   display: inline-block; padding: .15em .45em; border: 1px solid var(--arcogray-4);
@@ -327,8 +320,19 @@ end
 }
 .candy-feature-status.active { color: var(--arcogreen); border-color: var(--arcogreen); background: var(--arcogreen-light); }
 .candy-feature-status.available { color: var(--arcogray-5); }
-.candy-feature-evidence { color: var(--arcogray-6); white-space: nowrap; }
-.candy-feature-state { white-space: pre-line; line-height: 1.4; }
+.candy-feature-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1em; }
+.candy-feature-card { min-width:0; border:1px solid var(--arcogray-3); border-radius:var(--arcoradius); background:#fff; overflow:hidden; }
+.candy-feature-card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:1em; padding:.85em 1em; background:var(--arcogray-1); border-bottom:1px solid var(--arcogray-3); }
+.candy-feature-card-head strong { display:block; color:var(--arcogray-7); overflow-wrap:anywhere; }
+.candy-feature-card-meta { color:var(--arcogray-5); font-size:.82em; line-height:1.45; text-align:right; white-space:nowrap; }
+.candy-feature-list { margin:0; }
+.candy-feature-item { padding:.75em 1em; }
+.candy-feature-item + .candy-feature-item { border-top:1px solid var(--arcogray-3); }
+.candy-feature-item-head { display:flex; align-items:flex-start; justify-content:space-between; gap:.75em; }
+.candy-feature-name { min-width:0; font-weight:600; color:var(--arcogray-7); overflow-wrap:anywhere; }
+.candy-feature-badges { display:flex; justify-content:flex-end; gap:.35em; flex-wrap:wrap; }
+.candy-feature-evidence { margin-top:.35em; color:var(--arcogray-5); font-size:.82em; font-variant-numeric:tabular-nums; }
+.candy-feature-empty { color:var(--arcogray-5); padding:.9em 0; }
 
 /* === Progress bar for congestion window === */
 .candy-cwnd-bar {
@@ -352,6 +356,7 @@ end
 /* === Responsive === */
 @media (max-width: 1000px) {
   .candy-chart-grid { grid-template-columns: 1fr; }
+  .candy-feature-grid { grid-template-columns:1fr; }
   .candy-resource-band { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .candy-resource-item:nth-child(odd) { border-left:0; }
   .candy-resource-item:nth-child(n+3) { border-top:1px solid var(--arcogray-3); }
@@ -378,8 +383,22 @@ end
 @media (max-width: 440px) {
   .candy-resource-band { grid-template-columns:1fr; }
   .candy-resource-item + .candy-resource-item { border-left:0; border-top:1px solid var(--arcogray-3); }
+  .candy-feature-card-head, .candy-feature-item-head { flex-direction:column; }
+  .candy-feature-card-meta { text-align:left; white-space:normal; }
+  .candy-feature-badges { justify-content:flex-start; }
 }
 </style>
+
+<div class="cbi-map candy-diagnostics-section">
+	<h3><%:Service resources%></h3>
+	<div class="cbi-section candy-resource-band">
+		<div class="candy-resource-item"><span><%:Process CPU%></span><strong id="candy-diagnostics-process-cpu"><%=xml.pcdata(process_cpu ~= nil and tostring(process_cpu) .. " %" or "-")%></strong></div>
+		<div class="candy-resource-item"><span><%:Resident memory%></span><strong id="candy-diagnostics-process-rss"><%=xml.pcdata(bytes_label(process_rss))%></strong></div>
+		<div class="candy-resource-item"><span><%:UDP receive buffer%></span><strong id="candy-diagnostics-socket-rx"><%=xml.pcdata(bytes_label(socket_buffers.receive_bytes))%></strong></div>
+		<div class="candy-resource-item"><span><%:UDP send buffer%></span><strong id="candy-diagnostics-socket-tx"><%=xml.pcdata(bytes_label(socket_buffers.send_bytes))%></strong></div>
+		<div class="candy-resource-item"><span><%:UDP buffer target%></span><strong id="candy-diagnostics-socket-target"><%=xml.pcdata(bytes_label(socket_buffers.target_bytes))%></strong></div>
+	</div>
+</div>
 
 <div class="cbi-map candy-diagnostics-section">
 	<h3><%:Performance trends%></h3>
@@ -390,7 +409,7 @@ end
 </div>
 
 <div class="cbi-map candy-diagnostics-section">
-	<h3><%:Per-node telemetry%></h3>
+	<h3><%:Node telemetry%></h3>
 	<div class="cbi-section">
 		<div class="candy-diagnostics-table-scroll">
 			<table class="table">
@@ -412,7 +431,14 @@ end
 </div>
 
 <div class="cbi-map candy-diagnostics-section">
-	<h3><%:Congestion controller comparison%></h3>
+	<h3><%:Node features%></h3>
+	<div id="candy-diagnostics-feature-cards" class="cbi-section candy-feature-grid">
+		<div class="candy-feature-empty">-</div>
+	</div>
+</div>
+
+<div class="cbi-map candy-diagnostics-section">
+	<h3><%:Congestion parameter test%></h3>
 	<div class="cbi-section">
 		<p><%:Downloads the node's 50 MiB test object four times through the selected Candy QUIC line, once with CUBIC and once with each Candy BBR preset (up to about 200 MiB total). It does not change the running configuration.%></p>
 		<div class="candy-test-actions">
@@ -426,25 +452,6 @@ end
 			<span id="candy-congestion-test-state"><%=#congestion_test_nodes == 0 and i18n.translate("No compatible nodes") or i18n.translate("Not run")%></span>
 		</div>
 		<div class="candy-table-scroll"><table class="table"><thead><tr class="tr table-titles"><th class="th"><%:Node / controller / preset%></th><th class="th"><%:Goodput%></th><th class="th">TTFB</th><th class="th"><%:Total time%></th><th class="th"><%:Data%></th><th class="th"><%:Result%></th></tr></thead><tbody id="candy-congestion-test-results"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table></div>
-	</div>
-</div>
-
-<details id="candy-feature-matrix-section" class="cbi-map candy-tech-details">
-	<summary><%:Protocol capability details%></summary>
-	<p><%:Negotiation and authorization evidence for advanced compatibility troubleshooting.%></p>
-	<div class="cbi-section candy-feature-matrix">
-		<table class="table"><colgroup><col style="width:22%"><col style="width:11%"><col style="width:14%"><col style="width:13%"><col style="width:13%"><col style="width:27%"></colgroup><thead><tr class="tr table-titles"><th class="th"><%:Node / server Core%></th><th class="th"><%:Wire protocol%></th><th class="th"><%:Feature%></th><th class="th"><%:Negotiation%></th><th class="th"><%:Authorization%></th><th class="th"><%:Runtime evidence%></th></tr></thead><tbody id="candy-diagnostics-feature-matrix"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table>
-	</div>
-</details>
-
-<div class="cbi-map candy-diagnostics-section">
-	<h3><%:Service resources%></h3>
-	<div class="cbi-section candy-resource-band">
-		<div class="candy-resource-item"><span><%:Process CPU%></span><strong id="candy-diagnostics-process-cpu"><%=xml.pcdata(process_cpu ~= nil and tostring(process_cpu) .. " %" or "-")%></strong></div>
-		<div class="candy-resource-item"><span><%:Resident memory%></span><strong id="candy-diagnostics-process-rss"><%=xml.pcdata(bytes_label(process_rss))%></strong></div>
-		<div class="candy-resource-item"><span><%:UDP receive buffer%></span><strong id="candy-diagnostics-socket-rx"><%=xml.pcdata(bytes_label(socket_buffers.receive_bytes))%></strong></div>
-		<div class="candy-resource-item"><span><%:UDP send buffer%></span><strong id="candy-diagnostics-socket-tx"><%=xml.pcdata(bytes_label(socket_buffers.send_bytes))%></strong></div>
-		<div class="candy-resource-item"><span><%:UDP buffer target%></span><strong id="candy-diagnostics-socket-target"><%=xml.pcdata(bytes_label(socket_buffers.target_bytes))%></strong></div>
 	</div>
 </div>
 
@@ -495,7 +502,8 @@ var candyDiagnosticsLabels = {
 	cwnd: "CWND", mtu: "MTU",
 	negotiated: <%=js_string(i18n.translate("Negotiated"))%>, notNegotiated: <%=js_string(i18n.translate("Not negotiated"))%>,
 	authorized: <%=js_string(i18n.translate("Authorized"))%>, notAuthorized: <%=js_string(i18n.translate("Not authorized"))%>,
-	active: <%=js_string(i18n.translate("Active"))%>, idleFeature: <%=js_string(i18n.translate("Available"))%>, evidence: <%=js_string(i18n.translate("Evidence"))%>
+	active: <%=js_string(i18n.translate("Active"))%>, idleFeature: <%=js_string(i18n.translate("Available"))%>, evidence: <%=js_string(i18n.translate("Evidence"))%>,
+	wireProtocol: <%=js_string(i18n.translate("Wire protocol"))%>
 };
 
 function candyDiagnosticsText(value) { return value === null || value === undefined || value === "" ? "-" : String(value); }
@@ -588,26 +596,58 @@ function candyDiagnosticsTelemetryRow(label, value) {
 function candyDiagnosticsTelemetryRowSub(label, value, sub) {
 	return '<div class="candy-telemetry-row"><span class="candy-telemetry-label">' + candyDiagnosticsEscape(label) + '</span><span class="candy-telemetry-value">' + candyDiagnosticsEscape(value) + '</span></div><div class="candy-telemetry-sub">' + sub + '</div>';
 }
-function candyDiagnosticsRenderFeatureMatrix(data) {
-	var section = document.getElementById("candy-feature-matrix-section"), body = document.getElementById("candy-diagnostics-feature-matrix");
+function candyDiagnosticsRenderFeatureCards(data) {
+	var body = document.getElementById("candy-diagnostics-feature-cards");
 	var definitions = data && data.core && data.core.current_manifest && data.core.current_manifest.core && data.core.current_manifest.core.features || [], nodes = data && data.nodes || [];
-	if (!section || !body) return;
-	section.style.display = definitions.length && nodes.length ? "" : "none";
+	if (!body) return;
 	body.textContent = "";
+	if (!definitions.length || !nodes.length) {
+		var empty = document.createElement("div");
+		empty.className = "candy-feature-empty";
+		empty.textContent = candyDiagnosticsLabels.noNodes;
+		body.appendChild(empty);
+		return;
+	}
 	nodes.forEach(function(node) {
-		var passive = node.passive || {}, features = passive.features || {}, protocol = node.protocol_version || {}, peer = (node.server_version || "-") + " / " + (protocol.major === undefined ? "-" : protocol.major + "." + protocol.minor);
+		var passive = node.passive || {}, features = passive.features || {}, protocol = node.protocol_version || {};
+		var protocolText = protocol.major === undefined ? "-" : protocol.major + "." + protocol.minor;
+		var card = document.createElement("article"), header = document.createElement("div"), title = document.createElement("strong"), meta = document.createElement("div"), list = document.createElement("div");
+		card.className = "candy-feature-card";
+		header.className = "candy-feature-card-head";
+		title.textContent = candyDiagnosticsText(node.name || node.id);
+		meta.className = "candy-feature-card-meta";
+		meta.textContent = "Core " + candyDiagnosticsText(node.server_version) + " · " + candyDiagnosticsLabels.wireProtocol + " " + protocolText;
+		header.appendChild(title);
+		header.appendChild(meta);
+		card.appendChild(header);
+		list.className = "candy-feature-list";
 		definitions.forEach(function(definition) {
-			var value = features[definition.status_key || definition.id] || {}, row = document.createElement("tr"); row.className = "tr";
-			candyDiagnosticsAppendCell(row, candyDiagnosticsText(node.name || node.id) + " / " + peer);
-			candyDiagnosticsAppendCell(row, protocol.major === undefined ? "-" : protocol.major + "." + protocol.minor);
-			candyDiagnosticsAppendCell(row, definition.short_name || definition.name || definition.id);
-			var negotiation = candyDiagnosticsAppendCell(row, ""), authorization = candyDiagnosticsAppendCell(row, ""), evidence = candyDiagnosticsAppendCell(row, "");
-			var badge = document.createElement("span"); badge.className = "candy-feature-status" + (value.supported === true ? " active" : " available"); badge.textContent = value.supported === true ? candyDiagnosticsLabels.negotiated : candyDiagnosticsLabels.notNegotiated; negotiation.appendChild(badge);
-			badge = document.createElement("span"); badge.className = "candy-feature-status" + (value.authorized === true ? " active" : " available"); badge.textContent = value.authorized === true ? candyDiagnosticsLabels.authorized : candyDiagnosticsLabels.notAuthorized; authorization.appendChild(badge);
-			badge = document.createElement("span"); badge.className = "candy-feature-status" + (value.active === true ? " active" : " available"); badge.textContent = value.active === true ? candyDiagnosticsLabels.active : candyDiagnosticsLabels.idleFeature; evidence.appendChild(badge);
-			var evidenceText = document.createElement("span"); evidenceText.className = "candy-feature-evidence"; evidenceText.textContent = " / " + candyDiagnosticsLabels.evidence + " " + candyDiagnosticsText(value.evidence); evidence.appendChild(evidenceText);
-			body.appendChild(row);
+			var value = features[definition.status_key || definition.id] || {}, item = document.createElement("div"), itemHead = document.createElement("div"), name = document.createElement("span"), badges = document.createElement("div"), evidence = document.createElement("div");
+			item.className = "candy-feature-item";
+			itemHead.className = "candy-feature-item-head";
+			name.className = "candy-feature-name";
+			name.textContent = definition.short_name || definition.name || definition.id;
+			badges.className = "candy-feature-badges";
+			[
+				[value.supported === true, candyDiagnosticsLabels.negotiated, candyDiagnosticsLabels.notNegotiated],
+				[value.authorized === true, candyDiagnosticsLabels.authorized, candyDiagnosticsLabels.notAuthorized],
+				[value.active === true, candyDiagnosticsLabels.active, candyDiagnosticsLabels.idleFeature]
+			].forEach(function(state) {
+				var badge = document.createElement("span");
+				badge.className = "candy-feature-status " + (state[0] ? "active" : "available");
+				badge.textContent = state[0] ? state[1] : state[2];
+				badges.appendChild(badge);
+			});
+			evidence.className = "candy-feature-evidence";
+			evidence.textContent = candyDiagnosticsLabels.evidence + " " + candyDiagnosticsText(value.evidence);
+			itemHead.appendChild(name);
+			itemHead.appendChild(badges);
+			item.appendChild(itemHead);
+			item.appendChild(evidence);
+			list.appendChild(item);
 		});
+		card.appendChild(list);
+		body.appendChild(card);
 	});
 }
 
@@ -768,7 +808,7 @@ function candyDiagnosticsRender(data) {
 	var processStatus = data.process || {}, socketBuffers = processStatus.socket_buffers || {}, legacyLocal = legacy && legacy.local || {};
 	var nodes = data.nodes || [], body = document.getElementById("candy-diagnostics-nodes"), row, cell, text;
 	if (!nodes.length && legacy) nodes = [{ id: "-", name: "-", state: "-", passive: legacy }];
-	candyDiagnosticsRenderFeatureMatrix(data);
+	candyDiagnosticsRenderFeatureCards(data);
 	candyDiagnosticsUpdateCharts(nodes);
 	var cpu = candyDiagnosticsFirstDefined([processStatus.cpu_percent, legacyLocal.process_cpu_percent]);
 	var rss = candyDiagnosticsFirstDefined([processStatus.resident_memory_bytes, legacyLocal.resident_memory_bytes]);
