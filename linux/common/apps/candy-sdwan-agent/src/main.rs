@@ -230,7 +230,14 @@ enum ReadinessState {
     ListenerReady,
     Degraded,
     Ready,
+    RecoverablePeerLoss,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadinessPolicy {
+    Strict,
+    CommittedServer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -941,6 +948,22 @@ fn read_core_readiness(
     pid: u32,
     readiness_token: &str,
 ) -> Result<Option<ReadinessState>> {
+    read_core_readiness_with_policy(
+        path,
+        generation,
+        pid,
+        readiness_token,
+        ReadinessPolicy::Strict,
+    )
+}
+
+fn read_core_readiness_with_policy(
+    path: &PathBuf,
+    generation: u64,
+    pid: u32,
+    readiness_token: &str,
+    policy: ReadinessPolicy,
+) -> Result<Option<ReadinessState>> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -979,6 +1002,17 @@ fn read_core_readiness(
     let listener_ready = status.inbound_listener_configured
         && status.inbound_listener_ready
         && !status.inbound_listener_endpoints.is_empty();
+    let recoverable_committed_server_peer_loss = policy == ReadinessPolicy::CommittedServer
+        && matches!(status.lifecycle.as_str(), "failed" | "starting")
+        && status.fail_open_required
+        && listener_ready
+        && status.configured_peers > 0
+        && status.required_route_owners > 0
+        && status.ready_route_owners == 0
+        && matches!(
+            status.last_error_code.as_deref(),
+            Some("all_peer_reads_failed" | "all_peer_writes_failed" | "route_has_no_active_peer")
+        );
     let state = match status.lifecycle.as_str() {
         "starting" if !status.fail_open_required && listener_ready => ReadinessState::ListenerReady,
         "starting" if !status.fail_open_required => ReadinessState::Waiting,
@@ -1008,6 +1042,9 @@ fn read_core_readiness(
                 && has_authenticated_path_evidence =>
         {
             ReadinessState::Waiting
+        }
+        "failed" | "starting" if recoverable_committed_server_peer_loss => {
+            ReadinessState::RecoverablePeerLoss
         }
         "failed" | "stopping" | "stopped" => ReadinessState::Failed,
         "active"
@@ -1755,7 +1792,18 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 anyhow::anyhow!("Candy Core SD-WAN exited with status {code}"),
             );
         }
-        match read_core_readiness(&args.status, args.generation, child.id(), &readiness_token) {
+        let readiness_policy = if args.core_role == CoreRole::Server {
+            ReadinessPolicy::CommittedServer
+        } else {
+            ReadinessPolicy::Strict
+        };
+        match read_core_readiness_with_policy(
+            &args.status,
+            args.generation,
+            child.id(),
+            &readiness_token,
+            readiness_policy,
+        ) {
             Ok(Some(ReadinessState::Ready)) => {}
             Ok(Some(ReadinessState::Degraded)) if args.core_role == CoreRole::Server => {}
             Ok(Some(ReadinessState::Degraded)) => {
@@ -1790,6 +1838,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     anyhow::anyhow!("Candy Core lost SD-WAN readiness after netd commit"),
                 );
             }
+            Ok(Some(ReadinessState::RecoverablePeerLoss)) => {}
             Ok(Some(ReadinessState::Failed)) => unreachable!("failed readiness returns an error"),
             Err(error) => {
                 return retry_after_rollback(
@@ -2133,6 +2182,43 @@ sleep 30
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
+    fn install_fake_recovering_server_core(path: &Path) {
+        let script = r#"#!/bin/sh
+set -eu
+status=
+token=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --status) shift; status=$1 ;;
+        --readiness-token) shift; token=$1 ;;
+    esac
+    shift
+done
+[ -n "$status" ]
+[ -n "$token" ]
+rm -f "$0"
+umask 077
+status_tmp="$status.$$".tmp
+trap 'rm -f "$status_tmp"' EXIT
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"active","configured_peers":1,"active_peers":1,"required_route_owners":1,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null,"paths":[{"rtt_sample_count":1,"rx_bytes":1,"rx_idle_ms":0}]}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+sleep 1
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"failed","configured_peers":1,"active_peers":0,"required_route_owners":1,"ready_route_owners":0,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":true,"last_error_code":"all_peer_reads_failed","paths":[]}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+sleep 1
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"starting","configured_peers":1,"active_peers":0,"required_route_owners":1,"ready_route_owners":0,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":true,"last_error_code":"all_peer_reads_failed","paths":[]}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+sleep 1
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"active","configured_peers":1,"active_peers":1,"required_route_owners":1,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null,"paths":[{"rtt_sample_count":2,"rx_bytes":2,"rx_idle_ms":0}]}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+sleep 1
+kill -TERM "$PPID"
+sleep 30
+"#;
+        fs::write(path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
     fn install_fake_exiting_core(path: &Path) {
         let script = r#"#!/bin/sh
 set -eu
@@ -2291,6 +2377,24 @@ exit 17
     fn server_partial_route_readiness_commits_when_listener_is_ready() {
         let (_root, mut args) = server_runtime_fixture();
         install_fake_partial_server_ready_core(&args.core);
+        let receipt = args.activation_ready.clone().unwrap();
+        args.readiness_timeout_ms = 2_000;
+        let netd = start_netd_mock(&args.socket, Some(true));
+
+        let result = run(args);
+
+        netd.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            !receipt.exists(),
+            "normal shutdown retained the activation receipt"
+        );
+    }
+
+    #[test]
+    fn committed_server_waits_for_recoverable_peer_loss_without_restarting_core() {
+        let (_root, mut args) = server_runtime_fixture();
+        install_fake_recovering_server_core(&args.core);
         let receipt = args.activation_ready.clone().unwrap();
         args.readiness_timeout_ms = 2_000;
         let netd = start_netd_mock(&args.socket, Some(true));
@@ -2808,6 +2912,104 @@ exit 17
             read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
             Some(ReadinessState::Degraded)
         );
+    }
+
+    #[test]
+    fn recoverable_peer_loss_is_only_allowed_for_committed_server_monitoring() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("status.json");
+        let mut failed = serde_json::json!({
+            "schema_version": 3,
+            "generation": 9,
+            "pid": 42,
+            "readiness_token": "00112233445566778899aabbccddeeff",
+            "lifecycle": "failed",
+            "configured_peers": 1,
+            "active_peers": 0,
+            "required_route_owners": 1,
+            "ready_route_owners": 0,
+            "inbound_listener_configured": true,
+            "inbound_listener_ready": true,
+            "inbound_listener_endpoints": ["127.0.0.1:8443"],
+            "fail_open_required": true,
+            "last_error_code": "all_peer_reads_failed",
+            "paths": []
+        });
+        write_private(&path, &serde_json::to_vec(&failed).unwrap());
+
+        assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
+        assert_eq!(
+            read_core_readiness_with_policy(
+                &path,
+                9,
+                42,
+                "00112233445566778899aabbccddeeff",
+                ReadinessPolicy::CommittedServer,
+            )
+            .unwrap(),
+            Some(ReadinessState::RecoverablePeerLoss)
+        );
+
+        failed["last_error_code"] = serde_json::json!("route_has_no_active_peer");
+        write_private(&path, &serde_json::to_vec(&failed).unwrap());
+        assert_eq!(
+            read_core_readiness_with_policy(
+                &path,
+                9,
+                42,
+                "00112233445566778899aabbccddeeff",
+                ReadinessPolicy::CommittedServer,
+            )
+            .unwrap(),
+            Some(ReadinessState::RecoverablePeerLoss)
+        );
+
+        failed["last_error_code"] = serde_json::json!("all_peer_writes_failed");
+        write_private(&path, &serde_json::to_vec(&failed).unwrap());
+        assert_eq!(
+            read_core_readiness_with_policy(
+                &path,
+                9,
+                42,
+                "00112233445566778899aabbccddeeff",
+                ReadinessPolicy::CommittedServer,
+            )
+            .unwrap(),
+            Some(ReadinessState::RecoverablePeerLoss)
+        );
+
+        failed["lifecycle"] = serde_json::json!("starting");
+        write_private(&path, &serde_json::to_vec(&failed).unwrap());
+        assert_eq!(
+            read_core_readiness_with_policy(
+                &path,
+                9,
+                42,
+                "00112233445566778899aabbccddeeff",
+                ReadinessPolicy::CommittedServer,
+            )
+            .unwrap(),
+            Some(ReadinessState::RecoverablePeerLoss)
+        );
+
+        for (field, value) in [
+            ("inbound_listener_ready", serde_json::json!(false)),
+            ("required_route_owners", serde_json::json!(0)),
+            ("ready_route_owners", serde_json::json!(1)),
+            ("last_error_code", serde_json::json!("tun_read_failed")),
+        ] {
+            let mut rejected = failed.clone();
+            rejected[field] = value;
+            write_private(&path, &serde_json::to_vec(&rejected).unwrap());
+            assert!(read_core_readiness_with_policy(
+                &path,
+                9,
+                42,
+                "00112233445566778899aabbccddeeff",
+                ReadinessPolicy::CommittedServer,
+            )
+            .is_err());
+        }
     }
 
     #[test]
