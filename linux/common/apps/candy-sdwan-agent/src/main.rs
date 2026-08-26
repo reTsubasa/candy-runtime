@@ -220,7 +220,8 @@ struct CoreReadinessStatus {
 struct CoreReadinessPath {
     rtt_sample_count: u64,
     rx_bytes: u64,
-    rx_idle_ms: u64,
+    #[serde(rename = "rx_idle_ms")]
+    _rx_idle_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -967,11 +968,13 @@ fn read_core_readiness(
     {
         bail!("SD-WAN Core readiness status has impossible peer counters")
     }
-    let has_ready_path_evidence = status.paths.as_ref().is_some_and(|paths| {
+    // Route-owner readiness is the lifecycle authority. Receive idleness is
+    // telemetry freshness and must not restart an otherwise authenticated path.
+    let has_authenticated_path_evidence = status.paths.as_ref().is_some_and(|paths| {
         paths.len() >= status.ready_route_owners
-            && paths.iter().all(|path| {
-                path.rtt_sample_count > 0 && path.rx_bytes > 0 && path.rx_idle_ms <= 30_000
-            })
+            && paths
+                .iter()
+                .all(|path| path.rtt_sample_count > 0 && path.rx_bytes > 0)
     });
     let listener_ready = status.inbound_listener_configured
         && status.inbound_listener_ready
@@ -983,7 +986,7 @@ fn read_core_readiness(
             if !status.fail_open_required
                 && status.required_route_owners > 0
                 && status.ready_route_owners == status.required_route_owners
-                && has_ready_path_evidence =>
+                && has_authenticated_path_evidence =>
         {
             ReadinessState::Ready
         }
@@ -992,7 +995,7 @@ fn read_core_readiness(
                 && status.required_route_owners > 0
                 && status.ready_route_owners > 0
                 && status.ready_route_owners < status.required_route_owners
-                && has_ready_path_evidence
+                && has_authenticated_path_evidence
                 && listener_ready =>
         {
             ReadinessState::Degraded
@@ -1002,7 +1005,7 @@ fn read_core_readiness(
                 && status.required_route_owners > 0
                 && status.ready_route_owners > 0
                 && status.ready_route_owners < status.required_route_owners
-                && has_ready_path_evidence =>
+                && has_authenticated_path_evidence =>
         {
             ReadinessState::Waiting
         }
@@ -1056,17 +1059,18 @@ fn wait_for_core_readiness(
         if shutdown_requested() {
             return Ok(ReadinessWait::ShutdownRequested);
         }
-        if matches!(readiness, Some(ReadinessState::Ready)) {
+        if matches!(readiness, Some(ReadinessState::Ready))
+            || (args.core_role == CoreRole::Server
+                && matches!(readiness, Some(ReadinessState::Degraded)))
+        {
             return Ok(ReadinessWait::Ready);
         }
         let server_listener_ready = args.core_role == CoreRole::Server
-            && matches!(
-                readiness,
-                Some(ReadinessState::ListenerReady | ReadinessState::Degraded)
-            );
+            && matches!(readiness, Some(ReadinessState::ListenerReady));
         // An authenticated server listener can be healthy before a peer is
         // connected. Keep Core alive in that phase so the peer's next dial can
-        // complete; netd remains prepared but uncommitted until Active.
+        // complete; netd remains prepared but uncommitted until a route owner
+        // is authenticated.
         if Instant::now() >= deadline && !server_listener_ready {
             return Err(anyhow::Error::new(TransientReadinessFailure(
                 "Candy Core SD-WAN readiness timed out".into(),
@@ -2101,7 +2105,7 @@ sleep 30
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
-    fn install_fake_delayed_server_ready_core(path: &Path) {
+    fn install_fake_partial_server_ready_core(path: &Path) {
         let script = r#"#!/bin/sh
 set -eu
 status=
@@ -2120,12 +2124,6 @@ umask 077
 status_tmp="$status.$$".tmp
 trap 'rm -f "$status_tmp"' EXIT
 printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"active","configured_peers":2,"active_peers":1,"required_route_owners":2,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null,"paths":[{"rtt_sample_count":1,"rx_bytes":1,"rx_idle_ms":0}]}\n' "$$" "$token" >"$status_tmp"
-mv -f "$status_tmp" "$status"
-sleep 3
-printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"active","configured_peers":2,"active_peers":2,"required_route_owners":2,"ready_route_owners":2,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null,"paths":[{"rtt_sample_count":1,"rx_bytes":1,"rx_idle_ms":0},{"rtt_sample_count":1,"rx_bytes":1,"rx_idle_ms":0}]}\n' "$$" "$token" >"$status_tmp"
-mv -f "$status_tmp" "$status"
-sleep 1
-printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"active","configured_peers":2,"active_peers":1,"required_route_owners":2,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null,"paths":[{"rtt_sample_count":2,"rx_bytes":2,"rx_idle_ms":0}]}\n' "$$" "$token" >"$status_tmp"
 mv -f "$status_tmp" "$status"
 sleep 1
 kill -TERM "$PPID"
@@ -2290,9 +2288,9 @@ exit 17
     }
 
     #[test]
-    fn server_partial_route_readiness_survives_timeout_until_all_peers_connect() {
+    fn server_partial_route_readiness_commits_when_listener_is_ready() {
         let (_root, mut args) = server_runtime_fixture();
-        install_fake_delayed_server_ready_core(&args.core);
+        install_fake_partial_server_ready_core(&args.core);
         let receipt = args.activation_ready.clone().unwrap();
         args.readiness_timeout_ms = 2_000;
         let netd = start_netd_mock(&args.socket, Some(true));
@@ -2730,6 +2728,15 @@ exit 17
         active["paths"] = serde_json::json!([
             { "rtt_sample_count": 1, "rx_bytes": 1, "rx_idle_ms": 0 },
             { "rtt_sample_count": 2, "rx_bytes": 1, "rx_idle_ms": 0 }
+        ]);
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Ready)
+        );
+        active["paths"] = serde_json::json!([
+            { "rtt_sample_count": 1, "rx_bytes": 1, "rx_idle_ms": 120_000 },
+            { "rtt_sample_count": 2, "rx_bytes": 1, "rx_idle_ms": 180_000 }
         ]);
         fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
         assert_eq!(

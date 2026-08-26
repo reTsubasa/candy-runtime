@@ -13,6 +13,7 @@ EXPECTED_PROCESS_API=${CANDY_EXPECTED_CORE_PROCESS_API:-1}
 EXPECTED_CORE_API=${CANDY_EXPECTED_CORE_API:-1}
 MAX_CORE_BYTES=${CANDY_MAX_CORE_BYTES:-134217728}
 MAX_MANIFEST_BYTES=${CANDY_MAX_MANIFEST_BYTES:-262144}
+TMP_ROOT=${CANDY_CORE_TMP_ROOT:-/tmp}
 BUNDLE_SHA_FILE=.bundle.sha256
 LOCK_DIR=${CANDY_CORE_LOCK_DIR:-/var/lock/candy-core-manager.lock}
 SERVICE_LOCK_DIR=${CANDY_SERVICE_LOCK_DIR:-/var/lib/candy/service.lock}
@@ -25,6 +26,11 @@ VALIDATION_PHASE=
 VALIDATION_CODE=
 VALIDATION_DETAIL=
 LOCAL_UPLOAD_COPY=
+LOCAL_UPLOAD_DIR=
+DOWNLOAD_DIR=
+DOWNLOAD_ARCHIVE=
+INSTALL_CANDIDATE=
+UPLOAD_INSPECTION_DIR=
 SERVICE_LOCK_HELD=0
 
 json_string() {
@@ -102,9 +108,28 @@ cleanup_operation_locks() {
 		rmdir "$SERVICE_LOCK_DIR" 2>/dev/null || true
 		SERVICE_LOCK_HELD=0
 	fi
-	rm -f "$LOCAL_UPLOAD_COPY" 2>/dev/null || true
+	rm -f "$DOWNLOAD_ARCHIVE" "$LOCAL_UPLOAD_COPY" 2>/dev/null || true
+	rmdir "$DOWNLOAD_DIR" "$LOCAL_UPLOAD_DIR" 2>/dev/null || true
+	rm -rf "$INSTALL_CANDIDATE" "$UPLOAD_INSPECTION_DIR" 2>/dev/null || true
 	rm -f "$LOCK_DIR/pid" 2>/dev/null || true
 	rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+
+create_bundle_temp_dir() {
+	local directory
+	case "$TMP_ROOT" in /*) ;; *) return 1 ;; esac
+	mkdir -p "$TMP_ROOT" || return 1
+	[ -d "$TMP_ROOT" ] && [ ! -L "$TMP_ROOT" ] || return 1
+	directory=$(mktemp -d "$TMP_ROOT/candy-core-manager.XXXXXX") || return 1
+	chmod 0700 "$directory" || { rmdir "$directory" 2>/dev/null || true; return 1; }
+	printf '%s' "$directory"
+}
+
+cleanup_download_bundle() {
+	rm -f "$DOWNLOAD_ARCHIVE" 2>/dev/null || true
+	rmdir "$DOWNLOAD_DIR" 2>/dev/null || true
+	DOWNLOAD_ARCHIVE=
+	DOWNLOAD_DIR=
 }
 
 acquire_lock() {
@@ -362,12 +387,14 @@ inspect_local_bundle() {
 	size=$(wc -c < "$source" 2>/dev/null | tr -d ' ' || printf 0)
 	case "$size" in ''|*[!0-9]*) validation_error upload upload_size_invalid "Uploaded Core size is invalid" || return 1 ;; esac
 	[ "$size" -le "$MAX_CORE_BYTES" ] || validation_error upload upload_too_large "Uploaded Core exceeds the size limit" || return 1
-	mkdir -p "$CORE_ROOT" || validation_error install core_root_unavailable "Cannot create the Core directory" || return 1
-	[ ! -L "$CORE_ROOT" ] || validation_error install core_root_unsafe "Core root must not be a symbolic link" || return 1
-	LOCAL_UPLOAD_COPY="$CORE_ROOT/.upload-$$.tar.gz"
+	LOCAL_UPLOAD_DIR=$(create_bundle_temp_dir) || validation_error upload upload_staging_failed "Cannot create temporary Core upload staging" || return 1
+	LOCAL_UPLOAD_COPY="$LOCAL_UPLOAD_DIR/core.tar.gz"
 	cp "$source" "$LOCAL_UPLOAD_COPY" && chmod 0600 "$LOCAL_UPLOAD_COPY" || validation_error upload upload_copy_failed "Cannot stage the uploaded Core" || return 1
 	safe_archive "$LOCAL_UPLOAD_COPY" || validation_error archive archive_unsafe "Core bundle contains unsafe paths, entries, or file types" || return 1
+	mkdir -p "$CORE_ROOT" || validation_error install core_root_unavailable "Cannot create the Core directory" || return 1
+	[ ! -L "$CORE_ROOT" ] || validation_error install core_root_unsafe "Core root must not be a symbolic link" || return 1
 	probe="$CORE_ROOT/.upload-inspect-$$"
+	UPLOAD_INSPECTION_DIR=$probe
 	rm -rf "$probe"
 	mkdir -m 0700 "$probe" || validation_error archive staging_failed "Cannot create Core inspection directory" || return 1
 	if ! tar -oxzf "$LOCAL_UPLOAD_COPY" -C "$probe"; then
@@ -383,6 +410,7 @@ inspect_local_bundle() {
 	verify_manifest_signature "$probe/manifest.json" "$probe/manifest.sig" || { rm -rf "$probe"; return 1; }
 	version=$(manifest_field "$probe/manifest.json" '@.core.core_version')
 	rm -rf "$probe"
+	UPLOAD_INSPECTION_DIR=
 	valid_version "$version" || validation_error manifest version_invalid "Signed Core manifest has an invalid version" || return 1
 	OPERATION_VERSION=$version
 }
@@ -402,35 +430,33 @@ install_core() {
 	mkdir -p "$CORE_ROOT" || fail_stage install core_root_unavailable "Cannot create the Core directory"
 	[ ! -L "$CORE_ROOT" ] || fail_stage install core_root_unsafe "Core root must not be a symbolic link"
 	temporary="$CORE_ROOT/.install-$version-$$"
-	archive="$temporary/core.tar.gz"
+	INSTALL_CANDIDATE=$temporary
 	rm -rf "$temporary"
 	mkdir -m 0700 "$temporary" || fail_stage install staging_failed "Cannot create the Core staging directory"
+	DOWNLOAD_DIR=$(create_bundle_temp_dir) || fail_stage download staging_failed "Cannot create temporary Core download staging"
+	DOWNLOAD_ARCHIVE="$DOWNLOAD_DIR/core.tar.gz"
+	archive=$DOWNLOAD_ARCHIVE
 	download_bundle "$url" "$archive" || {
-		rm -rf "$temporary"
 		fail_stage download download_failed "Core bundle download failed"
 	}
 	size=$(wc -c < "$archive" 2>/dev/null | tr -d ' ' || printf 0)
-	case "$size" in ''|*[!0-9]*) rm -rf "$temporary"; fail_stage download size_invalid "Core bundle size is invalid" ;; esac
+	case "$size" in ''|*[!0-9]*) fail_stage download size_invalid "Core bundle size is invalid" ;; esac
 	[ "$size" -gt 0 ] && [ "$size" -le "$MAX_CORE_BYTES" ] || {
-		rm -rf "$temporary"
 		fail_stage download size_limit_exceeded "Core bundle exceeds the size limit"
 	}
 	actual_sha=$(sha256sum "$archive" 2>/dev/null | awk '{ print tolower($1) }')
 	[ "$actual_sha" = "$(printf '%s' "$expected_sha" | tr 'A-F' 'a-f')" ] || {
-		rm -rf "$temporary"
 		fail_stage download sha_mismatch "Core bundle SHA-256 does not match the signed catalog"
 	}
 	safe_archive "$archive" || {
-		rm -rf "$temporary"
 		fail_stage archive archive_unsafe "Core bundle contains unsafe paths, entries, or file types"
 	}
 	# BusyBox tar -o prevents build-runner UID/GID metadata from becoming the
 	# ownership policy for files installed by this root-only manager.
 	tar -oxzf "$archive" -C "$temporary" || {
-		rm -rf "$temporary"
 		fail_stage archive extraction_failed "Core bundle extraction failed"
 	}
-	rm -f "$archive"
+	cleanup_download_bundle
 	if find "$temporary" ! -type f ! -type d -print 2>/dev/null | grep -q .; then
 		rm -rf "$temporary"
 		fail_stage archive archive_unsafe "Core bundle contains unsupported file types"
@@ -460,16 +486,19 @@ install_core() {
 		installed_sha=$(cat "$destination/$BUNDLE_SHA_FILE" 2>/dev/null || true)
 		if [ "$installed_sha" = "$actual_sha" ]; then
 			rm -rf "$temporary"
+			INSTALL_CANDIDATE=
 			printf '%s\n' "Core $version bundle is already installed"
 			return 0
 		fi
 		replace_installed_core "$version" "$temporary" "$destination" "$current"
+		INSTALL_CANDIDATE=
 		return 0
 	fi
 	mv "$temporary" "$destination" || {
 		rm -rf "$temporary"
 		fail_stage install install_failed "Cannot install Core bundle"
 	}
+	INSTALL_CANDIDATE=
 	log_event info core_installed install installed "Installed Core $version without activation"
 	printf '%s\n' "installed Core $version"
 }
@@ -481,7 +510,9 @@ install_local_core() {
 	valid_sha256 "$sha" || fail_stage upload sha_failed "Cannot calculate the uploaded Core SHA-256"
 	CANDY_CORE_ALLOW_FILE_URL=1 install_core "$OPERATION_VERSION" "file://$LOCAL_UPLOAD_COPY" "$sha"
 	rm -f "$LOCAL_UPLOAD_COPY"
+	rmdir "$LOCAL_UPLOAD_DIR" 2>/dev/null || true
 	LOCAL_UPLOAD_COPY=
+	LOCAL_UPLOAD_DIR=
 }
 
 service_running() {

@@ -4,6 +4,7 @@ use candy_netd_proto::{
     ErrorCode, LeaseOwner, NetdOperation, NetdProtocolError, NetdRequest, NetdResponse,
     PrepareDeclaration, ResponseBody, SessionPhase, MAX_NETD_FRAME_LEN,
 };
+use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
 use std::io::{IoSlice, IoSliceMut, Read, Write};
@@ -279,13 +280,18 @@ fn send_frame(
         .as_ref()
         .map(|fds| vec![ControlMessage::ScmRights(fds)])
         .unwrap_or_default();
-    let sent = sendmsg::<()>(
-        stream.as_raw_fd(),
-        &slices,
-        &control,
-        MsgFlags::empty(),
-        None,
-    )?;
+    let sent = loop {
+        match sendmsg::<()>(
+            stream.as_raw_fd(),
+            &slices,
+            &control,
+            MsgFlags::empty(),
+            None,
+        ) {
+            Err(Errno::EINTR) => continue,
+            result => break result?,
+        }
+    };
     let frame_len = LENGTH_PREFIX_LEN + payload.len();
     if sent == 0 || sent > frame_len {
         return Err(IpcError::Io(std::io::Error::new(
@@ -310,12 +316,17 @@ fn recv_frame(stream: &UnixStream) -> Result<(Vec<u8>, Vec<OwnedFd>), IpcError> 
     let mut first = [0_u8; LENGTH_PREFIX_LEN];
     let mut slices = [IoSliceMut::new(&mut first)];
     let mut control_space = nix::cmsg_space!([RawFd; 2]);
-    let message = recvmsg::<()>(
-        stream.as_raw_fd(),
-        &mut slices,
-        Some(&mut control_space),
-        MsgFlags::empty(),
-    )?;
+    let message = loop {
+        match recvmsg::<()>(
+            stream.as_raw_fd(),
+            &mut slices,
+            Some(&mut control_space),
+            MsgFlags::empty(),
+        ) {
+            Err(Errno::EINTR) => continue,
+            result => break result?,
+        }
+    };
     if message.bytes == 0 {
         return Err(IpcError::Io(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,

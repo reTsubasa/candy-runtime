@@ -6,7 +6,8 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/candy-core-manager-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 bin="$tmp/bin"
 cores="$tmp/cores"
-mkdir -p "$bin" "$cores"
+core_tmp="$tmp/core-tmp"
+mkdir -p "$bin" "$cores" "$core_tmp"
 case "$(uname -m)" in
 	x86_64|amd64) test_arch=x86_64 ;;
 	aarch64|arm64) test_arch=aarch64 ;;
@@ -53,9 +54,33 @@ chmod +x "$bin/jsonfilter"
 cat > "$bin/uclient-fetch" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_FETCH_LOG"
+[ -n "${FAKE_FETCH_SOURCE:-}" ] || {
+	while [ "$#" -gt 0 ]; do
+		if [ "$1" = -O ]; then
+			printf '%s\n' partial-download > "$2"
+			break
+		fi
+		shift
+	done
+	exit 99
+}
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		-O) /bin/cp "$FAKE_FETCH_SOURCE" "$2"; exit $? ;;
+		*) shift ;;
+	esac
+done
 exit 99
 EOF
 chmod +x "$bin/uclient-fetch"
+
+export REAL_TAR=$(command -v tar)
+cat > "$bin/tar" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_TAR_LOG"
+exec "$REAL_TAR" "$@"
+EOF
+chmod +x "$bin/tar"
 
 cat > "$bin/timeout" <<'EOF'
 #!/bin/sh
@@ -133,6 +158,7 @@ EOF
 manager="$root/openwrt/client/packages/candy-client/candy-core-manager"
 export PATH="$bin:$PATH"
 export CANDY_CORE_ROOT="$cores"
+export CANDY_CORE_TMP_ROOT="$core_tmp"
 export CANDY_CORE_CURRENT_LINK="$cores/current"
 export CANDY_CORE_PREVIOUS_LINK="$cores/previous"
 export CANDY_SERVICE_INIT="$bin/candy-service"
@@ -148,6 +174,7 @@ export FAKE_SERVICE_LOG="$tmp/service.log"
 export FAKE_SERVICE_FAIL_ONCE="$tmp/service-fail-once"
 export FAKE_SERVICE_STOPPED="$tmp/service-stopped"
 export FAKE_FETCH_LOG="$tmp/fetch.log"
+export FAKE_TAR_LOG="$tmp/tar.log"
 mkdir -p "$CANDY_PROC_ROOT"
 
 mkdir "$CANDY_CORE_LOCK_DIR"
@@ -207,10 +234,48 @@ if "$manager" install 0.4.8 'https://example.invalid/core.tar.gz' "$sha_041" >/d
 	exit 1
 fi
 grep -F 'https://example.invalid/core.tar.gz' "$FAKE_FETCH_LOG" >/dev/null
+[ -z "$(find "$core_tmp" -mindepth 1 -print -quit)" ] || {
+	echo "failed HTTPS download left temporary bundle data behind" >&2
+	exit 1
+}
 rm -f "$FAKE_FETCH_LOG"
 "$manager" install 0.4.1 "file://$tmp/core-0.4.1.tar.gz" "$sha_041" >/dev/null
 [ ! -e "$FAKE_FETCH_LOG" ] || {
 	echo "local Core bundle unexpectedly used the network downloader" >&2
+	exit 1
+}
+grep -F -- "-C $cores/.install-0.4.1-" "$FAKE_TAR_LOG" >/dev/null || {
+	echo "Core candidate was not extracted below CORE_ROOT" >&2
+	exit 1
+}
+grep -F -- "-oxzf $core_tmp/candy-core-manager." "$FAKE_TAR_LOG" >/dev/null || {
+	echo "file URL bundle was not staged below CANDY_CORE_TMP_ROOT" >&2
+	exit 1
+}
+[ -z "$(find "$core_tmp" -mindepth 1 -print -quit)" ] || {
+	echo "successful file URL install left temporary bundle data behind" >&2
+	exit 1
+}
+
+make_bundle 0.4.6 1 "$tmp/core-0.4.6.tar.gz"
+sha_046=$(sha256sum "$tmp/core-0.4.6.tar.gz" | awk '{ print $1 }')
+FAKE_FETCH_SOURCE="$tmp/core-0.4.6.tar.gz" \
+	"$manager" install 0.4.6 'https://downloads.example.test/core.tar.gz' "$sha_046" >/dev/null
+grep -F "$core_tmp/candy-core-manager." "$FAKE_FETCH_LOG" >/dev/null || {
+	echo "HTTPS bundle was not downloaded below CANDY_CORE_TMP_ROOT" >&2
+	exit 1
+}
+[ -z "$(find "$core_tmp" -mindepth 1 -print -quit)" ] || {
+	echo "successful HTTPS install left temporary bundle data behind" >&2
+	exit 1
+}
+
+if "$manager" install 0.4.7 "file://$tmp/core-0.4.6.tar.gz" "$(printf '0%.0s' $(seq 1 64))" >/dev/null 2>&1; then
+	echo "bad file URL bundle SHA-256 was accepted" >&2
+	exit 1
+fi
+[ -z "$(find "$core_tmp" -mindepth 1 -print -quit)" ] || {
+	echo "failed file URL install left temporary bundle data behind" >&2
 	exit 1
 }
 "$manager" activate 0.4.1 >/dev/null
