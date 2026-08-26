@@ -1,6 +1,83 @@
 <%+header%>
-
-<h2 name="content"><%:Diagnostics%></h2>
-<%+candy/log_panel%>
-
+<%
+local i18n = require "luci.i18n"
+local function js_string(value) return string.format("%q", tostring(value or "")) end
+%>
+<style>
+.candy-log-head { display:flex; align-items:flex-start; justify-content:space-between; gap:1em; margin-bottom:1em; }
+.candy-log-head h2 { margin:0; }
+.candy-log-head p { margin:.35em 0 0; color:#4e5969; line-height:1.5; }
+.candy-log-toolbar { display:grid; grid-template-columns:minmax(9em,.7fr) minmax(8em,.55fr) minmax(14em,1.6fr) auto auto; gap:.65em; align-items:end; padding:.85em 0; border-top:1px solid #e5e6eb; border-bottom:1px solid #e5e6eb; }
+.candy-log-control { display:flex; min-width:0; flex-direction:column; gap:.25em; }
+.candy-log-control label { color:#4e5969; font-size:.86em; }
+.candy-log-control select, .candy-log-control input[type="search"] { width:100%; min-height:2.35em; box-sizing:border-box; }
+.candy-log-auto { display:flex; align-items:center; gap:.35em; min-height:2.35em; white-space:nowrap; }
+.candy-log-meta { display:flex; justify-content:space-between; gap:1em; margin:.75em 0; color:#4e5969; font-size:.9em; }
+.candy-log-table-wrap { overflow-x:auto; }
+.candy-log-table { width:100%; min-width:58em; table-layout:fixed; }
+.candy-log-table .th, .candy-log-table .td { box-sizing:border-box; vertical-align:top; overflow-wrap:anywhere; }
+.candy-log-table .th:nth-child(1) { width:10.5em; }
+.candy-log-table .th:nth-child(2), .candy-log-table .th:nth-child(3) { width:7em; }
+.candy-log-table .th:nth-child(4) { width:10em; }
+.candy-log-table .th:nth-child(5) { width:8em; }
+.candy-log-source, .candy-log-level { display:inline-block; border:1px solid #c9cdd4; border-radius:3px; padding:.08em .42em; background:#f7f8fa; font-size:.84em; font-weight:600; }
+.candy-log-level.error { border-color:#f98981; color:#b42318; background:#fff2f0; }
+.candy-log-level.warn { border-color:#f7ba1e; color:#8d4f00; background:#fffbe6; }
+.candy-log-level.info { border-color:#93b5e8; color:#165dff; background:#e8f3ff; }
+.candy-log-detail { font-family:monospace; font-size:.88em; line-height:1.45; white-space:pre-wrap; }
+.candy-log-empty { padding:2.5em 1em !important; text-align:center; color:#86909c; }
+@media (max-width:760px) {
+	.candy-log-head { flex-direction:column; }
+	.candy-log-toolbar { grid-template-columns:1fr 1fr; }
+	.candy-log-control.search { grid-column:1 / -1; }
+	.candy-log-table-wrap { overflow:visible; }
+	.candy-log-table { display:block; min-width:0; }
+	.candy-log-table thead { display:none; }
+	.candy-log-table tbody, .candy-log-table .tr { display:block; }
+	.candy-log-table .tr { padding:.45em 0; border-bottom:1px solid #e5e6eb; }
+	.candy-log-table .td { display:grid; grid-template-columns:6.5em minmax(0,1fr); gap:.6em; width:100%; padding:.3em .45em; border:0; }
+	.candy-log-table .td:before { content:attr(data-label); color:#86909c; font-size:.86em; }
+	.candy-log-table .td[colspan] { display:block; }
+}
+@media (max-width:460px) { .candy-log-toolbar { grid-template-columns:1fr; } .candy-log-control.search { grid-column:auto; } }
+</style>
+<div class="candy-log-head">
+	<div><h2 name="content"><%:Logs%></h2><p><%:Service events and user traffic decisions from this router, newest first.%></p></div>
+	<a class="cbi-button cbi-button-link" href="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'diagnostics')%>"><%:Open diagnostics%></a>
+</div>
+<div class="cbi-map"><div class="cbi-section">
+	<div class="candy-log-toolbar">
+		<div class="candy-log-control"><label for="candy-log-source"><%:Source%></label><select id="candy-log-source"><option value="all"><%:All sources%></option><option value="runtime">Runtime</option><option value="core">Core</option><option value="update"><%:Updates%></option><option value="sdwan">SD-WAN</option><option value="system"><%:System%></option><option value="traffic"><%:User traffic%></option></select></div>
+		<div class="candy-log-control"><label for="candy-log-level"><%:Level%></label><select id="candy-log-level"><option value="all"><%:All levels%></option><option value="error"><%:Error%></option><option value="warn"><%:Warning%></option><option value="info"><%:Information%></option><option value="debug"><%:Debug%></option></select></div>
+		<div class="candy-log-control search"><label for="candy-log-search"><%:Search%></label><input id="candy-log-search" type="search" autocomplete="off" placeholder="<%:Event, result, or detail%>" /></div>
+		<label class="candy-log-auto"><input id="candy-log-auto" type="checkbox" checked="checked" /> <%:Auto refresh%></label>
+		<button id="candy-log-refresh" class="cbi-button cbi-button-action" type="button"><%:Refresh%></button>
+	</div>
+	<div class="candy-log-meta"><span id="candy-log-count"><%:Loading logs...%></span><span id="candy-log-state"></span></div>
+	<div class="candy-log-table-wrap"><table class="table candy-log-table"><thead><tr class="tr table-titles"><th class="th"><%:Time%></th><th class="th"><%:Source%></th><th class="th"><%:Level%></th><th class="th"><%:Event%></th><th class="th"><%:Result%></th><th class="th"><%:Detail%></th></tr></thead><tbody id="candy-log-entries"><tr class="tr"><td class="td candy-log-empty" colspan="6"><%:Loading logs...%></td></tr></tbody></table></div>
+</div></div>
+<script type="text/javascript">
+(function() {
+	var url = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'logs_json')%>", entries = [], timer = null, request = null, generation = 0;
+	var labels = { time:<%=js_string(i18n.translate("Time"))%>, source:<%=js_string(i18n.translate("Source"))%>, level:<%=js_string(i18n.translate("Level"))%>, event:<%=js_string(i18n.translate("Event"))%>, result:<%=js_string(i18n.translate("Result"))%>, detail:<%=js_string(i18n.translate("Detail"))%>, noLogs:<%=js_string(i18n.translate("No log entries match the current filters."))%>, unavailable:<%=js_string(i18n.translate("Logs are temporarily unavailable."))%>, shown:<%=js_string(i18n.translate("entries shown"))%>, updated:<%=js_string(i18n.translate("Updated"))%> };
+	function value(id) { var node=document.getElementById(id); return node ? node.value : ""; }
+	function appendCell(row, valueText, label, className) { var cell=document.createElement("td"); cell.className="td"+(className?" "+className:""); cell.setAttribute("data-label",label); cell.textContent=valueText||"-"; row.appendChild(cell); return cell; }
+	function render() {
+		var source=value("candy-log-source"), level=value("candy-log-level"), query=value("candy-log-search").toLowerCase(), body=document.getElementById("candy-log-entries"), shown=0;
+		if (!body) return; body.textContent="";
+		entries.forEach(function(entry) { var haystack=[entry.timestamp,entry.source,entry.level,entry.event,entry.result,entry.detail].join(" ").toLowerCase(); if ((source!=="all"&&entry.source!==source)||(level!=="all"&&entry.level!==level)||(query&&haystack.indexOf(query)<0)) return;
+			var row=document.createElement("tr"), cell, tag; row.className="tr"; appendCell(row,entry.timestamp,labels.time);
+			cell=appendCell(row,"",labels.source); cell.textContent=""; tag=document.createElement("span"); tag.className="candy-log-source"; tag.textContent=entry.source||"-"; cell.appendChild(tag);
+			cell=appendCell(row,"",labels.level); cell.textContent=""; tag=document.createElement("span"); tag.className="candy-log-level "+(entry.level||"info"); tag.textContent=entry.level||"info"; cell.appendChild(tag);
+			appendCell(row,entry.event,labels.event); appendCell(row,entry.result,labels.result); appendCell(row,entry.detail,labels.detail,"candy-log-detail"); body.appendChild(row); shown++;
+		});
+		if (!shown) { var row=document.createElement("tr"), cell=document.createElement("td"); row.className="tr"; cell.className="td candy-log-empty"; cell.colSpan=6; cell.textContent=labels.noLogs; row.appendChild(cell); body.appendChild(row); }
+		document.getElementById("candy-log-count").textContent=shown+" "+labels.shown;
+	}
+	function schedule() { if (timer!==null) clearTimeout(timer); timer=document.getElementById("candy-log-auto").checked?setTimeout(refresh,3000):null; }
+	function refresh() { var currentGeneration=++generation,xhr=new XMLHttpRequest(); if(timer!==null){clearTimeout(timer);timer=null;} if (request) { try { request.abort(); } catch (error) {} } request=xhr; xhr.open("GET",url+"?_="+Date.now(),true); xhr.onreadystatechange=function() { if (xhr.readyState!==4||currentGeneration!==generation) return; var state=document.getElementById("candy-log-state"); if (xhr.status===200) { try { var data=JSON.parse(xhr.responseText||"{}"); entries=data.entries||[]; render(); state.textContent=labels.updated+" "+new Date().toLocaleTimeString(); } catch (error) { state.textContent=labels.unavailable; } } else state.textContent=labels.unavailable; if(request===xhr)request=null; schedule(); }; xhr.send(null); }
+	["candy-log-source","candy-log-level","candy-log-search"].forEach(function(id) { document.getElementById(id).addEventListener(id==="candy-log-search"?"input":"change",render); });
+	document.getElementById("candy-log-auto").addEventListener("change",schedule); document.getElementById("candy-log-refresh").addEventListener("click",refresh); refresh();
+})();
+</script>
 <%+footer%>

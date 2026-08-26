@@ -2077,3 +2077,182 @@ msgstr "传输状态"
 
 msgid "Process and socket resources"
 msgstr "进程与套接字资源"
+msgid "System"
+msgstr "系统"
+
+msgid "Back to System"
+msgstr "返回系统"
+
+msgid "Back to overview"
+msgstr "返回概览"
+
+msgid "Function, performance, and operating status for this router."
+msgstr "查看本路由器的功能、性能和运行状态。"
+
+msgid "Function coverage"
+msgstr "功能概况"
+
+msgid "Performance"
+msgstr "性能"
+
+msgid "Operating status"
+msgstr "运行状态"
+
+msgid "Service"
+msgstr "服务"
+
+msgid "Loading"
+msgstr "正在加载"
+
+msgid "Online nodes"
+msgstr "在线节点"
+
+msgid "Ready for traffic"
+msgstr "可承载流量"
+
+msgid "Active connections"
+msgstr "活跃连接"
+
+msgid "Average RTT"
+msgstr "平均 RTT"
+
+msgid "Across reporting nodes"
+msgstr "基于有遥测数据的节点"
+
+msgid "Current aggregate throughput"
+msgstr "当前汇总吞吐量"
+
+msgid "Manage nodes"
+msgstr "管理节点"
+
+msgid "Connections"
+msgstr "连接数"
+
+msgid "Latest result"
+msgstr "最近结果"
+
+msgid "Enabled at boot"
+msgstr "已启用开机启动"
+
+msgid "Disabled at boot"
+msgstr "未启用开机启动"
+
+msgid "rules"
+msgstr "条规则"
+
+msgid "groups"
+msgstr "个组"
+
+msgid "nodes"
+msgstr "个节点"
+
+msgid "No recent errors"
+msgstr "近期无错误"
+
+msgid "Service events and user traffic decisions from this router, newest first."
+msgstr "显示本路由器的服务事件和用户流量决策，最新记录优先。"
+
+msgid "Source"
+msgstr "来源"
+
+msgid "All sources"
+msgstr "全部来源"
+
+msgid "User traffic"
+msgstr "用户流量"
+
+msgid "Level"
+msgstr "级别"
+
+msgid "All levels"
+msgstr "全部级别"
+
+msgid "Information"
+msgstr "信息"
+
+msgid "Warning"
+msgstr "警告"
+
+msgid "Debug"
+msgstr "调试"
+
+msgid "Search"
+msgstr "搜索"
+
+msgid "Event, result, or detail"
+msgstr "事件、结果或详情"
+
+msgid "Auto refresh"
+msgstr "自动刷新"
+
+msgid "Refresh"
+msgstr "刷新"
+
+msgid "Time"
+msgstr "时间"
+
+msgid "Event"
+msgstr "事件"
+
+msgid "Detail"
+msgstr "详情"
+
+msgid "Loading logs..."
+msgstr "正在加载日志..."
+
+msgid "No log entries match the current filters."
+msgstr "没有符合当前筛选条件的日志。"
+
+msgid "Logs are temporarily unavailable."
+msgstr "日志暂时不可用。"
+
+msgid "entries shown"
+msgstr "条记录"
+
+msgid "Updated"
+msgstr "更新于"
+
+msgid "Open diagnostics"
+msgstr "打开诊断"
+
+msgid "Open logs"
+msgstr "打开日志"
+
+msgid "Service and traffic events"
+msgstr "服务和流量事件"
+
+msgid "Filter Runtime, Core, update, SD-WAN, system, and user traffic events on the Logs page."
+msgstr "在日志页筛选 Runtime、Core、更新、SD-WAN、系统和用户流量事件。"
+
+msgid "Protocol capability details"
+msgstr "协议能力详情"
+
+msgid "Negotiation and authorization evidence for advanced compatibility troubleshooting."
+msgstr "用于高级兼容性排障的协商与授权证据。"
+
+msgid "Link health, node telemetry, performance trends, and recovery state."
+msgstr "查看链路健康、节点遥测、性能趋势和恢复状态。"
+
+msgid "Unnamed site"
+msgstr "未命名站点"
+
+msgid "Unnamed network"
+msgstr "未命名网络"
+
+msgid "Unnamed peer"
+msgstr "未命名对端"
+
+msgid "Unnamed local egress"
+msgstr "未命名本地出口"
+
+msgid "Unnamed remote egress"
+msgstr "未命名远端出口"
+
+msgid "Synchronized from Candy Cloud"
+msgstr "已从 Candy Cloud 同步"
+
+msgid "Managed by Candy Cloud"
+msgstr "由 Candy Cloud 管理"
+
+msgid "Manage advanced Runtime controls and the installed Candy software."
+msgstr "管理高级 Runtime 控制项和已安装的 Candy 软件。"

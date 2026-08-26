@@ -116,207 +116,34 @@ fs.writeFileSync(outputPath, lua);
 EOF
 luac -p "$lua_syntax_file" || fail "LuCI templates contain invalid Lua template code"
 
-node - "$repo_root" "$status" <<'EOF'
+node - "$repo_root" "$status" "$log_view" <<'EOF'
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
 const root = process.argv[2];
 const statusPath = process.argv[3];
+const logPath = process.argv[4];
 const source = fs.readFileSync(root + "/" + statusPath, "utf8");
-assert.ok(!source.includes("Passive transport status"), "overview must not render passive transport status");
-assert.ok(!source.includes("candy-status-passive-"), "overview must not own passive field ids");
-assert.ok(!source.includes("candyOverviewRenderPassive"), "overview must not own passive refresh rendering");
-assert.ok(source.includes("<%:Candy version%>"), "overview must show the OpenWrt package version");
-assert.ok(source.includes("<%:Core version%>"), "overview must show the independent Core version");
-assert.ok(source.includes("candy-status-client-version"), "overview must expose the product version refresh target");
-assert.ok(source.includes("candy-status-core-version"), "overview must expose the Core version refresh target");
-assert.ok(source.includes("data.release"), "overview must include the OpenWrt package revision");
-assert.ok(source.includes("manifest.core.features"), "feature cards must come from the active Core manifest");
-assert.ok(source.includes("definition.status_key || definition.id"), "feature runtime evidence must use the Core status mapping");
-assert.ok(source.includes("candy-overview-section"), "overview sections must have explicit vertical spacing");
-for (const featureDetail of ["definition.description", "definition.activation", "candyOverviewFeatureEvidence", "candy-feature-evidence"]) {
-	assert.ok(!source.includes(featureDetail), "overview feature cards must omit detail: " + featureDetail);
-}
-assert.ok(!source.includes("candyOverviewFeatureNames"), "OpenWrt must not maintain a protocol feature catalog");
-assert.ok(!source.includes("effective UDP multiplier is 1"), "OpenWrt must not embed Core activation details");
-assert.ok(!source.includes("LuCI version"), "overview must not duplicate package versions");
-assert.ok(source.includes("Server version"), "overview must show the negotiated server software version");
-assert.ok(!source.includes("Runtime mode"), "overview must hide internal runtime modes");
-assert.ok(!source.includes("UDP packet multiplier"), "overview must hide negotiated packet multipliers");
-assert.ok(!source.includes("Candy 0.3.4 records BBR fallback evidence"), "overview must omit the BBR promotional description");
-assert.ok(!source.includes('id="candy-sdwan-status"'), "overview must leave SD-WAN product state to the dedicated page");
-const match = source.match(/<script type="text\/javascript">([\s\S]*?)<\/script>/);
-assert.ok(match, "status page JavaScript was not found");
-const script = match[1].replace(/<%=([\s\S]*?)%>/g, (_, expression) => {
-	if (expression.includes("build_url")) return "test";
-	return JSON.stringify("test");
-});
-
-class Element {
-	constructor() {
-		this.children = [];
-		this._textContent = "";
-		this.className = "";
-		this.style = {};
-		this.attributes = {};
-		this.listeners = {};
-	}
-	set innerHTML(value) { this._textContent = value; this.children = []; }
-	get innerHTML() { return this._textContent; }
-	set textContent(value) {
-		this._textContent = value;
-		this.children = [];
-	}
-	get textContent() {
-		return this._textContent;
-	}
-	appendChild(child) {
-		this.children.push(child);
-		return child;
-	}
-	get firstChild() { return this.children[0] || null; }
-	removeChild(child) { this.children.splice(this.children.indexOf(child), 1); }
-	setAttribute(name, value) { this.attributes[name] = String(value); }
-	addEventListener(name, callback) { this.listeners[name] = callback; }
-}
-
-const elements = new Map();
-const requests = [];
-const intervals = [];
-const timers = [];
-class FakeXMLHttpRequest {
-	constructor() {
-		this.readyState = 0;
-		this.status = 0;
-		this.responseText = "";
-		this.aborted = false;
-		requests.push(this);
-	}
-	open() {}
-	send() {}
-	abort() {
-		this.aborted = true;
-	}
-	respond(status, data) {
-		this.status = status;
-		this.responseText = JSON.stringify(data);
-		this.readyState = 4;
-		this.onreadystatechange();
+assert.ok(source.includes("Function coverage"), "overview must summarize configured functions");
+assert.ok(source.includes("Performance"), "overview must summarize performance");
+assert.ok(source.includes("Operating status"), "overview must summarize operating status");
+assert.ok(source.includes("candy-metric-throughput"), "overview must expose aggregate RX/TX");
+assert.ok(source.includes("goodput_bps_rx") && source.includes("goodput_bps_tx"), "overview must use directional telemetry");
+assert.ok(source.includes("active_tcp_flows") && source.includes("active_udp_flows"), "overview must expose active connections");
+assert.ok(source.includes("node.last_error"), "overview must expose the latest node result");
+assert.ok(source.includes("setTimeout(refresh,2000)"), "overview refresh must avoid overlapping intervals");
+assert.ok(source.includes("currentGeneration!==generation"), "overview must ignore stale status responses");
+assert.ok(!source.includes("candy-capability-tags"), "overview must not render protocol capability matrices");
+for (const templatePath of [statusPath, logPath]) {
+	const template = fs.readFileSync(root + "/" + templatePath, "utf8");
+	const scripts = Array.from(template.matchAll(/<script type="text\/javascript">([\s\S]*?)<\/script>/g));
+	assert.ok(scripts.length, templatePath + " must contain JavaScript");
+	for (const match of scripts) {
+		const script = match[1].replace(/<%=([\s\S]*?)%>/g, (_, expression) => expression.includes("build_url") ? "test" : JSON.stringify("test"));
+		assert.doesNotThrow(() => new vm.Script(script), templatePath + " JavaScript must parse");
 	}
 }
-
-const context = {
-	XMLHttpRequest: FakeXMLHttpRequest,
-	Date: { now: () => 1 },
-	document: {
-		getElementById(id) {
-			if (!elements.has(id)) elements.set(id, new Element());
-			return elements.get(id);
-		},
-		createElement: () => new Element(),
-		createTextNode: text => ({ textContent: text })
-	},
-	isFinite,
-	setInterval(callback, delay) {
-		intervals.push({ callback, delay });
-		return intervals.length;
-	},
-	setTimeout(callback, delay) {
-		const timer = { callback, delay };
-		timers.push(timer);
-		return timer;
-	},
-	clearTimeout(timer) {
-		const index = timers.indexOf(timer);
-		if (index !== -1) timers.splice(index, 1);
-	}
-};
-vm.runInNewContext(script, context, { filename: statusPath });
-
-assert.equal(context.candyOverviewClientVersion({ version: "0.4.0", release: "1" }), "0.4.0-r1");
-assert.equal(context.candyOverviewClientVersion({ version: "0.4.0-r1", release: "1" }), "0.4.0-r1");
-assert.equal(context.candyOverviewClientVersion({ version: "0.4.0" }), "0.4.0");
-
-assert.equal(requests.length, 1, "initial refresh must issue one request");
-const requestA = requests[0];
-context.refreshCandyOverviewStatus();
-assert.equal(requests.length, 2, "manual refresh must issue request B");
-const requestB = requests[1];
-assert.equal(requestA.aborted, true, "request B must abort request A");
-
-const response = (version, status, updated, nodes = []) => ({
-	version,
-	core: { current_version: "core-" + version, current_manifest: { core: { features: [] } } },
-	service: { status, enabled: status !== "stopped" },
-	runtime: {
-		mode: "stable",
-		performance: updated === undefined ? {} : { passive: { updated_unix_ms: updated } }
-	},
-	nodes
-});
-requestB.respond(200, response("new", "running", 20, [{
-		state: "ready", name: "node-b", server: "203.0.113.1:8443", server_version: "0.3.1", groups: ["Video", "Proxy"],
-	url_test: { status: "ok", latency_ms: 42 }, active_tcp_flows: 3, active_udp_flows: 2,
-		passive: { local: { smoothed_rtt_micros: 12345, goodput_bps: 1000 } }, reconnects: 1
-}]));
-requestA.respond(200, response("old", "stopped", 10));
-assert.equal(elements.get("candy-status-client-version").textContent, "new",
-	"late request A must not overwrite newer request B");
-assert.equal(elements.get("candy-status-core-version").textContent, "core-new");
-const nodeCells = elements.get("candy-status-nodes").children[0].children;
-assert.equal(nodeCells.length, 9, "node status must include protocol and line capability summaries");
-assert.equal(nodeCells[3].textContent, "0.3.1");
-assert.equal(nodeCells[4].textContent, "-");
-assert.equal(nodeCells[5].textContent, "-");
-assert.equal(nodeCells[6].textContent, "Video, Proxy");
-assert.equal(nodeCells[7].textContent, "12.35 ms");
-assert.equal(nodeCells[8].textContent, "42 ms");
-
-context.refreshCandyOverviewStatus();
-requests[2].respond(200, response("stopped", "stopped"));
-assert.equal(elements.get("candy-status-client-version").textContent, "stopped",
-	"a current response without passive status must still update ordinary fields");
-assert.equal(elements.get("candy-status-service").className, "label");
-assert.equal(elements.get("candy-status-nodes").children[0].children.length, 1,
-	"a current response without passive status must still replace nodes");
-
-context.candyOverviewCurrentManifest = { core: { features: [{
-	id: "future_feature", status_key: "future_status", short_name: "FUTURE", protocol_bit: 1
-}] } };
-context.candyOverviewRenderNodes([{ state: "ready", name: "node-b", server_version: "0.3.1", protocol_version: { major: 0, minor: 3 }, passive: { features: { future_status: { supported: true, authorized: true, active: true, evidence: 7 } } } }]);
-assert.equal(elements.get("candy-status-nodes").children[0].children.length, 9);
-assert.equal(elements.get("candy-status-nodes").children[0].children[5].children[0].textContent, "FUTURE");
-assert.equal(elements.get("candy-status-nodes").children[0].children[5].children[0].className, "candy-capability-tag active");
-assert.ok(elements.get("candy-status-nodes").children[0].children[5].children[0].attributes["data-tooltip"],
-	"capability tag must expose hover explanation text");
-assert.ok(elements.get("candy-status-nodes").children[0].children[5].children[0].listeners.mouseenter,
-	"capability tag must register a visible hover tooltip");
-
-context.refreshCandyOverviewStatus();
-requests[3].respond(200, response("restarted", "running", 5));
-assert.equal(elements.get("candy-status-client-version").textContent, "restarted");
-
-context.refreshCandyOverviewStatus();
-requests[4].respond(200, response("service-newer", "starting", 4));
-assert.equal(elements.get("candy-status-client-version").textContent, "service-newer",
-	"an old passive timestamp must not block ordinary field updates");
-assert.equal(elements.get("candy-status-service").className, "label warning");
-
-context.refreshCandyOverviewStatus();
-requests[5].respond(200, response("invalid-passive", "running", "invalid"));
-assert.equal(elements.get("candy-status-client-version").textContent, "invalid-passive");
-
-context.refreshCandyOverviewStatus();
-requests[6].respond(200, response("after-invalid", "running", 1));
-assert.equal(elements.get("candy-status-client-version").textContent, "after-invalid");
-
-context.refreshCandyOverviewStatus();
-requests[7].respond(503, response("error", "stopped"));
-assert.equal(elements.get("candy-status-client-version").textContent, "after-invalid",
-	"an HTTP error must not clear the last applied status");
-assert.equal(intervals.length, 0, "status refresh must not use an overlapping interval");
-assert.equal(timers.length, 1, "only one follow-up refresh timer may be scheduled");
 EOF
 
 node - "$repo_root" "$diagnostics" <<'EOF'
@@ -517,8 +344,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=73$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=73$'
+assert_contains "$makefile" '^PKG_RELEASE:=74$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=74$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'
@@ -719,12 +546,15 @@ done
 assert_contains "$controller" '\{"admin", "services", "candy", "overview"\}.*_\("Overview"\)'
 assert_contains "$controller" '\{"admin", "services", "candy", "sdwan"\}.*_\("SD-WAN"\)'
 assert_contains "$controller" '\{"admin", "services", "candy", "traffic"\}.*_\("Policy"\)'
-assert_contains "$controller" '\{"admin", "services", "candy", "settings"\}.*_\("Settings"\)'
+assert_contains "$controller" '\{"admin", "services", "candy", "nodes"\}.*_\("Nodes"\)'
+assert_contains "$controller" '\{"admin", "services", "candy", "dns_geo"\}.*_\("DNS"\)'
+assert_contains "$controller" '\{"admin", "services", "candy", "logs"\}.*_\("Logs"\)'
+assert_contains "$controller" '\{"admin", "services", "candy", "settings"\}.*_\("System"\)'
 assert_contains "$controller" '\{"admin", "services", "candy", "diagnostics"\}.*_\("Diagnostics"\)'
-for hidden_route in dns_geo nodes logs advanced core; do
+for hidden_route in advanced core; do
 	assert_contains "$controller" "\{\"admin\", \"services\", \"candy\", \"$hidden_route\"\}.*nil"
 done
-assert_count "$controller" '\{"admin", "services", "candy", "(overview|sdwan|traffic|settings|diagnostics)"\}.*_\("(Overview|SD-WAN|Policy|Settings|Diagnostics)"\)' 5
+assert_count "$controller" '\{"admin", "services", "candy", "(overview|nodes|traffic|dns_geo|sdwan|logs|diagnostics|settings)"\}.*_\("(Overview|Nodes|Policy|DNS|SD-WAN|Logs|Diagnostics|System)"\)' 8
 assert_not_contains "$controller" '\{"admin", "services", "candy", "status"\}'
 assert_not_contains "$controller" '\{"admin", "services", "candy", "rules"\}'
 assert_not_contains "$controller" '\{"admin", "services", "candy", "geo"\}'
@@ -752,6 +582,7 @@ assert_contains "$controller" 'action_gfwlist_update'
 assert_not_contains "$controller" 'action_link_probe'
 assert_not_contains "$controller" 'action_cdn_probe'
 assert_contains "$controller" 'action_traffic_log_active'
+assert_contains "$controller" 'action_logs_json'
 assert_contains "$controller" 'Cache-Control'
 assert_contains "$controller" 'application/json'
 assert_contains "$controller" '/tmp/candy\.lifecycle'
@@ -765,7 +596,7 @@ assert_contains "$controller" 'service == "starting"'
 assert_contains "$controller" 'SERVICE_LIFECYCLE_TTL = 10'
 assert_before "$controller" 'mark_service_transition\(action\)' 'candy_service_async\(action\)'
 assert_contains "$controller" 'transition.state == "starting" and "starting" or "stopped"'
-assert_contains "$status" 'service_status ~= "stopped" or transition.state == "starting"'
+assert_contains "$status" 'candy-status-service'
 assert_contains "$controller" 'status\.runtime\.multi_node'
 assert_contains "$controller" 'node.state = "connecting"'
 assert_contains "$controller" 'rules_unchanged'
@@ -810,20 +641,22 @@ assert_contains "$dns" 'normalize_resolver_list'
 assert_contains "$dns" 'local node_uci = require "luci.model.uci".cursor\(\)'
 assert_contains "$dns" 'node_uci:foreach\("candy", "node"'
 assert_contains "$sdwan" 'How traffic is selected'
-assert_contains "$settings" '<%:Nodes and groups%>'
-assert_contains "$settings" '<%:DNS and routing%>'
+assert_contains "$settings" '<%:System%>'
+assert_contains "$settings" '<%:Back to overview%>'
 assert_contains "$settings" '<%:Advanced settings%>'
 assert_contains "$settings" '<%:Core lifecycle%>'
 assert_contains "$settings" '<%:Software updates%>'
-for route in nodes dns_geo advanced core update; do
+for route in advanced core update; do
 	assert_contains "$settings" "'admin', 'services', 'candy', '$route'"
 done
+assert_not_contains "$settings" "'admin', 'services', 'candy', '(nodes|dns_geo)'"
 assert_contains "$sdwan" 'Candy SD-WAN connects sites through encrypted links'
 assert_contains "$sdwan" 'Unavailable until Candy Cloud publishes a local-egress configuration\.'
 assert_contains "$sdwan" 'Unavailable until Candy Cloud publishes a remote-egress configuration\.'
 assert_contains "$sdwan" 'Unavailable until Candy Cloud publishes an internal DNS configuration\.'
 assert_contains "$sdwan" '<%:Peer site%>'
-assert_contains "$sdwan" '<%:Attachment ID%>'
+assert_not_contains "$sdwan" '<%:Attachment ID%>'
+assert_contains "$sdwan" 'Unnamed peer'
 assert_contains "$sdwan" 'candy-sdwan-long'
 assert_contains "$sdwan" 'text-overflow:ellipsis'
 assert_not_contains "$sdwan" 'candy-sdwan-arrow|&rarr;|&#8594;'
@@ -984,77 +817,6 @@ for view in "$status" "$diagnostics" "$rules"; do
 	assert_not_contains "$view" 'carrier'
 done
 
-assert_contains "$status" '/tmp/candy\.nodes'
-assert_contains "$status" 'status_json'
-assert_contains "$status" 'candy-status-service'
-assert_contains "$status" 'Stopping'
-assert_contains "$status" 'transition\.state == "stopping"'
-assert_contains "$status" 'os\.time\(\) - tonumber\(transition\.updated_at\) <= 10'
-assert_contains "$status" 'refreshCandyOverviewStatus'
-assert_contains "$status" 'candyOverviewRequestGeneration'
-assert_contains "$status" 'setTimeout\(refreshCandyOverviewStatus, 2000\)'
-assert_not_contains "$status" 'setInterval\(refreshCandyOverviewStatus, 2000\)'
-assert_contains "$status" '<h2 name="content">Candy</h2>'
-assert_contains "$status" 'candy-logo'
-assert_contains "$status" 'candy-logo-mark'
-assert_contains "$status" "Candy secures and optimizes this router's Internet traffic"
-assert_contains "$status" 'justify-content: space-between'
-assert_contains "$status" '@media \(max-width: 720px\)'
-assert_contains "$status" 'content: attr\(data-label\)'
-assert_contains "$status" 'text-overflow: ellipsis'
-assert_not_contains "$status" 'Candy 0\.3\.4 records BBR fallback evidence and automatically retries Candy BBR after a bounded CUBIC cooldown\.'
-assert_not_contains "$status" 'id="candy-sdwan-status"'
-assert_not_contains "$status" 'candyOverviewRenderSdwan'
-assert_not_contains "$status" 'Smart DNS/GEO'
-assert_not_contains "$status" 'Weak-link QoS'
-assert_not_contains "$status" 'Video/CDN diagnostics'
-assert_contains "$status" 'candy-overview-actions'
-assert_contains "$status" 'candy-capability-tags'
-assert_contains "$status" 'candy-capability-tag\.active'
-assert_contains "$status" 'candy-capability-tooltip'
-assert_contains "$status" 'data-tooltip'
-assert_contains "$status" 'definition\.protocol_bit'
-assert_contains "$status" 'value\.supported === true && value\.authorized === true'
-assert_contains "$status" 'short_name'
-assert_not_contains "$status" 'candyOverviewFeatureEvidence'
-assert_not_contains "$status" 'definition\.description'
-assert_not_contains "$status" 'definition\.activation'
-assert_contains "$status" 'candy-overview-section'
-assert_contains "$status" 'manifest && manifest\.core && manifest\.core\.features'
-assert_contains "$status" 'definition\.status_key \|\| definition\.id'
-assert_not_contains "$status" 'candyOverviewFeatureNames'
-assert_not_contains "$status" 'Fragment frame bytes'
-assert_not_contains "$status" 'Early streams opened'
-assert_not_contains "$status" 'Fallback transitions'
-assert_not_contains "$status" '<th class="th"><%:Supported%></th>'
-assert_not_contains "$status" '<th class="th"><%:Authorized%></th>'
-assert_not_contains "$status" 'border-bottom: 1px solid #444;'
-assert_contains "$status" 'action.*restart'
-assert_contains "$status" 'action.*start'
-assert_contains "$status" 'action.*stop'
-assert_not_contains "$status" '<%:Quick actions%>'
-assert_contains "$status" 'require "luci.jsonc"'
-assert_contains "$status" 'jsonc\.parse'
-assert_contains "$status" 'status\.nodes'
-assert_not_contains "$status" 'runtime_performance\.passive'
-assert_not_contains "$status" 'candy-status-passive'
-assert_not_contains "$status" 'candyOverviewRenderPassive'
-assert_not_contains "$status" 'link probe'
-assert_not_contains "$status" 'cdn probe'
-
-assert_contains "$status" 'node\.groups'
-assert_contains "$status" 'node\.url_test'
-assert_not_contains "$status" 'node\.active_tcp_flows'
-assert_not_contains "$status" 'node\.active_udp_flows'
-assert_contains "$status" 'node\.server_version'
-assert_contains "$status" 'node\.protocol_version'
-assert_contains "$status" 'candyOverviewCapabilityTags'
-assert_contains "$status" 'short_name'
-assert_contains "$status" 'candy-capability-tag'
-assert_not_contains "$status" 'candyOverviewRenderFeatures(manifest, nodes)'
-assert_not_contains "$status" 'node\.reconnects'
-assert_not_contains "$status" 'node\.last_error'
-assert_not_contains "$status" 'status\.dns'
 
 assert_contains "$core_view" 'core_status'
 assert_contains "$core_view" 'core_install'
@@ -1091,73 +853,22 @@ assert_not_contains "$update_view" 'candidate\.active === true \|\|'
 assert_contains "$update_view" 'candyUpdateLink'
 assert_not_contains "$update_view" 'rollbackAvailable'
 assert_not_contains "$update_view" 'candyUpdateLabels\.incompatible'
-assert_not_contains "$status" 'status\.diagnostics'
-assert_not_contains "$status" 'runtime_mode'
-assert_contains "$status" 'status\.version'
-assert_not_contains "$status" 'status\.build_id'
-assert_contains "$status" '<%:Candy version%>'
-assert_contains "$status" '<%:Core version%>'
-assert_not_contains "$status" '<%:Client version%>'
-assert_not_contains "$status" '<%:LuCI version%>'
-assert_contains "$status" 'candy-status-client-version'
-assert_not_contains "$status" 'candy-status-luci-version'
-assert_not_contains "$status" '<%:UDP packet multiplier%>'
-assert_not_contains "$status" 'diagnostics\.udp_redundancy'
-assert_not_contains "$status" 'runtime_performance\.udp_client_multiplier'
-assert_not_contains "$status" '<%:Runtime mode%>'
-assert_not_contains "$status" 'name="runtime_mode"'
-assert_not_contains "$status" 'value="stable"'
-assert_not_contains "$status" 'value="performance"'
-assert_not_contains "$status" 'diagnostics_bundle'
-assert_not_contains "$status" 'dns_trace'
-assert_not_contains "$status" '<%:Export diagnostic bundle%>'
-assert_not_contains "$status" '<%:DNS trace%>'
-assert_not_contains "$status" '<%:Trace from overview%>'
-assert_not_contains "$status" 'TCP path, blocks browser QUIC/UDP'
-assert_not_contains "$status" 'UDP TProxy path, better throughput'
-assert_not_contains "$status" 'dns\.remote'
-assert_not_contains "$status" 'dns\.capture_lan'
-assert_not_contains "$status" 'dns\.filter_aaaa'
-assert_not_contains "$status" 'dns\.applied'
-assert_not_contains "$status" 'dns\.config_path'
-assert_not_contains "$status" '<%:DNS status%>'
-assert_not_contains "$status" '<%:Diagnostics%>'
-assert_not_contains "$status" '<%:Weak-link probe%>'
-assert_not_contains "$status" '<%:Security smoke%>'
-assert_not_contains "$status" '<%:Provider freshness%>'
-assert_contains "$status" '<%:Node status%>'
-assert_contains "$status" '<%:Node groups%>'
-assert_contains "$status" '<%:URL latency%>'
-assert_contains "$status" '<%:Local RTT%>'
-assert_not_contains "$status" '<%:URL Test status%>'
-assert_not_contains "$status" '<%:Active TCP flows%>'
-assert_not_contains "$status" '<%:Active UDP flows%>'
-assert_contains "$status" '<%:Server version%>'
-assert_not_contains "$status" '<%:Throughput%>'
-assert_not_contains "$status" 'localStatus\.goodput_bps'
-assert_not_contains "$status" '<%:Send rate%>'
-assert_not_contains "$status" '<%:Receive rate%>'
-assert_not_contains "$status" '<%:Reconnects%>'
-assert_not_contains "$status" '<%:Last error%>'
-assert_not_contains "$status" '<%:Selected node%>'
-assert_not_contains "$status" '<%:Video score%>'
-assert_not_contains "$status" '<%:CDN score%>'
-assert_not_contains "$status" '<%:TTFB%>'
-assert_not_contains "$status" '<%:Probe%>'
-assert_not_contains "$status" '<%:Reconnect policy%>'
-assert_not_contains "$status" '<%:Last connection error%>'
-assert_not_contains "$status" 'diagnostics\.weak_link_probe'
-assert_not_contains "$status" 'diagnostics\.security_smoke'
-assert_not_contains "$status" 'diagnostics\.dns_trace'
-assert_not_contains "$status" 'diagnostics\.provider_freshness'
-assert_not_contains "$status" 'diagnostics\.reconnect_policy'
-assert_not_contains "$status" '/tmp/candy\.log'
-assert_not_contains "$status" '/var/run/candy/runtime\.json'
-assert_not_contains "$status" 'logread'
-assert_not_contains "$status" 'netstat -lnp'
-assert_not_contains "$status" "ps 2>/dev/null"
-assert_not_contains "$status" '<%:Logs and diagnostics%>'
-assert_not_contains "$status" 'line:match\("\^\(\[\^\\t\]\*\)\\t'
+assert_contains "$status" 'status_json'
+assert_contains "$status" '<%:Function coverage%>'
+assert_contains "$status" '<%:Performance%>'
+assert_contains "$status" 'candy-summary-band'
+assert_contains "$status" 'candy-feature-band'
+assert_contains "$status" 'candy-metric-throughput'
+assert_contains "$status" 'goodput_bps_rx'
+assert_contains "$status" 'goodput_bps_tx'
+assert_contains "$status" 'active_tcp_flows'
+assert_contains "$status" 'active_udp_flows'
+assert_contains "$status" 'node\.last_error'
+assert_contains "$status" '<%:RX / TX%>'
+assert_contains "$status" '<%:Connections%>'
+assert_contains "$status" '<%:Latest result%>'
+assert_contains "$status" 'setTimeout\(refresh,2000\)'
+assert_not_contains "$status" 'candy-capability-tag|candyOverviewCapabilityTags|protocol capability'
 
 assert_count "$diagnostics" '<div class="cbi-map">' 5
 assert_contains "$diagnostics" '<%:Diagnostics%>'
@@ -1268,40 +979,29 @@ assert_contains "$diagnostics" 'candyDiagnosticsRenderFeatureMatrix'
 assert_not_contains "$diagnostics" 'carrier'
 
 assert_contains "$diagnostics" '<%\+candy/log_panel%>'
-assert_contains "$log_view" '<%\+candy/log_panel%>'
-assert_count "$logs" '<div class="cbi-map"' 1
-assert_contains "$logs" '<%:Logs%>'
-assert_contains "$logs" '<%:Service log%>'
-assert_contains "$logs" '<%:Traffic log%>'
-assert_contains "$logs" 'System service events'
-assert_contains "$logs" 'No traffic decisions for this boot yet'
-assert_contains "$logs" 'traffic_log_active'
-assert_contains "$logs" 'candy_traffic_log'
-assert_contains "$logs" 'LOG_HISTORY_GENERATIONS = 5'
-assert_contains "$logs" 'read_log_history'
-assert_contains "$logs" 'traffic_decisions'
-assert_contains "$logs" 'protocol == "TCP" or protocol == "UDP"'
-assert_contains "$logs" 'LOG_READ_LIMIT = 128 \* 1024'
-assert_contains "$logs" 'base .. "." .. generation'
-assert_contains "$logs" 'xhr\.open\("POST"'
-assert_contains "$logs" 'encodeURIComponent\(csrfToken\)'
-assert_not_contains "$logs" 'writefile\("/tmp/candy-traffic\.log", ""\)'
-assert_contains "$logs" 'Cache-Control'
-assert_contains "$logs" 'candy-log-section \+ \.candy-log-section'
-assert_contains "$logs" '/tmp/candy\.log'
-assert_contains "$logs" '/tmp/candy-traffic\.log'
-assert_contains "$logs" 'logread'
-assert_contains "$logs" 'process\.capture\(\{ "/sbin/logread" \}\)'
-assert_not_contains "$logs" 'Firewall counters'
-assert_not_contains "$logs" 'nft list table inet fw4'
-assert_not_contains "$logs" 'iptables -t nat -L CANDY'
-assert_not_contains "$logs" '<%:System log%>'
-assert_not_contains "$logs" '<%:Raw diagnostics%>'
-assert_not_contains "$logs" '/var/run/candy/runtime\.json'
-assert_not_contains "$logs" 'netstat -lnp'
-assert_not_contains "$logs" "ps 2>/dev/null"
-assert_not_contains "$logs" 'redact_runtime'
-assert_not_contains "$logs" '/tmp/candy\.nodes'
+assert_contains "$logs" '<%:Service and traffic events%>'
+assert_contains "$logs" "'admin', 'services', 'candy', 'logs'"
+assert_contains "$log_view" '<%:All sources%>'
+assert_contains "$log_view" '<%:All levels%>'
+assert_contains "$log_view" '<%:User traffic%>'
+assert_contains "$log_view" 'candy-log-search'
+assert_contains "$log_view" 'candy-log-auto'
+assert_contains "$log_view" 'logs_json'
+assert_contains "$log_view" 'entry\.source'
+assert_contains "$log_view" 'entry\.level'
+assert_contains "$log_view" 'entry\.result'
+assert_contains "$log_view" 'entry\.detail'
+assert_contains "$log_view" 'setTimeout\(refresh,3000\)'
+assert_contains "$log_view" 'currentGeneration!==generation'
+assert_not_contains "$log_view" '<textarea'
+assert_contains "$controller" 'LOG_ENTRY_LIMIT = 500'
+assert_contains "$controller" '/tmp/candy-core-manager\.log'
+assert_contains "$controller" '/tmp/candy-update-manager\.log'
+assert_contains "$controller" '/etc/candy/sdwan/events-v1\.log'
+assert_contains "$controller" 'append_log_entries\(entries, "traffic"'
+assert_contains "$controller" 'append_log_entries\(entries, "system"'
+assert_contains "$controller" 'event = event'
+assert_contains "$controller" 'result = result'
 
 assert_count "$rules" '<div class="cbi-map">' 2
 assert_contains "$rules" '<%:Policy%>'

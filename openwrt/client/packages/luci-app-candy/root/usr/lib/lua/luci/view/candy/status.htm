@@ -1,675 +1,118 @@
 <%+header%>
-
 <%
-local jsonc = require "luci.jsonc"
 local i18n = require "luci.i18n"
 local xml = require "luci.xml"
-local fs = require "nixio.fs"
-local process = require "luci.candy.process"
-local FAULT_STATUS_FILE = "/var/lib/candy/runtime-fault.json"
-local MAX_FAULT_STATUS_BYTES = 16384
-local init_ok, init_output = process.capture({ "/etc/init.d/candy", "status" })
-local init_status = init_ok and init_output:gsub("^%s+", ""):gsub("%s+$", "") or ""
-local process_running = process.run({ "/etc/init.d/candy", "running" })
-local enabled = luci.sys.init.enabled("candy")
-local status_text = fs.readfile("/tmp/candy.nodes") or ""
-local transition = jsonc.parse(fs.readfile("/tmp/candy.lifecycle") or "") or {}
-local status = jsonc.parse(status_text) or {}
-if type(transition) ~= "table" then transition = {} end
-if type(status) ~= "table" then status = {} end
-local fault_status = {}
-local fault_stat = fs.stat(FAULT_STATUS_FILE)
-if fault_stat and fault_stat.type == "reg" and tonumber(fault_stat.size or 0) <= MAX_FAULT_STATUS_BYTES then
-	local fault_text = fs.readfile(FAULT_STATUS_FILE) or ""
-	if #fault_text <= MAX_FAULT_STATUS_BYTES then
-		local parsed_fault = jsonc.parse(fault_text)
-		if type(parsed_fault) == "table" and tonumber(parsed_fault.schema_version) == 1 and
-			type(parsed_fault.reason) == "string" and type(parsed_fault.cleanup) == "string" then
-			fault_status = parsed_fault
-		end
-	end
-end
-local nodes = type(status.nodes) == "table" and status.nodes or {}
-local any_starting = false
-for _, node in ipairs(nodes) do
-		if type(node) == "table" and (node.state == "starting" or node.state == "checking") then
-			any_starting = true
-		end
-	end
-local version = status.version or "0.4.0"
-local release = status.release or "1"
-local client_version = tostring(version)
-if tostring(release) ~= "" and not client_version:match("%-r[0-9]+$") then
-	client_version = client_version .. "-r" .. tostring(release)
-end
-local service_status = "stopped"
-if init_status == "running" or process_running then
-	service_status = "running"
-elseif init_status == "starting" or any_starting then
-	service_status = "starting"
-end
-local fault_active = fault_status.state == "active"
-if service_status ~= "running" and tonumber(transition.updated_at) and os.time() - tonumber(transition.updated_at) <= 10 then
-	if transition.state == "starting" or transition.state == "stopping" or transition.state == "running" or transition.state == "stopped" then
-		if service_status ~= "stopped" or transition.state == "starting" then
-			service_status = transition.state
-		end
-	end
-end
-
-local function node_class(state)
-	if state == nil or state == "" then
-		return "idle"
-	end
-	if state == "running" or state == "ready" or state == "ok" then
-		return "ok"
-	elseif state == "starting" or state == "stopping" or state == "checking" or state == "connecting" or state == "reconnecting" then
-		return "warn"
-	elseif state == "standby" or state == "disabled" or state == "unused" or state == "unknown" then
-		return "idle"
-	end
-	return "bad"
-end
-
-local function service_label_class(value)
-	if value == "running" then
-		return "label notice"
-	elseif value == "starting" or value == "stopping" then
-		return "label warning"
-	end
-	return "label"
-end
-
-local function service_label(value)
-	if value == "running" then
-		return i18n.translate("Running")
-	elseif value == "starting" then
-		return i18n.translate("Starting")
-	elseif value == "stopping" then
-		return i18n.translate("Stopping")
-	end
-	return i18n.translate("Stopped")
-end
-
-local function js_string(value)
-	return string.format("%q", tostring(value or ""))
-end
-
-local function latency_label(value)
-	if value == nil then
-		return "-"
-	end
-	return tostring(value) .. " ms"
-end
-
-local function local_rtt_label(node)
-	local passive = (node or {}).passive or {}
-	local local_status = passive["local"] or {}
-	local micros = tonumber(local_status.smoothed_rtt_micros)
-	if micros == nil then
-		return "-"
-	end
-	return string.format("%.2f ms", micros / 1000)
-end
-
-local function text_label(value)
-	if value == nil or value == "" then
-		return "-"
-	end
-	return tostring(value)
-end
-
-local function list_label(value)
-	if type(value) == "table" then
-		return #value > 0 and table.concat(value, ", ") or "-"
-	end
-	return text_label(value)
-end
-
+local function js_string(value) return string.format("%q", tostring(value or "")) end
 %>
-
 <style>
-.node-dot {
-	display: inline-block;
-	width: 0.75em;
-	height: 0.75em;
-	border-radius: 50%;
-	margin-right: 0.4em;
-	background: #8c8c8c;
-	vertical-align: middle;
+.candy-overview-head { display:flex; align-items:flex-start; justify-content:space-between; gap:1em; margin-bottom:1em; }
+.candy-overview-title { display:flex; align-items:center; gap:.75em; min-width:0; }
+.candy-logo { display:flex; align-items:center; justify-content:center; width:2.5em; height:2.5em; flex:0 0 2.5em; border-radius:6px; background:#165dff; color:#fff; font-size:1.35em; font-weight:700; }
+.candy-overview-title h2 { margin:0; }
+.candy-overview-title p { margin:.3em 0 0; color:#4e5969; line-height:1.5; }
+.candy-overview-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:.45em; }
+.candy-overview-actions form { margin:0; }
+.candy-fault-banner { border-left:4px solid #c62828; background:#fff4f4; padding:.85em 1em; margin-bottom:1em; }
+.candy-fault-banner strong, .candy-fault-banner span { display:block; }
+.candy-fault-banner span { margin:.25em 0 .6em; }
+.candy-summary-band { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); border-top:1px solid #e5e6eb; border-bottom:1px solid #e5e6eb; }
+.candy-summary-item { min-width:0; padding:.85em 1em; }
+.candy-summary-item + .candy-summary-item { border-left:1px solid #e5e6eb; }
+.candy-summary-item span, .candy-summary-item small { display:block; color:#86909c; }
+.candy-summary-item strong { display:block; margin:.2em 0; overflow-wrap:anywhere; font-size:1.05em; }
+.candy-status-dot { display:inline-block; width:.7em; height:.7em; margin-right:.4em; border-radius:50%; background:#86909c; vertical-align:middle; }
+.candy-status-dot.ok { background:#2e7d32; }.candy-status-dot.warn { background:#f9a825; }.candy-status-dot.bad { background:#c62828; }
+.candy-section { margin-top:1.5em; }
+.candy-section-head { display:flex; align-items:center; justify-content:space-between; gap:1em; margin-bottom:.55em; }
+.candy-section-head h3 { margin:0; }
+.candy-feature-band { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); border-top:1px solid #e5e6eb; border-bottom:1px solid #e5e6eb; }
+.candy-feature { display:block; min-width:0; padding:.8em .9em; color:inherit; text-decoration:none; }
+.candy-feature + .candy-feature { border-left:1px solid #e5e6eb; }
+.candy-feature:hover, .candy-feature:focus { background:#f7f8fa; color:inherit; text-decoration:none; }
+.candy-feature span, .candy-feature small { display:block; overflow-wrap:anywhere; }
+.candy-feature span { font-weight:600; }.candy-feature small { margin-top:.2em; color:#4e5969; }
+.candy-node-scroll { overflow-x:auto; }
+.candy-node-table { min-width:62em; table-layout:fixed; }
+.candy-node-table .th, .candy-node-table .td { box-sizing:border-box; vertical-align:top; overflow-wrap:anywhere; }
+.candy-node-table .th:nth-child(1) { width:15%; }.candy-node-table .th:nth-child(2) { width:10%; }.candy-node-table .th:nth-child(3) { width:14%; }.candy-node-table .th:nth-child(4) { width:11%; }.candy-node-table .th:nth-child(5) { width:15%; }.candy-node-table .th:nth-child(6) { width:13%; }.candy-node-table .th:nth-child(7) { width:22%; }
+.candy-node-name { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.candy-node-error { color:#b42318; }
+.candy-node-empty { padding:2em 1em !important; text-align:center; color:#86909c; }
+@media (max-width:760px) {
+	.candy-overview-head { flex-direction:column; }.candy-overview-actions { justify-content:flex-start; }
+	.candy-summary-band { grid-template-columns:1fr 1fr; }.candy-summary-item:nth-child(3) { border-left:0; }.candy-summary-item:nth-child(n+3) { border-top:1px solid #e5e6eb; }
+	.candy-feature-band { grid-template-columns:1fr 1fr; }.candy-feature:nth-child(odd) { border-left:0; }.candy-feature:nth-child(n+3) { border-top:1px solid #e5e6eb; }
+	.candy-node-scroll { overflow:visible; }.candy-node-table { display:block; min-width:0; }.candy-node-table thead { display:none; }.candy-node-table tbody, .candy-node-table .tr { display:block; }
+	.candy-node-table .tr { padding:.45em 0; border-bottom:1px solid #e5e6eb; }.candy-node-table .td { display:grid; grid-template-columns:7.5em minmax(0,1fr); gap:.65em; width:100%; padding:.3em .45em; border:0; }.candy-node-table .td:before { content:attr(data-label); color:#86909c; font-size:.86em; }.candy-node-table .td[colspan] { display:block; }
 }
-.node-dot.ok { background: #2e7d32; }
-.node-dot.warn { background: #f9a825; }
-.node-dot.bad { background: #c62828; }
-.node-dot.idle { background: #8c8c8c; }
-	.candy-overview-header {
-		display: flex;
-		flex-direction: row;
-		align-items: center;
-		justify-content: space-between;
-		gap: 1em;
-		margin: 0 0 1.2em;
-	}
-	.candy-overview-brand {
-		display: flex;
-		align-items: center;
-		gap: .8em;
-		min-width: 0;
-	}
-	.candy-logo {
-		position: relative;
-		width: 2.6em;
-		height: 2.6em;
-		border-radius: 6px;
-		background: #165dff;
-		flex: 0 0 auto;
-	}
-.candy-logo-mark {
-	position: absolute;
-	inset: 0;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	color: #fff;
-		font-size: 1.45em;
-	font-weight: 700;
-	line-height: 1;
-	letter-spacing: 0;
-}
-	.candy-overview-header h2 {
-		border-bottom: 0;
-		margin: 0;
-		font-size: 1.45em;
-	}
-	.candy-overview-header p {
-		margin: .25em 0 0;
-		max-width: 52em;
-		color: #4e5969;
-		line-height: 1.5;
-	}
-.candy-overview-actions {
-	display: flex;
-	gap: 0.5em;
-	flex-wrap: wrap;
-		justify-content: flex-end;
-}
-.candy-overview-actions form {
-	margin: 0;
-}
-.candy-fault-banner {
-	border-left: 4px solid #c62828;
-	background: #fff4f4;
-	padding: 0.9em 1em;
-	margin-bottom: 1.2em;
-}
-.candy-fault-banner strong { display: block; margin-bottom: 0.35em; }
-.candy-node-table-scroll {
-	overflow-x: auto;
-}
-	.candy-node-table-scroll .table {
-		min-width: 58em;
-		table-layout: fixed;
-	}
-	.candy-node-table-scroll .th,
-	.candy-node-table-scroll .td {
-		box-sizing: border-box;
-		vertical-align: top;
-		overflow-wrap: anywhere;
-		word-break: break-word;
-	}
-	.candy-node-table-scroll .td {
-		max-width: 18em;
-	}
-	.candy-node-table-scroll .candy-cell-value {
-		display: block;
-		max-width: 100%;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-.candy-overview-section {
-	margin-top: 2em;
-}
-.candy-capability-tags { display: flex; flex-wrap: wrap; gap: .3em; min-width: 14em; }
-.candy-capability-tag { display: inline-block; border: 1px solid #8fb2df; border-radius: 4px; padding: .12em .38em; color: #1559a6; background: #f5f9ff; font-size: .86em; line-height: 1.25; white-space: nowrap; }
-.candy-capability-tag.active { border-color: #77b984; color: #1a7f37; background: #f0fff4; }
-.candy-capability-tag:focus { outline: 2px solid #4c8fd8; outline-offset: 2px; }
-.candy-capability-tooltip { position: fixed; z-index: 10000; display: none; box-sizing: border-box; width: max-content; max-width: calc(100vw - 16px); padding: .55em .7em; border: 1px solid #4a5568; border-radius: 4px; background: #20252b; color: #fff; box-shadow: 0 4px 14px rgba(0, 0, 0, .24); font-size: .82rem; line-height: 1.45; white-space: pre-line; pointer-events: none; }
-.candy-capability-empty { color: #777; }
-.candy-capability-legend { display: block; margin-top: .2em; color: #666; font-size: .78em; font-weight: 400; }
-	@media (max-width: 720px) {
-		.candy-overview-header { align-items: flex-start; flex-direction: column; }
-		.candy-overview-actions { justify-content: flex-start; }
-		.candy-node-table-scroll { overflow: visible; }
-		.candy-node-table-scroll .table { display: block; min-width: 0; }
-		.candy-node-table-scroll thead { display: none; }
-		.candy-node-table-scroll tbody { display: block; }
-		.candy-node-table-scroll .tr { display: block; padding: .5em 0; border-bottom: 1px solid #e5e6eb; }
-		.candy-node-table-scroll .td {
-			display: grid;
-			grid-template-columns: minmax(7.5em, .8fr) minmax(0, 1.4fr);
-			gap: .75em;
-			width: 100%;
-			max-width: none;
-			padding: .35em .5em;
-			border: 0;
-		}
-		.candy-node-table-scroll .td:before { content: attr(data-label); color: #86909c; font-size: .88em; }
-		.candy-node-table-scroll .td[colspan] { display: block; }
-		.candy-node-table-scroll .td[colspan]:before { display: none; }
-	}
+@media (max-width:440px) { .candy-summary-band, .candy-feature-band { grid-template-columns:1fr; }.candy-summary-item + .candy-summary-item, .candy-feature + .candy-feature { border-left:0; border-top:1px solid #e5e6eb; } }
 </style>
 
-<div class="candy-overview-header">
-	<div class="candy-overview-brand">
-		<div class="candy-logo" aria-hidden="true"><span class="candy-logo-mark">C</span></div>
-			<div>
-				<h2 name="content">Candy</h2>
-				<p><%:Candy secures and optimizes this router's Internet traffic, and connects sites through Cloud-managed SD-WAN.%></p>
-			</div>
-	</div>
+<div class="candy-overview-head">
+	<div class="candy-overview-title"><div class="candy-logo" aria-hidden="true">C</div><div><h2 name="content">Candy</h2><p><%:Function, performance, and operating status for this router.%></p></div></div>
 	<div class="candy-overview-actions">
-		<form method="post" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'action', 'restart')%>">
-			<input type="hidden" name="token" value="<%=luci.dispatcher.context.authsession%>" />
-			<input class="btn cbi-button cbi-button-apply" type="submit" value="<%:Restart%>" />
-		</form>
-		<form method="post" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'action', 'start')%>">
-			<input type="hidden" name="token" value="<%=luci.dispatcher.context.authsession%>" />
-			<input class="btn cbi-button cbi-button-apply" type="submit" value="<%:Start%>" />
-		</form>
-		<form method="post" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'action', 'stop')%>">
-			<input type="hidden" name="token" value="<%=luci.dispatcher.context.authsession%>" />
-			<input class="btn cbi-button cbi-button-reset" type="submit" value="<%:Stop%>" />
-		</form>
+		<form method="post" action="<%=luci.dispatcher.build_url('admin','services','candy','action','restart')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-apply" type="submit"><%:Restart%></button></form>
+		<form method="post" action="<%=luci.dispatcher.build_url('admin','services','candy','action','start')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-action" type="submit"><%:Start%></button></form>
+		<form method="post" action="<%=luci.dispatcher.build_url('admin','services','candy','action','stop')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-reset" type="submit"><%:Stop%></button></form>
+	</div>
+</div>
+<div id="candy-status-fault" class="candy-fault-banner" style="display:none"><strong><%:Candy has stopped and normal network routing is active.%></strong><span id="candy-fault-detail"><%:Open Diagnostics for the recorded reason and cleanup result.%></span><a class="cbi-button cbi-button-link" href="<%=luci.dispatcher.build_url('admin','services','candy','diagnostics')%>"><%:View diagnostics%></a></div>
+
+<div class="candy-summary-band" aria-label="<%:Operating status%>">
+	<div class="candy-summary-item"><span><%:Service%></span><strong id="candy-status-service"><span class="candy-status-dot"></span><%:Loading%></strong><small id="candy-status-boot">-</small></div>
+	<div class="candy-summary-item"><span><%:Core%></span><strong id="candy-status-core">-</strong><small id="candy-status-version">-</small></div>
+	<div class="candy-summary-item"><span><%:Network protection%></span><strong id="candy-status-protection">-</strong><small id="candy-status-runtime-mode">-</small></div>
+	<div class="candy-summary-item"><span>SD-WAN</span><strong id="candy-status-sdwan">-</strong><small id="candy-status-sdwan-detail">-</small></div>
+</div>
+
+<div class="candy-section">
+	<div class="candy-section-head"><h3><%:Function coverage%></h3></div>
+	<div class="candy-feature-band">
+		<a class="candy-feature" href="<%=luci.dispatcher.build_url('admin','services','candy','nodes')%>"><span><%:Nodes%></span><small id="candy-feature-nodes">-</small></a>
+		<a class="candy-feature" href="<%=luci.dispatcher.build_url('admin','services','candy','traffic')%>"><span><%:Policy%></span><small id="candy-feature-policy">-</small></a>
+		<a class="candy-feature" href="<%=luci.dispatcher.build_url('admin','services','candy','dns_geo')%>"><span>DNS</span><small id="candy-feature-dns">-</small></a>
+		<a class="candy-feature" href="<%=luci.dispatcher.build_url('admin','services','candy','sdwan')%>"><span>SD-WAN</span><small id="candy-feature-sdwan">-</small></a>
+		<a class="candy-feature" href="<%=luci.dispatcher.build_url('admin','services','candy','logs')%>"><span><%:Logs%></span><small><%:Service and traffic events%></small></a>
 	</div>
 </div>
 
-<div id="candy-status-fault" class="candy-fault-banner"<%=fault_active and '' or ' style="display:none"'%>>
-	<strong><%:Candy has stopped and normal network routing is active.%></strong>
-	<span><%:Open Diagnostics for the recorded reason and cleanup result.%></span>
-	<a class="cbi-button cbi-button-link" href="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'diagnostics')%>"><%:View diagnostics%></a>
-</div>
-
-<div class="cbi-map">
-	<div class="cbi-section">
-		<table class="table">
-			<tr class="tr">
-				<td class="td left" width="33%"><%:Service status%></td>
-				<td class="td left">
-					<span id="candy-status-service" class="<%=service_label_class(service_status)%>"><%=xml.pcdata(service_label(service_status))%></span>
-				</td>
-			</tr>
-			<tr class="tr">
-				<td class="td left"><%:Network protection%></td>
-				<td id="candy-status-protection" class="td left"><%=xml.pcdata(service_status == "running" and i18n.translate("Active") or (service_status == "starting" and i18n.translate("Applying") or (service_status == "stopping" and i18n.translate("Restoring normal routing") or i18n.translate("Normal routing"))))%></td>
-			</tr>
-			<tr class="tr">
-				<td class="td left"><%:Boot status%></td>
-				<td class="td left">
-					<% if enabled then %>
-						<span id="candy-status-boot" class="label notice"><%:Enabled%></span>
-					<% else %>
-						<span id="candy-status-boot" class="label"><%:Disabled%></span>
-					<% end %>
-				</td>
-			</tr>
-			<tr class="tr">
-				<td class="td left"><%:Candy version%></td>
-				<td id="candy-status-client-version" class="td left"><%=xml.pcdata(client_version)%></td>
-			</tr>
-			<tr class="tr">
-				<td class="td left"><%:Core version%></td>
-				<td id="candy-status-core-version" class="td left">-</td>
-			</tr>
-		</table>
+<div class="candy-section">
+	<div class="candy-section-head"><h3><%:Performance%></h3><a href="<%=luci.dispatcher.build_url('admin','services','candy','diagnostics')%>"><%:Open diagnostics%></a></div>
+	<div class="candy-summary-band">
+		<div class="candy-summary-item"><span><%:Online nodes%></span><strong id="candy-metric-online">0 / 0</strong><small><%:Ready for traffic%></small></div>
+		<div class="candy-summary-item"><span><%:Active connections%></span><strong id="candy-metric-flows">0</strong><small>TCP + UDP</small></div>
+		<div class="candy-summary-item"><span><%:Average RTT%></span><strong id="candy-metric-rtt">-</strong><small><%:Across reporting nodes%></small></div>
+		<div class="candy-summary-item"><span><%:RX / TX%></span><strong id="candy-metric-throughput">-</strong><small><%:Current aggregate throughput%></small></div>
 	</div>
 </div>
 
-<div class="cbi-map candy-overview-section">
-	<h3><%:Node status%></h3>
-	<div class="cbi-section candy-node-table-scroll">
-		<table class="table">
-			<thead>
-				<tr class="tr table-titles">
-					<th class="th"><%:Status%></th>
-					<th class="th"><%:Node%></th>
-					<th class="th"><%:Server%></th>
-					<th class="th"><%:Server version%></th>
-					<th class="th"><%:Wire protocol%></th>
-					<th class="th"><%:Line capabilities%><span class="candy-capability-legend"><%:Active / available%></span></th>
-					<th class="th"><%:Node groups%></th>
-					<th class="th"><%:Local RTT%></th>
-					<th class="th"><%:URL latency%></th>
-				</tr>
-			</thead>
-			<tbody id="candy-status-nodes">
-			<% if #nodes == 0 then %>
-				<tr class="tr">
-						<td class="td" colspan="9"><em><%:No node status available%></em></td>
-				</tr>
-			<% else %>
-				<% for _, node in ipairs(nodes) do node = type(node) == "table" and node or {} %>
-					<tr class="tr">
-							<td class="td" data-label="<%:Status%>">
-								<span class="node-dot <%=node_class(node.state)%>"></span>
-								<%=xml.pcdata(text_label(node.state))%>
-							</td>
-							<td class="td" data-label="<%:Node%>" title="<%=xml.pcdata(node.name ~= "" and node.name or node.id)%>"><span class="candy-cell-value"><%=xml.pcdata(node.name ~= "" and node.name or node.id)%></span></td>
-							<td class="td" data-label="<%:Server%>" title="<%=xml.pcdata(text_label(node.server))%>"><span class="candy-cell-value"><%=xml.pcdata(text_label(node.server))%></span></td>
-							<td class="td" data-label="<%:Server version%>"><%=xml.pcdata(text_label(node.server_version))%></td>
-							<td class="td" data-label="<%:Wire protocol%>"><%=xml.pcdata(node.protocol_version and tostring(node.protocol_version.major) .. "." .. tostring(node.protocol_version.minor) or "-")%></td>
-							<td class="td" data-label="<%:Line capabilities%>"><%=xml.pcdata("-")%></td>
-							<td class="td" data-label="<%:Node groups%>"><%=xml.pcdata(list_label(node.groups))%></td>
-							<td class="td" data-label="<%:Local RTT%>"><%=xml.pcdata(local_rtt_label(node))%></td>
-							<td class="td" data-label="<%:URL latency%>"><%=xml.pcdata(latency_label((node.url_test or {}).latency_ms))%></td>
-					</tr>
-				<% end %>
-			<% end %>
-			</tbody>
-		</table>
-	</div>
+<div class="candy-section">
+	<div class="candy-section-head"><h3><%:Node status%></h3><a href="<%=luci.dispatcher.build_url('admin','services','candy','nodes')%>"><%:Manage nodes%></a></div>
+	<div class="candy-node-scroll"><table class="table candy-node-table"><thead><tr class="tr table-titles"><th class="th"><%:Node%></th><th class="th"><%:Status%></th><th class="th"><%:Node groups%></th><th class="th">RTT</th><th class="th"><%:RX / TX%></th><th class="th"><%:Connections%></th><th class="th"><%:Latest result%></th></tr></thead><tbody id="candy-status-nodes"><tr class="tr"><td class="td candy-node-empty" colspan="7"><%:Loading%></td></tr></tbody></table></div>
 </div>
 
 <script type="text/javascript">
-var candyOverviewStatusUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'status_json')%>";
-var candyOverviewRequestGeneration = 0;
-var candyOverviewActiveRequest = null;
-var candyOverviewRefreshTimer = null;
-var candyOverviewLabels = {
-	running: <%=js_string(i18n.translate("Running"))%>,
-	starting: <%=js_string(i18n.translate("Starting"))%>,
-	stopping: <%=js_string(i18n.translate("Stopping"))%>,
-	stopped: <%=js_string(i18n.translate("Stopped"))%>,
-	protected: <%=js_string(i18n.translate("Active"))%>,
-	applying: <%=js_string(i18n.translate("Applying"))%>,
-	restoring: <%=js_string(i18n.translate("Restoring normal routing"))%>,
-	normal: <%=js_string(i18n.translate("Normal routing"))%>,
-	fault: <%=js_string(i18n.translate("Candy has stopped and normal network routing is active."))%>,
-	faultDetail: <%=js_string(i18n.translate("Open Diagnostics for the recorded reason and cleanup result."))%>,
-	enabled: <%=js_string(i18n.translate("Enabled"))%>,
-	disabled: <%=js_string(i18n.translate("Disabled"))%>,
-	noNodes: <%=js_string(i18n.translate("No node status available"))%>
-};
-function candyOverviewText(value) {
-	if (value === null || value === undefined || value === "") {
-		return "-";
-	}
-	return String(value);
-}
-
-function candyOverviewLatency(value) {
-	if (value === null || value === undefined || value === "") {
-		return "-";
-	}
-	return String(value) + " ms";
-}
-
-function candyOverviewLocalRtt(node) {
-	var passive = (node && node.passive) || {};
-	var localStatus = passive.local || {};
-	var micros = localStatus.smoothed_rtt_micros;
-	var value;
-	if (micros === null || micros === undefined || micros === "") {
-		return "-";
-	}
-	value = Number(micros) / 1000;
-	return isFinite(value) ? value.toFixed(2) + " ms" : "-";
-}
-
-function candyOverviewList(value) {
-	if (Array.isArray(value)) {
-		return value.length ? value.join(", ") : "-";
-	}
-	return candyOverviewText(value);
-}
-
-function candyOverviewNodeClass(state) {
-	if (state === null || state === undefined || state === "") {
-		return "idle";
-	}
-	if (state === "running" || state === "ready" || state === "ok") {
-		return "ok";
-	}
-	if (state === "starting" || state === "stopping" || state === "checking" || state === "connecting" || state === "reconnecting") {
-		return "warn";
-	}
-	if (state === "standby" || state === "disabled" || state === "unused" || state === "unknown") {
-		return "idle";
-	}
-	return "bad";
-}
-
-function candyOverviewSetText(id, value) {
-	var node = document.getElementById(id);
-	if (node) {
-		node.textContent = value;
-	}
-}
-
-function candyOverviewSetService(status) {
-	var node = document.getElementById("candy-status-service");
-	var value = status || "stopped";
-	if (!node) {
-		return;
-	}
-	node.textContent = candyOverviewLabels[value] || candyOverviewLabels.stopped;
-	node.className = value === "running" ? "label notice" : ((value === "starting" || value === "stopping") ? "label warning" : "label");
-}
-
-function candyOverviewSetBoot(enabled) {
-	var node = document.getElementById("candy-status-boot");
-	if (!node) {
-		return;
-	}
-	node.textContent = enabled ? candyOverviewLabels.enabled : candyOverviewLabels.disabled;
-	node.className = enabled ? "label notice" : "label";
-}
-
-function candyOverviewSetProtection(status) {
-	var node = document.getElementById("candy-status-protection");
-	if (!node) return;
-	if (status === "running") node.textContent = candyOverviewLabels.protected;
-	else if (status === "starting") node.textContent = candyOverviewLabels.applying;
-	else if (status === "stopping") node.textContent = candyOverviewLabels.restoring;
-	else node.textContent = candyOverviewLabels.normal;
-}
-
-function candyOverviewRenderFault(fault) {
-	var banner = document.getElementById("candy-status-fault");
-	if (!banner) return;
-	if (fault && fault.state === "active") {
-		banner.style.display = "";
-	} else {
-		banner.style.display = "none";
-	}
-}
-
-function candyOverviewClientVersion(data) {
-	var version = candyOverviewText(data.version);
-	var release = candyOverviewText(data.release);
-	if (version === "-" || release === "-" || /-r[0-9]+$/.test(version)) {
-		return version;
-	}
-	return version + "-r" + release;
-}
-
-var candyOverviewFeatureEffects = {
-	udp_multiplier: <%=js_string(i18n.translate("Sends controlled redundant UDP copies on lossy links to reduce real-time packet loss."))%>,
-	udp_fec: <%=js_string(i18n.translate("Reconstructs a lost fragment from an XOR repair shard without waiting for retransmission."))%>,
-	fragmented_datagram: <%=js_string(i18n.translate("Splits oversized UDP payloads into QUIC datagrams and reassembles them at the peer."))%>,
-	metrics: <%=js_string(i18n.translate("Exchanges trusted link measurements to support transport decisions and diagnostics."))%>,
-	early_data: <%=js_string(i18n.translate("Starts eligible data streams while session authorization is in flight to reduce setup delay."))%>,
-	adaptive_policy: <%=js_string(i18n.translate("Adjusts authorized transport policy from current loss, latency, and queue observations."))%>,
-	server_info: <%=js_string(i18n.translate("Publishes the authenticated server build and negotiated capability information."))%>,
-	stream_udp_fallback: <%=js_string(i18n.translate("Carries UDP payloads on a reliable QUIC stream when native datagrams are unavailable."))%>,
-	congestion_probe: <%=js_string(i18n.translate("Runs a bounded congestion comparison through the authenticated Candy QUIC data plane."))%>,
-	tls_ech: <%=js_string(i18n.translate("Encrypts the TLS ClientHello server name when ECH is configured."))%>
-};
-
-var candyOverviewCapabilityTooltip = null;
-var candyOverviewFocusedCapabilityId = null;
-
-function candyOverviewHideCapabilityTooltip() {
-	if (candyOverviewCapabilityTooltip) candyOverviewCapabilityTooltip.style.display = "none";
-}
-
-function candyOverviewShowCapabilityTooltip(badge) {
-	if (!candyOverviewCapabilityTooltip) {
-		candyOverviewCapabilityTooltip = document.createElement("div");
-		candyOverviewCapabilityTooltip.className = "candy-capability-tooltip";
-		candyOverviewCapabilityTooltip.setAttribute("role", "tooltip");
-		document.body.appendChild(candyOverviewCapabilityTooltip);
-	}
-	candyOverviewCapabilityTooltip.textContent = badge.getAttribute("data-tooltip") || "";
-	candyOverviewCapabilityTooltip.style.display = "block";
-	var badgeRect = badge.getBoundingClientRect(), tooltipRect = candyOverviewCapabilityTooltip.getBoundingClientRect();
-	var left = Math.max(8, Math.min(window.innerWidth - tooltipRect.width - 8, badgeRect.left));
-	var top = badgeRect.bottom + 7;
-	if (top + tooltipRect.height > window.innerHeight - 8) top = badgeRect.top - tooltipRect.height - 7;
-	candyOverviewCapabilityTooltip.style.left = left + "px";
-	candyOverviewCapabilityTooltip.style.top = Math.max(8, top) + "px";
-}
-
-function candyOverviewCapabilityTags(node, manifest) {
-	var definitions = (manifest && manifest.core && manifest.core.features) || [], features = ((node || {}).passive || {}).features || {}, tags = [];
-	definitions.forEach(function(definition) {
-		var value = features[definition.status_key || definition.id] || {};
-		if (definition.protocol_bit !== null && definition.protocol_bit !== undefined && value.supported === true && value.authorized === true) {
-			tags.push({
-				id: definition.id,
-				label: definition.short_name || definition.id,
-				name: definition.name || definition.short_name || definition.id,
-				description: candyOverviewFeatureEffects[definition.id] || definition["description"] || "",
-				active: value.active === true
-			});
-		}
-	});
-	return tags;
-}
-
-var candyOverviewCurrentManifest = {};
-
-function candyOverviewAppendCell(row, value, label) {
-	var cell = document.createElement("td");
-	cell.className = "td";
-	cell.textContent = value;
-	cell.title = value;
-	if (label) cell.setAttribute("data-label", label);
-	row.appendChild(cell);
-	return cell;
-}
-
-function candyOverviewRenderNodes(nodes) {
-	var body = document.getElementById("candy-status-nodes");
-	var row, cell, dot, text;
-	if (!body) {
-		return;
-	}
-	candyOverviewHideCapabilityTooltip();
-	body.textContent = "";
-	if (!nodes || !nodes.length) {
-		row = document.createElement("tr");
-		row.className = "tr";
-		cell = document.createElement("td");
-		cell.className = "td";
-		cell.colSpan = 9;
-		text = document.createElement("em");
-		text.textContent = candyOverviewLabels.noNodes;
-		cell.appendChild(text);
-		row.appendChild(cell);
-		body.appendChild(row);
-		return;
-	}
-	nodes.forEach(function(node) {
-		row = document.createElement("tr");
-		row.className = "tr";
-		cell = candyOverviewAppendCell(row, "", <%=js_string(i18n.translate("Status"))%>);
-		dot = document.createElement("span");
-		dot.className = "node-dot " + candyOverviewNodeClass(node.state);
-		cell.appendChild(dot);
-		cell.appendChild(document.createTextNode(candyOverviewText(node.state)));
-		candyOverviewAppendCell(row, candyOverviewText(node.name || node.id), <%=js_string(i18n.translate("Node"))%>);
-		candyOverviewAppendCell(row, candyOverviewText(node.server), <%=js_string(i18n.translate("Server"))%>);
-		candyOverviewAppendCell(row, candyOverviewText(node.server_version), <%=js_string(i18n.translate("Server version"))%>);
-		var protocol = node.protocol_version || {}, protocolText = protocol.major === undefined ? "-" : protocol.major + "." + protocol.minor;
-		candyOverviewAppendCell(row, protocolText, <%=js_string(i18n.translate("Wire protocol"))%>);
-		cell = candyOverviewAppendCell(row, "", <%=js_string(i18n.translate("Line capabilities"))%>);
-		var tags = candyOverviewCapabilityTags(node, candyOverviewCurrentManifest);
-		if (!tags.length) { cell.textContent = "-"; cell.className += " candy-capability-empty"; }
-		tags.forEach(function(tag) {
-			var badge = document.createElement("span");
-			var state = tag.active ? <%=js_string(i18n.translate("Active"))%> : <%=js_string(i18n.translate("Available"))%>;
-			badge.className = "candy-capability-tag" + (tag.active ? " active" : "");
-			badge.textContent = tag.label;
-			badge.title = tag.name + " · " + state + (tag.description ? "\n" + tag.description : "");
-			badge.setAttribute("data-tooltip", badge.title);
-			badge.setAttribute("data-capability-id", tag.id);
-			badge.setAttribute("aria-label", badge.title);
-			badge.tabIndex = 0;
-			badge.addEventListener("mouseenter", function() { candyOverviewShowCapabilityTooltip(badge); });
-			badge.addEventListener("mouseleave", candyOverviewHideCapabilityTooltip);
-			badge.addEventListener("focus", function() { candyOverviewFocusedCapabilityId = tag.id; candyOverviewShowCapabilityTooltip(badge); });
-			badge.addEventListener("blur", function() { if (candyOverviewFocusedCapabilityId === tag.id) candyOverviewFocusedCapabilityId = null; candyOverviewHideCapabilityTooltip(); });
-			cell.appendChild(badge);
-			if (candyOverviewFocusedCapabilityId === tag.id && typeof badge.focus === "function") badge.focus();
+(function() {
+	var url="<%=luci.dispatcher.build_url('admin','services','candy','status_json')%>", timer=null, request=null, generation=0;
+	var labels={ running:<%=js_string(i18n.translate("Running"))%>, starting:<%=js_string(i18n.translate("Starting"))%>, stopping:<%=js_string(i18n.translate("Stopping"))%>, stopped:<%=js_string(i18n.translate("Stopped"))%>, enabled:<%=js_string(i18n.translate("Enabled at boot"))%>, disabled:<%=js_string(i18n.translate("Disabled at boot"))%>, active:<%=js_string(i18n.translate("Active"))%>, inactive:<%=js_string(i18n.translate("Inactive"))%>, normal:<%=js_string(i18n.translate("Normal routing"))%>, rules:<%=js_string(i18n.translate("rules"))%>, groups:<%=js_string(i18n.translate("groups"))%>, nodes:<%=js_string(i18n.translate("nodes"))%>, noNodes:<%=js_string(i18n.translate("No node status available"))%>, none:<%=js_string(i18n.translate("No recent errors"))%> };
+	function text(value) { return value===null||value===undefined||value===""?"-":String(value); }
+	function set(id,value) { var node=document.getElementById(id); if(node) node.textContent=text(value); }
+	function stateClass(value) { if(value==="running"||value==="ready"||value==="ok"||value==="registered") return "ok"; if(value==="starting"||value==="stopping"||value==="checking"||value==="connecting"||value==="reconnecting"||value==="join-pending") return "warn"; return value==="disabled"||value==="unused"||value==="unknown"?"":"bad"; }
+	function stateLabel(value) { return labels[value]||text(value); }
+	function rate(value) { var n=Number(value); if(value===null||value===undefined||!isFinite(n)) return "-"; if(n>=1000000000) return (n/1000000000).toFixed(1)+" Gbps"; if(n>=1000000) return (n/1000000).toFixed(1)+" Mbps"; if(n>=1000) return (n/1000).toFixed(1)+" Kbps"; return n+" bps"; }
+	function rtt(node) { var n=Number((((node||{}).passive||{}).local||{}).smoothed_rtt_micros); return isFinite(n)?(n/1000).toFixed(1)+" ms":"-"; }
+	function appendCell(row,value,label,className) { var cell=document.createElement("td"); cell.className="td"+(className?" "+className:""); cell.setAttribute("data-label",label); cell.textContent=value; row.appendChild(cell); return cell; }
+	function renderNodes(nodes) {
+		var body=document.getElementById("candy-status-nodes"), online=0, flows=0, rttTotal=0, rttCount=0, rxTotal=0, txTotal=0, rxCount=0, txCount=0; body.textContent="";
+		if(!nodes.length){var er=document.createElement("tr"),ec=document.createElement("td");er.className="tr";ec.className="td candy-node-empty";ec.colSpan=7;ec.textContent=labels.noNodes;er.appendChild(ec);body.appendChild(er);}
+		nodes.forEach(function(node){var passive=node.passive||{},local=passive.local||{},peer=passive.peer||{},tcp=Number(node.active_tcp_flows)||0,udp=Number(node.active_udp_flows)||0,rx=peer.goodput_bps_rx,tx=peer.goodput_bps_tx,micros=Number(local.smoothed_rtt_micros),error=node.last_error||(node.url_test||{}).error||""; if(stateClass(node.state)==="ok")online++;flows+=tcp+udp;if(isFinite(micros)){rttTotal+=micros;rttCount++;}if(rx!==null&&rx!==undefined&&isFinite(Number(rx))){rxTotal+=Number(rx);rxCount++;}if(tx!==null&&tx!==undefined&&isFinite(Number(tx))){txTotal+=Number(tx);txCount++;}
+			var row=document.createElement("tr"),cell,dot;row.className="tr";cell=appendCell(row,text(node.name||node.id),<%=js_string(i18n.translate("Node"))%>);cell.className+=" candy-node-name";cell=appendCell(row,"",<%=js_string(i18n.translate("Status"))%>);dot=document.createElement("span");dot.className="candy-status-dot "+stateClass(node.state);cell.appendChild(dot);cell.appendChild(document.createTextNode(stateLabel(node.state)));appendCell(row,Array.isArray(node.groups)&&node.groups.length?node.groups.join(", "):"-",<%=js_string(i18n.translate("Node groups"))%>);appendCell(row,rtt(node),"RTT");appendCell(row,rate(rx)+" / "+rate(tx),<%=js_string(i18n.translate("RX / TX"))%>);appendCell(row,(tcp+udp)+" ("+tcp+" / "+udp+")",<%=js_string(i18n.translate("Connections"))%>);appendCell(row,error||labels.none,<%=js_string(i18n.translate("Latest result"))%>,error?"candy-node-error":"");body.appendChild(row);
 		});
-		candyOverviewAppendCell(row, candyOverviewList(node.groups), <%=js_string(i18n.translate("Node groups"))%>);
-		candyOverviewAppendCell(row, candyOverviewLocalRtt(node), <%=js_string(i18n.translate("Local RTT"))%>);
-		candyOverviewAppendCell(row, candyOverviewLatency((node.url_test || {}).latency_ms), <%=js_string(i18n.translate("URL latency"))%>);
-		body.appendChild(row);
-	});
-}
-
-function refreshCandyOverviewStatus() {
-	var generation = ++candyOverviewRequestGeneration;
-	var xhr = new XMLHttpRequest();
-	if (candyOverviewRefreshTimer !== null) {
-		clearTimeout(candyOverviewRefreshTimer);
-		candyOverviewRefreshTimer = null;
+		set("candy-metric-online",online+" / "+nodes.length);set("candy-metric-flows",flows);set("candy-metric-rtt",rttCount?(rttTotal/rttCount/1000).toFixed(1)+" ms":"-");set("candy-metric-throughput",(rxCount?rate(rxTotal):"-")+" / "+(txCount?rate(txTotal):"-"));
 	}
-	if (candyOverviewActiveRequest !== null) {
-		try {
-			candyOverviewActiveRequest.abort();
-		} catch (e) {}
-	}
-	candyOverviewActiveRequest = xhr;
-	xhr.open("GET", candyOverviewStatusUrl + "?_=" + Date.now(), true);
-	xhr.onreadystatechange = function() {
-		var data;
-		if (xhr.readyState !== 4 || generation !== candyOverviewRequestGeneration) {
-			return;
-		}
-		if (candyOverviewActiveRequest === xhr) {
-			candyOverviewActiveRequest = null;
-		}
-		candyOverviewRefreshTimer = setTimeout(refreshCandyOverviewStatus, 2000);
-		if (xhr.status !== 200) {
-			return;
-		}
-		try {
-			data = JSON.parse(xhr.responseText || "{}");
-		} catch (e) {
-			return;
-		}
-		candyOverviewSetService(data.service && data.service.status);
-		candyOverviewSetBoot(data.service && data.service.enabled);
-		candyOverviewSetProtection(data.service && data.service.status);
-		candyOverviewRenderFault(data.fault);
-		candyOverviewSetText("candy-status-client-version", candyOverviewClientVersion(data));
-		candyOverviewSetText("candy-status-core-version", data.core && data.core.current_version);
-		candyOverviewCurrentManifest = data.core && data.core.current_manifest;
-		candyOverviewRenderNodes(data.nodes || []);
-	};
-	try {
-		xhr.send(null);
-	} catch (e) {
-		if (generation === candyOverviewRequestGeneration) {
-			candyOverviewActiveRequest = null;
-			candyOverviewRefreshTimer = setTimeout(refreshCandyOverviewStatus, 2000);
-		}
-	}
-}
-
-refreshCandyOverviewStatus();
+	function render(data) { var service=(data.service||{}).status||"stopped",sdwan=data.sdwan||{},overview=data.overview||{},runtime=data.runtime||{},serviceNode=document.getElementById("candy-status-service"); serviceNode.textContent="";var dot=document.createElement("span");dot.className="candy-status-dot "+stateClass(service);serviceNode.appendChild(dot);serviceNode.appendChild(document.createTextNode(stateLabel(service)));set("candy-status-boot",(data.service||{}).enabled?labels.enabled:labels.disabled);set("candy-status-core",data.core&&data.core.current_version);var version=text(data.version);if(data.release&&version!=="-"&&!/-r\d+$/.test(version))version+="-r"+data.release;set("candy-status-version",version);set("candy-status-protection",service==="running"?labels.active:labels.normal);set("candy-status-runtime-mode",runtime.mode);set("candy-status-sdwan",stateLabel((sdwan.runtime||{}).state||sdwan.phase));set("candy-status-sdwan-detail",(sdwan.site&&sdwan.site.name)||(sdwan.segment&&sdwan.segment.name)||"-");set("candy-feature-nodes",text(overview.configured_nodes)+" "+labels.nodes+" / "+text(overview.groups)+" "+labels.groups);set("candy-feature-policy",text(overview.rules)+" "+labels.rules);set("candy-feature-dns",overview.dns_capture?labels.active:labels.inactive);set("candy-feature-sdwan",sdwan.active?labels.active:labels.inactive);var fault=document.getElementById("candy-status-fault");fault.style.display=data.fault&&data.fault.state==="active"?"":"none";if(data.fault&&data.fault.detail)set("candy-fault-detail",data.fault.detail);renderNodes(data.nodes||[]); }
+	function refresh(){var currentGeneration=++generation,xhr=new XMLHttpRequest();if(timer!==null){clearTimeout(timer);timer=null;}if(request){try{request.abort();}catch(error){}}request=xhr;xhr.open("GET",url+"?_="+Date.now(),true);xhr.onreadystatechange=function(){if(xhr.readyState!==4||currentGeneration!==generation)return;if(request===xhr)request=null;if(xhr.status===200){try{render(JSON.parse(xhr.responseText||"{}"));}catch(error){}}timer=setTimeout(refresh,2000);};xhr.send(null);}
+	refresh();
+})();
 </script>
-
 <%+footer%>

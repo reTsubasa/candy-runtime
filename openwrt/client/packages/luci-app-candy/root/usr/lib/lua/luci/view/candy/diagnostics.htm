@@ -1,6 +1,6 @@
 <%+header%>
 
-<h2 name="content"><%:Diagnostics%></h2>
+<div class="candy-diagnostics-head"><div><h2 name="content"><%:Diagnostics%></h2><p><%:Link health, node telemetry, performance trends, and recovery state.%></p></div><a class="cbi-button cbi-button-action" href="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'logs')%>"><%:Open logs%></a></div>
 
 <%
 local jsonc = require "luci.jsonc"
@@ -332,6 +332,13 @@ end
 .candy-feature-matrix .table { min-width: 62em; table-layout: fixed; }
 .candy-feature-matrix .table th, .candy-feature-matrix .table td { vertical-align: middle; overflow-wrap: anywhere; }
 .candy-feature-matrix .table th { white-space: normal; }
+.candy-diagnostics-head { display:flex; align-items:flex-start; justify-content:space-between; gap:1em; margin-bottom:1em; }
+.candy-diagnostics-head h2 { margin:0; }
+.candy-diagnostics-head p { margin:.35em 0 0; color:#4e5969; line-height:1.5; }
+.candy-tech-details { margin-top:1.5em; }
+.candy-tech-details > summary { cursor:pointer; padding:.8em 0; border-top:1px solid #e5e6eb; border-bottom:1px solid #e5e6eb; font-weight:600; }
+.candy-tech-details > p { color:#4e5969; line-height:1.5; }
+@media (max-width:560px) { .candy-diagnostics-head { flex-direction:column; } }
 .candy-feature-status {
   display: inline-block; padding: .15em .45em; border: 1px solid var(--arcogray-4);
   border-radius: 3px; line-height: 1.25; white-space: nowrap; font-size: .88em;
@@ -434,12 +441,13 @@ end
 	</div>
 </div>
 
-<div id="candy-feature-matrix-section" class="cbi-map">
-	<h3><%:Per-node protocol capability matrix%></h3>
+<details id="candy-feature-matrix-section" class="cbi-map candy-tech-details">
+	<summary><%:Protocol capability details%></summary>
+	<p><%:Negotiation and authorization evidence for advanced compatibility troubleshooting.%></p>
 	<div class="cbi-section candy-feature-matrix">
 		<table class="table"><colgroup><col style="width:22%"><col style="width:11%"><col style="width:14%"><col style="width:13%"><col style="width:13%"><col style="width:27%"></colgroup><thead><tr class="tr table-titles"><th class="th"><%:Node / server Core%></th><th class="th"><%:Wire protocol%></th><th class="th"><%:Feature%></th><th class="th"><%:Negotiation%></th><th class="th"><%:Authorization%></th><th class="th"><%:Runtime evidence%></th></tr></thead><tbody id="candy-diagnostics-feature-matrix"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table>
 	</div>
-</div>
+</details>
 
 <div class="cbi-map">
 	<h3><%:Service resources%></h3>

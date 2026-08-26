@@ -13,6 +13,10 @@ local SDWAN_RUNTIME = "/usr/libexec/candy-sdwan-runtime"
 local SDWAN_BOOTSTRAP_ROOT = os.getenv("CANDY_SDWAN_BOOTSTRAP_ROOT") or "/tmp/candy-sdwan-bootstrap"
 local MAX_SDWAN_BOOTSTRAP_BYTES = 16 * 1024
 local SERVICE_LOG_FILE = os.getenv("CANDY_SERVICE_LOG_FILE") or "/tmp/candy.log"
+local TRAFFIC_LOG_FILE = "/tmp/candy-traffic.log"
+local LOG_HISTORY_GENERATIONS = 5
+local LOG_READ_LIMIT = 128 * 1024
+local LOG_ENTRY_LIMIT = 500
 local FAULT_STATUS_FILE = "/var/lib/candy/runtime-fault.json"
 local MAX_FAULT_STATUS_BYTES = 16384
 local CONGESTION_TEST_LOCK_DIR = "/tmp/candy-congestion-test.lock"
@@ -202,8 +206,8 @@ local function read_sdwan_status(_uci)
 		if kind == "direct" or kind == "relay" then result.path = { kind = kind, state = safe_string(status.path.state, 32) or "unavailable" } end
 	end
 	if type(status.egress) == "table" then
-		result.egress["local"] = safe_string(status.egress["local"], 128)
-		result.egress.remote = safe_string(status.egress.remote, 128)
+		result.egress["local"] = safe_identity_object(status.egress["local"])
+		result.egress.remote = safe_identity_object(status.egress.remote)
 	end
 	if type(status.dns) == "table" then result.dns.state = safe_string(status.dns.state, 32) or "unavailable" end
 	return result
@@ -585,32 +589,32 @@ function index()
 	page = entry({"admin", "services", "candy", "overview"}, template("candy/status"), _("Overview"), 10)
 	page.leaf = true
 
-	page = entry({"admin", "services", "candy", "sdwan"}, template("candy/sdwan"), _("SD-WAN"), 15)
+	page = entry({"admin", "services", "candy", "nodes"}, cbi("candy/nodes"), _("Nodes"), 20)
 	page.leaf = true
 
-	page = entry({"admin", "services", "candy", "traffic"}, template("candy/rules"), _("Policy"), 20)
+	page = entry({"admin", "services", "candy", "traffic"}, template("candy/rules"), _("Policy"), 30)
 	page.leaf = true
 
-	page = entry({"admin", "services", "candy", "settings"}, template("candy/settings"), _("Settings"), 30)
+	page = entry({"admin", "services", "candy", "dns_geo"}, cbi("candy/dns"), _("DNS"), 40)
 	page.leaf = true
 
-	page = entry({"admin", "services", "candy", "diagnostics"}, template("candy/diagnostics"), _("Diagnostics"), 40)
+	page = entry({"admin", "services", "candy", "sdwan"}, template("candy/sdwan"), _("SD-WAN"), 50)
 	page.leaf = true
 
-	-- Preserve existing bookmarks without exposing implementation pages as top-level menu items.
-	page = entry({"admin", "services", "candy", "nodes"}, cbi("candy/nodes"), nil)
+	page = entry({"admin", "services", "candy", "logs"}, template("candy/log"), _("Logs"), 60)
 	page.leaf = true
 
-	page = entry({"admin", "services", "candy", "dns_geo"}, cbi("candy/dns"), nil)
+	page = entry({"admin", "services", "candy", "diagnostics"}, template("candy/diagnostics"), _("Diagnostics"), 70)
 	page.leaf = true
 
+	page = entry({"admin", "services", "candy", "settings"}, template("candy/settings"), _("System"), 80)
+	page.leaf = true
+
+	-- System detail routes remain bookmark-compatible and are reached from System.
 	page = entry({"admin", "services", "candy", "advanced"}, cbi("candy/advanced"), nil)
 	page.leaf = true
 
 	page = entry({"admin", "services", "candy", "core"}, template("candy/core"), nil)
-	page.leaf = true
-
-	page = entry({"admin", "services", "candy", "logs"}, template("candy/log"), nil)
 	page.leaf = true
 
 	entry({"admin", "services", "candy", "action"}, call("action_service")).leaf = true
@@ -618,6 +622,7 @@ function index()
 	entry({"admin", "services", "candy", "geo_update"}, call("action_geo_update")).leaf = true
 	entry({"admin", "services", "candy", "gfwlist_update"}, call("action_gfwlist_update")).leaf = true
 	entry({"admin", "services", "candy", "traffic_log_active"}, call("action_traffic_log_active")).leaf = true
+	entry({"admin", "services", "candy", "logs_json"}, call("action_logs_json")).leaf = true
 	entry({"admin", "services", "candy", "rules_import"}, call("action_rules_import")).leaf = true
 	entry({"admin", "services", "candy", "rules_export"}, call("action_rules_export")).leaf = true
 	entry({"admin", "services", "candy", "status_json"}, call("action_status_json")).leaf = true
@@ -1069,6 +1074,98 @@ function action_traffic_log_active()
 	luci.http.write(table.concat(out, "\n"))
 end
 
+local function read_log_tail(path)
+	local handle = io.open(path, "r")
+	if not handle then return "" end
+	local size = handle:seek("end") or 0
+	local offset = math.max(0, size - LOG_READ_LIMIT)
+	handle:seek("set", offset)
+	local text = handle:read("*a") or ""
+	handle:close()
+	if offset > 0 then
+		local newline = text:find("\n", 1, true)
+		text = newline and text:sub(newline + 1) or ""
+	end
+	return text
+end
+
+local function read_log_history(base)
+	local parts = {}
+	for generation = LOG_HISTORY_GENERATIONS, 1, -1 do
+		local text = read_log_tail(base .. "." .. generation)
+		if text ~= "" then parts[#parts + 1] = text end
+	end
+	local current = read_log_tail(base)
+	if current ~= "" then parts[#parts + 1] = current end
+	return table.concat(parts, "\n")
+end
+
+local function log_level(line)
+	local lower = line:lower()
+	local explicit = lower:match("level[=:]%s*([a-z]+)") or lower:match("%[([a-z]+)%]")
+	if explicit == "err" then explicit = "error" end
+	if explicit == "warning" then explicit = "warn" end
+	if explicit == "error" or explicit == "warn" or explicit == "info" or explicit == "debug" then return explicit end
+	if lower:find("failed", 1, true) or lower:find("error", 1, true) or lower:find("fatal", 1, true) then return "error" end
+	if lower:find("warning", 1, true) or lower:find("warn", 1, true) then return "warn" end
+	return "info"
+end
+
+local function log_timestamp(line)
+	return line:match("^(%d%d%d%d%-%d%d%-%d%d[T ]%d%d:%d%d:%d%dZ?)")
+		or line:match("^(%a%a%a%s+%d+%s+%d%d:%d%d:%d%d)")
+		or ""
+end
+
+local function log_field(line, key)
+	return line:match("[%s,]" .. key .. "=([^%s,]+)") or line:match("^" .. key .. "=([^%s,]+)")
+end
+
+local function append_log_entries(entries, source, text, system_only)
+	for line in (text or ""):gmatch("[^\r\n]+") do
+		if not system_only or line:lower():find("candy", 1, true) then
+			local protocol = source == "traffic" and line:match("^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%dZ %[(%u+)%]") or nil
+			if source ~= "traffic" or protocol == "TCP" or protocol == "UDP" then
+				local level = log_level(line)
+				local event = protocol or log_field(line, "event") or log_field(line, "operation") or source
+				local result = log_field(line, "result") or log_field(line, "status")
+				if not result then result = level == "error" and "failed" or (source == "traffic" and "routed" or "recorded") end
+				entries[#entries + 1] = {
+					timestamp = log_timestamp(line),
+					source = source,
+					level = level,
+					event = event,
+					result = result,
+					detail = line
+				}
+			end
+		end
+	end
+end
+
+function action_logs_json()
+	local jsonc = require "luci.jsonc"
+	local entries = {}
+	append_log_entries(entries, "runtime", read_log_history(SERVICE_LOG_FILE))
+	append_log_entries(entries, "core", read_log_tail("/tmp/candy-core-manager.log"))
+	append_log_entries(entries, "update", read_log_tail("/tmp/candy-update-manager.log"))
+	append_log_entries(entries, "sdwan", read_log_tail("/etc/candy/sdwan/events-v1.log"))
+	append_log_entries(entries, "traffic", read_log_history(TRAFFIC_LOG_FILE))
+	local _, system_log = process.capture({ "/sbin/logread", "-l", "250" }, { timeout = 3 })
+	append_log_entries(entries, "system", system_log or "", true)
+	for index, entry in ipairs(entries) do entry.sequence = index end
+	table.sort(entries, function(a, b)
+		if a.timestamp ~= b.timestamp then return a.timestamp > b.timestamp end
+		return a.sequence > b.sequence
+	end)
+	while #entries > LOG_ENTRY_LIMIT do table.remove(entries) end
+	for _, entry in ipairs(entries) do entry.sequence = nil end
+	luci.http.header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	luci.http.header("Pragma", "no-cache")
+	luci.http.prepare_content("application/json")
+	luci.http.write(jsonc.stringify({ schema_version = 1, entries = entries }))
+end
+
 function action_status_json()
 	local uci = require "luci.model.uci".cursor()
 	local jsonc = require "luci.jsonc"
@@ -1097,6 +1194,17 @@ function action_status_json()
 	status.release = status.release or "1"
 	status.nodes = status.nodes or {}
 	status.diagnostics = status.diagnostics or {}
+	local node_count, group_count, rule_count = 0, 0, 0
+	uci:foreach("candy", "node", function() node_count = node_count + 1 end)
+	uci:foreach("candy", "group", function() group_count = group_count + 1 end)
+	uci:foreach("candy", "rule", function() rule_count = rule_count + 1 end)
+	status.overview = {
+		configured_nodes = node_count,
+		groups = group_count,
+		rules = rule_count,
+		dns_capture = uci:get("candy", "client", "dns_capture_lan") == "1",
+		tcp_redirect = uci:get("candy", "client", "redirect_tcp") ~= "0"
+	}
 
 	luci.http.header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 	luci.http.header("Pragma", "no-cache")

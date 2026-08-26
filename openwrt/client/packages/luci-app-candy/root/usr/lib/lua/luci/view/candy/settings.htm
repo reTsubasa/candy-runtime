@@ -1,12 +1,17 @@
 <%+header%>
 
-<h2 name="content"><%:Settings%></h2>
-<p><%:Manage ordinary Candy nodes, DNS policy, advanced Runtime controls, and software lifecycle from one place.%></p>
+<div class="candy-system-head">
+	<div><h2 name="content"><%:System%></h2><p><%:Manage advanced Runtime controls and the installed Candy software.%></p></div>
+	<a class="cbi-button cbi-button-link" href="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'overview')%>"><%:Back to overview%></a>
+</div>
 
 <style>
 .candy-settings-list {
 	border-top: 1px solid #e5e6eb;
 }
+.candy-system-head { display:flex; align-items:flex-start; justify-content:space-between; gap:1em; margin-bottom:1em; }
+.candy-system-head h2 { margin:0; }
+.candy-system-head p { margin:.35em 0 0; color:#4e5969; }
 .candy-settings-row {
 	display: grid;
 	grid-template-columns: minmax(9em, .7fr) minmax(0, 1.8fr) auto;
@@ -39,6 +44,7 @@
 	font-weight: 400;
 }
 @media (max-width: 640px) {
+	.candy-system-head { flex-direction:column; }
 	.candy-settings-row {
 		grid-template-columns: minmax(0, 1fr) auto;
 		gap: .35em .75em;
@@ -56,16 +62,6 @@
 
 <div class="cbi-map">
 	<div class="cbi-section candy-settings-list">
-		<a class="candy-settings-row" href="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'nodes')%>">
-			<strong><%:Nodes and groups%></strong>
-			<span><%:Configure ordinary Candy server endpoints and the groups selected by traffic policy.%></span>
-			<b aria-hidden="true">&#8250;</b>
-		</a>
-		<a class="candy-settings-row" href="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'dns_geo')%>">
-			<strong><%:DNS and routing%></strong>
-			<span><%:Configure DNS capture, split resolution, China routing, and domain resolution policy.%></span>
-			<b aria-hidden="true">&#8250;</b>
-		</a>
 		<a class="candy-settings-row" href="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'advanced')%>">
 			<strong><%:Advanced settings%></strong>
 			<span><%:Tune expert DNS providers, congestion control, and transparent proxy behavior.%></span>

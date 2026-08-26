@@ -9,8 +9,7 @@ local function js_string(value)
 end
 %>
 
-<h2 name="content"><%:Updates%></h2>
-<p><%:Candy only installs releases listed by the signed stable catalog. Update checks and installations are manual.%></p>
+<div class="candy-system-detail-head"><div><h2 name="content"><%:Updates%></h2><p><%:Candy only installs releases listed by the signed stable catalog. Update checks and installations are manual.%></p></div><a class="cbi-button cbi-button-link" href="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'settings')%>"><%:Back to System%></a></div>
 
 <style>
 .candy-update-toolbar { display: flex; flex-wrap: wrap; gap: .6em; align-items: center; }
@@ -39,6 +38,10 @@ end
 .candy-update-upload-status { flex-basis: 100%; margin: 0; }
 .candy-update-upload-status.error { color: #c62828; }
 .candy-update-upload-status.success { color: #2e7d32; }
+.candy-system-detail-head { display:flex; align-items:flex-start; justify-content:space-between; gap:1em; margin-bottom:1em; }
+.candy-system-detail-head h2 { margin:0; }
+.candy-system-detail-head p { margin:.35em 0 0; }
+@media (max-width:560px) { .candy-system-detail-head { flex-direction:column; } }
 </style>
 
 <div id="candy-update-operation" class="candy-update-operation" style="display:none"></div>

@@ -1,11 +1,13 @@
 local m, s, o
 local process = require "luci.candy.process"
+local dispatcher = require "luci.dispatcher"
 
 local BOOTSTRAP_RESOLVERS_DEFAULT = "system,223.5.5.5:53"
 local GFWLIST_DEFAULT_URL = "https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt"
 local GEO_DEFAULT_URL = "https://gaoyifan.github.io/china-operator-ip/china46.txt"
 
-m = Map("candy", translate("Advanced"), translate("Expert DNS, provider, congestion-control, and transparent proxy controls."))
+m = Map("candy", translate("Advanced"), translate("Expert DNS, provider, congestion-control, and transparent proxy controls.") ..
+	' <a href="' .. dispatcher.build_url("admin", "services", "candy", "settings") .. '">' .. translate("Back to System") .. '</a>')
 
 s = m:section(NamedSection, "client", "candy", translate("DNS expert settings"))
 s.addremove = false
