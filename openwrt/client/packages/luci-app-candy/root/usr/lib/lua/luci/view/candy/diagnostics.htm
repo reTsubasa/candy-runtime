@@ -503,7 +503,9 @@ var candyDiagnosticsLabels = {
 	negotiated: <%=js_string(i18n.translate("Negotiated"))%>, notNegotiated: <%=js_string(i18n.translate("Not negotiated"))%>,
 	authorized: <%=js_string(i18n.translate("Authorized"))%>, notAuthorized: <%=js_string(i18n.translate("Not authorized"))%>,
 	active: <%=js_string(i18n.translate("Active"))%>, idleFeature: <%=js_string(i18n.translate("Available"))%>, evidence: <%=js_string(i18n.translate("Evidence"))%>,
-	wireProtocol: <%=js_string(i18n.translate("Wire protocol"))%>
+	wireProtocol: <%=js_string(i18n.translate("Wire protocol"))%>,
+	testStarting: <%=js_string(i18n.translate("Starting"))%>, testRunning: <%=js_string(i18n.translate("Running"))%>,
+	testCompleted: <%=js_string(i18n.translate("Completed"))%>, testFailed: <%=js_string(i18n.translate("Failed"))%>, testNotRun: <%=js_string(i18n.translate("Not run"))%>
 };
 
 function candyDiagnosticsText(value) { return value === null || value === undefined || value === "" ? "-" : String(value); }
@@ -666,7 +668,7 @@ function candyCongestionTestRender(data) {
 		if (select) select.value = candyDiagnosticsLabels.testNodeSections[samples[0].node] || samples[0].node;
 	}
 	var allFailed = samples.length > 0 && samples.every(function(sample) { return !!sample.error; });
-	state.textContent = data.state === "running" ? "Running…" : (data.state === "completed" && !allFailed) ? "Completed" : (data.state === "error" || allFailed) ? (data.message || (samples[0] && samples[0].error) || "Failed") : "Not run";
+	state.textContent = data.state === "running" ? candyDiagnosticsLabels.testRunning : (data.state === "completed" && !allFailed) ? candyDiagnosticsLabels.testCompleted : (data.state === "error" || allFailed) ? (data.message || (samples[0] && samples[0].error) || candyDiagnosticsLabels.testFailed) : candyDiagnosticsLabels.testNotRun;
 	if (!samples.length) return;
 	body.textContent = "";
 	samples.forEach(function(sample) {
@@ -685,7 +687,7 @@ function startCandyCongestionTest(event) {
 	if (!node || !node.value || !button) return;
 	button.disabled = true;
 	var state = document.getElementById("candy-congestion-test-state");
-	if (state) state.textContent = "Starting…";
+	if (state) state.textContent = candyDiagnosticsLabels.testStarting;
 	xhr.open("POST", candyCongestionTestUrl, true);
 	if (xhr.setRequestHeader) xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 	xhr.onreadystatechange = function() {
@@ -694,7 +696,7 @@ function startCandyCongestionTest(event) {
 			try {
 				var error = JSON.parse(xhr.responseText || "{}");
 				var state = document.getElementById("candy-congestion-test-state");
-				if (state) state.textContent = error.message || "Failed";
+				if (state) state.textContent = error.message || candyDiagnosticsLabels.testFailed;
 			} catch (e) {}
 		}
 		setTimeout(refreshCandyCongestionTest, 500);

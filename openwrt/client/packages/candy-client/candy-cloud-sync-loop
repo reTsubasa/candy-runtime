@@ -9,6 +9,14 @@ INTERVAL=${CANDY_CLOUD_SYNC_INTERVAL:-30}
 RUN_USER=${CANDY_CLOUD_SYNC_USER:-candy-sdwan}
 CANDY_INIT=${CANDY_INIT:-/etc/init.d/candy}
 CANDY_CORE_BIN=${CANDY_CORE_BIN:-/usr/lib/candy/cores/current/candy-core}
+FAULT_STATE_FILE=${CANDY_FAULT_STATE_FILE:-/etc/candy/runtime-fault.json}
+
+completed_runtime_fault() {
+	[ -s "$FAULT_STATE_FILE" ] && [ -f "$FAULT_STATE_FILE" ] && [ ! -L "$FAULT_STATE_FILE" ] || return 1
+	[ "$(jsonfilter -e '@.schema_version' <"$FAULT_STATE_FILE" 2>/dev/null)" = 1 ] || return 1
+	[ "$(jsonfilter -e '@.state' <"$FAULT_STATE_FILE" 2>/dev/null)" = active ] || return 1
+	[ "$(jsonfilter -e '@.cleanup' <"$FAULT_STATE_FILE" 2>/dev/null)" = completed ]
+}
 
 reconcile_sdwan() {
 	if ! "$CANDY_INIT" enabled >/dev/null 2>&1; then
@@ -18,6 +26,10 @@ reconcile_sdwan() {
 	service_state=$("$CANDY_INIT" status 2>/dev/null || true)
 	case "$service_state" in
 		stopped)
+			if completed_runtime_fault; then
+				logger -t candy -- "level=warn event=cloud_sync_reconcile result=deferred reason=runtime_fault"
+				return 0
+			fi
 			if "$CANDY_INIT" start >/dev/null 2>&1; then
 				logger -t candy -- "level=info event=cloud_sync_reconcile result=recovered reason=service_stopped"
 				return 0

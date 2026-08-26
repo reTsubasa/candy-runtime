@@ -36,6 +36,7 @@ input=$(cat)
 case "$expression" in
 	@.schema_version) printf '%s\n' "$input" | sed -n 's/.*"schema_version":\([0-9][0-9]*\).*/\1/p' ;;
 	@.state) printf '%s\n' "$input" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p' ;;
+	@.cleanup) printf '%s\n' "$input" | sed -n 's/.*"cleanup":"\([^"]*\)".*/\1/p' ;;
 	*) exit 1 ;;
 esac
 EOF
@@ -167,5 +168,27 @@ PATH="$tmp/bin:$PATH" \
 grep -Fx start "$tmp/reconcile.log" >/dev/null || fail "stopped enabled service was not restarted"
 grep -F 'event=cloud_sync_reconcile result=recovered reason=service_stopped' "$tmp/logger.log" >/dev/null ||
 	fail "successful service recovery was not logged"
+
+# A completed fail-open is a safety latch. Cloud polling may update the
+# candidate, but only an explicit service start may clear the fault and reclaim
+# traffic after an observed runtime blackhole.
+mkdir -p "$tmp/state/identity"
+printf '%s\n' '{}' >"$tmp/state/identity/device-identity-v1.json"
+printf '%s\n' '{"schema_version":1,"state":"active","reason":"sdwan:core_traffic_blackhole","cleanup":"completed"}' >"$tmp/runtime-fault.json"
+: >"$tmp/logger.log"
+: >"$tmp/reconcile.log"
+PATH="$tmp/bin:$PATH" \
+	CANDY_TEST_LOG="$tmp/logger.log" \
+	CANDY_TEST_RECONCILE_LOG="$tmp/reconcile.log" \
+	CANDY_TEST_IDENTITY_FILE="$tmp/state/identity/device-identity-v1.json" \
+	CANDY_CLOUD_SYNC_BIN="$tmp/sync" \
+	CANDY_SDWAN_STATE_DIR="$tmp/state" \
+	CANDY_FAULT_STATE_FILE="$tmp/runtime-fault.json" \
+	CANDY_INIT="$tmp/candy.init" \
+	CANDY_CLOUD_SYNC_INTERVAL=1 \
+	"$sync_loop" >/dev/null 2>"$stderr_log" || fail "completed fault handling failed"
+[ ! -s "$tmp/reconcile.log" ] || fail "Cloud sync restarted a service latched in fail-open"
+grep -F 'event=cloud_sync_reconcile result=deferred reason=runtime_fault' "$tmp/logger.log" >/dev/null ||
+	fail "completed fail-open was not reported as deferred"
 
 printf '%s\n' "OpenWrt Candy Cloud sync supervisor test passed"

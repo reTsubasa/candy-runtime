@@ -45,6 +45,7 @@ fn linux_plan_installs_only_signed_remote_routes_with_fixed_owned_names() {
     assert_eq!(plan.route_mtu, 1180);
     assert_eq!(plan.tcp_advmss, 1140);
     assert!(!plan.remote_egress);
+    assert_eq!(plan.policy_selectors(), vec![(Some(local), remote)]);
 }
 
 #[test]
@@ -68,10 +69,11 @@ fn linux_plan_marks_only_the_authorized_egress_site_for_nat() {
             manage_rp_filter: true,
         },
     };
-    assert!(
-        LinuxNetworkPlan::compile(&declaration)
-            .unwrap()
-            .remote_egress
+    let plan = LinuxNetworkPlan::compile(&declaration).unwrap();
+    assert!(plan.remote_egress);
+    assert_eq!(
+        plan.policy_selectors(),
+        vec![(None, Ipv4Prefix::new([192, 168, 1, 0], 24).unwrap())]
     );
 }
 

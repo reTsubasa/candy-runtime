@@ -208,7 +208,7 @@ for (const externalPoint of ["vultr-tokyo", "linode-singapore", "hetzner-ashburn
 for (const usefulField of ["Performance trends", "RTT / jitter", "Quality / packet loss", "RX / TX", "Transport"]) {
 	assert.ok(source.includes(usefulField), "diagnostics must retain useful transport field: " + usefulField);
 }
-const sections = ["Service resources", "Performance trends", "Node telemetry", "Node features", "Congestion parameter test"];
+const sections = ["Service resources", "Performance trends", "Node telemetry", "Node features", "Congestion parameter test"].map(title => "<h3><%:" + title + "%></h3>");
 for (let index = 1; index < sections.length; index++) {
 	assert.ok(source.indexOf(sections[index - 1]) < source.indexOf(sections[index]), "diagnostics section order must place " + sections[index - 1] + " before " + sections[index]);
 }
@@ -409,8 +409,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=76$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=76$'
+assert_contains "$makefile" '^PKG_RELEASE:=77$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=77$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'

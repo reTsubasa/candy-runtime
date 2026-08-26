@@ -30,6 +30,8 @@ const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 const RETRY_STABLE_RESET: Duration = Duration::from_secs(60);
 const RETRY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const TRAFFIC_BLACKHOLE_PACKET_THRESHOLD: u64 = 8;
+const TRAFFIC_BLACKHOLE_WINDOW: Duration = Duration::from_secs(5);
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn sanitize_log_value(value: &str) -> String {
@@ -214,6 +216,55 @@ struct CoreReadinessStatus {
     last_error_code: Option<String>,
     #[serde(default)]
     paths: Option<Vec<CoreReadinessPath>>,
+    #[serde(default)]
+    counters: CoreTrafficCounters,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+struct CoreTrafficCounters {
+    tun_packets_received: u64,
+    tun_packets_sent: u64,
+    peer_records_sent: u64,
+    drops: u64,
+}
+
+#[derive(Debug, Default)]
+struct TrafficBlackholeMonitor {
+    baseline: Option<(CoreTrafficCounters, Instant)>,
+}
+
+impl TrafficBlackholeMonitor {
+    fn observe(&mut self, counters: CoreTrafficCounters, now: Instant) -> bool {
+        let Some((baseline, baseline_at)) = self.baseline else {
+            self.baseline = Some((counters, now));
+            return false;
+        };
+        if now.saturating_duration_since(baseline_at) > TRAFFIC_BLACKHOLE_WINDOW {
+            self.baseline = Some((counters, now));
+            return false;
+        }
+        let received = counters
+            .tun_packets_received
+            .saturating_sub(baseline.tun_packets_received);
+        let forwarded = counters
+            .peer_records_sent
+            .saturating_sub(baseline.peer_records_sent)
+            .saturating_add(
+                counters
+                    .tun_packets_sent
+                    .saturating_sub(baseline.tun_packets_sent),
+            );
+        let dropped = counters.drops.saturating_sub(baseline.drops);
+        if forwarded > 0 {
+            self.baseline = Some((counters, now));
+            return false;
+        }
+        if received >= TRAFFIC_BLACKHOLE_PACKET_THRESHOLD {
+            self.baseline = Some((counters, now));
+            return dropped >= received;
+        }
+        false
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -964,6 +1015,18 @@ fn read_core_readiness_with_policy(
     readiness_token: &str,
     policy: ReadinessPolicy,
 ) -> Result<Option<ReadinessState>> {
+    let Some(status) = read_core_status(path, generation, pid, readiness_token)? else {
+        return Ok(None);
+    };
+    classify_core_readiness(&status, policy).map(Some)
+}
+
+fn read_core_status(
+    path: &PathBuf,
+    generation: u64,
+    pid: u32,
+    readiness_token: &str,
+) -> Result<Option<CoreReadinessStatus>> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -991,6 +1054,13 @@ fn read_core_readiness_with_policy(
     {
         bail!("SD-WAN Core readiness status has impossible peer counters")
     }
+    Ok(Some(status))
+}
+
+fn classify_core_readiness(
+    status: &CoreReadinessStatus,
+    policy: ReadinessPolicy,
+) -> Result<ReadinessState> {
     // Route-owner readiness is the lifecycle authority. Receive idleness is
     // telemetry freshness and must not restart an otherwise authenticated path.
     let has_authenticated_path_evidence = status.paths.as_ref().is_some_and(|paths| {
@@ -1060,7 +1130,7 @@ fn read_core_readiness_with_policy(
         let detail = status.last_error_code.as_deref().unwrap_or("not_ready");
         bail!("SD-WAN Core candidate failed readiness: {detail}")
     }
-    Ok(Some(state))
+    Ok(state)
 }
 
 fn wait_for_core_readiness(
@@ -1732,6 +1802,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     );
     let renew_every = Duration::from_millis((args.lease_ms / 3).max(1_000));
     let mut next_renewal = Instant::now() + renew_every;
+    let mut traffic_monitor = TrafficBlackholeMonitor::default();
     loop {
         match activation_pointer_unchanged(args) {
             Ok(true) => {}
@@ -1848,6 +1919,29 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     "Candy Core reported SD-WAN failure",
                     "core_runtime_failed",
                     error.context("Candy Core failed after netd commit"),
+                );
+            }
+        }
+        match read_core_status(&args.status, args.generation, child.id(), &readiness_token) {
+            Ok(Some(status)) if traffic_monitor.observe(status.counters, Instant::now()) => {
+                return fail_after_rollback(
+                    args,
+                    &mut child,
+                    &mut netd,
+                    "Candy Core dropped all intercepted traffic",
+                    "core_traffic_blackhole",
+                    anyhow::anyhow!("Candy Core received intercepted packets but forwarded none"),
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                return retry_after_rollback(
+                    args,
+                    &mut child,
+                    &mut netd,
+                    "Candy Core traffic status inspection failed",
+                    "core_status_inspection_failed",
+                    error,
                 );
             }
         }
@@ -2864,6 +2958,78 @@ exit 17
         assert!(read_core_readiness(&path, 9, 42, "11112233445566778899aabbccddeeff").is_err());
         fs::write(&path, status(9, "active", 1, 0)).unwrap();
         assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
+    }
+
+    #[test]
+    fn sustained_total_traffic_loss_is_a_blackhole() {
+        let mut monitor = TrafficBlackholeMonitor::default();
+        let now = Instant::now();
+        assert!(!monitor.observe(CoreTrafficCounters::default(), now));
+        assert!(!monitor.observe(
+            CoreTrafficCounters {
+                tun_packets_received: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD - 1,
+                drops: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD - 1,
+                ..CoreTrafficCounters::default()
+            },
+            now + Duration::from_secs(1)
+        ));
+        assert!(monitor.observe(
+            CoreTrafficCounters {
+                tun_packets_received: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD,
+                drops: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD,
+                ..CoreTrafficCounters::default()
+            },
+            now + Duration::from_secs(2)
+        ));
+    }
+
+    #[test]
+    fn successful_forwarding_resets_blackhole_detection() {
+        let mut monitor = TrafficBlackholeMonitor::default();
+        let now = Instant::now();
+        assert!(!monitor.observe(CoreTrafficCounters::default(), now));
+        assert!(!monitor.observe(
+            CoreTrafficCounters {
+                tun_packets_received: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD,
+                peer_records_sent: 1,
+                drops: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD - 1,
+                ..CoreTrafficCounters::default()
+            },
+            now + Duration::from_secs(1)
+        ));
+        assert!(!monitor.observe(
+            CoreTrafficCounters {
+                tun_packets_received: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD * 2 - 1,
+                peer_records_sent: 1,
+                drops: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD * 2 - 2,
+                ..CoreTrafficCounters::default()
+            },
+            now + Duration::from_secs(2)
+        ));
+        assert!(monitor.observe(
+            CoreTrafficCounters {
+                tun_packets_received: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD * 2,
+                peer_records_sent: 1,
+                drops: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD * 2 - 1,
+                ..CoreTrafficCounters::default()
+            },
+            now + Duration::from_secs(3)
+        ));
+    }
+
+    #[test]
+    fn sparse_drops_do_not_trip_blackhole_detection() {
+        let mut monitor = TrafficBlackholeMonitor::default();
+        let now = Instant::now();
+        assert!(!monitor.observe(CoreTrafficCounters::default(), now));
+        assert!(!monitor.observe(
+            CoreTrafficCounters {
+                tun_packets_received: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD,
+                drops: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD,
+                ..CoreTrafficCounters::default()
+            },
+            now + TRAFFIC_BLACKHOLE_WINDOW + Duration::from_secs(1)
+        ));
     }
 
     #[test]

@@ -266,10 +266,13 @@ fn real_linux_backend_prepares_commits_and_rolls_back() {
     assert_eq!(owned.len(), 2);
     assert!(owned.iter().any(|line| line.contains("to 10.255.253.0/24")));
     assert!(owned.iter().any(|line| line.contains("to 10.255.254.0/24")));
+    assert!(owned
+        .iter()
+        .all(|line| line.contains("from 172.31.254.0/24")));
     assert!(owned.iter().all(|line| !line.contains(" none ")));
     for destination in ["10.255.253.1", "10.255.254.1"] {
         let output = Command::new("ip")
-            .args(["-4", "route", "get", destination])
+            .args(["-4", "route", "get", destination, "from", "172.31.254.2"])
             .output()
             .unwrap();
         assert!(
@@ -280,6 +283,17 @@ fn real_linux_backend_prepares_commits_and_rolls_back() {
         let route = String::from_utf8(output.stdout).unwrap();
         assert!(route.contains("dev candy0"), "unexpected route: {route}");
         assert!(route.contains("table 20999"), "unexpected route: {route}");
+
+        let output = Command::new("ip")
+            .args(["-4", "route", "get", destination])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let route = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            !route.contains("table 20999"),
+            "router-originated traffic entered the client TUN: {route}"
+        );
     }
     if let Ok(output) = Command::new("ip")
         .args(["-details", "-4", "rule", "show"])

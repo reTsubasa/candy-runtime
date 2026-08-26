@@ -374,15 +374,18 @@ mod backend {
             let plan = Self::plan(declaration)?;
             let handle = self.handle.clone();
             self.with_async(async move {
-                for destination in &plan.remote_routes {
-                    handle
-                        .rule()
-                        .add()
-                        .v4()
-                        .destination_prefix(
-                            Ipv4Addr::from(destination.network),
-                            destination.prefix_len,
-                        )
+                for (source, destination) in plan.policy_selectors() {
+                    let request = handle.rule().add().v4().destination_prefix(
+                        Ipv4Addr::from(destination.network),
+                        destination.prefix_len,
+                    );
+                    let request = match source {
+                        Some(source) => {
+                            request.source_prefix(Ipv4Addr::from(source.network), source.prefix_len)
+                        }
+                        None => request,
+                    };
+                    request
                         .table_id(plan.route_table)
                         .priority(plan.policy_priority)
                         .action(RuleAction::ToTable)
@@ -657,6 +660,22 @@ impl LinuxNetworkPlan {
                 .ok_or(NetworkError::Backend)?,
             remote_egress,
         })
+    }
+
+    pub fn policy_selectors(&self) -> Vec<(Option<Ipv4Prefix>, Ipv4Prefix)> {
+        self.remote_routes
+            .iter()
+            .flat_map(|destination| {
+                if self.local_prefixes.is_empty() {
+                    vec![(None, *destination)]
+                } else {
+                    self.local_prefixes
+                        .iter()
+                        .map(|source| (Some(*source), *destination))
+                        .collect()
+                }
+            })
+            .collect()
     }
 
     #[cfg(any(target_os = "linux", test))]
