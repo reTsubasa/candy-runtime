@@ -232,6 +232,7 @@ end
   word-break: break-word;
   overflow-wrap: anywhere;
 }
+.candy-cell-content { min-width:0; }
 .candy-diagnostics-table-scroll .th:nth-child(1) { width: 13%; }
 .candy-diagnostics-table-scroll .th:nth-child(2) { width: 9%; }
 .candy-diagnostics-table-scroll .th:nth-child(3) { width: 14%; }
@@ -372,8 +373,7 @@ end
   .candy-diagnostics-table-scroll .td:before { content: attr(data-label); color: var(--arcogray-5); font-size: .85em; }
   .candy-diagnostics-table-scroll .td[colspan] { display: block; }
   .candy-diagnostics-table-scroll .td[colspan]:before { display: none; }
-  .candy-telemetry-row { justify-content: flex-start; }
-  .candy-telemetry-value { text-align: left; }
+  .candy-cell-content { grid-column:2; }
 }
 @media (max-width: 440px) {
   .candy-resource-band { grid-template-columns:1fr; }
@@ -514,9 +514,9 @@ function candyDiagnosticsController(applied, passive) {
 
 /* === Rich rendering helpers === */
 function candyDiagnosticsAppendRichCell(row, html, label) {
-	var cell = document.createElement("td");
+	var cell = document.createElement("td"), content = document.createElement("div");
 	cell.className = "td";
-	cell.innerHTML = html;
+	content.className = "candy-cell-content"; content.innerHTML = html; cell.appendChild(content);
 	if (label) cell.setAttribute("data-label", label);
 	row.appendChild(cell);
 	return cell;
@@ -698,17 +698,17 @@ function candyDiagnosticsAppendNameCell(row, value) {
 	cell.appendChild(span); row.appendChild(cell); return cell;
 }
 function candyDiagnosticsAppendTelemetryCell(row, html, label) {
-	var cell = document.createElement("td");
+	var cell = document.createElement("td"), content = document.createElement("div");
 	cell.className = "td td-telemetry";
-	cell.innerHTML = html;
+	content.className = "candy-cell-content"; content.innerHTML = html; cell.appendChild(content);
 	if (label) cell.setAttribute("data-label", label);
 	row.appendChild(cell);
 	return cell;
 }
 function candyDiagnosticsAppendStatusCell(row, html, label) {
-	var cell = document.createElement("td");
+	var cell = document.createElement("td"), content = document.createElement("div");
 	cell.className = "td td-status";
-	cell.innerHTML = html;
+	content.className = "candy-cell-content"; content.innerHTML = html; cell.appendChild(content);
 	if (label) cell.setAttribute("data-label", label);
 	row.appendChild(cell);
 	return cell;

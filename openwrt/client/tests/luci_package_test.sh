@@ -240,7 +240,7 @@ class Element {
 		this.children = [];
 	}
 	get textContent() {
-		return this._textContent;
+		return this.children.length ? this.children.map(child => child.textContent).join("") : this._textContent;
 	}
 	appendChild(child) {
 		this.children.push(child);
