@@ -1,13 +1,16 @@
 #!/bin/sh
 set -eu
 
-# The upgrader deliberately owns only immutable Runtime program and unit files.
+# The upgrader owns immutable Runtime program, unit, and kernel policy files.
 # Configuration, enrollment, mutable SD-WAN state, and Core are outside this list.
 ROOT=${CANDY_UPGRADE_ROOT:-}
 SYSTEMCTL=${CANDY_SYSTEMCTL:-systemctl}
 TMPFILES=${CANDY_SYSTEMD_TMPFILES:-systemd-tmpfiles}
+SYSCTL=${CANDY_SYSCTL:-sysctl}
 HEALTH_CHECK=${CANDY_HEALTH_CHECK:-/usr/local/libexec/candy-server-health-check}
 MAX_BUNDLE_BYTES=${CANDY_MAX_BUNDLE_BYTES:-268435456}
+SYSCTL_POLICY=/usr/lib/sysctl.d/60-candy-server.conf
+UDP_BUFFER_MAX_BYTES=16777216
 BUNDLE_FILE=
 BUNDLE_URL=
 EXPECTED_SHA256=
@@ -20,6 +23,12 @@ release_stage=
 release_created=0
 previous_current=
 had_current=0
+sdwan_migration_pending=
+sdwan_reverse_link_target=
+sdwan_reverse_migration=0
+sysctl_state_recorded=0
+previous_rmem_max=
+previous_wmem_max=
 
 usage() {
 	cat <<'EOF'
@@ -87,6 +96,7 @@ need_command mv
 need_command cp
 need_command "$SYSTEMCTL"
 need_command "$TMPFILES"
+need_command "$SYSCTL"
 
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/candy-runtime-upgrade.XXXXXX")
 bundle=$work_dir/runtime.tar.gz
@@ -142,6 +152,196 @@ stop_services() {
 	[ "$stop_failed" = 0 ]
 }
 
+read_positive_sysctl() {
+	key=$1
+	value=$("$SYSCTL" -n "$key") || return 1
+	case "$value" in ''|*[!0-9]*|0) return 1 ;; esac
+	printf '%s\n' "$value"
+}
+
+record_kernel_tuning() {
+	previous_rmem_max=$(read_positive_sysctl net.core.rmem_max) ||
+		die "could not read net.core.rmem_max"
+	previous_wmem_max=$(read_positive_sysctl net.core.wmem_max) ||
+		die "could not read net.core.wmem_max"
+	sysctl_state_recorded=1
+}
+
+raise_sysctl_minimum() {
+	key=$1
+	minimum=$2
+	current=$(read_positive_sysctl "$key") || return 1
+	if [ "$current" -lt "$minimum" ]; then
+		"$SYSCTL" -w "$key=$minimum" >/dev/null || return 1
+	fi
+	current=$(read_positive_sysctl "$key") || return 1
+	[ "$current" -ge "$minimum" ]
+}
+
+install_kernel_tuning() {
+	policy=$(host_path "$SYSCTL_POLICY")
+	target_rmem_max=$previous_rmem_max
+	target_wmem_max=$previous_wmem_max
+	[ "$target_rmem_max" -ge "$UDP_BUFFER_MAX_BYTES" ] || target_rmem_max=$UDP_BUFFER_MAX_BYTES
+	[ "$target_wmem_max" -ge "$UDP_BUFFER_MAX_BYTES" ] || target_wmem_max=$UDP_BUFFER_MAX_BYTES
+	mkdir -p "$(dirname "$policy")"
+	temporary="$(dirname "$policy")/.60-candy-server.conf.$$"
+	cat >"$temporary" <<EOF
+# Candy Core requests 8 MiB QUIC socket queues. Keep kernel maxima above that
+# request without granting the service CAP_NET_ADMIN for SO_*BUFFORCE.
+net.core.rmem_max = $target_rmem_max
+net.core.wmem_max = $target_wmem_max
+EOF
+	chmod 0644 "$temporary"
+	chown root:root "$temporary"
+	mv -f "$temporary" "$policy"
+	raise_sysctl_minimum net.core.rmem_max "$target_rmem_max" ||
+		die "could not raise net.core.rmem_max to $target_rmem_max"
+	raise_sysctl_minimum net.core.wmem_max "$target_wmem_max" ||
+		die "could not raise net.core.wmem_max to $target_wmem_max"
+}
+
+restore_kernel_tuning() {
+	status=0
+	[ "$sysctl_state_recorded" = 1 ] || return 0
+	"$SYSCTL" -w "net.core.rmem_max=$previous_rmem_max" >/dev/null 2>&1 || status=1
+	"$SYSCTL" -w "net.core.wmem_max=$previous_wmem_max" >/dev/null 2>&1 || status=1
+	return "$status"
+}
+
+merge_legacy_sdwan_tree() {
+	mode=$1
+	canonical=$(host_path /var/lib/candy/sdwan)
+	legacy=$(host_path /etc/candy/sdwan)
+	find "$legacy" -xdev -print | while IFS= read -r source; do
+		[ "$source" != "$legacy" ] || continue
+		relative=${source#"$legacy"/}
+		case "$relative" in ''|/*|*[!A-Za-z0-9._/-]*|../*|*/../*|*/..|..) die "unsafe legacy SD-WAN state path: $source" ;; esac
+		destination=$canonical/$relative
+		if [ -L "$source" ]; then
+			target=$(readlink "$source") || die "could not read legacy SD-WAN state link: $source"
+			case "$target" in /*|../*|*/../*|*/..|..) die "unsafe legacy SD-WAN state link: $source" ;; esac
+			if [ -L "$destination" ]; then
+				[ "$(readlink "$destination")" = "$target" ] || die "conflicting SD-WAN state link: $destination"
+			elif [ -e "$destination" ]; then
+				die "conflicting SD-WAN state object: $destination"
+			elif [ "$mode" = copy ]; then
+				ln -s "$target" "$destination"
+			fi
+		elif [ -d "$source" ]; then
+			if [ -L "$destination" ] || { [ -e "$destination" ] && [ ! -d "$destination" ]; }; then
+				die "conflicting SD-WAN state directory: $destination"
+			elif [ "$mode" = copy ] && [ ! -d "$destination" ]; then
+				mkdir -m 0700 "$destination"
+			fi
+		elif [ -f "$source" ]; then
+			if [ -f "$destination" ] && [ ! -L "$destination" ]; then
+				cmp "$source" "$destination" >/dev/null || die "conflicting SD-WAN state file: $destination"
+			elif [ -e "$destination" ] || [ -L "$destination" ]; then
+				die "conflicting SD-WAN state object: $destination"
+			elif [ "$mode" = copy ]; then
+				cp -p "$source" "$destination"
+			fi
+		else
+			die "unsupported legacy SD-WAN state object: $source"
+		fi
+	done
+}
+
+migrate_legacy_sdwan_state() {
+	canonical=$(host_path /var/lib/candy/sdwan)
+	legacy=$(host_path /etc/candy/sdwan)
+	if [ -L "$canonical" ]; then
+		canonical_target=$(readlink "$canonical") || die "could not read canonical SD-WAN state link"
+		case "$canonical_target" in
+			/etc/candy/sdwan|"$legacy") ;;
+			*) die "canonical SD-WAN state link does not target /etc/candy/sdwan" ;;
+		esac
+		[ -d "$legacy" ] && [ ! -L "$legacy" ] ||
+			die "reverse-linked legacy SD-WAN state is not a real directory"
+		log "migrating reverse-linked Linux server SD-WAN state to /var/lib/candy/sdwan"
+		rm -f "$canonical" || die "could not remove reverse SD-WAN state link"
+		mkdir -m 0700 "$canonical" || {
+			ln -s "$canonical_target" "$canonical" 2>/dev/null || true
+			die "could not create the canonical SD-WAN state directory"
+		}
+		sdwan_reverse_link_target=$canonical_target
+		sdwan_reverse_migration=1
+		merge_legacy_sdwan_tree check
+		merge_legacy_sdwan_tree copy
+		sdwan_migration_pending=reverse-directory
+	fi
+	mkdir -p "$canonical"
+	if [ "$sdwan_migration_pending" = reverse-directory ]; then
+		:
+	elif [ -L "$legacy" ]; then
+		legacy_target=$(readlink "$legacy") || die "could not read legacy SD-WAN state link"
+		case "$legacy_target" in
+			/var/lib/candy/sdwan|"$canonical") sdwan_migration_pending=link ;;
+			*) die "legacy SD-WAN state link does not target /var/lib/candy/sdwan" ;;
+		esac
+	elif [ -e "$legacy" ]; then
+		[ -d "$legacy" ] || die "legacy SD-WAN state path is not a real directory: $legacy"
+		log "migrating Linux server SD-WAN state from /etc/candy/sdwan to /var/lib/candy/sdwan"
+		merge_legacy_sdwan_tree check
+		merge_legacy_sdwan_tree copy
+		sdwan_migration_pending=directory
+	else
+		sdwan_migration_pending=absent
+	fi
+	find "$canonical" -xdev -type d -exec chmod 0700 {} \;
+	find "$canonical" -xdev -type f -exec chmod 0600 {} \;
+	for compatibility_root in \
+		"$canonical"/generations/*/compatibility-generations \
+		"$canonical"/activations/*/compatibility-generations; do
+		[ -d "$compatibility_root" ] || continue
+		[ ! -L "$compatibility_root" ] || die "compatibility catalog must not be a symbolic link: $compatibility_root"
+		find "$compatibility_root" -xdev -type f -exec chmod 0400 {} \;
+		find "$compatibility_root" -xdev -type d -exec chmod 0500 {} \;
+	done
+	find "$canonical" -xdev ! -type l -exec chown candy:candy {} \;
+}
+
+finalize_legacy_sdwan_state() {
+	legacy=$(host_path /etc/candy/sdwan)
+	case "$sdwan_migration_pending" in
+		link)
+			[ -L "$legacy" ] || return 1
+			legacy_target=$(readlink "$legacy") || return 1
+			case "$legacy_target" in /var/lib/candy/sdwan|"$(host_path /var/lib/candy/sdwan)") ;; *) return 1 ;; esac
+			;;
+		directory|reverse-directory)
+			[ -d "$legacy" ] && [ ! -L "$legacy" ] || return 1
+			legacy_backup="$legacy.runtime-upgrade-backup.$$"
+			[ ! -e "$legacy_backup" ] && [ ! -L "$legacy_backup" ] || return 1
+			mv "$legacy" "$legacy_backup" || return 1
+			if ! ln -s /var/lib/candy/sdwan "$legacy"; then
+				mv "$legacy_backup" "$legacy" 2>/dev/null || true
+				return 1
+			fi
+			find "$legacy_backup" -xdev -type d -exec chmod u+w {} \; 2>/dev/null || true
+			rm -rf "$legacy_backup" ||
+				log "warning: retained migrated SD-WAN backup at $legacy_backup"
+			;;
+		absent)
+			[ ! -e "$legacy" ] && [ ! -L "$legacy" ] || return 1
+			ln -s /var/lib/candy/sdwan "$legacy" || return 1
+			;;
+		'') ;;
+	esac
+}
+
+restore_sdwan_reverse_migration() {
+	[ "$sdwan_reverse_migration" = 1 ] || return 0
+	canonical=$(host_path /var/lib/candy/sdwan)
+	legacy=$(host_path /etc/candy/sdwan)
+	[ -d "$canonical" ] && [ ! -L "$canonical" ] || return 1
+	[ -d "$legacy" ] && [ ! -L "$legacy" ] || return 1
+	find "$canonical" -xdev -type d -exec chmod u+w {} \; 2>/dev/null || true
+	rm -rf "$canonical" || return 1
+	ln -s "$sdwan_reverse_link_target" "$canonical"
+}
+
 restore_service_state() {
 	stop_services || return 1
 	for service in $services; do "$SYSTEMCTL" disable "$service" >/dev/null 2>&1 || true; done
@@ -159,6 +359,7 @@ restore_files() {
 	for relative in $legacy_files; do restore_one "/$relative"; done
 	for unit in $unit_files; do restore_one "/etc/systemd/system/$unit"; done
 	restore_one /usr/lib/tmpfiles.d/candy.conf
+	restore_one "$SYSCTL_POLICY"
 }
 
 restore_current() {
@@ -191,11 +392,17 @@ rollback() {
 	set +e
 	log "upgrade failed; restoring the previous Runtime and service states"
 	stop_services || true
+	migration_status=0
+	restore_sdwan_reverse_migration || migration_status=1
 	restore_files
 	restore_current
+	kernel_tuning_status=0
+	restore_kernel_tuning || kernel_tuning_status=1
 	"$SYSTEMCTL" daemon-reload >/dev/null 2>&1
 	restore_service_state
 	status=$?
+	[ "$kernel_tuning_status" = 0 ] || status=1
+	[ "$migration_status" = 0 ] || status=1
 	transaction_finished=1
 	set -e
 	[ "$status" -eq 0 ] || log "warning: Runtime files were restored but a previous service state could not be restored"
@@ -324,7 +531,9 @@ if [ -f "$installed_server_unit" ] && [ ! -L "$installed_server_unit" ]; then
 	esac
 fi
 
-# Refuse mutation of protected trees even when a hostile host has replaced one with a link.
+# Refuse mutation of protected parent trees even when a hostile host has replaced
+# one with a link. migrate_legacy_sdwan_state separately validates the one
+# supported historical child link before replacing it.
 for protected in /etc/candy /var/lib/candy /opt/candy/cores; do
 	protected_path=$(host_path "$protected")
 	[ ! -L "$protected_path" ] || die "protected path is a symbolic link: $protected_path"
@@ -342,8 +551,12 @@ for relative in $managed_files; do backup_one "/$relative"; done
 for relative in $legacy_files; do backup_one "/$relative"; done
 for unit in $unit_files; do backup_one "/etc/systemd/system/$unit"; done
 backup_one /usr/lib/tmpfiles.d/candy.conf
+backup_one "$SYSCTL_POLICY"
+record_kernel_tuning
 transaction_started=1
 stop_services
+migrate_legacy_sdwan_state
+install_kernel_tuning
 
 mv "$release_stage" "$release_dir"
 release_created=1
@@ -369,6 +582,7 @@ if [ "$(cat "$state_dir/candy-server.service.active")" = 1 ]; then
 fi
 if [ "$(cat "$state_dir/candy-cloud-sync.timer.active")" = 1 ]; then "$SYSTEMCTL" is-active --quiet candy-cloud-sync.timer; fi
 
+finalize_legacy_sdwan_state || die "could not establish the legacy /etc/candy/sdwan compatibility link"
 transaction_finished=1
 log "Runtime $EXPECTED_VERSION installed; configuration, enrollment, SD-WAN state, and Core were preserved"
 cleanup

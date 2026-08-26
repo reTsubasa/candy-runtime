@@ -11,9 +11,12 @@ Group=candy
 UMask=0077
 Environment=CANDY_SDWAN_SERVICE_USER=candy
 Environment=CANDY_SDWAN_SERVICE_GROUP=candy
+Environment=CANDY_SDWAN_STATE_DIR=/var/lib/candy/sdwan
+Environment=CANDY_SDWAN_STATE_ROOT=/var/lib/candy/sdwan
 EnvironmentFile=-/etc/candy/cloud-sync.env
-ExecStart=/usr/local/libexec/candy-cloud-sync --core /opt/candy/cores/current/candy-core --server-config /etc/candy/server.toml sync-once
+ExecStart=/usr/local/libexec/candy-cloud-sync --state-dir /var/lib/candy/sdwan --core /opt/candy/cores/current/candy-core --server-config /etc/candy/server.toml sync-once
 ExecStartPost=+/usr/local/libexec/candy-sdwan-runtime reconcile candy-server.service
+ExecStartPost=+/opt/candy/current/candy-server sdwan prune-history
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true

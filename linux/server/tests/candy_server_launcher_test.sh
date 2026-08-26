@@ -4,7 +4,8 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 launcher=$root/linux/server/apps/candy-server/candy-server
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/candy-server-launcher-test.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+cleanup() { find "$tmp" -type d -exec chmod u+rwx {} \; 2>/dev/null || true; rm -rf "$tmp"; }
+trap cleanup EXIT HUP INT TERM
 tmp=$(CDPATH= cd -P -- "$tmp" && pwd -P)
 
 fail() {
@@ -34,6 +35,8 @@ case "${1:-}" in
 		done
 		printf '%s\n' "${CANDY_RUNTIME_PROCESS_API_VERSION:-}" >"$FAKE_ARGS_FILE.api"
 		printf '%s\n' "${CANDY_RUNTIME_ROLE:-}" >"$FAKE_ARGS_FILE.role"
+		printf '%s\n' "${CANDY_SDWAN_STATE_DIR:-}" >"$FAKE_ARGS_FILE.state-dir"
+		printf '%s\n' "${CANDY_SDWAN_STATE_ROOT:-}" >"$FAKE_ARGS_FILE.state-root"
 		if [ "${FAKE_WAIT_FOR_TERM:-0}" = 1 ]; then
 			trap 'exit "${FAKE_TERM_EXIT:-42}"' TERM
 			while :; do
@@ -80,6 +83,10 @@ CANDY_CORE_ROOT="$tmp/cores" \
 	"$launcher" --config /tmp/managed.toml
 grep -Fx '</tmp/managed.toml>' "$managed_args" >/dev/null ||
 	fail "launcher did not locate Core through the managed current symlink"
+[ "$(cat "$managed_args.state-dir")" = /var/lib/candy/sdwan ] ||
+	fail "launcher did not export the canonical SD-WAN state directory"
+[ "$(cat "$managed_args.state-root")" = /var/lib/candy/sdwan ] ||
+	fail "launcher did not export the canonical SD-WAN state root"
 
 if CANDY_CORE_BINARY="$tmp/missing-core" "$launcher" >"$tmp/missing.out" 2>&1; then
 	fail "missing Core unexpectedly launched"
@@ -201,6 +208,53 @@ grep -F 'ignored an invalid SD-WAN activation pointer' "$tmp/invalid-activation.
 grep -Fx '</tmp/server.toml>' "$args_file" >/dev/null ||
 	fail "invalid activation prevented ordinary server startup"
 rm -f "$tmp/sdwan/candidate"
+
+history=$tmp/history
+mkdir -p "$history/generations" "$history/activations"
+for index in 1 2 3 4 5 6; do
+	name=$(printf '%064d' "$index")
+	mkdir -p "$history/generations/$name" "$history/activations/$name"
+	printf '%s\n' "$index" >"$history/generations/$name/configuration-v1.json"
+	printf '%s\n' "$index" >"$history/activations/$name/activation-v1.json"
+	stamp=$(printf '2026082601%02d' "$index")
+	touch -t "$stamp" "$history/generations/$name" "$history/activations/$name"
+done
+oldest=$(printf '%064d' 1)
+second=$(printf '%064d' 2)
+newest=$(printf '%064d' 6)
+next_newest=$(printf '%064d' 5)
+readonly_generation=$(printf '%064d' 3)
+mkdir -p "$history/generations/$readonly_generation/compatibility-generations/generation-1"
+chmod 0500 "$history/generations/$readonly_generation/compatibility-generations" \
+	"$history/generations/$readonly_generation/compatibility-generations/generation-1"
+touch -t 202608260103 "$history/generations/$readonly_generation"
+ln -s "generations/$oldest" "$history/configuration"
+ln -s "activations/$oldest" "$history/active"
+ln -s "activations/$second" "$history/candidate"
+CANDY_SDWAN_RUNTIME=/bin/true CANDY_SDWAN_STATE_ROOT="$history" \
+	CANDY_SDWAN_HISTORY_RETAIN=3 CANDY_SDWAN_TEST_MODE=1 \
+	"$launcher" sdwan prune-history
+for name in "$oldest" "$next_newest" "$newest"; do
+	[ -d "$history/generations/$name" ] || fail "protected or retained configuration generation was pruned: $name"
+done
+for name in "$oldest" "$second" "$newest"; do
+	[ -d "$history/activations/$name" ] || fail "protected or retained activation was pruned: $name"
+done
+generation_count=0
+for path in "$history/generations"/*; do [ -d "$path" ] && generation_count=$((generation_count + 1)); done
+[ "$generation_count" -eq 3 ] || fail "configuration generation retention limit was not enforced"
+activation_count=0
+for path in "$history/activations"/*; do [ -d "$path" ] && activation_count=$((activation_count + 1)); done
+[ "$activation_count" -eq 3 ] || fail "activation retention limit was not enforced"
+[ ! -e "$history/generations/$readonly_generation" ] || fail "read-only stale generation was not pruned"
+
+ln -s "$history" "$tmp/history-link"
+if CANDY_SDWAN_RUNTIME=/bin/true CANDY_SDWAN_STATE_ROOT="$tmp/history-link" \
+	CANDY_SDWAN_TEST_MODE=1 "$launcher" sdwan prune-history >"$tmp/history-link.out" 2>&1; then
+	fail "symbolic-link canonical state root was accepted"
+fi
+grep -F 'state root must be a real directory' "$tmp/history-link.out" >/dev/null ||
+	fail "symbolic-link state root rejection was not actionable"
 
 signal_args=$tmp/signal.args
 signal_pid=$tmp/signal.pid

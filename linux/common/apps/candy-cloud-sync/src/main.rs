@@ -41,6 +41,8 @@ const LOCAL_ROUTE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const ACTIVATION_REVALIDATION_SECONDS: u64 = 60;
 const CONFIGURATION_MEDIA_TYPE: &str = "application/vnd.candy.runtime-configuration.v1+json";
 const PUBLIC_ENDPOINT_ENV: &str = "CANDY_PUBLIC_ENDPOINT";
+const CLOUD_ENDPOINT_CACHE: &str = "cloud-api-endpoints-v1.json";
+const MAX_CLOUD_ENDPOINTS: usize = 16;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -87,6 +89,16 @@ struct DeviceIdentity {
     device_id: Uuid,
     device_key_id: Uuid,
     not_after: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CloudEndpointCache {
+    schema_version: u8,
+    host: String,
+    port: u16,
+    addresses: Vec<SocketAddr>,
+    updated_at_unix: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1047,8 +1059,14 @@ fn sync_once_with_retry(
     )?;
     validate_identity(&identity)?;
     let cloud = validate_cloud(&identity.cloud_address)?;
-    let client = build_client(&identity_dir, args.ca_certificate.as_deref())?;
-    reconcile_transport_identity(args, public_endpoints, &client, &cloud)?;
+    let cloud_endpoints = resolve_cloud_endpoints(&args.state_dir, &cloud)?;
+    let client = build_client(
+        &identity_dir,
+        args.ca_certificate.as_deref(),
+        &cloud,
+        &cloud_endpoints,
+    )?;
+    reconcile_transport_identity(args, public_endpoints, &client, &cloud, &identity)?;
 
     let state_path = args.state_dir.join("sync-state-v1.json");
     let mut state: SyncState = if state_path.exists() {
@@ -1337,7 +1355,7 @@ fn sync_once_with_retry(
                         &identity_dir,
                         &core,
                         server_config,
-                        &cloud,
+                        &cloud_endpoints,
                         &etag,
                         &digest,
                         &configuration,
@@ -1356,7 +1374,7 @@ fn sync_once_with_retry(
                         &args.state_dir,
                         &identity_dir,
                         &core,
-                        &cloud,
+                        &cloud_endpoints,
                         &etag,
                         &digest,
                         &configuration,
@@ -2255,6 +2273,7 @@ fn reconcile_transport_identity(
     public_endpoints: &[SocketAddr],
     client: &Client,
     cloud: &Url,
+    identity: &DeviceIdentity,
 ) -> Result<()> {
     if public_endpoints.is_empty() {
         return Ok(());
@@ -2268,6 +2287,10 @@ fn reconcile_transport_identity(
     let desired = transport_identity::build_registration(&inspected, public_endpoints)?;
     let outcome = transport_identity::reconcile(
         &args.state_dir.join("transport-identity-state-v1.json"),
+        transport_identity::IdentityBinding {
+            device_id: identity.device_id,
+            device_key_id: identity.device_key_id,
+        },
         desired,
         |request| {
             transport_identity::put_to_cloud(
@@ -3274,7 +3297,12 @@ fn endpoint(cloud: &Url, path: &str) -> Result<Url> {
     .context("construct Cloud Runtime endpoint")
 }
 
-fn build_client(identity_dir: &Path, ca_certificate: Option<&Path>) -> Result<Client> {
+fn build_client(
+    identity_dir: &Path,
+    ca_certificate: Option<&Path>,
+    cloud: &Url,
+    cloud_endpoints: &[SocketAddr],
+) -> Result<Client> {
     let identity_pem = read_bounded(&identity_dir.join("device-mtls.pem"), 512 * 1024)?;
     let identity =
         reqwest::Identity::from_pem(&identity_pem).context("parse device mTLS identity")?;
@@ -3284,6 +3312,15 @@ fn build_client(identity_dir: &Path, ca_certificate: Option<&Path>) -> Result<Cl
         .timeout(Duration::from_secs(30))
         .https_only(true)
         .user_agent(concat!("candy-cloud-sync/", env!("CARGO_PKG_VERSION")));
+    if cloud
+        .host_str()
+        .is_some_and(|host| host.parse::<std::net::IpAddr>().is_err())
+    {
+        builder = builder.resolve_to_addrs(
+            cloud.host_str().context("Cloud URL has no host")?,
+            cloud_endpoints,
+        );
+    }
     if let Some(path) = ca_certificate {
         let certificate = reqwest::Certificate::from_pem(&read_bounded(path, 512 * 1024)?)
             .context("parse Cloud CA certificate")?;
@@ -3551,16 +3588,86 @@ fn decode_hex(value: &str, bytes: usize, label: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
-fn cloud_ipv4_exclusions(cloud: &Url) -> Result<Vec<String>> {
+fn usable_cloud_endpoint(address: &SocketAddr) -> bool {
+    !address.ip().is_unspecified() && !address.ip().is_multicast() && address.port() != 0
+}
+
+fn validate_cached_cloud_endpoints(
+    cache: CloudEndpointCache,
+    host: &str,
+    port: u16,
+) -> Result<Vec<SocketAddr>> {
+    if cache.schema_version != 1
+        || cache.host != host
+        || cache.port != port
+        || cache.updated_at_unix == 0
+        || cache.addresses.is_empty()
+        || cache.addresses.len() > MAX_CLOUD_ENDPOINTS
+        || cache
+            .addresses
+            .iter()
+            .any(|address| address.port() != port || !usable_cloud_endpoint(address))
+    {
+        bail!("cached Cloud API endpoints do not match the authenticated Cloud address")
+    }
+    let mut addresses = cache.addresses;
+    addresses.sort();
+    addresses.dedup();
+    Ok(addresses)
+}
+
+fn resolve_cloud_endpoints(state_dir: &Path, cloud: &Url) -> Result<Vec<SocketAddr>> {
     let host = cloud.host_str().context("Cloud URL has no host")?;
     let port = cloud
         .port_or_known_default()
         .context("Cloud URL has no known port")?;
-    let mut addresses = (host, port)
-        .to_socket_addrs()
-        .context("resolve authenticated Cloud API host before SD-WAN activation")?
+    let resolution = (host, port).to_socket_addrs();
+    let mut addresses = resolution
+        .as_ref()
+        .map(|resolved| {
+            resolved
+                .clone()
+                .filter(usable_cloud_endpoint)
+                .take(MAX_CLOUD_ENDPOINTS + 1)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    addresses.sort();
+    addresses.dedup();
+    if !addresses.is_empty() && addresses.len() <= MAX_CLOUD_ENDPOINTS {
+        atomic_json(
+            &state_dir.join(CLOUD_ENDPOINT_CACHE),
+            &CloudEndpointCache {
+                schema_version: 1,
+                host: host.to_owned(),
+                port,
+                addresses: addresses.clone(),
+                updated_at_unix: unix_now()?,
+            },
+            0o600,
+        )?;
+        return Ok(addresses);
+    }
+    let cache_path = state_dir.join(CLOUD_ENDPOINT_CACHE);
+    let cache = read_bounded_json(&cache_path, MAX_PROFILE_BYTES).with_context(|| {
+        format!(
+            "resolve authenticated Cloud API host and read fallback cache {}",
+            cache_path.display()
+        )
+    })?;
+    validate_cached_cloud_endpoints(cache, host, port).with_context(|| {
+        resolution
+            .err()
+            .map(|error| format!("system DNS resolution failed: {error}"))
+            .unwrap_or_else(|| "system DNS returned no usable Cloud API endpoint".into())
+    })
+}
+
+fn cloud_ipv4_exclusions(cloud_endpoints: &[SocketAddr]) -> Result<Vec<String>> {
+    let mut addresses = cloud_endpoints
+        .iter()
         .filter_map(|address| match address {
-            SocketAddr::V4(value) if !value.ip().is_unspecified() && !value.ip().is_multicast() => {
+            SocketAddr::V4(value) if usable_cloud_endpoint(address) => {
                 Some(format!("{}/32", value.ip()))
             }
             _ => None,
@@ -3775,7 +3882,7 @@ fn server_compatibility_paths(
 
 fn build_netd_declaration(
     discovery: &DiscoveredControlReport,
-    cloud: &Url,
+    cloud_endpoints: &[SocketAddr],
 ) -> Result<NetdDeclaration> {
     let mut routes = discovery
         .netd
@@ -3803,7 +3910,7 @@ fn build_netd_declaration(
     for prefix in &discovery.netd.underlay_ipv4_exclusions {
         exclusions.insert(prefix.clone(), "hub-endpoint");
     }
-    for prefix in cloud_ipv4_exclusions(cloud)? {
+    for prefix in cloud_ipv4_exclusions(cloud_endpoints)? {
         exclusions.insert(prefix, "cloud-api");
     }
     let mut exclusions = exclusions
@@ -3852,7 +3959,7 @@ fn publish_client_activation(
     state_dir: &Path,
     identity_dir: &Path,
     core: &Path,
-    cloud: &Url,
+    cloud_endpoints: &[SocketAddr],
     etag: &str,
     delivery_digest: &str,
     configuration: &RuntimeConfiguration,
@@ -3863,7 +3970,7 @@ fn publish_client_activation(
     grants: &[(grant::GrantSubject, grant::CachedGrant)],
 ) -> Result<String> {
     let grants = activation_grants(grants)?;
-    let declaration = build_netd_declaration(discovery, cloud)?;
+    let declaration = build_netd_declaration(discovery, cloud_endpoints)?;
     let declaration_bytes = serde_json::to_vec(&declaration)?;
     let mut activation_hash = Sha256::new();
     activation_hash.update(b"candy/runtime-client-activation-v2\0");
@@ -4032,7 +4139,7 @@ fn publish_server_activation(
     identity_dir: &Path,
     core: &Path,
     ordinary_config: &Path,
-    cloud: &Url,
+    cloud_endpoints: &[SocketAddr],
     etag: &str,
     delivery_digest: &str,
     configuration: &RuntimeConfiguration,
@@ -4054,7 +4161,7 @@ fn publish_server_activation(
         bail!("server activation requires an inbound or outbound signed peer")
     }
     let grants = activation_grants(resolved_grants)?;
-    let declaration = build_netd_declaration(discovery, cloud)?;
+    let declaration = build_netd_declaration(discovery, cloud_endpoints)?;
     let declaration_bytes = serde_json::to_vec(&declaration)?;
     let ordinary = read_bounded(ordinary_config, MAX_CONFIGURATION_BYTES)?;
     let mut activation_hash = Sha256::new();
@@ -4866,11 +4973,8 @@ mod tests {
     fn netd_declaration_sorts_prefixes_numerically_not_lexically() {
         let mut report = discovery();
         report.netd.underlay_ipv4_exclusions = vec!["104.243.28.153/32".into()];
-        let declaration = build_netd_declaration(
-            &report,
-            &Url::parse("https://47-83-1-189.sslip.io").unwrap(),
-        )
-        .unwrap();
+        let cloud_endpoints = ["47.83.1.189:443".parse().unwrap()];
+        let declaration = build_netd_declaration(&report, &cloud_endpoints).unwrap();
         assert_eq!(
             declaration
                 .exclusions
@@ -6474,10 +6578,37 @@ default via 192.0.2.1 dev eth0 proto static
     #[test]
     fn cloud_underlay_requires_at_least_one_ipv4_address() {
         assert_eq!(
-            cloud_ipv4_exclusions(&Url::parse("https://127.0.0.1").unwrap()).unwrap(),
+            cloud_ipv4_exclusions(&["127.0.0.1:443".parse().unwrap()]).unwrap(),
             vec!["127.0.0.1/32"]
         );
-        assert!(cloud_ipv4_exclusions(&Url::parse("https://[::1]").unwrap()).is_err());
+        assert!(cloud_ipv4_exclusions(&["[::1]:443".parse().unwrap()]).is_err());
+    }
+
+    #[test]
+    fn cloud_endpoint_cache_breaks_the_full_tunnel_dns_dependency() {
+        let directory = tempfile::tempdir().unwrap();
+        let cloud = Url::parse("https://cloud.example.invalid").unwrap();
+        let cached = "198.51.100.27:443".parse().unwrap();
+        atomic_json(
+            &directory.path().join(CLOUD_ENDPOINT_CACHE),
+            &CloudEndpointCache {
+                schema_version: 1,
+                host: "cloud.example.invalid".into(),
+                port: 443,
+                addresses: vec![cached],
+                updated_at_unix: 1,
+            },
+            0o600,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_cloud_endpoints(directory.path(), &cloud).unwrap(),
+            vec![cached]
+        );
+
+        let wrong_cloud = Url::parse("https://other.example.invalid").unwrap();
+        assert!(resolve_cloud_endpoints(directory.path(), &wrong_cloud).is_err());
     }
 
     #[test]

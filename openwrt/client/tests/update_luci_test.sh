@@ -45,6 +45,10 @@ grep -F 'setTimeout(refreshCandyUpdateStatus, 2000)' "$view" >/dev/null
 grep -F 'never activated automatically' "$view" >/dev/null
 grep -F 'Update checks and installations are manual' "$view" >/dev/null
 grep -F 'msgid "Updates"' "$po" >/dev/null
+grep -F 'template("candy/update"), nil' "$controller" >/dev/null || {
+	printf '%s\n' 'OpenWrt Candy update page must remain under the Settings menu' >&2
+	exit 1
+}
 grep -F 'msgstr "更新"' "$po" >/dev/null
 
 upload_root=$(mktemp -d)

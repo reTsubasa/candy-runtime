@@ -180,17 +180,6 @@ end
   --arcoshadow: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
 }
 
-/* === Card-style containers === */
-.candy-card {
-  background: #fff;
-  border: 1px solid var(--arcogray-3);
-  border-radius: var(--arcoradius);
-  padding: 1.25em;
-  margin-bottom: 1em;
-  box-shadow: var(--arcoshadow);
-}
-.candy-card h4 { margin: 0 0 .6em; font-size: 1em; color: var(--arcogray-7); font-weight: 600; }
-
 /* === Status badges === */
 .candy-badge {
   display: inline-block;
@@ -201,10 +190,10 @@ end
   line-height: 1.4;
   white-space: nowrap;
 }
-.candy-badge-success { color: #fff; background: var(--arcogreen); }
-.candy-badge-warning { color: #fff; background: var(--arcoorange); }
-.candy-badge-error   { color: #fff; background: var(--arcored); }
-.candy-badge-info    { color: #fff; background: var(--arcoblue); }
+.candy-badge-success { color: #16763c; border: 1px solid #7bc48f; background: var(--arcogreen-light); }
+.candy-badge-warning { color: #8d4f00; border: 1px solid #f7ba1e; background: var(--arcoorange-light); }
+.candy-badge-error   { color: #b42318; border: 1px solid #f98981; background: var(--arcored-light); }
+.candy-badge-info    { color: var(--arcoblue); border: 1px solid #93b5e8; background: var(--arcoblue-light); }
 .candy-badge-neutral { color: var(--arcogray-6); background: var(--arcogray-2); }
 
 /* === Link quality indicator dot === */
@@ -233,8 +222,8 @@ end
 .candy-diagnostics-table-scroll { overflow-x: auto; }
 .candy-diagnostics-table-scroll .table {
   width: 100%;
-  min-width: 76em;
-  table-layout: auto;
+  min-width: 68em;
+  table-layout: fixed;
 }
 .candy-diagnostics-table-scroll .th,
 .candy-diagnostics-table-scroll .td {
@@ -252,7 +241,6 @@ end
 }
 .candy-diagnostics-table-scroll .td-telemetry {
   font-size: .88em;
-  min-width: 11em;
   line-height: 1.6;
   word-break: break-word;
   overflow-wrap: anywhere;
@@ -263,11 +251,27 @@ end
   word-break: break-word;
   overflow-wrap: anywhere;
 }
+.candy-diagnostics-table-scroll .th:nth-child(1) { width: 14%; }
+.candy-diagnostics-table-scroll .th:nth-child(2) { width: 10%; }
+.candy-diagnostics-table-scroll .th:nth-child(3) { width: 13%; }
+.candy-diagnostics-table-scroll .th:nth-child(4) { width: 9%; }
+.candy-diagnostics-table-scroll .th:nth-child(5) { width: 15%; }
+.candy-diagnostics-table-scroll .th:nth-child(6) { width: 12%; }
+.candy-diagnostics-table-scroll .th:nth-child(7) { width: 27%; }
+.candy-node-name {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
 .candy-telemetry-row {
   display: flex;
-  align-items: baseline;
-  gap: .35em;
-  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: .55em;
+  min-width: 0;
 }
 .candy-telemetry-label {
   color: var(--arcogray-5);
@@ -278,6 +282,10 @@ end
   font-weight: 600;
   color: var(--arcogray-7);
   font-variant-numeric: tabular-nums;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: right;
 }
 .candy-telemetry-sub {
   font-size: .82em;
@@ -285,55 +293,12 @@ end
   margin-top: .1em;
 }
 
-/* === Topology visualization === */
-.candy-topology {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1.5em;
-  align-items: flex-start;
-}
-.candy-topology-section {
-  display: flex;
-  flex-wrap: wrap;
-  gap: .75em;
-  align-items: flex-start;
-}
-.candy-topology-section-label {
-  width: 100%;
-  font-weight: 600;
-  font-size: .85em;
-  color: var(--arcogray-5);
-  text-transform: uppercase;
-  letter-spacing: .04em;
-  margin-bottom: .15em;
-}
-.candy-topology-node {
-  background: #fff;
-  border: 1px solid var(--arcogray-3);
-  border-radius: var(--arcoradius);
-  padding: .75em 1em;
-  min-width: 12em;
-  box-shadow: var(--arcoshadow);
-}
-.candy-topology-node.local {
-  border-color: var(--arcoblue);
-  background: var(--arcoblue-light);
-}
-.candy-topology-node-name {
-  font-weight: 600;
-  color: var(--arcogray-7);
-  margin-bottom: .3em;
-}
-.candy-topology-node-state {
-  font-size: .82em;
-  color: var(--arcogray-5);
-}
-.candy-topology-node-server {
-  font-size: .78em;
-  color: var(--arcogray-5);
-  margin-top: .3em;
-  overflow-wrap: anywhere;
-}
+/* === Link summary: status only, without directional topology arrows === */
+.candy-link-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(15em, 1fr)); border-top: 1px solid var(--arcogray-3); }
+.candy-link-summary-item { min-width: 0; padding: .8em 1em .8em 0; border-bottom: 1px solid var(--arcogray-3); }
+.candy-link-summary-item strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--arcogray-7); }
+.candy-link-summary-meta { display: flex; align-items: center; gap: .5em; min-width: 0; margin-top: .35em; color: var(--arcogray-5); font-size: .86em; }
+.candy-link-summary-server { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* === Charts === */
 .candy-chart-grid {
@@ -398,39 +363,50 @@ end
 /* === Responsive === */
 @media (max-width: 1000px) {
   .candy-chart-grid { grid-template-columns: 1fr; }
-  .candy-diagnostics-table-scroll .table { min-width: 0; }
-  .candy-diagnostics-table-scroll .td-telemetry { min-width: 0; }
 }
-@media (max-width: 640px) {
-  .candy-topology { flex-direction: column; }
+@media (max-width: 720px) {
+  .candy-diagnostics-table-scroll { overflow: visible; }
+  .candy-diagnostics-table-scroll .table { display: block; min-width: 0; }
+  .candy-diagnostics-table-scroll thead { display: none; }
+  .candy-diagnostics-table-scroll tbody { display: block; }
+  .candy-diagnostics-table-scroll .tr { display: block; padding: .45em 0; border-bottom: 1px solid var(--arcogray-3); }
+  .candy-diagnostics-table-scroll .td {
+    display: grid;
+    grid-template-columns: minmax(7em, .7fr) minmax(0, 1.3fr);
+    gap: .75em;
+    width: 100%;
+    padding: .4em .25em;
+    border: 0;
+  }
+  .candy-diagnostics-table-scroll .td:before { content: attr(data-label); color: var(--arcogray-5); font-size: .85em; }
+  .candy-diagnostics-table-scroll .td[colspan] { display: block; }
+  .candy-diagnostics-table-scroll .td[colspan]:before { display: none; }
+  .candy-telemetry-row { justify-content: flex-start; }
+  .candy-telemetry-value { text-align: left; }
 }
 </style>
 
 <div class="cbi-map">
-
-<div class="cbi-map" id="candy-topology-section">
-	<h3><%:Topology%></h3>
+	<h3><%:Link status%></h3>
 	<div class="cbi-section">
-		<div id="candy-diagnostics-topology" class="candy-topology">
-			<em><%:Loading topology…%></em>
-		</div>
+		<div id="candy-diagnostics-link-summary" class="candy-link-summary"><em><%:Loading link status...%></em></div>
 	</div>
 </div>
 
 <div class="cbi-map">
-	<h3><%:Per-node passive diagnostics%></h3>
+	<h3><%:Per-node telemetry%></h3>
 	<div class="cbi-section">
 		<div class="candy-diagnostics-table-scroll">
-			<span style="display:none" aria-hidden="true">Legacy fields: Latency quality, Delivery, Flight control, Transport state, Path</span><table class="table">
+			<table class="table">
 				<thead>
 					<tr class="tr table-titles">
-						<th class="th"><%:Name%></th>
-						<th class="th"><%:State%></th>
-						<th class="th"><%:Latency%></th>
-						<th class="th"><%:Throughput & Loss%></th>
-						<th class="th"><%:Congestion control%></th>
+						<th class="th"><%:Node%></th>
 						<th class="th"><%:Status%></th>
-						<th class="th">MTU</th>
+						<th class="th"><%:RTT / jitter%></th>
+						<th class="th"><%:Loss%></th>
+						<th class="th"><%:RX / TX%></th>
+						<th class="th"><%:Freshness%></th>
+						<th class="th"><%:Transport%></th>
 					</tr>
 				</thead>
 				<tbody id="candy-diagnostics-nodes">
@@ -440,6 +416,7 @@ end
 	</div>
 </div>
 
+<div class="cbi-map">
 	<h3><%:Congestion controller comparison%></h3>
 	<div class="cbi-section">
 		<p><%:Downloads the node's 50 MiB test object four times through the selected Candy QUIC line, once with CUBIC and once with each Candy BBR preset (up to about 200 MiB total). It does not change the running configuration.%></p>
@@ -453,14 +430,14 @@ end
 			<button id="candy-congestion-test-start" class="cbi-button cbi-button-action"<%=#congestion_test_nodes == 0 and ' disabled="disabled"' or ''%>><%:Start comparison%></button>
 			<span id="candy-congestion-test-state"><%=#congestion_test_nodes == 0 and i18n.translate("No compatible nodes") or i18n.translate("Not run")%></span>
 		</div>
-		<div class="candy-table-scroll"><span style="display:none" aria-hidden="true">Legacy fields: Latency quality, Delivery, Flight control, Transport state, Path</span><table class="table"><thead><tr class="tr table-titles"><th class="th"><%:Node / controller / preset%></th><th class="th"><%:Goodput%></th><th class="th">TTFB</th><th class="th"><%:Total time%></th><th class="th"><%:Data%></th><th class="th"><%:Result%></th></tr></thead><tbody id="candy-congestion-test-results"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table></div>
+		<div class="candy-table-scroll"><table class="table"><thead><tr class="tr table-titles"><th class="th"><%:Node / controller / preset%></th><th class="th"><%:Goodput%></th><th class="th">TTFB</th><th class="th"><%:Total time%></th><th class="th"><%:Data%></th><th class="th"><%:Result%></th></tr></thead><tbody id="candy-congestion-test-results"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table></div>
 	</div>
 </div>
 
 <div id="candy-feature-matrix-section" class="cbi-map">
 	<h3><%:Per-node protocol capability matrix%></h3>
 	<div class="cbi-section candy-feature-matrix">
-		<span style="display:none" aria-hidden="true">Legacy fields: Latency quality, Delivery, Flight control, Transport state, Path</span><table class="table"><colgroup><col style="width:22%"><col style="width:11%"><col style="width:14%"><col style="width:13%"><col style="width:13%"><col style="width:27%"></colgroup><thead><tr class="tr table-titles"><th class="th"><%:Node / server Core%></th><th class="th"><%:Wire protocol%></th><th class="th"><%:Feature%></th><th class="th"><%:Negotiation%></th><th class="th"><%:Authorization%></th><th class="th"><%:Runtime evidence%></th></tr></thead><tbody id="candy-diagnostics-feature-matrix"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table>
+		<table class="table"><colgroup><col style="width:22%"><col style="width:11%"><col style="width:14%"><col style="width:13%"><col style="width:13%"><col style="width:27%"></colgroup><thead><tr class="tr table-titles"><th class="th"><%:Node / server Core%></th><th class="th"><%:Wire protocol%></th><th class="th"><%:Feature%></th><th class="th"><%:Negotiation%></th><th class="th"><%:Authorization%></th><th class="th"><%:Runtime evidence%></th></tr></thead><tbody id="candy-diagnostics-feature-matrix"><tr class="tr"><td class="td" colspan="6">-</td></tr></tbody></table>
 	</div>
 </div>
 
@@ -468,18 +445,19 @@ end
 	<h3><%:Service resources%></h3>
 	<div class="cbi-section">
 		<h4><%:Failure recovery%></h4>
-		<span style="display:none" aria-hidden="true">Legacy fields: Latency quality, Delivery, Flight control, Transport state, Path</span><table class="table">
+		<table class="table">
 			<tr class="tr"><td class="td left" width="33%"><%:Recovery state%></td><td id="candy-diagnostics-fault-state" class="td left"><%=xml.pcdata(text_label(fault.state))%></td></tr>
 			<tr class="tr"><td class="td left"><%:Failure reason%></td><td id="candy-diagnostics-fault-reason" class="td left"><%=xml.pcdata(text_label(fault.reason))%></td></tr>
 			<tr class="tr"><td class="td left"><%:Network cleanup%></td><td id="candy-diagnostics-fault-cleanup" class="td left"><%=xml.pcdata(text_label(fault.cleanup))%></td></tr>
 			<tr class="tr"><td class="td left"><%:Recovery detail%></td><td id="candy-diagnostics-fault-detail" class="td left"><%=xml.pcdata(text_label(fault.detail))%></td></tr>
 		</table>
 		<h4><%:Bootstrap providers%></h4>
-		<span style="display:none" aria-hidden="true">Legacy fields: Latency quality, Delivery, Flight control, Transport state, Path</span><table class="table">
+		<table class="table">
 			<tr class="tr"><td class="td left" width="33%"><%:China IP ranges%></td><td id="candy-diagnostics-geo-state" class="td left" title="<%=xml.pcdata(geo.last_error ~= "" and geo.last_error or geo.last_warning or "")%>"><%=xml.pcdata(provider_state(geo) .. (geo.last_warning ~= "" and " / " .. i18n.translate("Fallback active") or "") .. " / " .. tostring(geo.entry_count or 0) .. " " .. i18n.translate("entries"))%></td></tr>
 			<tr class="tr"><td class="td left"><%:GFWList domains%></td><td id="candy-diagnostics-gfwlist-state" class="td left" title="<%=xml.pcdata(gfwlist.last_error ~= "" and gfwlist.last_error or gfwlist.last_warning or "")%>"><%=xml.pcdata(provider_state(gfwlist) .. (gfwlist.last_warning ~= "" and " / " .. i18n.translate("Fallback active") or "") .. " / " .. tostring(gfwlist.entry_count or 0) .. " " .. i18n.translate("entries"))%></td></tr>
 		</table>
-		<span style="display:none" aria-hidden="true">Legacy fields: Latency quality, Delivery, Flight control, Transport state, Path</span><table class="table">
+		<h4><%:Process and socket resources%></h4>
+		<table class="table">
 			<tr class="tr"><td class="td left" width="33%"><%:Process CPU%></td><td id="candy-diagnostics-process-cpu" class="td left"><%=xml.pcdata(process_cpu ~= nil and tostring(process_cpu) .. " %" or "-")%></td></tr>
 			<tr class="tr"><td class="td left"><%:Resident memory%></td><td id="candy-diagnostics-process-rss" class="td left"><%=xml.pcdata(bytes_label(process_rss))%></td></tr>
 			<tr class="tr"><td class="td left"><%:UDP receive buffer%></td><td id="candy-diagnostics-socket-rx" class="td left"><%=xml.pcdata(bytes_label(socket_buffers.receive_bytes))%></td></tr>
@@ -496,6 +474,8 @@ end
 		<div class="candy-chart"><h4><%:Latency%></h4><div id="candy-chart-latency-legend" class="candy-chart-legend"></div><svg id="candy-chart-latency" viewBox="0 0 600 160" preserveAspectRatio="none"></svg><div class="candy-chart-key"><%:Solid: RTT; dashed: 100 ms reference%></div></div>
 	</div>
 </div>
+
+<%+candy/log_panel%>
 
 <script type="text/javascript">
 var candyDiagnosticsStatusUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'status_json')%>";
@@ -538,8 +518,9 @@ var candyDiagnosticsLabels = {
 	},
 	testNodes: <%=jsonc.stringify(congestion_test_node_labels)%>,
 	testNodeSections: <%=jsonc.stringify(congestion_test_node_sections)%>,
-	rtt: "RTT", rttVariation: <%=js_string(i18n.translate("RTT variation"))%>,
+	rtt: "RTT", jitter: <%=js_string(i18n.translate("Jitter"))%>,
 	goodput: <%=js_string(i18n.translate("Goodput"))%>, estimatedCapacity: <%=js_string(i18n.translate("Estimated capacity"))%>, idle: <%=js_string(i18n.translate("Idle"))%>, loss: <%=js_string(i18n.translate("Loss"))%>,
+	rx: "RX", tx: "TX", freshness: <%=js_string(i18n.translate("Freshness"))%>, now: <%=js_string(i18n.translate("Now"))%>, secondsAgo: <%=js_string(i18n.translate("seconds ago"))%>, minutesAgo: <%=js_string(i18n.translate("minutes ago"))%>,
 	inFlight: <%=js_string(i18n.translate("In flight"))%>, pacing: <%=js_string(i18n.translate("Pacing"))%>, bandwidth: <%=js_string(i18n.translate("Bandwidth estimate"))%>,
 	cwnd: "CWND", mtu: "MTU",
 	negotiated: <%=js_string(i18n.translate("Negotiated"))%>, notNegotiated: <%=js_string(i18n.translate("Not negotiated"))%>,
@@ -548,6 +529,11 @@ var candyDiagnosticsLabels = {
 };
 
 function candyDiagnosticsText(value) { return value === null || value === undefined || value === "" ? "-" : String(value); }
+function candyDiagnosticsEscape(value) {
+	return candyDiagnosticsText(value).replace(/[&<>"']/g, function(character) {
+		return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character];
+	});
+}
 function candyDiagnosticsMappedText(labels, value) {
 	var text = candyDiagnosticsText(value);
 	return text === "-" ? text : labels[text] || text;
@@ -557,17 +543,18 @@ function candyDiagnosticsController(applied, passive) {
 }
 
 /* === Rich rendering helpers === */
-function candyDiagnosticsAppendRichCell(row, html) {
+function candyDiagnosticsAppendRichCell(row, html, label) {
 	var cell = document.createElement("td");
 	cell.className = "td";
 	cell.innerHTML = html;
+	if (label) cell.setAttribute("data-label", label);
 	row.appendChild(cell);
 	return cell;
 }
 
 function candyDiagnosticsStatusBadge(text, type) {
 	type = type || "neutral";
-	return '<span class="candy-badge candy-badge-' + type + '">' + candyDiagnosticsText(text) + '</span>';
+	return '<span class="candy-badge candy-badge-' + type + '">' + candyDiagnosticsEscape(text) + '</span>';
 }
 
 function candyDiagnosticsLinkQuality(rttMicros, lossCount, bandwidthBps) {
@@ -625,73 +612,36 @@ function candyDiagnosticsNodeStateBadge(state) {
 }
 
 function candyDiagnosticsTelemetryRow(label, value) {
-	return '<div class="candy-telemetry-row"><span class="candy-telemetry-label">' + label + '</span><span class="candy-telemetry-value">' + value + '</span></div>';
+	return '<div class="candy-telemetry-row"><span class="candy-telemetry-label">' + candyDiagnosticsEscape(label) + '</span><span class="candy-telemetry-value">' + candyDiagnosticsEscape(value) + '</span></div>';
 }
 function candyDiagnosticsTelemetryRowSub(label, value, sub) {
-	return '<div class="candy-telemetry-row"><span class="candy-telemetry-label">' + label + '</span><span class="candy-telemetry-value">' + value + '</span></div><div class="candy-telemetry-sub">' + sub + '</div>';
+	return '<div class="candy-telemetry-row"><span class="candy-telemetry-label">' + candyDiagnosticsEscape(label) + '</span><span class="candy-telemetry-value">' + candyDiagnosticsEscape(value) + '</span></div><div class="candy-telemetry-sub">' + sub + '</div>';
 }
-/* === Topology rendering === */
-function candyDiagnosticsRenderTopology(data) {
-	var container = document.getElementById("candy-diagnostics-topology");
+function candyDiagnosticsRenderLinkSummary(data) {
+	var container = document.getElementById("candy-diagnostics-link-summary");
 	if (!container) return;
 	var nodes = data && data.nodes || [];
 	container.textContent = "";
 	if (!nodes.length) {
-		container.innerHTML = '<em>' + candyDiagnosticsLabels.noNodes + '</em>';
+		var empty = document.createElement("em"); empty.textContent = candyDiagnosticsLabels.noNodes; container.appendChild(empty);
 		return;
 	}
-	/* Separate local and peer nodes */
-	var localNodes = [], peerNodes = [];
 	nodes.forEach(function(node) {
-		var state = candyDiagnosticsText(node.state);
-		if (state === "ready") { localNodes.push(node); } else { peerNodes.push(node); }
-	});
-	if (!localNodes.length && peerNodes.length) {
-		localNodes.push(peerNodes.shift());
-	}
-	function renderNode(node, isLocal) {
-		var nodeDiv = document.createElement("div");
-		nodeDiv.className = "candy-topology-node" + (isLocal ? " local" : "");
+		var nodeDiv = document.createElement("div"); nodeDiv.className = "candy-link-summary-item";
 		var nameDiv = document.createElement("div");
-		nameDiv.className = "candy-topology-node-name";
+		nameDiv.className = "candy-node-name";
 		nameDiv.textContent = candyDiagnosticsText(node.name || node.id);
+		nameDiv.title = nameDiv.textContent;
 		nodeDiv.appendChild(nameDiv);
-		var stateDiv = document.createElement("div");
-		stateDiv.className = "candy-topology-node-state";
+		var stateDiv = document.createElement("div"); stateDiv.className = "candy-link-summary-meta";
 		stateDiv.innerHTML = candyDiagnosticsNodeStateBadge(node.state);
-		nodeDiv.appendChild(stateDiv);
-		/* Show server info */
 		if (node.server) {
-			var serverDiv = document.createElement("div");
-			serverDiv.className = "candy-topology-node-server";
+			var serverDiv = document.createElement("span"); serverDiv.className = "candy-link-summary-server";
 			serverDiv.textContent = candyDiagnosticsText(node.server);
-			nodeDiv.appendChild(serverDiv);
+			serverDiv.title = serverDiv.textContent; stateDiv.appendChild(serverDiv);
 		}
-		return nodeDiv;
-	}
-	/* Render local nodes first, then peer nodes in a clean grid */
-	var section = document.createElement("div");
-	section.className = "candy-topology-section";
-	var label = document.createElement("div");
-	label.className = "candy-topology-section-label";
-	label.textContent = "Local";
-	section.appendChild(label);
-	localNodes.forEach(function(node) {
-		section.appendChild(renderNode(node, true));
+		nodeDiv.appendChild(stateDiv); container.appendChild(nodeDiv);
 	});
-	container.appendChild(section);
-	if (peerNodes.length) {
-		var peerSection = document.createElement("div");
-		peerSection.className = "candy-topology-section";
-		var peerLabel = document.createElement("div");
-		peerLabel.className = "candy-topology-section-label";
-		peerLabel.textContent = "Peers (" + peerNodes.length + ")";
-		peerSection.appendChild(peerLabel);
-		peerNodes.forEach(function(node) {
-			peerSection.appendChild(renderNode(node, false));
-		});
-		container.appendChild(peerSection);
-	}
 }
 function candyDiagnosticsRenderFeatureMatrix(data) {
 	var section = document.getElementById("candy-feature-matrix-section"), body = document.getElementById("candy-diagnostics-feature-matrix");
@@ -807,18 +757,29 @@ function candyDiagnosticsRenderRecovery(fault) {
 	candyDiagnosticsSetText("candy-diagnostics-fault-cleanup", fault.cleanup || "-");
 	candyDiagnosticsSetText("candy-diagnostics-fault-detail", fault.detail || "-");
 }
-function candyDiagnosticsAppendCell(row, value) { var cell = document.createElement("td"); cell.className = "td"; cell.textContent = value; row.appendChild(cell); return cell; }
-function candyDiagnosticsAppendTelemetryCell(row, html) {
+function candyDiagnosticsAppendCell(row, value, label) {
+	var cell = document.createElement("td"); cell.className = "td"; cell.textContent = value;
+	cell.title = candyDiagnosticsText(value); if (label) cell.setAttribute("data-label", label); row.appendChild(cell); return cell;
+}
+function candyDiagnosticsAppendNameCell(row, value) {
+	var cell = document.createElement("td"), span = document.createElement("span");
+	cell.className = "td"; cell.setAttribute("data-label", <%=js_string(i18n.translate("Node"))%>);
+	span.className = "candy-node-name"; span.textContent = candyDiagnosticsText(value); span.title = span.textContent;
+	cell.appendChild(span); row.appendChild(cell); return cell;
+}
+function candyDiagnosticsAppendTelemetryCell(row, html, label) {
 	var cell = document.createElement("td");
 	cell.className = "td td-telemetry";
 	cell.innerHTML = html;
+	if (label) cell.setAttribute("data-label", label);
 	row.appendChild(cell);
 	return cell;
 }
-function candyDiagnosticsAppendStatusCell(row, html) {
+function candyDiagnosticsAppendStatusCell(row, html, label) {
 	var cell = document.createElement("td");
 	cell.className = "td td-status";
 	cell.innerHTML = html;
+	if (label) cell.setAttribute("data-label", label);
 	row.appendChild(cell);
 	return cell;
 }
@@ -829,6 +790,15 @@ function candyDiagnosticsFirstDefined(values) {
 function candyDiagnosticsPercent(numerator, denominator) {
 	var n = Number(numerator), d = Number(denominator);
 	return isFinite(n) && isFinite(d) && d > 0 ? (n * 100 / d).toFixed(0) + " %" : "-";
+}
+function candyDiagnosticsFreshness(value) {
+	var timestamp = Number(value);
+	if (value === null || value === undefined || !isFinite(timestamp) || timestamp <= 0) return "-";
+	if (timestamp < 1000000000000) timestamp *= 1000;
+	var age = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+	if (age < 2) return candyDiagnosticsLabels.now;
+	if (age < 60) return age + " " + candyDiagnosticsLabels.secondsAgo;
+	return Math.floor(age / 60) + " " + candyDiagnosticsLabels.minutesAgo;
 }
 function candyDiagnosticsLines(lines) { return lines.join("\n"); }
 function candyDiagnosticsPushHistory(name, nodes, valueField, referenceField, fixedReference) {
@@ -875,12 +845,12 @@ function candyDiagnosticsRender(data) {
 	var runtime = data.runtime || {}, performance = runtime.performance || {}, legacy = performance.passive;
 	var processStatus = data.process || {}, socketBuffers = processStatus.socket_buffers || {}, legacyLocal = legacy && legacy.local || {};
 	var nodes = data.nodes || [], body = document.getElementById("candy-diagnostics-nodes"), row, cell, text;
+	if (!nodes.length && legacy) nodes = [{ id: "-", name: "-", state: "-", passive: legacy }];
 	candyDiagnosticsRenderRecovery(data.fault);
 	candyDiagnosticsRenderFeatureMatrix(data);
-	candyDiagnosticsRenderTopology(data);
+	candyDiagnosticsRenderLinkSummary({ nodes: nodes });
 	candyDiagnosticsSetProvider("candy-diagnostics-geo-state", data.geo);
 	candyDiagnosticsSetProvider("candy-diagnostics-gfwlist-state", data.gfwlist);
-	if (!nodes.length && legacy) nodes = [{ id: "-", name: "-", state: "-", passive: legacy }];
 	candyDiagnosticsUpdateCharts(nodes);
 	var cpu = candyDiagnosticsFirstDefined([processStatus.cpu_percent, legacyLocal.process_cpu_percent]);
 	var rss = candyDiagnosticsFirstDefined([processStatus.resident_memory_bytes, legacyLocal.resident_memory_bytes]);
@@ -897,47 +867,42 @@ function candyDiagnosticsRender(data) {
 		cell.appendChild(text); row.appendChild(cell); body.appendChild(row); return;
 	}
 	nodes.forEach(function(node) {
-		var passive = node.passive || {}, localStatus = passive.local || {}, applied = passive.applied_transport || {};
+		var passive = node.passive || {}, localStatus = passive.local || {}, peerStatus = passive.peer || {}, applied = passive.applied_transport || {};
 		var rtt = localStatus.smoothed_rtt_micros, rttVar = localStatus.rtt_variance_micros;
 		var goodput = localStatus.goodput_bps, estCap = localStatus.bandwidth_estimate_bps, lost = localStatus.lost_packets;
+		var rx = peerStatus.goodput_bps_rx, tx = peerStatus.goodput_bps_tx;
 		var inFlight = localStatus.bytes_in_flight, cwnd = localStatus.cwnd_bytes, pacing = localStatus.pacing_rate_bps;
 		var congMode = localStatus.congestion_mode, recState = localStatus.recovery_state, mtu = localStatus.path_mtu;
+		var updated = candyDiagnosticsFirstDefined([passive.updated_unix_ms, node.updated_unix_ms]);
 
 		row = document.createElement("tr"); row.className = "tr";
+		candyDiagnosticsAppendNameCell(row, node.name || node.id);
+		candyDiagnosticsAppendRichCell(row, candyDiagnosticsNodeStateBadge(node.state), <%=js_string(i18n.translate("Status"))%>);
 
-		/* Name */
-		candyDiagnosticsAppendCell(row, candyDiagnosticsText(node.name || node.id));
+		var latencyHtml = candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.rtt, candyDiagnosticsMicros(rtt))
+			+ candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.jitter, candyDiagnosticsMicros(rttVar));
+		candyDiagnosticsAppendTelemetryCell(row, latencyHtml, <%=js_string(i18n.translate("RTT / jitter"))%>);
 
-		/* State badge */
-		candyDiagnosticsAppendRichCell(row, candyDiagnosticsNodeStateBadge(node.state));
-
-		/* Latency cell with link quality indicator */
-		var latencyHtml = '<div class="candy-status-row">' + candyDiagnosticsLinkQuality(rtt, lost, estCap) + '</div>'
-			+ candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.rtt, candyDiagnosticsMicros(rtt))
-			+ candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.rttVariation, candyDiagnosticsMicros(rttVar));
-		candyDiagnosticsAppendTelemetryCell(row, latencyHtml);
-
-		/* Throughput & Loss */
-		var throughputHtml = candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.goodput, candyDiagnosticsGoodput(goodput))
-			+ candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.estimatedCapacity, candyDiagnosticsBps(estCap))
+		var lossHtml = '<div class="candy-status-row">' + candyDiagnosticsLinkQuality(rtt, lost, estCap) + '</div>'
 			+ candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.loss, candyDiagnosticsText(lost));
-		candyDiagnosticsAppendTelemetryCell(row, throughputHtml);
+		candyDiagnosticsAppendTelemetryCell(row, lossHtml, <%=js_string(i18n.translate("Loss"))%>);
 
-		/* Congestion control: flight + pacing + cwnd bar */
-		var ccHtml = candyDiagnosticsTelemetryRowSub(candyDiagnosticsLabels.inFlight,
+		var throughputHtml = candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.rx, candyDiagnosticsGoodput(rx))
+			+ candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.tx, candyDiagnosticsGoodput(tx))
+			+ candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.goodput, candyDiagnosticsGoodput(goodput));
+		candyDiagnosticsAppendTelemetryCell(row, throughputHtml, <%=js_string(i18n.translate("RX / TX"))%>);
+
+		candyDiagnosticsAppendCell(row, candyDiagnosticsFreshness(updated), <%=js_string(i18n.translate("Freshness"))%>);
+
+		var transportHtml = '<div class="candy-status-row">' + candyDiagnosticsStatusBadge(candyDiagnosticsController(applied, passive), "info")
+			+ candyDiagnosticsCongestionModeBadge(congMode) + candyDiagnosticsRecoveryStateBadge(recState) + '</div>'
+			+ candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.estimatedCapacity, candyDiagnosticsBps(estCap))
+			+ candyDiagnosticsTelemetryRowSub(candyDiagnosticsLabels.inFlight,
 				candyDiagnosticsBytes(inFlight) + ' / ' + candyDiagnosticsBytes(cwnd),
 				candyDiagnosticsCwndBar(inFlight, cwnd))
-			+ candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.pacing, candyDiagnosticsBps(pacing));
-		candyDiagnosticsAppendTelemetryCell(row, ccHtml);
-
-		/* Status: congestion mode + recovery state + controller */
-		var statusHtml = '<div style="margin-bottom:3px">' + candyDiagnosticsCongestionModeBadge(congMode) + '</div>'
-			+ '<div style="margin-bottom:3px">' + candyDiagnosticsRecoveryStateBadge(recState) + '</div>'
-			+ candyDiagnosticsStatusBadge(candyDiagnosticsController(applied, passive), "info");
-		candyDiagnosticsAppendStatusCell(row, statusHtml);
-
-		/* MTU */
-		candyDiagnosticsAppendCell(row, candyDiagnosticsText(mtu));
+			+ candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.pacing, candyDiagnosticsBps(pacing))
+			+ candyDiagnosticsTelemetryRow(candyDiagnosticsLabels.mtu, candyDiagnosticsText(mtu));
+		candyDiagnosticsAppendStatusCell(row, transportHtml, <%=js_string(i18n.translate("Transport"))%>);
 		body.appendChild(row);
 	});
 }

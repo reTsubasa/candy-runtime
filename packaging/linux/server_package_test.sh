@@ -62,6 +62,13 @@ grep -F 'LAUNCHER=${CANDY_SERVER_LAUNCHER:-/opt/candy/current/candy-server}' \
 grep -F 'ExecStart=/opt/candy/current/candy-server --config /etc/candy/server.toml' \
 	"$stage/systemd/candy-server.service" >/dev/null ||
 	fail "server unit does not use the stable current release launcher"
+grep -F 'LimitMEMLOCK=64M' "$stage/systemd/candy-server.service" >/dev/null ||
+	fail "server unit cannot establish the transaction agent memlock limit"
+grep -Fx 'CapabilityBoundingSet=' "$stage/systemd/candy-server.service" >/dev/null ||
+	fail "server unit does not retain an empty capability set"
+if grep -Eq '^AmbientCapabilities=|^CapabilityBoundingSet=CAP_' "$stage/systemd/candy-server.service"; then
+	fail "server unit grants broad capabilities for kernel tuning"
+fi
 [ -x "$stage/usr/local/libexec/candy-server-health-check" ] || fail "server health check was not staged"
 [ -f "$stage/etc/candy/server.toml.example" ] || fail "server example config was not staged"
 [ -f "$stage/etc/candy/cloud-sync.env.example" ] || fail "server Cloud sync endpoint example was not staged"
@@ -71,6 +78,12 @@ grep -F 'ExecStart=/opt/candy/current/candy-server --config /etc/candy/server.to
 [ ! -e "$stage/systemd/candy-sdwan.service" ] || fail "server package must not stage a second SD-WAN service"
 [ -x "$stage/install/install-candy-server.sh" ] || fail "installer was not staged"
 [ -x "$stage/install/upgrade-candy-server.sh" ] || fail "full Runtime upgrader was not staged"
+for installer in "$stage/install/install-candy-server.sh" "$stage/install/upgrade-candy-server.sh"; do
+	grep -F 'SYSCTL_POLICY=/usr/lib/sysctl.d/60-candy-server.conf' "$installer" >/dev/null ||
+		fail "server installer has no persistent QUIC sysctl policy"
+	grep -F 'UDP_BUFFER_MAX_BYTES=16777216' "$installer" >/dev/null ||
+		fail "server installer has the wrong QUIC socket maximum"
+done
 [ "$(cat "$stage/RUNTIME-RELEASE")" = 0.4.0-r62 ] || fail "server bundle release identity is missing or invalid"
 [ "$(cat "$stage/RUNTIME-ARCH")" = x86_64 ] || fail "server bundle architecture identity is missing or invalid"
 [ "$(cat "$edge_stage/RUNTIME-RELEASE")" = 0.4.0-r62 ] || fail "edge bundle release identity is missing or invalid"

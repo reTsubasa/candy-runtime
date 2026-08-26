@@ -166,12 +166,9 @@ mod backend {
                     .await
                     .map_err(|_| NetworkError::Backend)?;
             }
-            for exclusion in &plan.exclusions {
+            for prefix in plan.throw_prefixes() {
                 let route = RouteMessageBuilder::<Ipv4Addr>::new()
-                    .destination_prefix(
-                        Ipv4Addr::from(exclusion.prefix.network),
-                        exclusion.prefix.prefix_len,
-                    )
+                    .destination_prefix(Ipv4Addr::from(prefix.network), prefix.prefix_len)
                     .table_id(plan.route_table)
                     .protocol(RouteProtocol::Static)
                     .kind(RouteType::Throw)
@@ -210,12 +207,9 @@ mod backend {
                     }
                 }
             }
-            for exclusion in &plan.exclusions {
+            for prefix in plan.throw_prefixes() {
                 let route = RouteMessageBuilder::<Ipv4Addr>::new()
-                    .destination_prefix(
-                        Ipv4Addr::from(exclusion.prefix.network),
-                        exclusion.prefix.prefix_len,
-                    )
+                    .destination_prefix(Ipv4Addr::from(prefix.network), prefix.prefix_len)
                     .table_id(plan.route_table)
                     .protocol(RouteProtocol::Static)
                     .kind(RouteType::Throw)
@@ -629,5 +623,58 @@ impl LinuxNetworkPlan {
                 .ok_or(NetworkError::Backend)?,
             remote_egress,
         })
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn throw_prefixes(&self) -> Vec<Ipv4Prefix> {
+        let mut prefixes = self.local_prefixes.clone();
+        prefixes.extend(self.exclusions.iter().map(|exclusion| exclusion.prefix));
+        prefixes.sort_unstable();
+        prefixes.dedup();
+        prefixes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candy_netd_proto::{FirewallPolicy, RouteDeclaration, UnderlayKind};
+
+    #[test]
+    fn local_networks_and_underlay_endpoints_bypass_remote_egress_rules() {
+        let local = Ipv4Prefix::new([192, 168, 1, 0], 24).unwrap();
+        let cloud = Ipv4Prefix::new([47, 83, 1, 189], 32).unwrap();
+        let declaration = PrepareDeclaration {
+            table_id: 20_614,
+            overlay_router_ipv4: [100, 64, 0, 2],
+            effective_mtu: 1_300,
+            routes: vec![
+                RouteDeclaration {
+                    prefix: Ipv4Prefix::new([0, 0, 0, 0], 1).unwrap(),
+                    kind: RouteKind::RemoteEgress,
+                },
+                RouteDeclaration {
+                    prefix: Ipv4Prefix::new([128, 0, 0, 0], 1).unwrap(),
+                    kind: RouteKind::RemoteEgress,
+                },
+                RouteDeclaration {
+                    prefix: local,
+                    kind: RouteKind::Local,
+                },
+            ],
+            exclusions: vec![UnderlayExclusion {
+                prefix: cloud,
+                kind: UnderlayKind::CloudApi,
+            }],
+            firewall: FirewallPolicy {
+                allow_forward: true,
+                clamp_tcp_mss: true,
+                require_ipv4_forwarding: true,
+                manage_rp_filter: true,
+            },
+        };
+
+        let plan = LinuxNetworkPlan::compile(&declaration).unwrap();
+        assert_eq!(plan.throw_prefixes(), vec![cloud, local]);
     }
 }

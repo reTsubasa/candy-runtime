@@ -183,7 +183,10 @@ grep -F "The node record remains in Cloud until an administrator deletes it" "$s
 grep -F 'run_sdwan_lifecycle("stop", { "/etc/init.d/candy", "sdwan_stop", "user_leave" }' "$controller" >/dev/null || fail "LuCI can erase identity before fail-open completes"
 grep -F 'run_sdwan_lifecycle("runtime", { SDWAN_RUNTIME, "leave" }' "$controller" >/dev/null || fail "LuCI does not run the profile cleanup lifecycle"
 grep -F 'event=sdwan_leave phase=' "$controller" >/dev/null || fail "LuCI leave action does not write phase-specific logs"
-grep -F 'if network_ready' "$sdwan" | grep -F 'sdwan_reconnect' >/dev/null || fail "LuCI reconnect is not gated by a synchronized Cloud network profile"
+network_ready_actions=$(sed -n '/<% if network_ready then %>/,/<% end %>/p' "$sdwan")
+for action in sdwan_start sdwan_stop sdwan_reconnect; do
+	printf '%s\n' "$network_ready_actions" | grep -F "$action" >/dev/null || fail "LuCI $action is not gated by a synchronized Cloud network profile"
+done
 if grep -F 'The node identity has joined Candy Cloud. The SD-WAN data plane is not enabled' "$sdwan" >/dev/null; then
 	fail "LuCI still exposes the ambiguous data-plane-disabled message"
 fi

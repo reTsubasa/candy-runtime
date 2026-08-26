@@ -71,6 +71,38 @@ valid endpoint is installed, start `candy-cloud-sync.service` or wait for its
 timer; Cloud then validates the endpoint port against Core's real listeners
 before accepting the transport identity.
 
+All Linux server SD-WAN components use the real state directory
+`/var/lib/candy/sdwan`. The service units set both state environment variables,
+and Cloud sync also receives an explicit `--state-dir` argument. Runtime
+upgrades merge an older real `/etc/candy/sdwan` tree into the canonical path and
+also accept the historical `/var/lib/candy/sdwan -> /etc/candy/sdwan` layout.
+They preserve matching identity and configuration objects, reject conflicting
+objects, and switch `/etc/candy/sdwan` to a compatibility link only after the
+upgraded services pass health verification. The canonical path ends as a real
+directory; a failed reverse-link migration restores the previous layout.
+
+Cloud configuration generations and server activation directories are
+content-addressed immutable history. After successful synchronization the
+server keeps at most four entries of each kind by default, always protecting
+the `configuration`, `candidate`, and `active` pointer targets. Set
+`CANDY_SDWAN_HISTORY_RETAIN` to a value from 2 through 32 when a longer local
+rollback window is required.
+
+## Linux kernel limits for SD-WAN QUIC
+
+The server transaction agent establishes a 64 MiB `RLIMIT_MEMLOCK` before it
+starts Core. `candy-server.service` therefore sets `LimitMEMLOCK=64M`; no
+`CAP_IPC_LOCK` capability is required or granted. The unit also retains an
+empty capability bounding set.
+
+Core requests 8 MiB UDP receive and send queues for each QUIC socket. The
+installer and Runtime upgrader persist each of `net.core.rmem_max` and
+`net.core.wmem_max` as the greater of its current value and 16 MiB in
+`/usr/lib/sysctl.d/60-candy-server.conf`, and raise a lower live value before
+the service starts. This lets ordinary `SO_RCVBUF` and `SO_SNDBUF` calls meet
+the target without granting `CAP_NET_ADMIN` for the force variants. Upgrade
+rollback restores both the previous policy file and the previous live values.
+
 For an operator-driven join over SSH, use the repository helper. It supports
 both x86-64 and ARM64 servers and never accepts an SSH password:
 

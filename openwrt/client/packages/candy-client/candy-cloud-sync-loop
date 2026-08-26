@@ -11,6 +11,25 @@ CANDY_INIT=${CANDY_INIT:-/etc/init.d/candy}
 CANDY_CORE_BIN=${CANDY_CORE_BIN:-/usr/lib/candy/cores/current/candy-core}
 
 reconcile_sdwan() {
+	if ! "$CANDY_INIT" enabled >/dev/null 2>&1; then
+		logger -t candy -- "level=info event=cloud_sync_reconcile result=deferred reason=service_disabled"
+		return 0
+	fi
+	service_state=$("$CANDY_INIT" status 2>/dev/null || true)
+	case "$service_state" in
+		stopped)
+			if "$CANDY_INIT" start >/dev/null 2>&1; then
+				logger -t candy -- "level=info event=cloud_sync_reconcile result=recovered reason=service_stopped"
+				return 0
+			fi
+			logger -t candy -- "level=error event=cloud_sync_reconcile result=failed reason=service_restart_failed"
+			return 1
+			;;
+		starting|stopping)
+			logger -t candy -- "level=info event=cloud_sync_reconcile result=deferred reason=service_$service_state"
+			return 0
+			;;
+	esac
 	if "$CANDY_INIT" sdwan_reconcile >/dev/null 2>&1; then
 		logger -t candy -- "level=info event=cloud_sync_reconcile result=ok"
 		return 0

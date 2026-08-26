@@ -3,7 +3,7 @@
 START=95
 STOP=10
 USE_PROCD=1
-EXTRA_COMMANDS="provider_update_once provider_update_loop network_apply network_cleanup reload_runtime restart_queued fail_open sdwan_fail_open sdwan_reconcile sdwan_reconnect sdwan_stop health_watchdog congestion_test run_client run_sdwan run_netd"
+EXTRA_COMMANDS="provider_update_once provider_update_loop network_apply network_cleanup reload_runtime restart_queued fail_open sdwan_fail_open sdwan_reconcile sdwan_start sdwan_reconnect sdwan_stop health_watchdog congestion_test run_client run_sdwan run_netd"
 EXTRA_HELP="	provider_update_once	Run due provider auto updates once
 	provider_update_loop	Run provider auto update scheduler loop
 	network_apply	Apply firewall and DNS policy in background
@@ -13,6 +13,7 @@ EXTRA_HELP="	provider_update_once	Run due provider auto updates once
 	fail_open	Stop Candy and remove owned network steering after a fatal failure
 	sdwan_fail_open	Remove only SD-WAN-owned state after an SD-WAN failure
 	sdwan_reconcile	Apply the authenticated Candy Cloud SD-WAN activation
+	sdwan_start	Enable Candy and start the authenticated SD-WAN activation
 	sdwan_reconnect	Restart only the SD-WAN child and preserve ordinary Candy
 	sdwan_stop	Stop only SD-WAN child processes and owned network state
 	health_watchdog	Monitor local Core liveness and fail open after repeated faults
@@ -21,7 +22,7 @@ EXTRA_HELP="	provider_update_once	Run due provider auto updates once
 	run_netd	Run the privileged SD-WAN network helper"
 
 case "${action:-${1:-}}" in
-status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|fail_open|sdwan_fail_open|sdwan_reconcile|sdwan_reconnect|sdwan_stop|health_watchdog|congestion_test|run_client|run_sdwan|run_netd)
+status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|fail_open|sdwan_fail_open|sdwan_reconcile|sdwan_start|sdwan_reconnect|sdwan_stop|health_watchdog|congestion_test|run_client|run_sdwan|run_netd)
 		CANDY_FAST_STATUS_ACTION="${action:-$1}"
 		EXTRA_COMMANDS="$EXTRA_COMMANDS status running"
 		USE_PROCD=
@@ -51,6 +52,7 @@ CANDY_DNS_LISTEN=${CANDY_DNS_LISTEN:-127.0.0.1:15353}
 CANDY_LISTENER_WAIT_SECONDS=${CANDY_LISTENER_WAIT_SECONDS:-8}
 CANDY_SERVICE_LOCK_WAIT_SECONDS=${CANDY_SERVICE_LOCK_WAIT_SECONDS:-30}
 CANDY_PROVIDER_RELOAD_WAIT_SECONDS=${CANDY_PROVIDER_RELOAD_WAIT_SECONDS:-90}
+CANDY_PROVIDER_RETRY_SECONDS=${CANDY_PROVIDER_RETRY_SECONDS:-30}
 CANDY_PROVIDER_ACTIVATION_PENDING=${CANDY_PROVIDER_ACTIVATION_PENDING:-/var/lib/candy/provider-activation.pending}
 CANDY_LIFECYCLE_TTL_SECONDS=${CANDY_LIFECYCLE_TTL_SECONDS:-10}
 CANDY_READY_FILE=${CANDY_READY_FILE:-$RUNTIME_DIR/client.ready}
@@ -89,6 +91,8 @@ CANDY_EPOCH_DIRECTORY=${CANDY_EPOCH_DIRECTORY:-/etc/candy/epochs}
 CANDY_SDWAN_STATUS_FILE=${CANDY_SDWAN_STATUS_FILE:-$RUNTIME_DIR/sdwan-status.json}
 CANDY_SDWAN_READY_FILE=${CANDY_SDWAN_READY_FILE:-$CANDY_SDWAN_STATE_DIR/activation-ready-v1.json}
 CANDY_SDWAN_ACTIVE_PROOF=${CANDY_SDWAN_ACTIVE_PROOF:-$CANDY_SDWAN_STATE_DIR/active-activation-v1.json}
+CANDY_SDWAN_USER_STOPPED_FILE=${CANDY_SDWAN_USER_STOPPED_FILE:-$CANDY_SDWAN_STATE_DIR/user-stopped-v1}
+CANDY_SDWAN_STOP_WAIT_SECONDS=${CANDY_SDWAN_STOP_WAIT_SECONDS:-15}
 CANDY_VERSION=${CANDY_VERSION:-0.4.0}
 CANDY_RELEASE=${CANDY_RELEASE:-1}
 CONFIG_FILE=/etc/config/candy
@@ -390,6 +394,25 @@ sdwan_netd_pids() {
 		grep -v grep | awk '{print $1}' 2>/dev/null || true
 }
 
+sdwan_agent_pids() {
+	candy_ps | grep -E "($CANDY_SDWAN_AGENT .*--socket $CANDY_NETD_SOCKET|$CANDY_CORE_BIN client sdwan|$CANDY_CORE_BIN server)" |
+		grep -v grep | awk '{print $1}' 2>/dev/null || true
+}
+
+sdwan_netd_daemon_pids() {
+	candy_ps | grep -F "$CANDY_NETD_BIN --socket $CANDY_NETD_SOCKET" |
+		grep -v grep | awk '{print $1}' 2>/dev/null || true
+}
+
+wait_for_sdwan_pid_query() {
+	local query="$1" wait_seconds="${2:-$CANDY_SDWAN_STOP_WAIT_SECONDS}" waited=0
+	while [ -n "$("$query")" ]; do
+		[ "$waited" -lt "$wait_seconds" ] || return 1
+		waited=$((waited + 1))
+		sleep 1
+	done
+}
+
 wait_for_candy_client_exit() {
 	local wait_seconds="${1:-$CANDY_SERVICE_WAIT_SECONDS}" waited=0
 	while [ -n "$(candy_client_pids)" ]; do
@@ -585,6 +608,10 @@ run_sdwan() {
 		rc=$?
 		child=
 		[ "$stopping" -eq 0 ] || break
+		if sdwan_user_stopped; then
+			log_event info sdwan_stopped "reason=user_request ordinary_client=preserved"
+			continue
+		fi
 		log_event error sdwan_exit "exit=$rc; scheduling isolated SD-WAN fail-open activation=$attempted_hash"
 		run_detached_direct_command sdwan_fail_open "sdwan_exit:$rc"
 		# The Cloud synchronizer consumes the signed rejection receipt and
@@ -727,9 +754,38 @@ sdwan_candidate_ready() {
 	load_sdwan_candidate
 }
 
+sdwan_user_stopped() {
+	[ -e "$CANDY_SDWAN_USER_STOPPED_FILE" ] || [ -L "$CANDY_SDWAN_USER_STOPPED_FILE" ] || return 1
+	return 0
+}
+
+set_sdwan_user_stopped() {
+	local temporary
+	[ -d "$CANDY_SDWAN_STATE_DIR" ] && [ ! -L "$CANDY_SDWAN_STATE_DIR" ] || return 1
+	if [ -e "$CANDY_SDWAN_USER_STOPPED_FILE" ] || [ -L "$CANDY_SDWAN_USER_STOPPED_FILE" ]; then
+		[ -f "$CANDY_SDWAN_USER_STOPPED_FILE" ] && [ ! -L "$CANDY_SDWAN_USER_STOPPED_FILE" ] || return 1
+		return 0
+	fi
+	temporary=$(atomic_temp_path "$CANDY_SDWAN_USER_STOPPED_FILE") || return 1
+	printf '%s\n' '{"schema_version":1,"state":"stopped_by_user"}' >"$temporary" || { rm -f "$temporary"; return 1; }
+	chmod 0640 "$temporary" || { rm -f "$temporary"; return 1; }
+	chown root:candy-sdwan "$temporary" 2>/dev/null || { rm -f "$temporary"; return 1; }
+	atomic_commit_file "$temporary" "$CANDY_SDWAN_USER_STOPPED_FILE"
+}
+
+clear_sdwan_user_stopped() {
+	[ -e "$CANDY_SDWAN_USER_STOPPED_FILE" ] || [ -L "$CANDY_SDWAN_USER_STOPPED_FILE" ] || return 0
+	[ -f "$CANDY_SDWAN_USER_STOPPED_FILE" ] && [ ! -L "$CANDY_SDWAN_USER_STOPPED_FILE" ] || return 1
+	rm -f "$CANDY_SDWAN_USER_STOPPED_FILE"
+}
+
 wait_for_sdwan_candidate() {
 	local rc logged=0
 	while [ "${stopping:-0}" -eq 0 ]; do
+		if sdwan_user_stopped; then
+			sleep 2
+			continue
+		fi
 		if load_sdwan_candidate; then
 			return 0
 		else
@@ -952,6 +1008,10 @@ run_netd() {
 		rc=$?
 		child=
 		[ "$stopping" -eq 0 ] || break
+		if sdwan_user_stopped; then
+			log_event info sdwan_netd_stopped "reason=user_request ordinary_client=preserved"
+			continue
+		fi
 		log_event error sdwan_netd_exit "exit=$rc activation=$attempted_hash"
 		# Keep this procd instance alive while Cloud consumes the matching
 		# activation outcome. A replacement candidate starts a fresh helper.
@@ -1678,7 +1738,26 @@ wait_for_service_lifecycle_idle() {
 	return 0
 }
 
+provider_runtime_reload_ready() {
+	local candidate_rc active_target
+	current_readiness || return 1
+	sdwan_user_stopped && return 0
+	if load_sdwan_candidate; then
+		active_target=$(sdwan_active_target 2>/dev/null || true)
+		[ "$active_target" = "$CANDY_SDWAN_CANDIDATE_TARGET" ] || return 1
+		[ -n "$(sdwan_process_pids)" ] && [ -n "$(sdwan_netd_pids)" ] || return 1
+		return 0
+	else
+		candidate_rc=$?
+	fi
+	# No Cloud candidate is a valid ordinary-client-only steady state. Invalid
+	# candidate state must remain fail closed and cannot overlap a runtime reload.
+	[ "$candidate_rc" -eq 2 ]
+}
+
 provider_update_loop() {
+	local retry_seconds
+	case "$CANDY_PROVIDER_RETRY_SECONDS" in ''|*[!0-9]*|0) retry_seconds=30 ;; *) retry_seconds=$CANDY_PROVIDER_RETRY_SECONDS ;; esac
 	while :; do
 		if ! provider_update_once; then
 			log_event warn provider_update "result=partial-or-failed activation_pending=${PROVIDER_UPDATED:-0}"
@@ -1687,6 +1766,8 @@ provider_update_loop() {
 			log_msg "reloading candy service after provider auto update"
 			if ! wait_for_service_lifecycle_idle; then
 				log_event warn provider_reload "provider update activation deferred; service lifecycle is busy"
+			elif ! provider_runtime_reload_ready; then
+				log_event info provider_reload "provider update activation deferred; SD-WAN activation is not in steady state"
 			elif ! "$CANDY_INIT_SELF" reload_runtime >/dev/null 2>&1; then
 				log_event error provider_reload "validated provider update could not be activated"
 			elif provider_activation_required; then
@@ -1696,7 +1777,11 @@ provider_update_loop() {
 				log_event info provider_reload "validated provider update activated"
 			fi
 		fi
-		sleep "$(provider_update_sleep_seconds)"
+		if [ -s "$CANDY_PROVIDER_ACTIVATION_PENDING" ]; then
+			sleep "$retry_seconds"
+		else
+			sleep "$(provider_update_sleep_seconds)"
+		fi
 	done
 }
 
@@ -3769,7 +3854,8 @@ service_failed() {
 }
 
 fail_open_locked() {
-	local reason="${1:-runtime_failure}" instance="${2:-unknown}" pids cleanup=completed rc=0 netd_stopped=1 autostart_disabled=0 detail
+	local reason="${1:-runtime_failure}" instance="${2:-unknown}" pids cleanup=completed rc=0 netd_stopped=1 autostart_disabled=0 autostart_preserved=0 was_enabled=0 detail
+	"$CANDY_INIT_SELF" enabled >/dev/null 2>&1 && was_enabled=1
 	log_event warn fail_open "reason=$reason instance=$instance stopping service and removing owned steering"
 	write_lifecycle_state fail_open stopping || rc=1
 	if [ -f /lib/functions/procd.sh ]; then
@@ -3813,22 +3899,36 @@ fail_open_locked() {
 		cleanup=failed
 		rc=1
 	fi
-	if "$CANDY_INIT_SELF" disable >/dev/null 2>&1 && ! "$CANDY_INIT_SELF" enabled >/dev/null 2>&1; then
-		autostart_disabled=1
-	else
-		log_error "fail-open could not disable Candy autostart"
-		rc=1
+	case "$reason:$instance" in
+		sdwan:user_stop|sdwan:user_leave) ;;
+		sdwan:*) [ "$was_enabled" -eq 0 ] || autostart_preserved=1 ;;
+	esac
+	if [ "$autostart_preserved" -ne 1 ]; then
+		if "$CANDY_INIT_SELF" disable >/dev/null 2>&1 && ! "$CANDY_INIT_SELF" enabled >/dev/null 2>&1; then
+			autostart_disabled=1
+		else
+			log_error "fail-open could not disable Candy autostart"
+			rc=1
+		fi
 	fi
 	[ "$rc" -eq 0 ] || cleanup=failed
 	if [ "$rc" -eq 0 ]; then
-		detail="instance=$instance; service disabled"
+		if [ "$autostart_preserved" -eq 1 ]; then
+			detail="instance=$instance; transient SD-WAN failure; automatic recovery pending"
+		else
+			detail="instance=$instance; service disabled"
+		fi
 		if ! write_lifecycle_state fail_open failed || ! write_fault_state "$reason" completed "$detail"; then
 			rc=1
 			cleanup=failed
 			write_fault_state "$reason" failed "instance=$instance; cleanup completed but persistent state write failed" || true
 			log_event error fail_open "reason=$reason instance=$instance cleanup=failed persistent fault state could not be completed"
 		else
-			log_event error fail_open "reason=$reason instance=$instance cleanup=completed service disabled after terminal failure"
+			if [ "$autostart_preserved" -eq 1 ]; then
+				log_event warn fail_open "reason=$reason instance=$instance cleanup=completed autostart=preserved recovery=pending"
+			else
+				log_event error fail_open "reason=$reason instance=$instance cleanup=completed service disabled after terminal failure"
+			fi
 		fi
 	else
 		if [ "$autostart_disabled" -eq 1 ]; then
@@ -3912,6 +4012,11 @@ interrupt_sdwan_processes() {
 
 sdwan_reconcile() {
 	local candidate_rc active_target
+	if sdwan_user_stopped; then
+		sdwan_runtime_state stopped || true
+		log_event info sdwan_reconcile "result=unchanged state=user_stopped ordinary_client=preserved"
+		return 0
+	fi
 	if load_sdwan_candidate; then
 		active_target=$(sdwan_active_target 2>/dev/null || true)
 		if [ "$active_target" = "$CANDY_SDWAN_CANDIDATE_TARGET" ]; then
@@ -3964,6 +4069,11 @@ sdwan_reconcile() {
 }
 
 sdwan_reconnect() {
+	if sdwan_user_stopped; then
+		sdwan_runtime_state stopped || true
+		log_event warn sdwan_reconnect "request rejected; reason=user_stopped use=start ordinary_client=preserved"
+		return 1
+	fi
 	if ! load_sdwan_candidate; then
 		sdwan_runtime_state stopped || true
 		log_event warn sdwan_reconnect "request rejected; reason=no_cloud_activation ordinary_client=preserved"
@@ -3974,9 +4084,77 @@ sdwan_reconnect() {
 	log_event info sdwan_reconnect "SD-WAN child restart requested; ordinary_client=preserved"
 }
 
+sdwan_start() {
+	local was_user_stopped=0
+	if ! load_sdwan_candidate; then
+		sdwan_runtime_state stopped || true
+		log_event warn sdwan_start "request rejected; reason=no_cloud_activation"
+		return 1
+	fi
+	if sdwan_user_stopped; then
+		was_user_stopped=1
+	fi
+	if ! "$CANDY_INIT_SELF" enable >/dev/null 2>&1; then
+		log_event error sdwan_start "request failed; reason=enable_failed"
+		return 1
+	fi
+	if [ "$was_user_stopped" -eq 1 ] && ! clear_sdwan_user_stopped; then
+		log_event error sdwan_start "request failed; reason=stop_marker_not_removable"
+		return 1
+	fi
+	if candy_process_running && current_readiness; then
+		if [ "$was_user_stopped" -eq 1 ]; then
+			sdwan_runtime_state reconnect || return 1
+			log_event info sdwan_start "SD-WAN activation resumed; activation=$CANDY_SDWAN_CANDIDATE_HASH ordinary_client=preserved"
+			return 0
+		fi
+		sdwan_reconnect
+		return $?
+	fi
+	log_event info sdwan_start "service enable requested; activation=$CANDY_SDWAN_CANDIDATE_HASH"
+	"$CANDY_INIT_SELF" start
+}
+
+stop_sdwan_data_plane() {
+	local pids rc=0
+	pids=$(sdwan_agent_pids)
+	[ -z "$pids" ] || kill -TERM $pids 2>/dev/null || true
+	if ! wait_for_sdwan_pid_query sdwan_agent_pids; then
+		pids=$(sdwan_agent_pids)
+		[ -z "$pids" ] || kill -KILL $pids 2>/dev/null || true
+		wait_for_sdwan_pid_query sdwan_agent_pids 3 || rc=1
+	fi
+	pids=$(sdwan_netd_daemon_pids)
+	[ -z "$pids" ] || kill -TERM $pids 2>/dev/null || true
+	wait_for_sdwan_pid_query sdwan_netd_daemon_pids 3 || rc=1
+	wait_for_netd_exit 3 || rc=1
+	if [ -s "$CANDY_NETD_JOURNAL" ]; then
+		if ! run_with_timeout 15 "$CANDY_NETD_BIN" --recover --journal "$CANDY_NETD_JOURNAL" >/dev/null 2>&1; then
+			log_event error sdwan_stop "result=failed reason=orphan_recovery_failed"
+			rc=1
+		fi
+	fi
+	[ ! -s "$CANDY_NETD_JOURNAL" ] || rc=1
+	return "$rc"
+}
+
+sdwan_stop_locked() {
+	local reason="${1:-user_stop}"
+	if ! set_sdwan_user_stopped; then
+		log_event error sdwan_stop "result=failed reason=stop_marker_not_persisted ordinary_client=preserved"
+		return 1
+	fi
+	if stop_sdwan_data_plane; then
+		sdwan_runtime_state stopped || true
+		log_event info sdwan_stop "result=stopped reason=$reason ordinary_client=preserved"
+		return 0
+	fi
+	log_event error sdwan_stop "result=failed reason=cleanup_incomplete escalating=full_fail_open"
+	fail_open_locked sdwan user_stop_cleanup_failed
+}
+
 sdwan_stop() {
-	interrupt_sdwan_processes
-	sdwan_fail_open "${1:-user_stop}"
+	with_service_lifecycle_lock sdwan_stop_locked "${1:-user_stop}"
 }
 
 restart_queued_locked() {

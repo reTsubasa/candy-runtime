@@ -33,6 +33,7 @@ chmod 0755 "$fake_core"
 cat >"$fake_runtime" <<'EOF'
 #!/bin/sh
 printf '<%s>' "$@" >>"${FAKE_SDWAN_CALLS:?}"
+printf '<state-dir=%s><state-root=%s>' "${CANDY_SDWAN_STATE_DIR:-}" "${CANDY_SDWAN_STATE_ROOT:-}" >>"$FAKE_SDWAN_CALLS"
 printf '\n' >>"$FAKE_SDWAN_CALLS"
 case "${1:-}" in
 	status) printf '%s\n' '{"schema_version":1,"registration":{"state":"unregistered"}}' ;;
@@ -67,8 +68,11 @@ if grep -F 'candy-core' "$tmp/api.out" >/dev/null; then
 	fail "public candy-server output exposed the internal executable"
 fi
 
-FAKE_SDWAN_CALLS="$calls" CANDY_SDWAN_RUNTIME="$fake_runtime" "$launcher" sdwan status >"$tmp/status.out"
+FAKE_SDWAN_CALLS="$calls" CANDY_SDWAN_RUNTIME="$fake_runtime" CANDY_SDWAN_STATE_DIR="$tmp/sdwan" \
+	"$launcher" sdwan status >"$tmp/status.out"
 grep -F '<status>' "$calls" >/dev/null || fail "SD-WAN status did not use the Runtime boundary"
+grep -F "<state-dir=$tmp/sdwan><state-root=$tmp/sdwan>" "$calls" >/dev/null ||
+	fail "server product command did not align SD-WAN Runtime state variables"
 if FAKE_SDWAN_CALLS="$calls" CANDY_SDWAN_RUNTIME="$fake_runtime" "$launcher" join --cloud https://cloud.example.test >"$tmp/join.out" 2>&1; then
 	fail "removed server join command unexpectedly succeeded"
 fi

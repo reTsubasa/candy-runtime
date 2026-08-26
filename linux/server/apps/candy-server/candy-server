@@ -8,12 +8,15 @@ core_candidate=${CANDY_CORE_BINARY:-$core_current/candy-core}
 sdwan_runtime=${CANDY_SDWAN_RUNTIME:-/usr/local/libexec/candy-sdwan-runtime}
 server_service=${CANDY_SERVER_SERVICE:-candy-server.service}
 sdwan_agent=${CANDY_SDWAN_AGENT:-/usr/local/libexec/candy-sdwan-agent}
-sdwan_state_root=${CANDY_SDWAN_STATE_ROOT:-/var/lib/candy/sdwan}
+sdwan_state_root=${CANDY_SDWAN_STATE_ROOT:-${CANDY_SDWAN_STATE_DIR:-/var/lib/candy/sdwan}}
 sdwan_candidate=${CANDY_SDWAN_ACTIVATION_LINK:-$sdwan_state_root/candidate}
 activation_ready=${CANDY_SDWAN_ACTIVATION_READY:-$sdwan_state_root/activation-ready-v1.json}
 netd_socket=${CANDY_NETD_SOCKET:-/run/candy-netd/netd.sock}
-export CANDY_SDWAN_SERVICE_USER=${CANDY_SDWAN_SERVICE_USER:-candy}
-export CANDY_SDWAN_SERVICE_GROUP=${CANDY_SDWAN_SERVICE_GROUP:-candy}
+sdwan_history_retain=${CANDY_SDWAN_HISTORY_RETAIN:-4}
+export CANDY_SDWAN_STATE_DIR="$sdwan_state_root"
+export CANDY_SDWAN_STATE_ROOT="$sdwan_state_root"
+export CANDY_SDWAN_SERVICE_USER="${CANDY_SDWAN_SERVICE_USER:-candy}"
+export CANDY_SDWAN_SERVICE_GROUP="${CANDY_SDWAN_SERVICE_GROUP:-candy}"
 
 fail() {
 	status=$1
@@ -28,6 +31,90 @@ require_sdwan_runtime() {
 
 warn() {
 	printf '%s\n' "candy-server: warning: $*" >&2
+}
+
+valid_history_name() {
+	name=$1
+	case "$name" in
+		????????????????????????????????????????????????????????????????)
+			case "$name" in *[!0-9a-f]*) return 1 ;; esac
+			;;
+		legacy-????????-????-????-????-????????????)
+			legacy_id=${name#legacy-}
+			case "$legacy_id" in *[!0-9a-f-]*) return 1 ;; esac
+			;;
+		*) return 1 ;;
+	esac
+}
+
+protected_history_names() {
+	collection=$1
+	protected=
+	for pointer in configuration candidate active; do
+		[ -L "$sdwan_state_root/$pointer" ] || continue
+		target=$(readlink "$sdwan_state_root/$pointer" 2>/dev/null || true)
+		case "$target" in
+			"$collection"/*)
+				name=${target#"$collection"/}
+				valid_history_name "$name" || continue
+				case " $protected " in *" $name "*) ;; *) protected="$protected $name" ;; esac
+				;;
+		esac
+	done
+	printf '%s\n' "$protected"
+}
+
+prune_history_collection() {
+	collection=$1
+	directory=$sdwan_state_root/$collection
+	[ -e "$directory" ] || [ -L "$directory" ] || return 0
+	[ -d "$directory" ] && [ ! -L "$directory" ] ||
+		fail 78 "SD-WAN $collection history must be a real directory"
+	directory_real=$(CDPATH= cd -P -- "$directory" 2>/dev/null && pwd -P) ||
+		fail 78 "cannot resolve SD-WAN $collection history"
+	[ "$directory_real" = "$state_root_real/$collection" ] ||
+		fail 78 "SD-WAN $collection history escaped the state root"
+
+	protected=$(protected_history_names "$collection")
+	protected_count=0
+	for name in $protected; do protected_count=$((protected_count + 1)); done
+	available=$((sdwan_history_retain - protected_count))
+	[ "$available" -ge 0 ] || available=0
+	kept=0
+
+	# Runtime-generated names contain no whitespace. Sorting by mtime preserves
+	# the newest rollback material while pointer targets are always retained.
+	for path in $(LC_ALL=C ls -1dt "$directory"/* 2>/dev/null || true); do
+		name=${path##*/}
+		if ! valid_history_name "$name"; then
+			warn "ignored unexpected SD-WAN $collection history entry: $path"
+			continue
+		fi
+		if [ -L "$path" ] || [ ! -d "$path" ]; then
+			warn "ignored non-directory SD-WAN $collection history entry: $path"
+			continue
+		fi
+		case " $protected " in *" $name "*) continue ;; esac
+		if [ "$kept" -lt "$available" ]; then
+			kept=$((kept + 1))
+			continue
+		fi
+		find "$path" -xdev -type d -exec chmod u+w {} \; ||
+			fail 77 "could not make stale SD-WAN $collection history removable: $path"
+		rm -rf "$path" || fail 77 "could not remove stale SD-WAN $collection history: $path"
+	done
+}
+
+prune_sdwan_history() {
+	case "$sdwan_history_retain" in ''|*[!0-9]*) fail 64 "CANDY_SDWAN_HISTORY_RETAIN must be an integer" ;; esac
+	[ "$sdwan_history_retain" -ge 2 ] && [ "$sdwan_history_retain" -le 32 ] ||
+		fail 64 "CANDY_SDWAN_HISTORY_RETAIN must be between 2 and 32"
+	[ -d "$sdwan_state_root" ] && [ ! -L "$sdwan_state_root" ] ||
+		fail 78 "SD-WAN state root must be a real directory"
+	state_root_real=$(CDPATH= cd -P -- "$sdwan_state_root" 2>/dev/null && pwd -P) ||
+		fail 78 "cannot resolve SD-WAN state root"
+	prune_history_collection generations
+	prune_history_collection activations
 }
 
 canonical_file() {
@@ -84,6 +171,7 @@ usage:
   candy-server bootstrap FILE
   candy-server sdwan status
   candy-server sdwan reconnect
+  candy-server sdwan prune-history
   candy-server leave [--yes]
   candy-server [server options]
 EOF
@@ -110,10 +198,13 @@ case "${1:-}" in
 		subcommand=${1:-}
 		[ "$#" -eq 0 ] || shift
 		[ "$#" -eq 0 ] || fail 64 "unexpected SD-WAN argument: $1"
-		require_sdwan_runtime
 		case "$subcommand" in
-			status) "$sdwan_runtime" status ;;
+			status)
+				require_sdwan_runtime
+				"$sdwan_runtime" status
+				;;
 			reconnect)
+				require_sdwan_runtime
 				[ "$(id -u)" = 0 ] || fail 77 "reconnect requires root privileges"
 				"$sdwan_runtime" reconnect
 				if command -v systemctl >/dev/null 2>&1 && systemctl restart "$server_service"; then
@@ -122,6 +213,11 @@ case "${1:-}" in
 					"$sdwan_runtime" fail-open "reconnect failed; Candy-owned network state removed" || true
 					fail 1 "reconnect failed; the network was restored to the Candy-stopped state"
 				fi
+				;;
+			prune-history)
+				[ "$(id -u)" = 0 ] || [ "${CANDY_SDWAN_TEST_MODE:-0}" = 1 ] ||
+					fail 77 "SD-WAN history pruning requires root privileges"
+				prune_sdwan_history
 				;;
 			*) node_usage >&2; exit 64 ;;
 		esac

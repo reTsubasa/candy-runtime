@@ -142,32 +142,28 @@ end
 .node-dot.warn { background: #f9a825; }
 .node-dot.bad { background: #c62828; }
 .node-dot.idle { background: #8c8c8c; }
-.candy-overview-header {
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-	gap: 0.75em;
-	margin: 0 auto 1.2em;
-	text-align: center;
-}
-.candy-overview-brand {
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-	gap: 0.7em;
-	min-width: 0;
-}
-.candy-logo {
-	position: relative;
-	width: 4.2em;
-	height: 4.2em;
-	border-radius: 50%;
-	background:
-		radial-gradient(circle at 32% 28%, rgba(255, 255, 255, 0.34), transparent 28%),
-		linear-gradient(145deg, #19a974 0%, #2575d8 58%, #1f2a44 100%);
-	box-shadow: 0 0.4em 1.1em rgba(31, 42, 68, 0.18), inset 0 0 0 1px rgba(255, 255, 255, 0.34);
-	flex: 0 0 auto;
-}
+	.candy-overview-header {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1em;
+		margin: 0 0 1.2em;
+	}
+	.candy-overview-brand {
+		display: flex;
+		align-items: center;
+		gap: .8em;
+		min-width: 0;
+	}
+	.candy-logo {
+		position: relative;
+		width: 2.6em;
+		height: 2.6em;
+		border-radius: 6px;
+		background: #165dff;
+		flex: 0 0 auto;
+	}
 .candy-logo-mark {
 	position: absolute;
 	inset: 0;
@@ -175,25 +171,27 @@ end
 	align-items: center;
 	justify-content: center;
 	color: #fff;
-	font-size: 2.35em;
+		font-size: 1.45em;
 	font-weight: 700;
 	line-height: 1;
 	letter-spacing: 0;
 }
-.candy-overview-header h2 {
-	border-bottom: 0;
-	margin: 0;
-	font-size: 2.05em;
-}
-.candy-overview-header p {
-	margin: 0;
-	max-width: 52em;
-}
+	.candy-overview-header h2 {
+		border-bottom: 0;
+		margin: 0;
+		font-size: 1.45em;
+	}
+	.candy-overview-header p {
+		margin: .25em 0 0;
+		max-width: 52em;
+		color: #4e5969;
+		line-height: 1.5;
+	}
 .candy-overview-actions {
 	display: flex;
 	gap: 0.5em;
 	flex-wrap: wrap;
-	justify-content: center;
+		justify-content: flex-end;
 }
 .candy-overview-actions form {
 	margin: 0;
@@ -208,9 +206,26 @@ end
 .candy-node-table-scroll {
 	overflow-x: auto;
 }
-.candy-node-table-scroll .table {
-	min-width: 62em;
-}
+	.candy-node-table-scroll .table {
+		min-width: 58em;
+		table-layout: fixed;
+	}
+	.candy-node-table-scroll .th,
+	.candy-node-table-scroll .td {
+		box-sizing: border-box;
+		vertical-align: top;
+		overflow-wrap: anywhere;
+		word-break: break-word;
+	}
+	.candy-node-table-scroll .td {
+		max-width: 18em;
+	}
+	.candy-node-table-scroll .candy-cell-value {
+		display: block;
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
 .candy-overview-section {
 	margin-top: 2em;
 }
@@ -221,16 +236,36 @@ end
 .candy-capability-tooltip { position: fixed; z-index: 10000; display: none; box-sizing: border-box; width: max-content; max-width: calc(100vw - 16px); padding: .55em .7em; border: 1px solid #4a5568; border-radius: 4px; background: #20252b; color: #fff; box-shadow: 0 4px 14px rgba(0, 0, 0, .24); font-size: .82rem; line-height: 1.45; white-space: pre-line; pointer-events: none; }
 .candy-capability-empty { color: #777; }
 .candy-capability-legend { display: block; margin-top: .2em; color: #666; font-size: .78em; font-weight: 400; }
-@media (max-width: 720px) {
-}
+	@media (max-width: 720px) {
+		.candy-overview-header { align-items: flex-start; flex-direction: column; }
+		.candy-overview-actions { justify-content: flex-start; }
+		.candy-node-table-scroll { overflow: visible; }
+		.candy-node-table-scroll .table { display: block; min-width: 0; }
+		.candy-node-table-scroll thead { display: none; }
+		.candy-node-table-scroll tbody { display: block; }
+		.candy-node-table-scroll .tr { display: block; padding: .5em 0; border-bottom: 1px solid #e5e6eb; }
+		.candy-node-table-scroll .td {
+			display: grid;
+			grid-template-columns: minmax(7.5em, .8fr) minmax(0, 1.4fr);
+			gap: .75em;
+			width: 100%;
+			max-width: none;
+			padding: .35em .5em;
+			border: 0;
+		}
+		.candy-node-table-scroll .td:before { content: attr(data-label); color: #86909c; font-size: .88em; }
+		.candy-node-table-scroll .td[colspan] { display: block; }
+		.candy-node-table-scroll .td[colspan]:before { display: none; }
+	}
 </style>
 
 <div class="candy-overview-header">
 	<div class="candy-overview-brand">
 		<div class="candy-logo" aria-hidden="true"><span class="candy-logo-mark">C</span></div>
-		<div>
-			<h2 name="content">Candy</h2>
-		</div>
+			<div>
+				<h2 name="content">Candy</h2>
+				<p><%:Candy secures and optimizes this router's Internet traffic, and connects sites through Cloud-managed SD-WAN.%></p>
+			</div>
 	</div>
 	<div class="candy-overview-actions">
 		<form method="post" action="<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'action', 'restart')%>">
@@ -314,18 +349,18 @@ end
 			<% else %>
 				<% for _, node in ipairs(nodes) do node = type(node) == "table" and node or {} %>
 					<tr class="tr">
-						<td class="td">
-							<span class="node-dot <%=node_class(node.state)%>"></span>
-							<%=xml.pcdata(text_label(node.state))%>
-						</td>
-						<td class="td"><%=xml.pcdata(node.name ~= "" and node.name or node.id)%></td>
-						<td class="td"><%=xml.pcdata(text_label(node.server))%></td>
-						<td class="td"><%=xml.pcdata(text_label(node.server_version))%></td>
-						<td class="td"><%=xml.pcdata(node.protocol_version and tostring(node.protocol_version.major) .. "." .. tostring(node.protocol_version.minor) or "-")%></td>
-		<td class="td"><%=xml.pcdata("-")%></td>
-						<td class="td"><%=xml.pcdata(list_label(node.groups))%></td>
-							<td class="td"><%=xml.pcdata(local_rtt_label(node))%></td>
-							<td class="td"><%=xml.pcdata(latency_label((node.url_test or {}).latency_ms))%></td>
+							<td class="td" data-label="<%:Status%>">
+								<span class="node-dot <%=node_class(node.state)%>"></span>
+								<%=xml.pcdata(text_label(node.state))%>
+							</td>
+							<td class="td" data-label="<%:Node%>" title="<%=xml.pcdata(node.name ~= "" and node.name or node.id)%>"><span class="candy-cell-value"><%=xml.pcdata(node.name ~= "" and node.name or node.id)%></span></td>
+							<td class="td" data-label="<%:Server%>" title="<%=xml.pcdata(text_label(node.server))%>"><span class="candy-cell-value"><%=xml.pcdata(text_label(node.server))%></span></td>
+							<td class="td" data-label="<%:Server version%>"><%=xml.pcdata(text_label(node.server_version))%></td>
+							<td class="td" data-label="<%:Wire protocol%>"><%=xml.pcdata(node.protocol_version and tostring(node.protocol_version.major) .. "." .. tostring(node.protocol_version.minor) or "-")%></td>
+							<td class="td" data-label="<%:Line capabilities%>"><%=xml.pcdata("-")%></td>
+							<td class="td" data-label="<%:Node groups%>"><%=xml.pcdata(list_label(node.groups))%></td>
+							<td class="td" data-label="<%:Local RTT%>"><%=xml.pcdata(local_rtt_label(node))%></td>
+							<td class="td" data-label="<%:URL latency%>"><%=xml.pcdata(latency_label((node.url_test or {}).latency_ms))%></td>
 					</tr>
 				<% end %>
 			<% end %>
@@ -513,10 +548,12 @@ function candyOverviewCapabilityTags(node, manifest) {
 
 var candyOverviewCurrentManifest = {};
 
-function candyOverviewAppendCell(row, value) {
+function candyOverviewAppendCell(row, value, label) {
 	var cell = document.createElement("td");
 	cell.className = "td";
 	cell.textContent = value;
+	cell.title = value;
+	if (label) cell.setAttribute("data-label", label);
 	row.appendChild(cell);
 	return cell;
 }
@@ -545,17 +582,17 @@ function candyOverviewRenderNodes(nodes) {
 	nodes.forEach(function(node) {
 		row = document.createElement("tr");
 		row.className = "tr";
-		cell = candyOverviewAppendCell(row, "");
+		cell = candyOverviewAppendCell(row, "", <%=js_string(i18n.translate("Status"))%>);
 		dot = document.createElement("span");
 		dot.className = "node-dot " + candyOverviewNodeClass(node.state);
 		cell.appendChild(dot);
 		cell.appendChild(document.createTextNode(candyOverviewText(node.state)));
-		candyOverviewAppendCell(row, candyOverviewText(node.name || node.id));
-		candyOverviewAppendCell(row, candyOverviewText(node.server));
-		candyOverviewAppendCell(row, candyOverviewText(node.server_version));
+		candyOverviewAppendCell(row, candyOverviewText(node.name || node.id), <%=js_string(i18n.translate("Node"))%>);
+		candyOverviewAppendCell(row, candyOverviewText(node.server), <%=js_string(i18n.translate("Server"))%>);
+		candyOverviewAppendCell(row, candyOverviewText(node.server_version), <%=js_string(i18n.translate("Server version"))%>);
 		var protocol = node.protocol_version || {}, protocolText = protocol.major === undefined ? "-" : protocol.major + "." + protocol.minor;
-		candyOverviewAppendCell(row, protocolText);
-		cell = candyOverviewAppendCell(row, "");
+		candyOverviewAppendCell(row, protocolText, <%=js_string(i18n.translate("Wire protocol"))%>);
+		cell = candyOverviewAppendCell(row, "", <%=js_string(i18n.translate("Line capabilities"))%>);
 		var tags = candyOverviewCapabilityTags(node, candyOverviewCurrentManifest);
 		if (!tags.length) { cell.textContent = "-"; cell.className += " candy-capability-empty"; }
 		tags.forEach(function(tag) {
@@ -575,9 +612,9 @@ function candyOverviewRenderNodes(nodes) {
 			cell.appendChild(badge);
 			if (candyOverviewFocusedCapabilityId === tag.id && typeof badge.focus === "function") badge.focus();
 		});
-		candyOverviewAppendCell(row, candyOverviewList(node.groups));
-		candyOverviewAppendCell(row, candyOverviewLocalRtt(node));
-		candyOverviewAppendCell(row, candyOverviewLatency((node.url_test || {}).latency_ms));
+		candyOverviewAppendCell(row, candyOverviewList(node.groups), <%=js_string(i18n.translate("Node groups"))%>);
+		candyOverviewAppendCell(row, candyOverviewLocalRtt(node), <%=js_string(i18n.translate("Local RTT"))%>);
+		candyOverviewAppendCell(row, candyOverviewLatency((node.url_test || {}).latency_ms), <%=js_string(i18n.translate("URL latency"))%>);
 		body.appendChild(row);
 	});
 }

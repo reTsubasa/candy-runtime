@@ -66,7 +66,9 @@ core_view=luci-app-candy/root/usr/lib/lua/luci/view/candy/core.htm
 update_view=luci-app-candy/root/usr/lib/lua/luci/view/candy/update.htm
 diagnostics=luci-app-candy/root/usr/lib/lua/luci/view/candy/diagnostics.htm
 dns_tunnel_status=luci-app-candy/root/usr/lib/lua/luci/view/candy/dns_tunnel_status.htm
-logs=luci-app-candy/root/usr/lib/lua/luci/view/candy/log.htm
+log_view=luci-app-candy/root/usr/lib/lua/luci/view/candy/log.htm
+logs=luci-app-candy/root/usr/lib/lua/luci/view/candy/log_panel.htm
+settings=luci-app-candy/root/usr/lib/lua/luci/view/candy/settings.htm
 sdwan=luci-app-candy/root/usr/lib/lua/luci/view/candy/sdwan.htm
 
 assert_file "candy-client/rulesets/cn-ip.cidr"
@@ -93,7 +95,7 @@ assert_contains "$controller" 'process\.capture\(\{ CORE_MANAGER, "status" \}, \
 
 lua_syntax_file=$(mktemp)
 trap 'rm -f "$lua_syntax_file"' EXIT HUP INT TERM
-node - "$repo_root" "$lua_syntax_file" "$status" "$diagnostics" "$core_view" "$update_view" <<'EOF'
+node - "$repo_root" "$lua_syntax_file" "$status" "$sdwan" "$diagnostics" "$logs" "$settings" "$core_view" "$update_view" <<'EOF'
 const fs = require("node:fs");
 
 const root = process.argv[2];
@@ -325,8 +327,11 @@ const vm = require("node:vm");
 const root = process.argv[2];
 const diagnosticsPath = process.argv[3];
 const source = fs.readFileSync(root + "/" + diagnosticsPath, "utf8");
-assert.ok(source.includes("Per-node passive diagnostics"), "diagnostics must render per-node passive status");
+assert.ok(source.includes("Per-node telemetry"), "diagnostics must render per-node telemetry");
 assert.ok(source.includes("Service resources"), "diagnostics must separate process resources");
+for (const field of ["RTT / jitter", "Loss", "RX / TX", "Freshness", "Transport"]) {
+	assert.ok(source.includes(field), "diagnostics must expose readable telemetry field: " + field);
+}
 assert.ok(source.includes("candy-diagnostics-nodes"), "diagnostics must expose the node table");
 assert.ok(source.includes("candyDiagnosticsRender"), "diagnostics must own passive refresh rendering");
 assert.ok(source.includes('uci:foreach("candy", "node"'), "congestion comparison must use configured Candy nodes");
@@ -336,10 +341,10 @@ assert.ok(source.includes("&node="), "congestion comparison must submit the sele
 for (const externalPoint of ["vultr-tokyo", "linode-singapore", "hetzner-ashburn", "ovh-france", "serverius-netherlands"]) {
 	assert.ok(!source.includes(externalPoint), "external test point remains: " + externalPoint);
 }
-for (const usefulField of ["Overall performance trends", "Latency quality", "Delivery", "Flight control", "Transport state", "Path"]) {
+for (const usefulField of ["Overall performance trends", "RTT / jitter", "RX / TX", "Freshness", "Transport"]) {
 	assert.ok(source.includes(usefulField), "diagnostics must retain useful transport field: " + usefulField);
 }
-for (const redundantField of ["Client UDP multiplier", "Server UDP multiplier", "Peer directional goodput", "Peer trust", "Fallback reason", "Last updated"]) {
+for (const redundantField of ["Client UDP multiplier", "Server UDP multiplier", "Peer directional goodput", "Peer trust", "Fallback reason"]) {
 	assert.ok(!source.includes(redundantField), "diagnostics must hide redundant or unavailable field: " + redundantField);
 }
 for (const oldText of ["Weak-link probe", "Run Video/CDN probe", "Video/CDN probe"]) {
@@ -466,20 +471,23 @@ assert.equal(elements.get("candy-diagnostics-process-cpu").textContent, "1.5 %")
 assert.equal(elements.get("candy-diagnostics-process-rss").textContent, "2.0 KiB");
 const rows = elements.get("candy-diagnostics-nodes").children;
 assert.equal(rows.length, 2, "diagnostics must render one row per node");
-assert.equal(rows[0].children[0].textContent, "hk");
+assert.equal(rows[0].children[0].children[0].textContent, "hk");
 assert.match(rows[0].children[2].textContent, /12\.35 ms/);
 assert.match(rows[0].children[2].textContent, /2\.00 ms/);
 assert.equal(rows[0].children.length, 7, "diagnostics must keep the node table compact");
-assert.match(rows[0].children[3].textContent, /1\.5 Mbps/);
-assert.match(rows[0].children[4].textContent, /32\.0 KiB.*64\.0 KiB.*50 %/);
-assert.match(rows[0].children[5].textContent, /Candy BBR/);
+assert.match(rows[0].children[3].textContent, /0/);
+assert.match(rows[0].children[4].textContent, /2\.0 Kbps/);
+assert.match(rows[0].children[4].textContent, /1\.0 Kbps/);
+assert.notEqual(rows[0].children[5].textContent, "-", "fresh telemetry must expose an age");
+assert.match(rows[0].children[6].textContent, /Candy BBR/);
+assert.match(rows[0].children[6].textContent, /32\.0 KiB.*64\.0 KiB.*50 %/);
 for (const phase of ["startup", "drain", "probe-bw", "probe-bw-refill", "probe-bw-up", "probe-bw-down", "probe-bw-cruise", "probe-rtt"]) {
 	assert.equal(context.candyDiagnosticsMappedText(context.candyDiagnosticsLabels.congestionModes, phase), "test");
 }
 assert.equal(context.candyDiagnosticsMappedText(context.candyDiagnosticsLabels.congestionModes, "future-phase"), "future-phase",
 	"unknown future congestion phases must remain visible");
-assert.match(rows[1].children[5].textContent, /CUBIC/, "passive diagnostics must show the effective CUBIC controller");
-assert.equal(rows[1].children[0].textContent, "sg");
+assert.match(rows[1].children[6].textContent, /CUBIC/, "passive diagnostics must show the effective CUBIC controller");
+assert.equal(rows[1].children[0].children[0].textContent, "sg");
 
 context.refreshCandyDiagnosticsStatus();
 requests[3].respond(200, { runtime: { performance: {} } });
@@ -488,7 +496,7 @@ assert.equal(elements.get("candy-diagnostics-process-rss").textContent, "-");
 assert.equal(timers.length, 1, "only one diagnostics follow-up refresh timer may be scheduled");
 EOF
 
-for file in "$makefile" "$config" "$init" "$po" "$po2lmo_c" "$po2lmo_lmo" "$po2lmo_h" "$process_helper" "$controller" "$nodes" "$dns" "$advanced" "$rules" "$status" "$core_view" "$update_view" "$diagnostics" "$dns_tunnel_status" "$logs"; do
+for file in "$makefile" "$config" "$init" "$po" "$po2lmo_c" "$po2lmo_lmo" "$po2lmo_h" "$process_helper" "$controller" "$nodes" "$dns" "$advanced" "$rules" "$status" "$core_view" "$update_view" "$diagnostics" "$dns_tunnel_status" "$log_view" "$logs" "$settings" "$sdwan"; do
 	assert_file "$file"
 done
 
@@ -509,8 +517,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=65$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=65$'
+assert_contains "$makefile" '^PKG_RELEASE:=66$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=66$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'
@@ -552,7 +560,9 @@ assert_contains "$po" '^"Language: zh_CN\\n"$'
 for msgid in \
 	"Candy" \
 	"Overview" \
+	"SD-WAN" \
 	"Policy" \
+	"Settings" \
 	"DNS" \
 	"Nodes" \
 	"Runtime mode" \
@@ -703,17 +713,18 @@ grep -RhoE 'translate\("[^"]+"\)|_\("[^"]+"\)|<%:[^%]+%>' "$repo_root/luci-app-c
 assert_contains "$controller" 'module\("luci.controller.candy"'
 assert_contains "$controller" '/etc/config/candy'
 assert_contains "$controller" '\{"admin", "services", "candy"\}.*_\("Candy"\)'
-for route in overview traffic dns_geo nodes diagnostics logs advanced core; do
+for route in overview sdwan traffic settings dns_geo nodes diagnostics logs advanced core; do
 	assert_contains "$controller" "\"$route\""
 done
 assert_contains "$controller" '\{"admin", "services", "candy", "overview"\}.*_\("Overview"\)'
+assert_contains "$controller" '\{"admin", "services", "candy", "sdwan"\}.*_\("SD-WAN"\)'
 assert_contains "$controller" '\{"admin", "services", "candy", "traffic"\}.*_\("Policy"\)'
-assert_contains "$controller" '\{"admin", "services", "candy", "dns_geo"\}.*_\("DNS"\)'
-assert_contains "$controller" '\{"admin", "services", "candy", "nodes"\}.*_\("Nodes"\)'
+assert_contains "$controller" '\{"admin", "services", "candy", "settings"\}.*_\("Settings"\)'
 assert_contains "$controller" '\{"admin", "services", "candy", "diagnostics"\}.*_\("Diagnostics"\)'
-assert_contains "$controller" '\{"admin", "services", "candy", "logs"\}.*_\("Logs"\)'
-assert_contains "$controller" '\{"admin", "services", "candy", "advanced"\}.*_\("Advanced"\)'
-assert_contains "$controller" '\{"admin", "services", "candy", "core"\}.*_\("Core"\)'
+for hidden_route in dns_geo nodes logs advanced core; do
+	assert_contains "$controller" "\{\"admin\", \"services\", \"candy\", \"$hidden_route\"\}.*nil"
+done
+assert_count "$controller" '\{"admin", "services", "candy", "(overview|sdwan|traffic|settings|diagnostics)"\}.*_\("(Overview|SD-WAN|Policy|Settings|Diagnostics)"\)' 5
 assert_not_contains "$controller" '\{"admin", "services", "candy", "status"\}'
 assert_not_contains "$controller" '\{"admin", "services", "candy", "rules"\}'
 assert_not_contains "$controller" '\{"admin", "services", "candy", "geo"\}'
@@ -799,6 +810,23 @@ assert_contains "$dns" 'normalize_resolver_list'
 assert_contains "$dns" 'local node_uci = require "luci.model.uci".cursor\(\)'
 assert_contains "$dns" 'node_uci:foreach\("candy", "node"'
 assert_contains "$sdwan" 'How traffic is selected'
+assert_contains "$settings" '<%:Nodes and groups%>'
+assert_contains "$settings" '<%:DNS and routing%>'
+assert_contains "$settings" '<%:Advanced settings%>'
+assert_contains "$settings" '<%:Core lifecycle%>'
+assert_contains "$settings" '<%:Software updates%>'
+for route in nodes dns_geo advanced core update; do
+	assert_contains "$settings" "'admin', 'services', 'candy', '$route'"
+done
+assert_contains "$sdwan" 'Candy SD-WAN connects sites through encrypted links'
+assert_contains "$sdwan" 'Unavailable until Candy Cloud publishes a local-egress configuration\.'
+assert_contains "$sdwan" 'Unavailable until Candy Cloud publishes a remote-egress configuration\.'
+assert_contains "$sdwan" 'Unavailable until Candy Cloud publishes an internal DNS configuration\.'
+assert_contains "$sdwan" '<%:Peer site%>'
+assert_contains "$sdwan" '<%:Attachment ID%>'
+assert_contains "$sdwan" 'candy-sdwan-long'
+assert_contains "$sdwan" 'text-overflow:ellipsis'
+assert_not_contains "$sdwan" 'candy-sdwan-arrow|&rarr;|&#8594;'
 assert_not_contains "$controller" 'luci\.sys\.call\(cmd\)'
 assert_not_contains "$dns" 'luci\.sys\.call\(cmd\)'
 
@@ -969,8 +997,11 @@ assert_not_contains "$status" 'setInterval\(refreshCandyOverviewStatus, 2000\)'
 assert_contains "$status" '<h2 name="content">Candy</h2>'
 assert_contains "$status" 'candy-logo'
 assert_contains "$status" 'candy-logo-mark'
-assert_contains "$status" 'flex-direction: column'
-assert_contains "$status" 'text-align: center'
+assert_contains "$status" "Candy secures and optimizes this router's Internet traffic"
+assert_contains "$status" 'justify-content: space-between'
+assert_contains "$status" '@media \(max-width: 720px\)'
+assert_contains "$status" 'content: attr\(data-label\)'
+assert_contains "$status" 'text-overflow: ellipsis'
 assert_not_contains "$status" 'Candy 0\.3\.4 records BBR fallback evidence and automatically retries Candy BBR after a bounded CUBIC cooldown\.'
 assert_not_contains "$status" 'id="candy-sdwan-status"'
 assert_not_contains "$status" 'candyOverviewRenderSdwan'
@@ -1127,10 +1158,11 @@ assert_not_contains "$status" "ps 2>/dev/null"
 assert_not_contains "$status" '<%:Logs and diagnostics%>'
 assert_not_contains "$status" 'line:match\("\^\(\[\^\\t\]\*\)\\t'
 
-assert_count "$diagnostics" '<div class="cbi-map">' 4
+assert_count "$diagnostics" '<div class="cbi-map">' 5
 assert_contains "$diagnostics" '<%:Diagnostics%>'
 assert_contains "$diagnostics" '<%:Service resources%>'
-assert_contains "$diagnostics" '<%:Per-node passive diagnostics%>'
+assert_contains "$diagnostics" '<%:Link status%>'
+assert_contains "$diagnostics" '<%:Per-node telemetry%>'
 assert_contains "$diagnostics" 'runtime_performance\.passive'
 assert_contains "$diagnostics" 'node\.passive'
 assert_contains "$diagnostics" 'candyDiagnosticsRender'
@@ -1150,9 +1182,22 @@ assert_contains "$diagnostics" 'applied\.congestion'
 assert_contains "$diagnostics" 'process_status\.cpu_percent'
 assert_contains "$diagnostics" 'resident_memory_bytes'
 assert_contains "$diagnostics" 'goodput_bps'
+assert_contains "$diagnostics" 'passive\.peer'
+assert_contains "$diagnostics" 'goodput_bps_rx'
+assert_contains "$diagnostics" 'goodput_bps_tx'
+assert_contains "$diagnostics" 'updated_unix_ms'
+assert_contains "$diagnostics" 'candyDiagnosticsFreshness'
+assert_contains "$diagnostics" '<%:RTT / jitter%>'
+assert_contains "$diagnostics" '<%:Loss%>'
+assert_contains "$diagnostics" '<%:RX / TX%>'
+assert_contains "$diagnostics" '<%:Freshness%>'
+assert_contains "$diagnostics" '<%:Transport%>'
+assert_contains "$diagnostics" 'content: attr\(data-label\)'
+assert_contains "$diagnostics" 'overflow-wrap: anywhere'
+assert_contains "$diagnostics" 'text-overflow: ellipsis'
+assert_not_contains "$diagnostics" 'candy-topology|candyDiagnosticsRenderTopology|&rarr;|&#8594;'
 assert_not_contains "$diagnostics" 'client_udp_multiplier'
 assert_not_contains "$diagnostics" 'server_udp_multiplier'
-assert_not_contains "$diagnostics" 'passive\.peer'
 assert_contains "$diagnostics" 'configured_congestion|controllers'
 assert_not_contains "$diagnostics" '<%:Link diagnosis%>'
 assert_not_contains "$diagnostics" '<%:Link conclusion%>'
@@ -1194,7 +1239,7 @@ assert_not_contains "$diagnostics" 'diagnostics\.weak_link_probe'
 assert_not_contains "$diagnostics" 'link_probe_result'
 assert_not_contains "$diagnostics" '<%:Field%>'
 assert_not_contains "$diagnostics" '<%:Meaning%>'
-assert_not_contains "$diagnostics" '<%:Jitter%>'
+assert_contains "$diagnostics" 'translate\("Jitter"\)'
 assert_not_contains "$diagnostics" '<%:Packet loss%>'
 assert_not_contains "$diagnostics" '<%:UDP impaired%>'
 assert_not_contains "$diagnostics" '<%:Invalid reason%>'
@@ -1221,7 +1266,9 @@ assert_contains "$diagnostics" 'candy-feature-matrix-section'
 assert_contains "$diagnostics" 'candyDiagnosticsRenderFeatureMatrix'
 assert_not_contains "$diagnostics" 'carrier'
 
-assert_count "$logs" '<div class="cbi-map">' 1
+assert_contains "$diagnostics" '<%\+candy/log_panel%>'
+assert_contains "$log_view" '<%\+candy/log_panel%>'
+assert_count "$logs" '<div class="cbi-map"' 1
 assert_contains "$logs" '<%:Logs%>'
 assert_contains "$logs" '<%:Service log%>'
 assert_contains "$logs" '<%:Traffic log%>'

@@ -117,86 +117,93 @@ local scope_id = short_id(tenant_id or organization_id)
 local result = luci.http.formvalue("result") or ""
 %>
 
-<style>
-.candy-sdwan-head { display:flex; align-items:center; justify-content:space-between; gap:1em; flex-wrap:wrap; margin-bottom:1em; }
-.candy-sdwan-head h2 { margin:0; }
-.candy-sdwan-state { display:inline-flex; align-items:center; min-height:2em; padding:.2em .7em; border:1px solid #bbb; border-radius:999px; font-weight:600; }
-.candy-sdwan-state.registered { border-color:#2e7d32; color:#1b5e20; background:#f1f8f2; }
-.candy-sdwan-state.pending { border-color:#b26a00; color:#7a4700; background:#fff8e8; }
-.candy-cloud-profile { border:1px solid rgba(128,128,128,.3); border-radius:6px; overflow:hidden; background:#fff; }
-.candy-cloud-profile-head { display:flex; align-items:center; gap:.9em; padding:1em 1.1em; border-bottom:1px solid rgba(128,128,128,.22); }
-.candy-cloud-avatar { display:flex; align-items:center; justify-content:center; width:2.65em; height:2.65em; flex:0 0 2.65em; border-radius:50%; background:#eef4ff; color:#2458a6; font-weight:700; font-size:1.05em; }
-.candy-cloud-profile-title { min-width:0; flex:1; }
-.candy-cloud-profile-title strong, .candy-cloud-profile-title span { display:block; overflow-wrap:anywhere; }
-.candy-cloud-profile-title span { color:#666; margin-top:.15em; }
-.candy-cloud-profile-state { display:inline-flex; align-items:center; min-height:1.9em; padding:.15em .65em; border-radius:999px; border:1px solid #b26a00; color:#7a4700; background:#fff8e8; font-weight:600; white-space:nowrap; }
-.candy-cloud-profile-state.active { border-color:#2e7d32; color:#1b5e20; background:#f1f8f2; }
-.candy-cloud-profile-state.applying { border-color:#2669a8; color:#174c7d; background:#eef6ff; }
-.candy-cloud-profile-state.error { border-color:#b42318; color:#8a1c13; background:#fff2f0; }
-.candy-cloud-profile-state-group { display:flex; align-items:center; gap:.65em; flex-wrap:wrap; justify-content:flex-end; }
-.candy-cloud-profile-meta { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); padding:.95em 1.1em; gap:1em; }
-.candy-cloud-profile-meta > div { min-width:0; }
-.candy-cloud-profile-meta span, .candy-cloud-profile-meta small { display:block; color:#666; }
-.candy-cloud-profile-meta strong { display:block; margin:.2em 0; overflow-wrap:anywhere; }
-.candy-cloud-progress { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); border-top:1px solid rgba(128,128,128,.22); }
-.candy-cloud-progress > div { position:relative; min-height:3.2em; padding:.85em 1em .85em 2.15em; }
-.candy-cloud-progress > div + div { border-left:1px solid rgba(128,128,128,.22); }
-.candy-cloud-progress > div:before { content:""; position:absolute; left:1em; top:1.15em; width:.55em; height:.55em; border-radius:50%; background:#aaa; }
-.candy-cloud-progress > div.done:before { background:#2e7d32; }
-.candy-cloud-progress > div.current:before { background:#b26a00; box-shadow:0 0 0 3px #fff2cf; }
-.candy-cloud-progress strong, .candy-cloud-progress span { display:block; }
-.candy-cloud-progress span { color:#666; margin-top:.15em; font-size:.92em; }
-.candy-sdwan-next { margin-top:1em; padding:1em 1.1em; background:#f6f8fb; border-left:4px solid #4876b8; }
-.candy-sdwan-next strong { display:block; margin-bottom:.25em; }
-.candy-sdwan-next p { color:#555; margin:.25em 0 .8em; line-height:1.6; }
-.candy-sdwan-details { margin-top:1.3em; }
-.candy-sdwan-routing-note { margin-top:1em; padding:.85em 1em; background:#f6f8fb; border-left:4px solid #879bb8; color:#555; line-height:1.65; }
-.candy-sdwan-routing-note strong { color:#333; }
-.candy-sdwan-details h3 { margin:0 0 .5em; font-size:1.05em; }
-.candy-sdwan-profile-management { display:flex; align-items:center; justify-content:space-between; gap:1.25em; margin-top:1.2em; padding:.9em 0; border-top:1px solid rgba(128,128,128,.25); }
-.candy-sdwan-profile-management strong, .candy-sdwan-profile-management span { display:block; }
-.candy-sdwan-profile-management span { margin-top:.2em; color:#666; line-height:1.55; }
-.candy-sdwan-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.65em 1.25em; margin:0; }
-.candy-sdwan-grid > div { display:grid; grid-template-columns:minmax(7em, .8fr) minmax(0, 1.5fr); gap:.75em; padding:.65em 0; border-bottom:1px solid rgba(128,128,128,.3); min-width:0; }
-.candy-sdwan-grid dt { color:#666; }
-.candy-sdwan-grid dd { margin:0; overflow-wrap:anywhere; }
-.candy-sdwan-actions { display:flex; gap:.6em; flex-wrap:wrap; margin-top:1.2em; }
-.candy-sdwan-actions form { margin:0; }
-.candy-sdwan-form { max-width:42em; margin-top:1.2em; }
-.candy-sdwan-form .cbi-value { display:grid; grid-template-columns:minmax(9em,.8fr) minmax(0,1.8fr); gap:.8em; align-items:center; }
-.candy-sdwan-join-help { color:#666; margin:.5em 0 0; line-height:1.65; }
-.candy-sdwan-result { padding:.7em .9em; margin-bottom:1em; border-left:4px solid #b26a00; background:#fff8e8; }
-@media (max-width: 640px) { .candy-sdwan-grid, .candy-cloud-profile-meta, .candy-cloud-progress { grid-template-columns:1fr; } .candy-cloud-progress > div + div { border-left:0; border-top:1px solid rgba(128,128,128,.22); } .candy-sdwan-profile-management { align-items:flex-start; flex-direction:column; } }
-@media (max-width: 480px) { .candy-sdwan-form .cbi-value { grid-template-columns:1fr; gap:.25em; } }
-.candy-sdwan-hero { padding:1em 1.1em; margin-bottom:1em; background:linear-gradient(135deg,#eef4ff 0%,#f0f5ff 100%); border:1px solid rgba(72,118,184,.25); border-radius:6px; }
-.candy-sdwan-hero strong { display:block; margin-bottom:.35em; font-size:1.05em; color:#1a3a5c; }
-.candy-sdwan-hero p { margin:0; color:#4a5568; line-height:1.65; }
-.candy-sdwan-peer-table { width:100%; border-collapse:collapse; margin:0; font-size:.92em; }
-.candy-sdwan-peer-table th { padding:.35em .5em; font-weight:600; color:#555; font-size:.88em; border-bottom:2px solid rgba(128,128,128,.35); text-align:left; }
-.candy-sdwan-peer-table td { padding:.4em .5em; border-bottom:1px solid rgba(128,128,128,.18); overflow-wrap:anywhere; vertical-align:top; }
-.candy-sdwan-peer-table th:first-child, .candy-sdwan-peer-table td:first-child { width:auto; }
-.candy-sdwan-peer-table th:nth-child(2), .candy-sdwan-peer-table td:nth-child(2) { width:8em; }
-.candy-sdwan-peer-table th:nth-child(3), .candy-sdwan-peer-table td:nth-child(3) { width:6em; }
-.candy-sdwan-hint { display:block; margin-top:.25em; color:#888; font-size:.88em; font-style:italic; }
-</style>
+	<style>
+	.candy-sdwan-head { display:flex; align-items:flex-start; justify-content:space-between; gap:1em; flex-wrap:wrap; margin-bottom:1em; }
+	.candy-sdwan-head h2 { margin:0; font-size:1.45em; }
+	.candy-sdwan-purpose { max-width:58em; margin:.35em 0 0; color:#4e5969; line-height:1.55; }
+	.candy-sdwan-state, .candy-status-chip { display:inline-flex; align-items:center; min-height:1.75em; box-sizing:border-box; padding:.1em .55em; border:1px solid #c9cdd4; border-radius:3px; color:#4e5969; background:#f7f8fa; font-size:.88em; font-weight:600; line-height:1.35; white-space:nowrap; }
+	.candy-sdwan-state.registered, .candy-status-chip.ok { border-color:#7bc48f; color:#16763c; background:#f0fff4; }
+	.candy-sdwan-state.pending, .candy-status-chip.warn { border-color:#f7ba1e; color:#8d4f00; background:#fffbe6; }
+	.candy-status-chip.bad { border-color:#f98981; color:#b42318; background:#fff2f0; }
+	.candy-cloud-profile { border:1px solid #e5e6eb; border-radius:6px; overflow:hidden; background:#fff; }
+	.candy-cloud-profile-head { display:flex; align-items:center; gap:.9em; padding:1em; border-bottom:1px solid #e5e6eb; }
+	.candy-cloud-avatar { display:flex; align-items:center; justify-content:center; width:2.4em; height:2.4em; flex:0 0 2.4em; border-radius:5px; background:#e8f3ff; color:#165dff; font-weight:700; }
+	.candy-cloud-profile-title { min-width:0; flex:1; }
+	.candy-cloud-profile-title strong, .candy-cloud-profile-title span { display:block; overflow-wrap:anywhere; }
+	.candy-cloud-profile-title span { color:#4e5969; margin-top:.15em; }
+	.candy-cloud-profile-state { display:inline-flex; align-items:center; min-height:1.75em; padding:.1em .55em; border-radius:3px; border:1px solid #f7ba1e; color:#8d4f00; background:#fffbe6; font-size:.88em; font-weight:600; white-space:nowrap; }
+	.candy-cloud-profile-state.active { border-color:#7bc48f; color:#16763c; background:#f0fff4; }
+	.candy-cloud-profile-state.applying { border-color:#93b5e8; color:#165dff; background:#e8f3ff; }
+	.candy-cloud-profile-state.error { border-color:#f98981; color:#b42318; background:#fff2f0; }
+	.candy-cloud-profile-state-group { display:flex; align-items:center; gap:.65em; flex-wrap:wrap; justify-content:flex-end; }
+	.candy-cloud-profile-meta { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); padding:.9em 1em; gap:1em; }
+	.candy-cloud-profile-meta > div { min-width:0; }
+	.candy-cloud-profile-meta span, .candy-cloud-profile-meta small { display:block; color:#86909c; }
+	.candy-cloud-profile-meta strong { display:block; margin:.2em 0; overflow:hidden; text-overflow:ellipsis; }
+	.candy-cloud-progress { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); border-top:1px solid rgba(128,128,128,.22); }
+	.candy-cloud-progress > div { position:relative; min-height:3em; padding:.8em .9em .8em 2em; }
+	.candy-cloud-progress > div + div { border-left:1px solid #e5e6eb; }
+	.candy-cloud-progress > div:before { content:""; position:absolute; left:.9em; top:1.1em; width:.5em; height:.5em; border-radius:50%; background:#c9cdd4; }
+	.candy-cloud-progress > div.done:before { background:#00b42a; }
+	.candy-cloud-progress > div.current:before { background:#ff7d00; }
+	.candy-cloud-progress strong, .candy-cloud-progress span { display:block; }
+	.candy-cloud-progress span { color:#4e5969; margin-top:.15em; font-size:.9em; line-height:1.45; }
+	.candy-sdwan-next { margin-top:1em; padding:.9em 1em; background:#f7f8fa; border-left:3px solid #165dff; }
+	.candy-sdwan-next strong { display:block; margin-bottom:.25em; }
+	.candy-sdwan-next p { color:#4e5969; margin:.25em 0 .8em; line-height:1.6; }
+	.candy-sdwan-details { margin-top:1.3em; }
+	.candy-sdwan-routing-note { margin-top:1em; padding:.8em 1em; background:#f7f8fa; border-left:3px solid #86909c; color:#4e5969; line-height:1.6; }
+	.candy-sdwan-routing-note strong { color:#333; }
+	.candy-sdwan-details h3 { margin:0 0 .6em; font-size:1.08em; }
+	.candy-sdwan-profile-management { display:flex; align-items:center; justify-content:space-between; gap:1.25em; margin-top:1.2em; padding:.9em 0; border-top:1px solid rgba(128,128,128,.25); }
+	.candy-sdwan-profile-management strong, .candy-sdwan-profile-management span { display:block; }
+	.candy-sdwan-profile-management span { margin-top:.2em; color:#4e5969; line-height:1.55; }
+	.candy-sdwan-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 1.25em; margin:0; }
+	.candy-sdwan-grid > div { display:grid; grid-template-columns:minmax(7.5em, .75fr) minmax(0, 1.5fr); gap:.75em; align-items:start; padding:.65em 0; border-bottom:1px solid #e5e6eb; min-width:0; }
+	.candy-sdwan-grid dt { color:#86909c; }
+	.candy-sdwan-grid dd { margin:0; min-width:0; overflow-wrap:anywhere; }
+	.candy-sdwan-actions { display:flex; gap:.6em; flex-wrap:wrap; margin-top:1.2em; }
+	.candy-sdwan-actions form { margin:0; }
+	.candy-sdwan-form { max-width:42em; margin-top:1.2em; }
+	.candy-sdwan-form .cbi-value { display:grid; grid-template-columns:minmax(9em,.8fr) minmax(0,1.8fr); gap:.8em; align-items:center; }
+	.candy-sdwan-join-help { color:#4e5969; margin:.5em 0 0; line-height:1.6; }
+	.candy-sdwan-result { padding:.7em .9em; margin-bottom:1em; border-left:3px solid #ff7d00; background:#fff7e8; }
+	.candy-sdwan-result.error { border-color:#f53f3f; background:#ffece8; }
+	@media (max-width: 640px) { .candy-sdwan-grid, .candy-cloud-profile-meta, .candy-cloud-progress { grid-template-columns:1fr; } .candy-cloud-progress > div + div { border-left:0; border-top:1px solid rgba(128,128,128,.22); } .candy-sdwan-profile-management { align-items:flex-start; flex-direction:column; } }
+	@media (max-width: 480px) { .candy-sdwan-form .cbi-value { grid-template-columns:1fr; gap:.25em; } }
+	.candy-sdwan-peer-scroll { max-width:100%; overflow-x:auto; border-top:1px solid #e5e6eb; }
+	.candy-sdwan-peer-table { width:100%; min-width:42em; table-layout:fixed; border-collapse:collapse; margin:0; font-size:.92em; }
+	.candy-sdwan-peer-table th { padding:.55em .6em; font-weight:600; color:#4e5969; font-size:.88em; border-bottom:1px solid #c9cdd4; text-align:left; }
+	.candy-sdwan-peer-table td { padding:.6em; border-bottom:1px solid #e5e6eb; vertical-align:middle; }
+	.candy-sdwan-peer-table th:nth-child(1), .candy-sdwan-peer-table td:nth-child(1) { width:28%; }
+	.candy-sdwan-peer-table th:nth-child(2), .candy-sdwan-peer-table td:nth-child(2) { width:38%; }
+	.candy-sdwan-peer-table th:nth-child(3), .candy-sdwan-peer-table td:nth-child(3) { width:18%; }
+	.candy-sdwan-peer-table th:nth-child(4), .candy-sdwan-peer-table td:nth-child(4) { width:16%; }
+	.candy-sdwan-long { display:block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+	.candy-sdwan-hint { display:block; margin-top:.3em; color:#86909c; font-size:.88em; line-height:1.45; }
+	.candy-sdwan-peer-empty { color:#86909c; }
+	@media (max-width:640px) { .candy-sdwan-grid > div { grid-template-columns:minmax(6.5em,.8fr) minmax(0,1.4fr); } .candy-cloud-profile-head { align-items:flex-start; flex-wrap:wrap; } .candy-cloud-profile-state-group { width:100%; justify-content:flex-start; padding-left:3.3em; } }
+	</style>
 
-<div class="cbi-map">
-	<% if result == "joined" then %><div class="candy-sdwan-result"><%:This node has joined Candy Cloud.%></div><% end %>
-	<% if result == "reconnecting" then %><div class="candy-sdwan-result"><%:Reconnect requested.%></div><% end %>
-	<% if result == "starting" then %><div class="candy-sdwan-result"><%:SD-WAN start requested.%></div><% end %>
-	<% if result == "stopped" then %><div class="candy-sdwan-result"><%:SD-WAN stopped.%></div><% end %>
+	<div class="cbi-map">
+		<% if result == "joined" then %><div class="candy-sdwan-result"><%:This node has joined Candy Cloud.%></div><% end %>
+		<% if result == "reconnecting" then %><div class="candy-sdwan-result"><%:Reconnect requested.%></div><% end %>
+		<% if result == "starting" then %><div class="candy-sdwan-result"><%:SD-WAN start requested.%></div><% end %>
+		<% if result == "stopped" then %><div class="candy-sdwan-result"><%:SD-WAN stopped.%></div><% end %>
 	<% if result == "not-enabled" then %><div class="candy-sdwan-result"><%:The node has joined Candy Cloud, but the SD-WAN service is not enabled.%></div><% end %>
 	<% if result == "left" then %><div class="candy-sdwan-result"><%:The current Cloud Profile has been removed. Local SD-WAN state is cleared and ordinary Candy traffic is unaffected.%></div><% end %>
 	<% if result == "invalid-file" then %><div class="candy-sdwan-result"><%:The node join file could not be read. Choose the JSON file downloaded from Candy Cloud and try again.%></div><% end %>
 	<% if result == "file-too-large" then %><div class="candy-sdwan-result"><%:The node join file is too large. Generate a new join file in Candy Cloud and try again.%></div><% end %>
-	<% if result == "leave-stop-failed" then %><div class="candy-sdwan-result error"><%:Could not stop the SD-WAN data plane safely. The profile was kept; check Logs for the stop-phase error.%></div><% end %>
-	<% if result == "leave-runtime-failed" then %><div class="candy-sdwan-result error"><%:The SD-WAN data plane stopped, but local profile cleanup failed. The profile was kept; check Logs for the cleanup-phase error.%></div><% end %>
-	<% if result == "error" then %><div class="candy-sdwan-result"><%:Operation failed. Check Logs for details.%></div><% end %>
-	<div class="candy-sdwan-hero"><strong><%:What is SD-WAN?%></strong><p><%:Candy SD-WAN securely connects sites across the Internet with full-duplex encrypted tunnels. It auto-discovers peers, selects the best path (direct or relay), and applies egress policies published from Candy Cloud — all without manual VPN configuration.%></p></div>
-<div class="candy-sdwan-head">
-		<h2><%:SD-WAN%></h2>
-		<% if registration_state ~= "registered" then %><span class="candy-sdwan-state <%=registration_state == "join-pending" and "pending" or ""%>"><%=state_label(registration_state)%></span><% end %>
-	</div>
+		<% if result == "leave-stop-failed" then %><div class="candy-sdwan-result error"><%:Could not stop the SD-WAN data plane safely. The profile was kept; check Diagnostics for the stop-phase error.%></div><% end %>
+		<% if result == "leave-runtime-failed" then %><div class="candy-sdwan-result error"><%:The SD-WAN data plane stopped, but local profile cleanup failed. The profile was kept; check Diagnostics for the cleanup-phase error.%></div><% end %>
+		<% if result == "error" then %><div class="candy-sdwan-result error"><%:Operation failed. Check Diagnostics for details.%></div><% end %>
+		<div class="candy-sdwan-head">
+			<div>
+				<h2><%:SD-WAN%></h2>
+				<p class="candy-sdwan-purpose"><%:Candy SD-WAN connects sites through encrypted links; network, egress, and internal DNS settings are delivered by Candy Cloud.%></p>
+			</div>
+			<% if registration_state ~= "registered" then %><span class="candy-sdwan-state <%=registration_state == "join-pending" and "pending" or ""%>"><%=state_label(registration_state)%></span><% end %>
+		</div>
 	<% if registration_state ~= "registered" then %>
 		<dl class="candy-sdwan-grid">
 			<div><dt><%:Cloud%></dt><dd><%=label(registration.cloud_address)%></dd></div>
@@ -209,45 +216,162 @@ local result = luci.http.formvalue("result") or ""
 			<div class="candy-sdwan-actions"><button class="cbi-button cbi-button-apply" type="submit"><%:Import and join%></button></div>
 		</form>
 	<% else %>
-		<div class="candy-cloud-profile">
-			<div class="candy-cloud-profile-head">
-				<span class="candy-cloud-avatar">C</span>
-				<div class="candy-cloud-profile-title"><strong><%:Cloud network profile%></strong><span><%=label(display_name or cloud_name)%></span></div>
+			<div class="candy-cloud-profile">
+				<div class="candy-cloud-profile-head">
+					<span class="candy-cloud-avatar">C</span>
+					<div class="candy-cloud-profile-title"><strong><%:Cloud network profile%></strong><span><%=label(display_name or cloud_name)%></span></div>
 				<div class="candy-cloud-profile-state-group"><span class="candy-cloud-profile-state <%=profile_state%>"><%=profile_state_label%></span></div>
-			</div>
-			<div class="candy-cloud-profile-meta">
-				<div><span><%:Cloud%></span><strong><%=label(cloud_name)%></strong><small><%=label(cloud_address)%></small></div>
-				<div><span><%:Cloud account%></span><strong><%=label(scope_kind)%></strong><small><%=organization_name and label(organization_name) or (scope_id and label(scope_id) or translate("Pending synchronization"))%></small></div>
-				<div><span><%:Node profile%></span><strong><%=label(display_name or translate("This device"))%></strong><small><%=device_id and label(short_id(device_id)) or translate("Pending synchronization")%></small></div>
-			</div>
+				</div>
+				<div class="candy-cloud-profile-meta">
+					<div><span><%:Cloud%></span><strong title="<%=label(cloud_name)%>"><%=label(cloud_name)%></strong><small title="<%=label(cloud_address)%>"><%=label(cloud_address)%></small></div>
+					<div><span><%:Cloud account%></span><strong><%=label(scope_kind)%></strong><small><%=organization_name and label(organization_name) or (scope_id and label(scope_id) or translate("Pending synchronization"))%></small></div>
+					<div><span><%:Node profile%></span><strong title="<%=label(display_name or translate("This device"))%>"><%=label(display_name or translate("This device"))%></strong><small title="<%=device_id and label(device_id) or translate("Pending synchronization")%>"><%=device_id and label(short_id(device_id)) or translate("Pending synchronization")%></small></div>
+				</div>
 			<div class="candy-cloud-progress">
 				<div class="done"><strong><%:Identity authorized%></strong><span><%:Cloud trust established%></span></div>
 				<div class="<%=network_ready and "done" or "current"%>"><strong><%=network_ready and translate("Network configured") or translate("Network configuration pending")%></strong><span><%=network_ready and label(site_value) or translate("Assign this node to a Site and network in Cloud")%></span></div>
 				<div class="<%=runtime_active and "done" or (network_ready and "current" or "")%>"><strong><%=runtime_active and translate("SD-WAN active") or (sync_failed and translate("Configuration could not be applied") or (network_ready and translate("Applying SD-WAN configuration") or translate("SD-WAN pending")))%></strong><span><%=runtime_active and runtime_state_label(runtime.state) or (sync_failed and translate("Open Logs for details; ordinary Candy traffic is unaffected") or translate("Activation is automatic after Cloud publishes a complete configuration"))%></span></div>
 			</div>
-		</div>
-		<% if not network_ready then %>
-			<div class="candy-sdwan-next"><strong><%:Complete network setup in Candy Cloud%></strong><p><%:This node is securely authorized. Assign it to a Site and network in Candy Cloud; no additional local settings are required. Ordinary Candy traffic continues normally while configuration is pending.%></p><a class="cbi-button cbi-button-apply" href="<%=xml.pcdata(cloud_address)%>" target="_blank" rel="noopener noreferrer"><%:Open Candy Cloud%></a></div>
-		<% else %>
-			<div class="candy-sdwan-details"><h3><%:Network status%></h3><dl class="candy-sdwan-grid">
-				<div><dt><%:Site%></dt><dd><%=label(site_value)%></dd></div>
-				<div><dt><%:Segment%></dt><dd><%=label(segment_value)%></dd></div>
-				<div><dt><%:TUN%></dt><dd><%=runtime_state_label(tun.state)%><% if tun.full_duplex == true then %> / <%:Full duplex%><% end %></dd></div>
-				<div><dt><%:Peer%></dt><dd><% if #peers == 0 then %><%=translate("Unavailable")%><% else %><table class="candy-sdwan-peer-table"><thead><tr><th><%:Name%></th><th><%:Status%></th><th><%:Path%></th></tr></thead><tbody><% for _, peer in ipairs(peers) do %><tr><td><%=label(peer.name or peer.id)%></td><td><%=runtime_state_label(peer.state)%></td><td><% if type(peer.path) == "table" and (peer.path.kind == "direct" or peer.path.kind == "relay") then %><%=peer.path.kind == "direct" and translate("Direct") or translate("Relay")%><% else %>—<% end %></td></tr><% end %></tbody></table><% end %></dd></div>
-				<div><dt><%:Path%></dt><dd><% if path and (path.kind == "direct" or path.kind == "relay") then %><%=path.kind == "direct" and translate("Direct") or translate("Relay")%><% else %><%=translate("Unavailable")%><% end %></dd></div>
-				<div><dt><%:Local egress%></dt><dd><%=object_label(egress["local"], "name")%><% if type(egress["local"]) ~= "table" or (not egress["local"].name and not egress["local"].id) then %><small class="candy-sdwan-hint"><%:Routes selected traffic through a local Internet breakout. Configure in Candy Cloud.%></small><% end %></dd></div>
-				<div><dt><%:Remote egress%></dt><dd><%=object_label(egress.remote, "name")%><% if type(egress.remote) ~= "table" or (not egress.remote.name and not egress.remote.id) then %><small class="candy-sdwan-hint"><%:Routes selected traffic through a remote site's Internet breakout. Configure in Candy Cloud.%></small><% end %></dd></div>
-				<div><dt><%:Internal DNS%></dt><dd><%=runtime_state_label(dns.state)%><% if dns.state == "unavailable" or dns.state == nil or dns.state == "" then %><small class="candy-sdwan-hint"><%:Resolves private domain names through the SD-WAN network. Configure in Candy Cloud.%></small><% end %></dd></div>
-				<div><dt><%:Runtime%></dt><dd><%=runtime_state_label(runtime.state)%></dd></div>
-				</dl></div>
+			</div>
+			<% if not network_ready then %>
+				<div class="candy-sdwan-next"><strong><%:Complete network setup in Candy Cloud%></strong><p><%:This node is securely authorized. Assign it to a Site and network in Candy Cloud; no additional local settings are required. Ordinary Candy traffic continues normally while configuration is pending.%></p><a class="cbi-button cbi-button-apply" href="<%=xml.pcdata(cloud_address)%>" target="_blank" rel="noopener noreferrer"><%:Open Candy Cloud%></a></div>
+			<% end %>
+			<div class="candy-sdwan-details">
+				<h3><%:Network status%></h3>
+				<dl class="candy-sdwan-grid">
+					<div><dt><%:Site%></dt><dd><%=label(site_value)%></dd></div>
+					<div><dt><%:Segment%></dt><dd><%=label(segment_value)%></dd></div>
+					<div><dt><%:TUN%></dt><dd id="candy-sdwan-tun"><span class="candy-status-chip <%=tun.state == "running" and "ok" or (tun.state == "reconnecting" and "warn" or "")%>"><%=runtime_state_label(tun.state)%></span><% if tun.full_duplex == true then %> / <%:Full duplex%><% end %></dd></div>
+					<div><dt><%:Path%></dt><dd id="candy-sdwan-path"><% if path and (path.kind == "direct" or path.kind == "relay") then %><span class="candy-status-chip ok"><%=path.kind == "direct" and translate("Direct") or translate("Relay")%></span><% else %><span class="candy-status-chip"><%=translate("Unavailable")%></span><% end %></dd></div>
+					<div><dt><%:Runtime%></dt><dd id="candy-sdwan-runtime"><span class="candy-status-chip <%=runtime.state == "running" and "ok" or (runtime.state == "reconnecting" and "warn" or (runtime.state == "fail-open" and "bad" or ""))%>"><%=runtime_state_label(runtime.state)%></span></dd></div>
+					<div><dt><%:Freshness%></dt><dd id="candy-sdwan-freshness"><%=runtime.updated_at and label(os.date("%Y-%m-%d %H:%M:%S", runtime.updated_at)) or translate("Unavailable")%></dd></div>
+					<div><dt><%:Local egress%></dt><dd><%=object_label(egress["local"], "name")%><% if type(egress["local"]) ~= "table" or (not egress["local"].name and not egress["local"].id) then %><small class="candy-sdwan-hint"><%:Unavailable until Candy Cloud publishes a local-egress configuration.%></small><% end %></dd></div>
+					<div><dt><%:Remote egress%></dt><dd><%=object_label(egress.remote, "name")%><% if type(egress.remote) ~= "table" or (not egress.remote.name and not egress.remote.id) then %><small class="candy-sdwan-hint"><%:Unavailable until Candy Cloud publishes a remote-egress configuration.%></small><% end %></dd></div>
+					<div><dt><%:Internal DNS%></dt><dd><%=runtime_state_label(dns.state)%><% if dns.state == "unavailable" or dns.state == nil or dns.state == "" then %><small class="candy-sdwan-hint"><%:Unavailable until Candy Cloud publishes an internal DNS configuration.%></small><% end %></dd></div>
+				</dl>
+				<h3 style="margin-top:1.25em"><%:Peers%></h3>
+				<div class="candy-sdwan-peer-scroll">
+					<table class="candy-sdwan-peer-table">
+						<thead><tr><th><%:Peer site%></th><th><%:Attachment ID%></th><th><%:Status%></th><th><%:Path%></th></tr></thead>
+						<tbody id="candy-sdwan-peers">
+						<% if #peers == 0 then %><tr><td class="candy-sdwan-peer-empty" colspan="4"><%:No peer links are available until Candy Cloud publishes the Site connections.%></td></tr><% else %>
+						<% for _, peer in ipairs(peers) do local peer_name = peer.name or peer.id or "" local peer_id = peer.id or "" %><tr>
+							<td><span class="candy-sdwan-long" title="<%=label(peer_name)%>"><%=label(peer_name)%></span></td>
+							<td><span class="candy-sdwan-long" title="<%=label(peer_id)%>"><%=label(peer_id)%></span></td>
+							<td><span class="candy-status-chip <%=peer.state == "running" and "ok" or (peer.state == "reconnecting" and "warn" or "bad")%>"><%=runtime_state_label(peer.state)%></span></td>
+							<td><% if type(peer.path) == "table" and (peer.path.kind == "direct" or peer.path.kind == "relay") then %><%=peer.path.kind == "direct" and translate("Direct") or translate("Relay")%><% else %>-<% end %></td>
+						</tr><% end %><% end %>
+						</tbody>
+					</table>
+				</div>
+			</div>
+			<% if network_ready then %>
 				<div class="candy-sdwan-routing-note"><strong><%:How traffic is selected%></strong><br /><%:Published remote site networks always use the SD-WAN full-duplex TUN because their routes are more specific. When a policy selects a remote Internet egress, traffic uses the TUN to reach that site's Candy egress. Traffic that does not match an SD-WAN network or remote-egress policy continues through this router's normal Candy node and DNS rules. If SD-WAN fails, only its own routes are withdrawn and ordinary Candy traffic remains on its normal path.%></div>
-			<% if network_ready then %><div class="candy-sdwan-actions"><form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_start')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-apply" type="submit"><%:Start%></button></form><form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_stop')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-reset" type="submit"><%:Stop%></button></form><form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_reconnect')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-action" type="submit"><%:Reconnect%></button></form></div><% end %>
-		<% end %>
-		<div class="candy-sdwan-profile-management">
-			<div><strong><%:Profile management%></strong><span><%:Leaving removes this device's local Cloud identity and SD-WAN configuration. The node record remains in Cloud until an administrator deletes it.%></span></div>
-			<form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_leave')%>" onsubmit="return confirm('<%=translate('Leave the current Cloud Profile? Local SD-WAN state will be cleared and ordinary Candy traffic will continue normally.')%>');"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-negative" type="submit"><%:Leave current Profile%></button></form>
+				<div class="candy-sdwan-actions">
+					<form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_start')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-apply" type="submit"><%:Start%></button></form>
+					<form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_stop')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-reset" type="submit"><%:Stop%></button></form>
+					<form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_reconnect')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-action" type="submit"><%:Reconnect%></button></form>
+				</div>
+			<% end %>
+			<div class="candy-sdwan-profile-management">
+				<div><strong><%:Profile management%></strong><span><%:Leaving removes this device's local Cloud identity and SD-WAN configuration. The node record remains in Cloud until an administrator deletes it.%></span></div>
+				<form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_leave')%>" onsubmit="return confirm('<%=translate('Leave the current Cloud Profile? Local SD-WAN state will be cleared and ordinary Candy traffic will continue normally.')%>');"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-negative" type="submit"><%:Leave current Profile%></button></form>
 		</div>
-	<% end %>
-</div>
+		<% end %>
+	</div>
 
-<%+footer%>
+	<% if registration_state == "registered" then %>
+	<script type="text/javascript">
+	(function() {
+		var statusUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'status_json')%>";
+		var timer = null;
+		var request = null;
+		var labels = {
+			unavailable: <%=string.format("%q", translate("Unavailable"))%>,
+			running: <%=string.format("%q", translate("Running"))%>,
+			reconnecting: <%=string.format("%q", translate("Reconnecting"))%>,
+			stopped: <%=string.format("%q", translate("Stopped"))%>,
+			failOpen: <%=string.format("%q", translate("Network restored"))%>,
+			direct: <%=string.format("%q", translate("Direct"))%>,
+			relay: <%=string.format("%q", translate("Relay"))%>,
+			fullDuplex: <%=string.format("%q", translate("Full duplex"))%>,
+			secondsAgo: <%=string.format("%q", translate("seconds ago"))%>,
+			minutesAgo: <%=string.format("%q", translate("minutes ago"))%>,
+			now: <%=string.format("%q", translate("Now"))%>,
+			noPeers: <%=string.format("%q", translate("No peer links are available until Candy Cloud publishes the Site connections."))%>
+		};
+		function text(value) { return value === null || value === undefined || value === "" ? labels.unavailable : String(value); }
+		function stateText(value) {
+			if (value === "running") return labels.running;
+			if (value === "reconnecting") return labels.reconnecting;
+			if (value === "stopped") return labels.stopped;
+			if (value === "fail-open") return labels.failOpen;
+			return text(value);
+		}
+		function chip(value, state) {
+			var span = document.createElement("span");
+			span.className = "candy-status-chip " + (state === "running" ? "ok" : (state === "reconnecting" ? "warn" : (state === "fail-open" || state === "unavailable" ? "bad" : "")));
+			span.textContent = value;
+			return span;
+		}
+		function setStatus(id, value, state, suffix) {
+			var element = document.getElementById(id);
+			if (!element) return;
+			element.textContent = "";
+			element.appendChild(chip(value, state));
+			if (suffix) element.appendChild(document.createTextNode(" / " + suffix));
+		}
+		function freshness(value) {
+			var timestamp = Number(value);
+			if (!isFinite(timestamp) || timestamp <= 0) return labels.unavailable;
+			if (timestamp > 1000000000000) timestamp /= 1000;
+			var age = Math.max(0, Math.floor(Date.now() / 1000 - timestamp));
+			if (age < 2) return labels.now;
+			if (age < 60) return age + " " + labels.secondsAgo;
+			return Math.floor(age / 60) + " " + labels.minutesAgo;
+		}
+		function renderPeers(peers) {
+			var body = document.getElementById("candy-sdwan-peers");
+			if (!body) return;
+			body.textContent = "";
+			if (!peers || !peers.length) {
+				var emptyRow = document.createElement("tr"), emptyCell = document.createElement("td");
+				emptyCell.colSpan = 4; emptyCell.className = "candy-sdwan-peer-empty"; emptyCell.textContent = labels.noPeers;
+				emptyRow.appendChild(emptyCell); body.appendChild(emptyRow); return;
+			}
+			peers.forEach(function(peer) {
+				var row = document.createElement("tr");
+				var values = [text(peer.name || peer.id), text(peer.id)];
+				values.forEach(function(value) { var cell = document.createElement("td"), span = document.createElement("span"); span.className = "candy-sdwan-long"; span.textContent = value; span.title = value; cell.appendChild(span); row.appendChild(cell); });
+				var stateCell = document.createElement("td"); stateCell.appendChild(chip(stateText(peer.state), peer.state)); row.appendChild(stateCell);
+				var pathCell = document.createElement("td"), kind = peer.path && peer.path.kind; pathCell.textContent = kind === "direct" ? labels.direct : (kind === "relay" ? labels.relay : "-"); row.appendChild(pathCell);
+				body.appendChild(row);
+			});
+		}
+		function render(status) {
+			var runtime = status.runtime || {}, tun = status.tun || {}, path = status.path || {};
+			setStatus("candy-sdwan-runtime", stateText(runtime.state), runtime.state);
+			setStatus("candy-sdwan-tun", stateText(tun.state), tun.state, tun.full_duplex === true ? labels.fullDuplex : "");
+			setStatus("candy-sdwan-path", path.kind === "direct" ? labels.direct : (path.kind === "relay" ? labels.relay : labels.unavailable), path.state || (path.kind ? "running" : "unavailable"));
+			var freshnessNode = document.getElementById("candy-sdwan-freshness"); if (freshnessNode) freshnessNode.textContent = freshness(runtime.updated_at);
+			renderPeers(status.peers || []);
+		}
+		function refresh() {
+			if (timer !== null) { clearTimeout(timer); timer = null; }
+			if (request !== null) { try { request.abort(); } catch (error) {} }
+			request = new XMLHttpRequest();
+			request.open("GET", statusUrl + "?_=" + Date.now(), true);
+			request.onreadystatechange = function() {
+				if (request.readyState !== 4) return;
+				timer = setTimeout(refresh, 2000);
+				if (request.status !== 200) return;
+				try { var data = JSON.parse(request.responseText || "{}"); render(data.sdwan || {}); } catch (error) {}
+			};
+			try { request.send(null); } catch (error) { timer = setTimeout(refresh, 2000); }
+		}
+		refresh();
+	})();
+	</script>
+	<% end %>
+
+	<%+footer%>

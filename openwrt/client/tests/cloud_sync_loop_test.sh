@@ -56,7 +56,11 @@ exit 0
 EOF
 cat >"$tmp/candy.init" <<'EOF'
 #!/bin/sh
-printf '%s\n' "$*" >>"$CANDY_TEST_RECONCILE_LOG"
+case "$1" in
+	enabled) exit 0 ;;
+	status) printf '%s\n' running ;;
+	sdwan_reconcile) printf '%s\n' "$*" >>"$CANDY_TEST_RECONCILE_LOG" ;;
+esac
 EOF
 chmod 0755 "$tmp/bin/"* "$tmp/sync" "$tmp/candy.init"
 
@@ -102,5 +106,66 @@ PATH="$tmp/bin:$PATH" \
 	"$sync_loop" >/dev/null 2>"$stderr_log" || fail "supervisor rejected an unknown successful result"
 grep -F 'event=cloud_sync result=ok state=unknown' "$tmp/logger.log" >/dev/null ||
 	fail "state parser accepted JSON that was not the final stdout record"
+
+# An explicit stop disables Candy. Cloud synchronization must retain the
+# downloaded candidate without restarting it every interval.
+mkdir -p "$tmp/state/identity"
+printf '%s\n' '{}' >"$tmp/state/identity/device-identity-v1.json"
+cat >"$tmp/bin/start-stop-daemon" <<'EOF'
+#!/bin/sh
+printf '%s\n' '{"schema_version":1,"state":"configuration_unchanged"}'
+rm -f "$CANDY_TEST_IDENTITY_FILE"
+EOF
+cat >"$tmp/candy.init" <<'EOF'
+#!/bin/sh
+case "$1" in
+	enabled) exit 1 ;;
+	*) printf '%s\n' "$*" >>"$CANDY_TEST_RECONCILE_LOG" ;;
+esac
+EOF
+chmod 0755 "$tmp/bin/start-stop-daemon" "$tmp/candy.init"
+: >"$tmp/logger.log"
+: >"$tmp/reconcile.log"
+PATH="$tmp/bin:$PATH" \
+	CANDY_TEST_LOG="$tmp/logger.log" \
+	CANDY_TEST_RECONCILE_LOG="$tmp/reconcile.log" \
+	CANDY_TEST_IDENTITY_FILE="$tmp/state/identity/device-identity-v1.json" \
+	CANDY_CLOUD_SYNC_BIN="$tmp/sync" \
+	CANDY_SDWAN_STATE_DIR="$tmp/state" \
+	CANDY_INIT="$tmp/candy.init" \
+	CANDY_CLOUD_SYNC_INTERVAL=1 \
+	"$sync_loop" >/dev/null 2>"$stderr_log" || fail "disabled service handling failed"
+[ ! -s "$tmp/reconcile.log" ] || fail "Cloud sync restarted an explicitly disabled service"
+grep -F 'event=cloud_sync_reconcile result=deferred reason=service_disabled' "$tmp/logger.log" >/dev/null ||
+	fail "disabled reconciliation was not reported as deferred"
+
+# A transient SD-WAN failure preserves autostart. The next successful Cloud
+# sync starts the stopped service once instead of requesting reconnect forever.
+mkdir -p "$tmp/state/identity"
+printf '%s\n' '{}' >"$tmp/state/identity/device-identity-v1.json"
+cat >"$tmp/candy.init" <<'EOF'
+#!/bin/sh
+case "$1" in
+	enabled) exit 0 ;;
+	status) printf '%s\n' stopped ;;
+	start) printf '%s\n' "$*" >>"$CANDY_TEST_RECONCILE_LOG" ;;
+	*) exit 1 ;;
+esac
+EOF
+chmod 0755 "$tmp/candy.init"
+: >"$tmp/logger.log"
+: >"$tmp/reconcile.log"
+PATH="$tmp/bin:$PATH" \
+	CANDY_TEST_LOG="$tmp/logger.log" \
+	CANDY_TEST_RECONCILE_LOG="$tmp/reconcile.log" \
+	CANDY_TEST_IDENTITY_FILE="$tmp/state/identity/device-identity-v1.json" \
+	CANDY_CLOUD_SYNC_BIN="$tmp/sync" \
+	CANDY_SDWAN_STATE_DIR="$tmp/state" \
+	CANDY_INIT="$tmp/candy.init" \
+	CANDY_CLOUD_SYNC_INTERVAL=1 \
+	"$sync_loop" >/dev/null 2>"$stderr_log" || fail "stopped service recovery failed"
+grep -Fx start "$tmp/reconcile.log" >/dev/null || fail "stopped enabled service was not restarted"
+grep -F 'event=cloud_sync_reconcile result=recovered reason=service_stopped' "$tmp/logger.log" >/dev/null ||
+	fail "successful service recovery was not logged"
 
 printf '%s\n' "OpenWrt Candy Cloud sync supervisor test passed"

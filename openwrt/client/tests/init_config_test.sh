@@ -249,11 +249,19 @@ printf '%s\n' "$provider_updater_block" | grep -F 'procd_set_param respawn 3600 
 provider_loop_block=$(sed -n '/^provider_update_loop()/,/^}/p' "$repo_root/candy-client/candy.init")
 ! printf '%s\n' "$provider_loop_block" | grep -F 'exit 0' >/dev/null ||
   fail "provider updater exits permanently after its first successful update"
+printf '%s\n' "$provider_loop_block" | grep -F 'provider_runtime_reload_ready' >/dev/null ||
+  fail "provider updater can reload while SD-WAN activation is still changing the network stack"
+printf '%s\n' "$provider_loop_block" | grep -F 'CANDY_PROVIDER_ACTIVATION_PENDING' >/dev/null ||
+  fail "deferred provider activation is not retried promptly"
 grep -F 'migrate_reserved_dns_forward' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'forward local listen conflicts with reserved Candy DNS listener' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'CANDY_FAST_STATUS_ACTION' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'case "${action:-${1:-}}" in' "$repo_root/candy-client/candy.init" >/dev/null
-grep -F 'status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|fail_open|sdwan_fail_open|sdwan_reconcile|sdwan_reconnect|sdwan_stop|health_watchdog|congestion_test|run_client|run_sdwan|run_netd)' "$repo_root/candy-client/candy.init" >/dev/null
+grep -F 'status|running|enabled|stop|provider_update_once|provider_update_loop|network_apply|network_cleanup|reload_runtime|restart_queued|fail_open|sdwan_fail_open|sdwan_reconcile|sdwan_start|sdwan_reconnect|sdwan_stop|health_watchdog|congestion_test|run_client|run_sdwan|run_netd)' "$repo_root/candy-client/candy.init" >/dev/null
+grep -F 'CANDY_SDWAN_USER_STOPPED_FILE=${CANDY_SDWAN_USER_STOPPED_FILE:-$CANDY_SDWAN_STATE_DIR/user-stopped-v1}' "$repo_root/candy-client/candy.init" >/dev/null ||
+  fail "explicit SD-WAN stop is not persisted across Cloud synchronization"
+sed -n '/^sdwan_stop_locked()/,/^}/p' "$repo_root/candy-client/candy.init" | grep -F 'stop_sdwan_data_plane' >/dev/null ||
+  fail "explicit SD-WAN stop does not use isolated data-plane cleanup"
 grep -F -- '--control-socket-path "$CANDY_CONTROL_SOCKET"' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F -- '--active "$RUNTIME_CONFIG"' "$repo_root/candy-client/candy.init" >/dev/null || fail "runtime reload does not request atomic active-config promotion"
 grep -F 'reload_service()' "$repo_root/candy-client/candy.init" >/dev/null
@@ -1770,6 +1778,124 @@ done
   fi
   grep -Fq '"cleanup":"failed"' "$CANDY_FAULT_STATE_FILE" || fail "incomplete fail-open cleanup was hidden"
   grep -Fq 'event=fail_open' "$LOG_FILE" || fail "fail-open lifecycle context was not logged"
+)
+
+(
+  fault_dir=$(mktemp -d)
+	. "$repo_root/candy-client/candy.init"
+  RUNTIME_DIR=$fault_dir/run/candy
+  LOG_FILE=$fault_dir/candy.log
+  CANDY_LIFECYCLE_FILE=$fault_dir/candy.lifecycle
+  CANDY_FAULT_STATE_FILE=$fault_dir/runtime-fault.json
+  CANDY_INIT_SELF=$fault_dir/candy-init
+  CANDY_NETD_JOURNAL=$fault_dir/netd.journal
+  mkdir -p "$RUNTIME_DIR"
+  printf '%s\n' '#!/bin/sh' \
+    'case "$1" in enabled) exit 0 ;; disable) printf disabled >"$CANDY_TEST_DISABLE_MARKER"; exit 0 ;; esac' \
+    'exit 0' > "$CANDY_INIT_SELF"
+  chmod +x "$CANDY_INIT_SELF"
+  CANDY_TEST_DISABLE_MARKER=$fault_dir/disabled
+  export CANDY_TEST_DISABLE_MARKER
+  : > "$LOG_FILE"
+  config_load() { return 0; }
+  candy_client_pids() { return 0; }
+  wait_for_candy_client_exit() { return 0; }
+  network_cleanup() { return 0; }
+  stop_network_policy_worker_for_fail_open() { return 0; }
+  wait_for_netd_exit() { return 0; }
+  fail_open_locked sdwan sdwan_exit:1
+  test ! -e "$CANDY_TEST_DISABLE_MARKER" || fail "transient SD-WAN failure disabled recovery across reboot"
+  grep -Fq 'automatic recovery pending' "$CANDY_FAULT_STATE_FILE" ||
+    fail "transient SD-WAN failure did not persist recovery state"
+)
+
+(
+  stop_dir=$(mktemp -d)
+  . "$repo_root/candy-client/candy.init"
+  CANDY_SDWAN_STATE_DIR=$stop_dir/sdwan
+  CANDY_SDWAN_USER_STOPPED_FILE=$CANDY_SDWAN_STATE_DIR/user-stopped-v1
+  CANDY_NETD_JOURNAL=$stop_dir/netd.journal
+  CANDY_INIT_SELF=$stop_dir/candy-init
+  LOG_FILE=$stop_dir/candy.log
+  RUNTIME_DIR=$stop_dir/run
+  mkdir -p "$CANDY_SDWAN_STATE_DIR" "$RUNTIME_DIR"
+  printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$1" >>"$CANDY_TEST_INIT_CALLS"' 'exit 0' >"$CANDY_INIT_SELF"
+  chmod +x "$CANDY_INIT_SELF"
+  CANDY_TEST_INIT_CALLS=$stop_dir/init.calls
+  export CANDY_TEST_INIT_CALLS
+  : >"$CANDY_TEST_INIT_CALLS"
+  : >"$LOG_FILE"
+  chown() { return 0; }
+  candy_client_pids() { fail "explicit SD-WAN stop inspected the ordinary Candy process"; }
+  network_cleanup() { fail "explicit SD-WAN stop removed ordinary Candy network policy"; }
+  stop_network_policy_worker_for_fail_open() { fail "explicit SD-WAN stop interrupted the ordinary policy worker"; }
+  fail_open_locked() { fail "successful explicit SD-WAN stop escalated to global fail-open"; }
+  stop_sdwan_data_plane() { return 0; }
+  sdwan_runtime_actions=
+  sdwan_runtime_state() { sdwan_runtime_actions="${sdwan_runtime_actions}${sdwan_runtime_actions:+ }$1"; }
+
+  sdwan_stop_locked user_stop || fail "isolated explicit SD-WAN stop failed"
+  [ -f "$CANDY_SDWAN_USER_STOPPED_FILE" ] || fail "explicit SD-WAN stop marker was not persisted"
+  [ "$sdwan_runtime_actions" = stopped ] || fail "explicit SD-WAN stop did not publish stopped state"
+  [ ! -s "$CANDY_TEST_INIT_CALLS" ] || fail "explicit SD-WAN stop changed ordinary Candy enablement"
+
+  load_sdwan_candidate() { fail "Cloud reconciliation ignored the explicit stop marker"; }
+  sdwan_reconcile || fail "explicitly stopped SD-WAN was not an idempotent reconciliation state"
+  [ "$sdwan_runtime_actions" = "stopped stopped" ] || fail "Cloud reconciliation changed explicitly stopped state"
+
+  load_sdwan_candidate() { CANDY_SDWAN_CANDIDATE_HASH=$(printf '%064d' 9); return 0; }
+  candy_process_running() { return 0; }
+  current_readiness() { return 0; }
+  sdwan_reconnect() { fail "start used destructive reconnect after an explicit stop"; }
+  sdwan_start || fail "explicitly stopped SD-WAN could not be started"
+  [ ! -e "$CANDY_SDWAN_USER_STOPPED_FILE" ] || fail "SD-WAN start retained the explicit stop marker"
+  [ "$sdwan_runtime_actions" = "stopped stopped reconnect" ] || fail "SD-WAN start did not request activation"
+  grep -Fx enable "$CANDY_TEST_INIT_CALLS" >/dev/null || fail "SD-WAN start did not preserve service autostart"
+
+  set_sdwan_user_stopped || fail "could not restore explicit stop marker for failure test"
+  stop_sdwan_data_plane() { return 1; }
+  fail_open_args=
+  fail_open_locked() { fail_open_args="$*"; return 0; }
+  sdwan_stop_locked user_stop || fail "failed isolated cleanup did not complete global fail-open"
+  [ "$fail_open_args" = "sdwan user_stop_cleanup_failed" ] ||
+    fail "failed isolated cleanup did not escalate through the safety fail-open path"
+)
+
+(
+  cleanup_dir=$(mktemp -d)
+  . "$repo_root/candy-client/candy.init"
+  CANDY_NETD_JOURNAL=$cleanup_dir/netd.journal
+  CANDY_NETD_BIN=$cleanup_dir/candy-netd
+  LOG_FILE=$cleanup_dir/candy.log
+  agent_alive=$cleanup_dir/agent.alive
+  netd_alive=$cleanup_dir/netd.alive
+  signal_log=$cleanup_dir/signals
+  : >"$agent_alive"
+  : >"$netd_alive"
+  : >"$CANDY_NETD_JOURNAL"
+  printf '%s\n' pending-network-transaction >"$CANDY_NETD_JOURNAL"
+  : >"$signal_log"
+  sdwan_agent_pids() { [ ! -e "$agent_alive" ] || printf '%s\n' 101; }
+  sdwan_netd_daemon_pids() { [ ! -e "$netd_alive" ] || printf '%s\n' 202; }
+  kill() {
+    printf '%s\n' "$*" >>"$signal_log"
+    case "${2:-}" in 101) rm -f "$agent_alive" ;; 202) rm -f "$netd_alive" ;; esac
+  }
+  wait_for_netd_exit() { return 0; }
+  run_with_timeout() {
+    shift
+    [ "$1" = "$CANDY_NETD_BIN" ] && [ "$2" = --recover ] || return 1
+    printf '%s\n' recover >>"$signal_log"
+    rm -f "$CANDY_NETD_JOURNAL"
+  }
+  candy_client_pids() { fail "isolated data-plane cleanup inspected ordinary Candy"; }
+  network_cleanup() { fail "isolated data-plane cleanup removed ordinary network policy"; }
+
+  stop_sdwan_data_plane || fail "isolated SD-WAN process and journal cleanup failed"
+  [ ! -e "$agent_alive" ] && [ ! -e "$netd_alive" ] || fail "isolated cleanup left SD-WAN processes alive"
+  [ ! -s "$CANDY_NETD_JOURNAL" ] || fail "isolated cleanup left the netd journal active"
+  expected_signals=$(printf '%s\n' '-TERM 101' '-TERM 202' recover)
+  [ "$(cat "$signal_log")" = "$expected_signals" ] || fail "isolated cleanup did not stop agent, then netd, then recover"
 )
 
 (

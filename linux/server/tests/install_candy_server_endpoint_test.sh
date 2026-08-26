@@ -41,5 +41,22 @@ grep -F 'run cp "$cloud_sync_env_backup" "$CLOUD_SYNC_ENV"' "$installer" >/dev/n
 	fail "installer rollback does not restore the previous endpoint"
 grep -F 'run chmod 0640 "$CLOUD_SYNC_ENV"' "$installer" >/dev/null ||
 	fail "restored endpoint permissions are not protected"
+grep -F 'LimitMEMLOCK=64M' "$installer" >/dev/null ||
+	fail "generated server unit has no transaction agent memlock limit"
+grep -F 'SYSCTL_POLICY=/usr/lib/sysctl.d/60-candy-server.conf' "$installer" >/dev/null ||
+	fail "installer has no persistent QUIC sysctl policy"
+grep -F 'UDP_BUFFER_MAX_BYTES=16777216' "$installer" >/dev/null ||
+	fail "installer has the wrong QUIC socket maximum"
+grep -F 'target_rmem_max=$previous_rmem_max' "$installer" >/dev/null ||
+	fail "installer does not preserve a higher receive buffer maximum"
+grep -F 'target_wmem_max=$previous_wmem_max' "$installer" >/dev/null ||
+	fail "installer does not preserve a higher send buffer maximum"
+grep -F 'net.core.rmem_max = $target_rmem_max' "$installer" >/dev/null ||
+	fail "installer does not persist the effective receive buffer maximum"
+grep -F 'net.core.wmem_max = $target_wmem_max' "$installer" >/dev/null ||
+	fail "installer does not persist the effective send buffer maximum"
+if grep -F 'AmbientCapabilities=' "$installer" >/dev/null; then
+	fail "installer grants ambient capabilities for kernel tuning"
+fi
 
 printf '%s\n' "Candy Linux server public endpoint installer test passed"

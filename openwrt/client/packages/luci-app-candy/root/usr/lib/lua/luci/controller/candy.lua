@@ -591,22 +591,26 @@ function index()
 	page = entry({"admin", "services", "candy", "traffic"}, template("candy/rules"), _("Policy"), 20)
 	page.leaf = true
 
-	page = entry({"admin", "services", "candy", "dns_geo"}, cbi("candy/dns"), _("DNS"), 30)
+	page = entry({"admin", "services", "candy", "settings"}, template("candy/settings"), _("Settings"), 30)
 	page.leaf = true
 
-	page = entry({"admin", "services", "candy", "nodes"}, cbi("candy/nodes"), _("Nodes"), 40)
+	page = entry({"admin", "services", "candy", "diagnostics"}, template("candy/diagnostics"), _("Diagnostics"), 40)
 	page.leaf = true
 
-	page = entry({"admin", "services", "candy", "diagnostics"}, template("candy/diagnostics"), _("Diagnostics"), 50)
+	-- Preserve existing bookmarks without exposing implementation pages as top-level menu items.
+	page = entry({"admin", "services", "candy", "nodes"}, cbi("candy/nodes"), nil)
 	page.leaf = true
 
-	page = entry({"admin", "services", "candy", "logs"}, template("candy/log"), _("Logs"), 60)
+	page = entry({"admin", "services", "candy", "dns_geo"}, cbi("candy/dns"), nil)
 	page.leaf = true
 
-	page = entry({"admin", "services", "candy", "advanced"}, cbi("candy/advanced"), _("Advanced"), 65)
+	page = entry({"admin", "services", "candy", "advanced"}, cbi("candy/advanced"), nil)
 	page.leaf = true
 
-	page = entry({"admin", "services", "candy", "core"}, template("candy/core"), _("Core"), 70)
+	page = entry({"admin", "services", "candy", "core"}, template("candy/core"), nil)
+	page.leaf = true
+
+	page = entry({"admin", "services", "candy", "logs"}, template("candy/log"), nil)
 	page.leaf = true
 
 	entry({"admin", "services", "candy", "action"}, call("action_service")).leaf = true
@@ -620,8 +624,8 @@ function index()
 	entry({"admin", "services", "candy", "sdwan_join"}, call("action_sdwan_join")).leaf = true
 	entry({"admin", "services", "candy", "sdwan_reconnect"}, call("action_sdwan_reconnect")).leaf = true
 	entry({"admin", "services", "candy", "sdwan_leave"}, call("action_sdwan_leave")).leaf = true
-entry({"admin", "services", "candy", "sdwan_start"}, call("action_sdwan_start")).leaf = true
-entry({"admin", "services", "candy", "sdwan_stop"}, call("action_sdwan_stop")).leaf = true
+	entry({"admin", "services", "candy", "sdwan_start"}, call("action_sdwan_start")).leaf = true
+	entry({"admin", "services", "candy", "sdwan_stop"}, call("action_sdwan_stop")).leaf = true
 	entry({"admin", "services", "candy", "congestion_test"}, call("action_congestion_test")).leaf = true
 	entry({"admin", "services", "candy", "congestion_test_status"}, call("action_congestion_test_status")).leaf = true
 	entry({"admin", "services", "candy", "core_status"}, call("action_core_status")).leaf = true

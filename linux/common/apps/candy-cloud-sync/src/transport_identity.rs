@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
+use uuid::Uuid;
 
 const MAX_INSPECT_BYTES: usize = 64 * 1024;
 const MAX_PUBLIC_ENDPOINTS: usize = 8;
@@ -54,10 +55,19 @@ struct PendingRegistration {
     request: TransportIdentityRequest,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityBinding {
+    pub device_id: Uuid,
+    pub device_key_id: Uuid,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ReconcileState {
     schema_version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity: Option<IdentityBinding>,
     applied_digest: Option<String>,
     pending: Option<PendingRegistration>,
 }
@@ -169,6 +179,7 @@ pub fn build_registration(
 
 pub fn reconcile<F>(
     state_path: &Path,
+    identity: IdentityBinding,
     desired: Option<TransportIdentityRequest>,
     put: F,
 ) -> Result<ReconcileOutcome>
@@ -179,12 +190,21 @@ where
         return Ok(ReconcileOutcome::NoExplicitEndpoints);
     };
     validate_request(&desired)?;
+    validate_identity(identity)?;
     let digest = registration_digest(&desired.endpoints)?;
     let mut state = load_state(state_path)?.unwrap_or(ReconcileState {
-        schema_version: 1,
+        schema_version: 2,
+        identity: Some(identity),
         ..ReconcileState::default()
     });
     validate_state(&state)?;
+    if state.schema_version != 2 || state.identity != Some(identity) {
+        state = ReconcileState {
+            schema_version: 2,
+            identity: Some(identity),
+            ..ReconcileState::default()
+        };
+    }
     if state.applied_digest.as_deref() == Some(&digest) && state.pending.is_none() {
         return Ok(ReconcileOutcome::Unchanged);
     }
@@ -250,8 +270,10 @@ fn load_state(path: &Path) -> Result<Option<ReconcileState>> {
 }
 
 fn validate_state(state: &ReconcileState) -> Result<()> {
-    if state.schema_version != 1 {
-        bail!("unsupported transport identity state schema")
+    match (state.schema_version, state.identity) {
+        (1, None) => {}
+        (2, Some(identity)) => validate_identity(identity)?,
+        _ => bail!("unsupported transport identity state schema or identity binding"),
     }
     if let Some(digest) = &state.applied_digest {
         if !canonical_hex(digest, 32) {
@@ -263,6 +285,13 @@ fn validate_state(state: &ReconcileState) -> Result<()> {
         if pending.digest != registration_digest(&pending.request.endpoints)? {
             bail!("pending transport identity digest is inconsistent")
         }
+    }
+    Ok(())
+}
+
+fn validate_identity(identity: IdentityBinding) -> Result<()> {
+    if identity.device_id.is_nil() || identity.device_key_id.is_nil() {
+        bail!("transport identity cache binding is invalid")
     }
     Ok(())
 }
@@ -322,6 +351,13 @@ mod tests {
         }]
     }
 
+    fn identity(seed: u8) -> IdentityBinding {
+        IdentityBinding {
+            device_id: Uuid::from_bytes([seed; 16]),
+            device_key_id: Uuid::from_bytes([seed.saturating_add(1); 16]),
+        }
+    }
+
     #[test]
     fn explicit_endpoint_replaces_only_listener_address() {
         let request = build_registration(&inspected(), &["203.0.113.7:4433".parse().unwrap()])
@@ -341,7 +377,13 @@ mod tests {
         assert!(build_registration(&inspected(), &[]).unwrap().is_none());
         let root = tempdir().unwrap();
         assert_eq!(
-            reconcile(&root.path().join("state.json"), None, |_| unreachable!()).unwrap(),
+            reconcile(
+                &root.path().join("state.json"),
+                identity(1),
+                None,
+                |_| unreachable!(),
+            )
+            .unwrap(),
             ReconcileOutcome::NoExplicitEndpoints
         );
     }
@@ -354,14 +396,14 @@ mod tests {
             build_registration(&inspected(), &["203.0.113.7:4433".parse().unwrap()]).unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let first_seen = Arc::clone(&seen);
-        assert!(reconcile(&path, desired.clone(), |request| {
+        assert!(reconcile(&path, identity(1), desired.clone(), |request| {
             first_seen.lock().unwrap().push(request.request_id.clone());
             bail!("response lost")
         })
         .is_err());
         let second_seen = Arc::clone(&seen);
         assert_eq!(
-            reconcile(&path, desired, |request| {
+            reconcile(&path, identity(1), desired, |request| {
                 second_seen.lock().unwrap().push(request.request_id.clone());
                 Ok(())
             })
@@ -370,6 +412,54 @@ mod tests {
         );
         let seen = seen.lock().unwrap();
         assert_eq!(seen[0], seen[1]);
+    }
+
+    #[test]
+    fn re_enrollment_republishes_unchanged_endpoints_for_the_new_identity() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("state.json");
+        let desired =
+            build_registration(&inspected(), &["203.0.113.7:4433".parse().unwrap()]).unwrap();
+        assert_eq!(
+            reconcile(&path, identity(1), desired.clone(), |_| Ok(())).unwrap(),
+            ReconcileOutcome::Applied
+        );
+        assert_eq!(
+            reconcile(&path, identity(1), desired.clone(), |_| unreachable!()).unwrap(),
+            ReconcileOutcome::Unchanged
+        );
+        assert_eq!(
+            reconcile(&path, identity(3), desired, |_| Ok(())).unwrap(),
+            ReconcileOutcome::Applied
+        );
+
+        let state: ReconcileState = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(state.schema_version, 2);
+        assert_eq!(state.identity, Some(identity(3)));
+    }
+
+    #[test]
+    fn legacy_unbound_cache_is_republished_and_upgraded() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("state.json");
+        let desired = build_registration(&inspected(), &["203.0.113.7:4433".parse().unwrap()])
+            .unwrap()
+            .unwrap();
+        super::super::atomic_json(
+            &path,
+            &ReconcileState {
+                schema_version: 1,
+                applied_digest: Some(registration_digest(&desired.endpoints).unwrap()),
+                ..ReconcileState::default()
+            },
+            0o600,
+        )
+        .unwrap();
+
+        assert_eq!(
+            reconcile(&path, identity(1), Some(desired), |_| Ok(())).unwrap(),
+            ReconcileOutcome::Applied
+        );
     }
 
     #[test]

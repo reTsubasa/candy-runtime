@@ -4,6 +4,8 @@ set -eu
 INSTALL_PREFIX=/opt/candy
 CONFIG_DIR=/etc/candy
 STATE_DIR=/var/lib/candy
+SDWAN_STATE_DIR=$STATE_DIR/sdwan
+LEGACY_SDWAN_STATE_DIR=$CONFIG_DIR/sdwan
 BACKUP_DIR=/var/backups/candy
 SERVICE_PATH=/etc/systemd/system/candy-server.service
 CLOUD_SYNC_ENV=$CONFIG_DIR/cloud-sync.env
@@ -24,6 +26,9 @@ CORE_BINARY=${CANDY_CORE_BINARY:-/opt/candy/cores/current/candy-core}
 EXPECTED_CORE_PROCESS_API=1
 CONGESTION_TEST_FILE=$STATE_DIR/congestion-test.bin
 CONGESTION_TEST_BYTES=52428800
+SYSCTL=${CANDY_SYSCTL:-sysctl}
+SYSCTL_POLICY=/usr/lib/sysctl.d/60-candy-server.conf
+UDP_BUFFER_MAX_BYTES=16777216
 
 usage() {
 	cat <<'EOF'
@@ -243,6 +248,12 @@ had_cloud_sync_env=0
 cloud_sync_env_changed=0
 cert_sha256=
 congestion_test_temporary=
+sysctl_policy_backup=$work_dir/previous-candy-server-sysctl.conf
+had_sysctl_policy=0
+sysctl_policy_changed=0
+sysctl_state_recorded=0
+previous_rmem_max=
+previous_wmem_max=
 
 cleanup() {
 	[ -z "$congestion_test_temporary" ] || rm -f "$congestion_test_temporary"
@@ -281,6 +292,19 @@ rollback() {
 		else
 			run rm -f "$CLOUD_SYNC_ENV"
 		fi
+	fi
+	if [ "$sysctl_policy_changed" = 1 ]; then
+		if [ "$had_sysctl_policy" = 1 ]; then
+			run cp "$sysctl_policy_backup" "$SYSCTL_POLICY"
+			run chown root:root "$SYSCTL_POLICY"
+			run chmod 0644 "$SYSCTL_POLICY"
+		else
+			run rm -f "$SYSCTL_POLICY"
+		fi
+	fi
+	if [ "$sysctl_state_recorded" = 1 ]; then
+		run "$SYSCTL" -w "net.core.rmem_max=$previous_rmem_max" >/dev/null 2>&1 || rollback_failed=1
+		run "$SYSCTL" -w "net.core.wmem_max=$previous_wmem_max" >/dev/null 2>&1 || rollback_failed=1
 	fi
 	run systemctl daemon-reload
 	if [ "$previous_service_active" = 1 ]; then
@@ -329,12 +353,78 @@ create_service_user() {
 }
 
 prepare_sdwan_state() {
-	sdwan_state=$STATE_DIR/sdwan
+	sdwan_state=$SDWAN_STATE_DIR
+	[ ! -L "$STATE_DIR" ] || die "refusing symbolic-link Candy state directory: $STATE_DIR"
 	[ ! -L "$sdwan_state" ] || die "refusing symbolic-link SD-WAN state directory: $sdwan_state"
 	run mkdir -p "$sdwan_state"
 	run find "$sdwan_state" -xdev -type d -exec chmod 0700 {} \;
 	run find "$sdwan_state" -xdev -type f -exec chmod 0600 {} \;
+	for compatibility_root in \
+		"$sdwan_state"/generations/*/compatibility-generations \
+		"$sdwan_state"/activations/*/compatibility-generations; do
+		[ -d "$compatibility_root" ] || continue
+		[ ! -L "$compatibility_root" ] || die "compatibility catalog must not be a symbolic link: $compatibility_root"
+		run find "$compatibility_root" -xdev -type f -exec chmod 0400 {} \;
+		run find "$compatibility_root" -xdev -type d -exec chmod 0500 {} \;
+	done
 	run find "$sdwan_state" -xdev ! -type l -exec chown "$SERVICE_USER:$SERVICE_USER" {} \;
+}
+
+merge_legacy_sdwan_tree() {
+	mode=$1
+	find "$LEGACY_SDWAN_STATE_DIR" -xdev -print | while IFS= read -r source; do
+		[ "$source" != "$LEGACY_SDWAN_STATE_DIR" ] || continue
+		relative=${source#"$LEGACY_SDWAN_STATE_DIR"/}
+		case "$relative" in ''|/*|*[!A-Za-z0-9._/-]*|../*|*/../*|*/..|..) die "unsafe legacy SD-WAN state path: $source" ;; esac
+		destination=$SDWAN_STATE_DIR/$relative
+		if [ -L "$source" ]; then
+			target=$(readlink "$source") || die "could not read legacy SD-WAN state link: $source"
+			case "$target" in /*|../*|*/../*|*/..|..) die "unsafe legacy SD-WAN state link: $source" ;; esac
+			if [ -L "$destination" ]; then
+				[ "$(readlink "$destination")" = "$target" ] || die "conflicting SD-WAN state link: $destination"
+			elif [ -e "$destination" ]; then
+				die "conflicting SD-WAN state object: $destination"
+			elif [ "$mode" = copy ]; then
+				ln -s "$target" "$destination"
+			fi
+		elif [ -d "$source" ]; then
+			if [ -L "$destination" ] || { [ -e "$destination" ] && [ ! -d "$destination" ]; }; then
+				die "conflicting SD-WAN state directory: $destination"
+			elif [ "$mode" = copy ] && [ ! -d "$destination" ]; then
+				mkdir -m 0700 "$destination"
+			fi
+		elif [ -f "$source" ]; then
+			if [ -f "$destination" ] && [ ! -L "$destination" ]; then
+				cmp "$source" "$destination" >/dev/null || die "conflicting SD-WAN state file: $destination"
+			elif [ -e "$destination" ] || [ -L "$destination" ]; then
+				die "conflicting SD-WAN state object: $destination"
+			elif [ "$mode" = copy ]; then
+				cp -p "$source" "$destination"
+			fi
+		else
+			die "unsupported legacy SD-WAN state object: $source"
+		fi
+	done
+}
+
+migrate_legacy_sdwan_state() {
+	[ -e "$LEGACY_SDWAN_STATE_DIR" ] || [ -L "$LEGACY_SDWAN_STATE_DIR" ] || return 0
+	[ ! -L "$SDWAN_STATE_DIR" ] || die "refusing symbolic-link SD-WAN state directory: $SDWAN_STATE_DIR"
+	mkdir -p "$SDWAN_STATE_DIR"
+	if [ -L "$LEGACY_SDWAN_STATE_DIR" ]; then
+		legacy_target=$(readlink "$LEGACY_SDWAN_STATE_DIR") || die "could not read legacy SD-WAN state link"
+		[ "$legacy_target" = "$SDWAN_STATE_DIR" ] ||
+			die "legacy SD-WAN state link does not target $SDWAN_STATE_DIR"
+		return 0
+	fi
+	[ -d "$LEGACY_SDWAN_STATE_DIR" ] || die "legacy SD-WAN state path is not a real directory"
+	log "Migrating Linux server SD-WAN state from $LEGACY_SDWAN_STATE_DIR to $SDWAN_STATE_DIR"
+	merge_legacy_sdwan_tree check
+	merge_legacy_sdwan_tree copy
+	# The standalone installer does not own older Cloud sync timers. Retain the
+	# source as a rollback backup; the transactional Runtime upgrader removes it
+	# only after all related services have been stopped and verified.
+	log "Legacy SD-WAN state retained at $LEGACY_SDWAN_STATE_DIR as a rollback backup"
 }
 
 persist_public_endpoint() {
@@ -389,6 +479,55 @@ ensure_congestion_test_object() {
 	run chown "$SERVICE_USER:$SERVICE_USER" "$temporary"
 	run mv -f "$temporary" "$CONGESTION_TEST_FILE"
 	congestion_test_temporary=
+}
+
+read_positive_sysctl() {
+	key=$1
+	value=$("$SYSCTL" -n "$key") || return 1
+	case "$value" in ''|*[!0-9]*|0) return 1 ;; esac
+	printf '%s\n' "$value"
+}
+
+raise_sysctl_minimum() {
+	key=$1
+	minimum=$2
+	current=$(read_positive_sysctl "$key") || return 1
+	if [ "$current" -lt "$minimum" ]; then
+		"$SYSCTL" -w "$key=$minimum" >/dev/null || return 1
+	fi
+	current=$(read_positive_sysctl "$key") || return 1
+	[ "$current" -ge "$minimum" ]
+}
+
+install_kernel_tuning() {
+	command -v "$SYSCTL" >/dev/null 2>&1 || return 1
+	previous_rmem_max=$(read_positive_sysctl net.core.rmem_max) || return 1
+	previous_wmem_max=$(read_positive_sysctl net.core.wmem_max) || return 1
+	target_rmem_max=$previous_rmem_max
+	target_wmem_max=$previous_wmem_max
+	[ "$target_rmem_max" -ge "$UDP_BUFFER_MAX_BYTES" ] || target_rmem_max=$UDP_BUFFER_MAX_BYTES
+	[ "$target_wmem_max" -ge "$UDP_BUFFER_MAX_BYTES" ] || target_wmem_max=$UDP_BUFFER_MAX_BYTES
+	sysctl_state_recorded=1
+	if [ -f "$SYSCTL_POLICY" ] && [ ! -L "$SYSCTL_POLICY" ]; then
+		had_sysctl_policy=1
+		cp "$SYSCTL_POLICY" "$sysctl_policy_backup" || return 1
+	elif [ -e "$SYSCTL_POLICY" ] || [ -L "$SYSCTL_POLICY" ]; then
+		return 1
+	fi
+	mkdir -p "$(dirname "$SYSCTL_POLICY")" || return 1
+	temporary=$(mktemp "$(dirname "$SYSCTL_POLICY")/.60-candy-server.conf.XXXXXX") || return 1
+	cat >"$temporary" <<EOF
+# Candy Core requests 8 MiB QUIC socket queues. Keep kernel maxima above that
+# request without granting the service CAP_NET_ADMIN for SO_*BUFFORCE.
+net.core.rmem_max = $target_rmem_max
+net.core.wmem_max = $target_wmem_max
+EOF
+	chown root:root "$temporary" || { rm -f "$temporary"; return 1; }
+	chmod 0644 "$temporary" || { rm -f "$temporary"; return 1; }
+	mv -f "$temporary" "$SYSCTL_POLICY" || { rm -f "$temporary"; return 1; }
+	sysctl_policy_changed=1
+	raise_sysctl_minimum net.core.rmem_max "$target_rmem_max" || return 1
+	raise_sysctl_minimum net.core.wmem_max "$target_wmem_max" || return 1
 }
 
 write_default_config() {
@@ -477,13 +616,16 @@ UMask=0077
 WorkingDirectory=$STATE_DIR
 Environment=CANDY_CORE_BINARY=$CORE_BINARY
 Environment=CANDY_SDWAN_AGENT=/usr/local/libexec/candy-sdwan-agent
-Environment=CANDY_SDWAN_ACTIVATION_LINK=$STATE_DIR/sdwan/candidate
-Environment=CANDY_SDWAN_ACTIVATION_READY=$STATE_DIR/sdwan/activation-ready-v1.json
+Environment=CANDY_SDWAN_STATE_DIR=$SDWAN_STATE_DIR
+Environment=CANDY_SDWAN_STATE_ROOT=$SDWAN_STATE_DIR
+Environment=CANDY_SDWAN_ACTIVATION_LINK=$SDWAN_STATE_DIR/candidate
+Environment=CANDY_SDWAN_ACTIVATION_READY=$SDWAN_STATE_DIR/activation-ready-v1.json
 Environment=CANDY_NETD_SOCKET=/run/candy-netd/netd.sock
 ExecStart=$current_link/candy-server --config $config_file
 Restart=on-failure
 RestartSec=2s
 LimitNOFILE=1048576
+LimitMEMLOCK=64M
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
@@ -504,7 +646,7 @@ verify_udp_listener() {
 	while [ "$attempt" -lt 10 ]; do
 		if command -v ss >/dev/null 2>&1; then
 			ss -lunp | grep -E "[:.]$port([[:space:]]|$)" >/dev/null && return 0
-		elif grep -Eiq "[[:xdigit:]]{8}:$port_hex[[:space:]]" /proc/net/udp /proc/net/udp6 2>/dev/null; then
+		elif grep -Eiq "[[:xdigit:]]{8}:${port_hex}[[:space:]]" /proc/net/udp /proc/net/udp6 2>/dev/null; then
 			return 0
 		fi
 		attempt=$((attempt + 1))
@@ -561,10 +703,13 @@ download_artifact
 run chmod 0755 "$artifact_path"
 
 create_service_user
+[ ! -L "$STATE_DIR" ] || die "refusing symbolic-link Candy state directory: $STATE_DIR"
+[ ! -L "$SDWAN_STATE_DIR" ] || die "refusing symbolic-link SD-WAN state directory: $SDWAN_STATE_DIR"
 run mkdir -p "$INSTALL_PREFIX/releases" "$CONFIG_DIR" "$tls_dir" "$STATE_DIR/candy-data" "$BACKUP_DIR"
 run chown root:root "$STATE_DIR"
 run chmod 0711 "$STATE_DIR"
 run chown "$SERVICE_USER:$SERVICE_USER" "$STATE_DIR/candy-data" "$tls_dir"
+migrate_legacy_sdwan_state
 prepare_sdwan_state
 ensure_congestion_test_object
 
@@ -611,6 +756,10 @@ run chmod 0755 "$release_dir/candy-server"
 run chown -R root:root "$release_dir"
 persist_public_endpoint
 install_unit
+if ! install_kernel_tuning; then
+	rollback
+	die "failed to install Linux QUIC kernel tuning"
+fi
 run systemctl daemon-reload
 
 if ! CANDY_CORE_BINARY="$CORE_BINARY" "$release_dir/candy-server" --config "$config_file" --check-config; then

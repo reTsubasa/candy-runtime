@@ -5,6 +5,9 @@ readonly_runtime_api=1
 core_root=${CANDY_CORE_ROOT:-/opt/candy/cores}
 core_current=${CANDY_CORE_CURRENT_LINK:-$core_root/current}
 core_candidate=${CANDY_CORE_BINARY:-$core_current/candy-core}
+sdwan_state_root=${CANDY_SDWAN_STATE_ROOT:-${CANDY_SDWAN_STATE_DIR:-/var/lib/candy/sdwan}}
+export CANDY_SDWAN_STATE_DIR="$sdwan_state_root"
+export CANDY_SDWAN_STATE_ROOT="$sdwan_state_root"
 
 fail() {
 	status=$1

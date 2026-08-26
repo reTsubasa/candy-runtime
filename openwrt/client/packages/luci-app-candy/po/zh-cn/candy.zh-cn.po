@@ -73,7 +73,7 @@ msgid "Disconnected"
 msgstr "未连接"
 
 msgid "Not connected"
-msgstr "尚未连接"
+msgstr "未连接 Cloud"
 
 msgid "Resolver"
 msgstr "解析器"
@@ -736,13 +736,10 @@ msgid "Supported, not authorized"
 msgstr "支持，未授权"
 
 msgid "Evidence"
-msgstr "依据"
+msgstr "证据"
 
 msgid "Policy"
 msgstr "策略"
-
-msgid "DNS"
-msgstr "DNS"
 
 msgid "Quick actions"
 msgstr "快捷操作"
@@ -1581,9 +1578,6 @@ msgstr "普通路由"
 msgid "Failure recovery"
 msgstr "故障恢复"
 
-msgid "Recovery state"
-msgstr "恢复状态"
-
 msgid "Failure reason"
 msgstr "故障原因"
 
@@ -1620,17 +1614,11 @@ msgstr "内置数据"
 msgid "Fallback active"
 msgstr "已启用内置回退"
 
-msgid "Error"
-msgstr "错误"
-
 msgid "Unavailable"
 msgstr "不可用"
 
 msgid "entries"
 msgstr "条"
-
-msgid "Runtime mode"
-msgstr "运行模式"
 
 msgid "Stable: compatibility first"
 msgstr "稳定：优先兼容性"
@@ -1734,17 +1722,11 @@ msgstr "本设备"
 msgid "Pending synchronization"
 msgstr "等待同步"
 
-msgid "Active"
-msgstr "运行中"
-
 msgid "Ready to activate"
 msgstr "配置已就绪"
 
 msgid "Waiting for network configuration"
 msgstr "等待网络配置"
-
-msgid "Not connected"
-msgstr "未连接 Cloud"
 
 msgid "Identity authorized"
 msgstr "身份已授权"
@@ -1868,17 +1850,8 @@ msgstr "已协商"
 msgid "Negotiation"
 msgstr "协商"
 
-msgid "Not negotiated"
-msgstr "未协商"
-
-msgid "Authorized"
-msgstr "已授权"
-
 msgid "Not authorized"
 msgstr "未授权"
-
-msgid "Evidence"
-msgstr "证据"
 
 msgid "Runtime evidence"
 msgstr "运行证据"
@@ -1999,3 +1972,108 @@ msgstr "吞吐量与丢包"
 
 msgid "Topology"
 msgstr "拓扑"
+
+msgid "Settings"
+msgstr "设置"
+
+msgid "Candy secures and optimizes this router's Internet traffic, and connects sites through Cloud-managed SD-WAN."
+msgstr "Candy 用于保护和优化本路由器的互联网流量，并通过云端管理的 SD-WAN 安全互联各站点。"
+
+msgid "Manage ordinary Candy nodes, DNS policy, advanced Runtime controls, and software lifecycle from one place."
+msgstr "在一个入口中管理普通 Candy 节点、DNS 策略、高级运行参数和软件生命周期。"
+
+msgid "Nodes and groups"
+msgstr "节点与分组"
+
+msgid "Configure ordinary Candy server endpoints and the groups selected by traffic policy."
+msgstr "配置普通 Candy 服务端节点，以及供流量策略选择的节点分组。"
+
+msgid "DNS and routing"
+msgstr "DNS 与路由"
+
+msgid "Configure DNS capture, split resolution, China routing, and domain resolution policy."
+msgstr "配置 DNS 捕获、分流解析、中国大陆直连和域名解析策略。"
+
+msgid "Advanced settings"
+msgstr "高级设置"
+
+msgid "Tune expert DNS providers, congestion control, and transparent proxy behavior."
+msgstr "调整专家级 DNS 数据源、拥塞控制和透明代理行为。"
+
+msgid "Core lifecycle"
+msgstr "Core 生命周期"
+
+msgid "Review installed Core versions, activate a version, or roll back safely."
+msgstr "查看已安装的 Core 版本，并安全地激活或回退版本。"
+
+msgid "Software updates"
+msgstr "软件更新"
+
+msgid "Check the signed release catalog and install compatible Runtime or Core updates."
+msgstr "检查已签名的发布目录，并安装兼容的 Runtime 或 Core 更新。"
+
+msgid "Candy SD-WAN connects sites through encrypted links; network, egress, and internal DNS settings are delivered by Candy Cloud."
+msgstr "Candy SD-WAN 通过加密链路互联各站点；网络、出口和内部 DNS 配置由 Candy Cloud 统一下发。"
+
+msgid "Unavailable until Candy Cloud publishes a local-egress configuration."
+msgstr "需由 Candy Cloud 下发本地出口配置后才可用。"
+
+msgid "Unavailable until Candy Cloud publishes a remote-egress configuration."
+msgstr "需由 Candy Cloud 下发远端出口配置后才可用。"
+
+msgid "Unavailable until Candy Cloud publishes an internal DNS configuration."
+msgstr "需由 Candy Cloud 下发内部 DNS 配置后才可用。"
+
+msgid "Peer site"
+msgstr "对端站点"
+
+msgid "Attachment ID"
+msgstr "连接 ID"
+
+msgid "Peers"
+msgstr "对端"
+
+msgid "No peer links are available until Candy Cloud publishes the Site connections."
+msgstr "Candy Cloud 下发站点连接后才会显示对端链路。"
+
+msgid "Freshness"
+msgstr "数据新鲜度"
+
+msgid "Now"
+msgstr "刚刚"
+
+msgid "seconds ago"
+msgstr "秒前"
+
+msgid "minutes ago"
+msgstr "分钟前"
+
+msgid "Could not stop the SD-WAN data plane safely. The profile was kept; check Diagnostics for the stop-phase error."
+msgstr "无法安全停止 SD-WAN 数据面。Profile 已保留，请在诊断页查看停止阶段错误。"
+
+msgid "The SD-WAN data plane stopped, but local profile cleanup failed. The profile was kept; check Diagnostics for the cleanup-phase error."
+msgstr "SD-WAN 数据面已停止，但本地 Profile 清理失败。Profile 已保留，请在诊断页查看清理阶段错误。"
+
+msgid "Operation failed. Check Diagnostics for details."
+msgstr "操作失败，请在诊断页查看详情。"
+
+msgid "Link status"
+msgstr "链路状态"
+
+msgid "Loading link status..."
+msgstr "正在加载链路状态..."
+
+msgid "Per-node telemetry"
+msgstr "分节点遥测"
+
+msgid "RTT / jitter"
+msgstr "RTT / 抖动"
+
+msgid "RX / TX"
+msgstr "接收 / 发送"
+
+msgid "Transport"
+msgstr "传输状态"
+
+msgid "Process and socket resources"
+msgstr "进程与套接字资源"
