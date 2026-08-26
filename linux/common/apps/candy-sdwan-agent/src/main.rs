@@ -227,6 +227,7 @@ struct CoreReadinessPath {
 enum ReadinessState {
     Waiting,
     ListenerReady,
+    Degraded,
     Ready,
     Failed,
 }
@@ -603,9 +604,7 @@ fn set_resource_limits() -> Result<()> {
         rlim_cur: 4096,
         rlim_max: 4096,
     };
-    let rc = unsafe {
-        nix::libc::setrlimit(nix::libc::RLIMIT_NOFILE, &rlim)
-    };
+    let rc = unsafe { nix::libc::setrlimit(nix::libc::RLIMIT_NOFILE, &rlim) };
     if rc != 0 {
         let err = std::io::Error::last_os_error();
         eprintln!(
@@ -618,9 +617,7 @@ fn set_resource_limits() -> Result<()> {
     // Prevent the Core process from locking too much memory.
     rlim.rlim_cur = 64 * 1024 * 1024; // 64 MiB
     rlim.rlim_max = 64 * 1024 * 1024;
-    let rc = unsafe {
-        nix::libc::setrlimit(nix::libc::RLIMIT_MEMLOCK, &rlim)
-    };
+    let rc = unsafe { nix::libc::setrlimit(nix::libc::RLIMIT_MEMLOCK, &rlim) };
     if rc != 0 {
         let err = std::io::Error::last_os_error();
         eprintln!(
@@ -970,31 +967,44 @@ fn read_core_readiness(
     {
         bail!("SD-WAN Core readiness status has impossible peer counters")
     }
+    let has_ready_path_evidence = status.paths.as_ref().is_some_and(|paths| {
+        paths.len() >= status.ready_route_owners
+            && paths.iter().all(|path| {
+                path.rtt_sample_count > 0 && path.rx_bytes > 0 && path.rx_idle_ms <= 30_000
+            })
+    });
+    let listener_ready = status.inbound_listener_configured
+        && status.inbound_listener_ready
+        && !status.inbound_listener_endpoints.is_empty();
     let state = match status.lifecycle.as_str() {
-        "starting"
-            if !status.fail_open_required
-                && status.inbound_listener_configured
-                && status.inbound_listener_ready
-                && !status.inbound_listener_endpoints.is_empty() =>
-        {
-            ReadinessState::ListenerReady
-        }
+        "starting" if !status.fail_open_required && listener_ready => ReadinessState::ListenerReady,
         "starting" if !status.fail_open_required => ReadinessState::Waiting,
         "active"
             if !status.fail_open_required
                 && status.required_route_owners > 0
-                && status.ready_route_owners > 0
-                && status.schema_version >= 3
-                && status.paths.as_ref().is_some_and(|paths| {
-                    paths.len() >= status.required_route_owners
-                        && paths.iter().all(|path| {
-                            path.rtt_sample_count > 0
-                                && path.rx_bytes > 0
-                                && path.rx_idle_ms <= 30_000
-                        })
-                }) =>
+                && status.ready_route_owners == status.required_route_owners
+                && has_ready_path_evidence =>
         {
             ReadinessState::Ready
+        }
+        "active"
+            if !status.fail_open_required
+                && status.required_route_owners > 0
+                && status.ready_route_owners > 0
+                && status.ready_route_owners < status.required_route_owners
+                && has_ready_path_evidence
+                && listener_ready =>
+        {
+            ReadinessState::Degraded
+        }
+        "active"
+            if !status.fail_open_required
+                && status.required_route_owners > 0
+                && status.ready_route_owners > 0
+                && status.ready_route_owners < status.required_route_owners
+                && has_ready_path_evidence =>
+        {
+            ReadinessState::Waiting
         }
         "failed" | "stopping" | "stopped" => ReadinessState::Failed,
         "active"
@@ -1050,7 +1060,10 @@ fn wait_for_core_readiness(
             return Ok(ReadinessWait::Ready);
         }
         let server_listener_ready = args.core_role == CoreRole::Server
-            && matches!(readiness, Some(ReadinessState::ListenerReady));
+            && matches!(
+                readiness,
+                Some(ReadinessState::ListenerReady | ReadinessState::Degraded)
+            );
         // An authenticated server listener can be healthy before a peer is
         // connected. Keep Core alive in that phase so the peer's next dial can
         // complete; netd remains prepared but uncommitted until Active.
@@ -1740,6 +1753,17 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
         }
         match read_core_readiness(&args.status, args.generation, child.id(), &readiness_token) {
             Ok(Some(ReadinessState::Ready)) => {}
+            Ok(Some(ReadinessState::Degraded)) if args.core_role == CoreRole::Server => {}
+            Ok(Some(ReadinessState::Degraded)) => {
+                return retry_after_rollback(
+                    args,
+                    &mut child,
+                    &mut netd,
+                    "Candy Core lost full SD-WAN route readiness",
+                    "core_route_readiness_lost",
+                    anyhow::anyhow!("Candy Core has only partial route readiness"),
+                );
+            }
             Ok(Some(ReadinessState::ListenerReady)) => {
                 return retry_after_rollback(
                     args,
@@ -2077,6 +2101,40 @@ sleep 30
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
+    fn install_fake_delayed_server_ready_core(path: &Path) {
+        let script = r#"#!/bin/sh
+set -eu
+status=
+token=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --status) shift; status=$1 ;;
+        --readiness-token) shift; token=$1 ;;
+    esac
+    shift
+done
+[ -n "$status" ]
+[ -n "$token" ]
+rm -f "$0"
+umask 077
+status_tmp="$status.$$".tmp
+trap 'rm -f "$status_tmp"' EXIT
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"active","configured_peers":2,"active_peers":1,"required_route_owners":2,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null,"paths":[{"rtt_sample_count":1,"rx_bytes":1,"rx_idle_ms":0}]}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+sleep 3
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"active","configured_peers":2,"active_peers":2,"required_route_owners":2,"ready_route_owners":2,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null,"paths":[{"rtt_sample_count":1,"rx_bytes":1,"rx_idle_ms":0},{"rtt_sample_count":1,"rx_bytes":1,"rx_idle_ms":0}]}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+sleep 1
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"active","configured_peers":2,"active_peers":1,"required_route_owners":2,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null,"paths":[{"rtt_sample_count":2,"rx_bytes":2,"rx_idle_ms":0}]}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+sleep 1
+kill -TERM "$PPID"
+sleep 30
+"#;
+        fs::write(path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
     fn install_fake_exiting_core(path: &Path) {
         let script = r#"#!/bin/sh
 set -eu
@@ -2228,6 +2286,24 @@ exit 17
         assert!(
             !receipt.exists(),
             "normal shutdown retained or replaced the activation receipt"
+        );
+    }
+
+    #[test]
+    fn server_partial_route_readiness_survives_timeout_until_all_peers_connect() {
+        let (_root, mut args) = server_runtime_fixture();
+        install_fake_delayed_server_ready_core(&args.core);
+        let receipt = args.activation_ready.clone().unwrap();
+        args.readiness_timeout_ms = 2_000;
+        let netd = start_netd_mock(&args.socket, Some(true));
+
+        let result = run(args);
+
+        netd.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            !receipt.exists(),
+            "normal shutdown retained the activation receipt"
         );
     }
 
@@ -2660,6 +2736,18 @@ exit 17
             read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
             Some(ReadinessState::Ready)
         );
+        active["ready_route_owners"] = serde_json::json!(1);
+        active["paths"] =
+            serde_json::json!([{ "rtt_sample_count": 1, "rx_bytes": 1, "rx_idle_ms": 0 }]);
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Waiting)
+        );
+        active["paths"] =
+            serde_json::json!([{ "rtt_sample_count": 0, "rx_bytes": 1, "rx_idle_ms": 0 }]);
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
         assert!(read_core_readiness(&path, 10, 42, "00112233445566778899aabbccddeeff").is_err());
         assert!(read_core_readiness(&path, 9, 43, "00112233445566778899aabbccddeeff").is_err());
         assert!(read_core_readiness(&path, 9, 42, "11112233445566778899aabbccddeeff").is_err());
@@ -2701,6 +2789,17 @@ exit 17
         assert_eq!(
             read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
             Some(ReadinessState::Ready)
+        );
+        let mut partial =
+            serde_json::from_str::<serde_json::Value>(&status(9, "active", 2, 1)).unwrap();
+        partial["required_route_owners"] = serde_json::json!(2);
+        partial["inbound_listener_configured"] = serde_json::json!(true);
+        partial["inbound_listener_ready"] = serde_json::json!(true);
+        partial["inbound_listener_endpoints"] = serde_json::json!(["127.0.0.1:8443"]);
+        fs::write(&path, serde_json::to_vec(&partial).unwrap()).unwrap();
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Degraded)
         );
     }
 

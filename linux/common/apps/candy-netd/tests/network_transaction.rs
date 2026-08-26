@@ -328,7 +328,7 @@ fn commit_installs_policy_rule_only_after_all_prepared_state() {
 }
 
 #[test]
-fn rollback_removes_steering_first_and_restores_sysctls_last() {
+fn rollback_restores_interface_sysctls_before_removing_link() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let backend = RecordingBackend(events.clone());
     let journal = MemoryJournal::default();
@@ -342,10 +342,10 @@ fn rollback_removes_steering_first_and_restores_sysctls_last() {
         [
             "remove_policy_rule",
             "deactivate_link",
+            "restore_sysctls",
             "remove_firewall",
             "remove_routes",
             "remove_link",
-            "restore_sysctls",
         ]
     );
 }
@@ -369,10 +369,10 @@ fn orphan_recovery_uses_persisted_steps_and_clears_journal() {
         *events.borrow(),
         [
             "deactivate_link",
+            "restore_sysctls",
             "remove_firewall",
             "remove_routes",
             "remove_link",
-            "restore_sysctls",
         ]
     );
 }
@@ -443,10 +443,10 @@ fn cleanup_continues_after_failure_and_retains_only_failed_intent() {
         [
             "remove_policy_rule",
             "deactivate_link",
+            "restore_sysctls",
             "remove_firewall",
             "remove_routes",
             "remove_link",
-            "restore_sysctls",
         ]
     );
     assert!(retained.load().unwrap().is_some());

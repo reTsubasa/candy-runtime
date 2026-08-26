@@ -335,6 +335,11 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             STEP_LINK_ACTIVE
         );
         cleanup_step!(
+            steps & STEP_SYSCTLS != 0,
+            self.backend.restore_sysctls(declaration, &record.sysctls),
+            STEP_SYSCTLS
+        );
+        cleanup_step!(
             steps & STEP_FIREWALL != 0,
             self.backend.remove_firewall(declaration),
             STEP_FIREWALL
@@ -348,11 +353,6 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             steps & STEP_LINK != 0,
             self.backend.remove_link(declaration),
             STEP_LINK
-        );
-        cleanup_step!(
-            steps & STEP_SYSCTLS != 0,
-            self.backend.restore_sysctls(declaration, &record.sysctls),
-            STEP_SYSCTLS
         );
 
         if self

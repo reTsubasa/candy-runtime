@@ -473,7 +473,9 @@ mod backend {
             changes: &[SysctlChange],
         ) -> Result<(), NetworkError> {
             for change in changes.iter().rev() {
-                let current = read_sysctl(change.key)?;
+                let Some(current) = read_sysctl_for_restore(change.key)? else {
+                    continue;
+                };
                 let original = change.original.to_string();
                 let applied = change.applied.to_string();
                 if restore_sysctl_value(&original, &applied, &current.to_string()).is_some() {
@@ -526,11 +528,25 @@ mod backend {
     }
 
     fn read_sysctl(key: SysctlKey) -> Result<u8, NetworkError> {
-        let mut file = OpenOptions::new()
+        read_sysctl_path(sysctl_path(key), false)?.ok_or(NetworkError::Backend)
+    }
+
+    fn read_sysctl_for_restore(key: SysctlKey) -> Result<Option<u8>, NetworkError> {
+        read_sysctl_path(sysctl_path(key), key == SysctlKey::CandyRpFilter)
+    }
+
+    fn read_sysctl_path(path: &Path, missing_is_clean: bool) -> Result<Option<u8>, NetworkError> {
+        let mut file = match OpenOptions::new()
             .read(true)
             .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
-            .open(sysctl_path(key))
-            .map_err(|_| NetworkError::Backend)?;
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if missing_is_clean && error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(_) => return Err(NetworkError::Backend),
+        };
         let metadata = file.metadata().map_err(|_| NetworkError::Backend)?;
         if !metadata.file_type().is_file() {
             return Err(NetworkError::Backend);
@@ -539,9 +555,9 @@ mod backend {
         file.read_to_string(&mut value)
             .map_err(|_| NetworkError::Backend)?;
         match value.trim() {
-            "0" => Ok(0),
-            "1" => Ok(1),
-            "2" => Ok(2),
+            "0" => Ok(Some(0)),
+            "1" => Ok(Some(1)),
+            "2" => Ok(Some(2)),
             _ => Err(NetworkError::Backend),
         }
     }
@@ -558,6 +574,24 @@ mod backend {
         }
         file.write_all(value.to_string().as_bytes())
             .map_err(|_| NetworkError::Backend)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn missing_interface_sysctl_is_clean_during_restore() {
+            let missing = std::env::temp_dir()
+                .join(format!("candy-netd-missing-sysctl-{}", std::process::id()));
+            let _ = std::fs::remove_file(&missing);
+
+            assert!(matches!(read_sysctl_path(&missing, true), Ok(None)));
+            assert!(matches!(
+                read_sysctl_path(&missing, false),
+                Err(NetworkError::Backend)
+            ));
+        }
     }
 
     pub use LinuxNetworkBackend as ExportedLinuxNetworkBackend;
