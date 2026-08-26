@@ -18,6 +18,7 @@ HEALTH_CHECK=${CANDY_SERVER_HEALTH_CHECK:-/usr/local/libexec/candy-server-health
 LOCK_DIR=${CANDY_CORE_LOCK_DIR:-/var/lock/candy-core-manager.lock}
 MAX_BUNDLE_BYTES=${CANDY_MAX_CORE_BUNDLE_BYTES:-268435456}
 MAX_MANIFEST_BYTES=${CANDY_MAX_CORE_MANIFEST_BYTES:-262144}
+BUNDLE_SHA_FILE=.bundle.sha256
 
 fail() {
 	printf '%s\n' "candy-core-manager: $*" >&2
@@ -259,7 +260,7 @@ safe_archive() {
 }
 
 install_core() {
-	local version bundle expected_bundle_sha destination size actual_bundle_sha temporary archive
+	local version bundle expected_bundle_sha destination size actual_bundle_sha temporary archive existing=0 existing_sha candidate_sha
 	version=$1
 	bundle=$2
 	expected_bundle_sha=$3
@@ -267,7 +268,10 @@ install_core() {
 	valid_sha256 "$expected_bundle_sha" || fail "invalid Core bundle SHA-256"
 	[ -f "$bundle" ] && [ ! -L "$bundle" ] || fail "Core bundle is not a regular file: $bundle"
 	destination=$(version_path "$version") || fail "invalid Core version"
-	[ ! -e "$destination" ] || fail "Core $version is already installed"
+	if [ -e "$destination" ] || [ -L "$destination" ]; then
+		[ -d "$destination" ] && [ ! -L "$destination" ] || fail "Core $version has an unsafe existing path"
+		existing=1
+	fi
 	size=$(file_size "$bundle") || fail "cannot read Core bundle size"
 	case "$size" in ''|*[!0-9]*) fail "invalid Core bundle size" ;; esac
 	[ "$size" -gt 0 ] && [ "$size" -le "$MAX_BUNDLE_BYTES" ] || fail "Core bundle exceeds the size limit"
@@ -293,6 +297,19 @@ install_core() {
 		rm -rf "$temporary"
 		fail "Core signature, manifest, executable, target, or process API validation failed"
 	}
+	candidate_sha=$(printf '%s' "$expected_bundle_sha" | tr 'A-F' 'a-f')
+	printf '%s\n' "$candidate_sha" >"$temporary/$BUNDLE_SHA_FILE"
+	chmod 0644 "$temporary/$BUNDLE_SHA_FILE"
+	if [ "$existing" = 1 ]; then
+		existing_sha=$(cat "$destination/$BUNDLE_SHA_FILE" 2>/dev/null || true)
+		if [ "$existing_sha" = "$candidate_sha" ]; then
+			rm -rf "$temporary"
+			printf '%s\n' "Core $version is already installed"
+			return
+		fi
+		replace_core_directory "$version" "$temporary" "$destination"
+		return
+	fi
 	mv "$temporary" "$destination" || { rm -rf "$temporary"; fail "cannot publish Core $version"; }
 	printf '%s\n' "installed Core $version"
 }
@@ -313,6 +330,64 @@ preflight_server_role() {
 	local directory
 	directory=$1
 	CANDY_CORE_BINARY="$directory/candy-core" "$LAUNCHER" --config "$SERVER_CONFIG" --preflight >/dev/null || return 1
+}
+
+replace_core_directory() {
+	local version candidate destination current previous backup was_active=0
+	version=$1
+	candidate=$2
+	destination=$3
+	current=$(link_version "$CURRENT_LINK")
+	previous=$(link_version "$PREVIOUS_LINK")
+	[ "$previous" != "$version" ] || {
+		rm -rf "$candidate"
+		fail "Core $version is the rollback Core and cannot be replaced"
+	}
+	validate_server_config "$candidate" || {
+		rm -rf "$candidate"
+		fail "replacement Core $version failed server config validation"
+	}
+	preflight_server_role "$candidate" || {
+		rm -rf "$candidate"
+		fail "replacement Core $version failed server preflight"
+	}
+	if [ "$current" = "$version" ]; then
+		service_active && was_active=1
+		[ "$was_active" = 0 ] || "$SYSTEMCTL" stop "$SERVICE_NAME" || {
+			rm -rf "$candidate"
+			fail "cannot stop $SERVICE_NAME for Core replacement"
+		}
+	fi
+	backup=$CORE_ROOT/.replace-$version-$$
+	[ ! -e "$backup" ] && [ ! -L "$backup" ] || {
+		[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		rm -rf "$candidate"
+		fail "Core replacement backup path already exists"
+	}
+	mv "$destination" "$backup" || {
+		[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		rm -rf "$candidate"
+		fail "cannot preserve installed Core $version"
+	}
+	if ! mv "$candidate" "$destination"; then
+		mv "$backup" "$destination" 2>/dev/null || true
+		[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		fail "cannot publish replacement Core $version"
+	fi
+	if [ "$was_active" = 1 ] &&
+		{ ! "$SYSTEMCTL" start "$SERVICE_NAME" || ! service_active || [ ! -x "$HEALTH_CHECK" ] || ! "$HEALTH_CHECK"; }; then
+		"$SYSTEMCTL" stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+		rm -rf "$destination"
+		mv "$backup" "$destination" || fail "replacement Core failed and the previous directory could not be restored"
+		"$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		fail "replacement Core $version failed service startup; previous Core restored"
+	fi
+	rm -rf "$backup"
+	if [ "$current" = "$version" ]; then
+		printf '%s\n' "replaced active Core $version"
+	else
+		printf '%s\n' "replaced inactive Core $version"
+	fi
 }
 
 activate_core() {
@@ -363,15 +438,18 @@ rollback_core() {
 }
 
 status_core() {
-	local current previous
+	local current previous current_bundle_sha
 	current=$(link_version "$CURRENT_LINK")
 	previous=$(link_version "$PREVIOUS_LINK")
+	current_bundle_sha=$(cat "$CORE_ROOT/$current/$BUNDLE_SHA_FILE" 2>/dev/null || true)
+	valid_sha256 "$current_bundle_sha" || current_bundle_sha=
 	jq -n \
 		--arg current "$current" \
 		--arg previous "$previous" \
+		--arg current_bundle_sha "$current_bundle_sha" \
 		--argjson process_api "$EXPECTED_PROCESS_API" \
 		--argjson core_api "$EXPECTED_CORE_API" \
-		'{schema_version:1,manager_api_version:1,required_core_process_api_version:$process_api,required_core_api_version:$core_api,current_version:(if $current == "" then null else $current end),previous_version:(if $previous == "" then null else $previous end)}'
+		'{schema_version:1,manager_api_version:1,required_core_process_api_version:$process_api,required_core_api_version:$core_api,current_version:(if $current == "" then null else $current end),current_bundle_sha256:(if $current_bundle_sha == "" then null else $current_bundle_sha end),previous_version:(if $previous == "" then null else $previous end)}'
 }
 
 need_command jq

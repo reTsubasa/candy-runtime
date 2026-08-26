@@ -92,6 +92,11 @@ case "$1" in
 			rm -f "$FAKE_SERVICE_FAIL_ONCE"
 			exit 1
 		fi
+		rm -f "$FAKE_SERVICE_STOPPED"
+		;;
+	stop)
+		printf '%s\n' stop >> "$FAKE_SERVICE_LOG"
+		: >"$FAKE_SERVICE_STOPPED"
 		;;
 	*) exit 1 ;;
 esac
@@ -99,11 +104,13 @@ EOF
 chmod +x "$bin/candy-service"
 
 make_bundle() {
-	local version="$1" api="$2" bundle="$3" stage="$tmp/stage-$1" executable_sha
+	local version="$1" api="$2" bundle="$3" flavor="${4:-base}" stage executable_sha
+	stage="$tmp/stage-$version-$flavor"
 	rm -rf "$stage"
 	mkdir -p "$stage"
 	cat > "$stage/candy-core" <<EOF
 #!/bin/sh
+# $flavor
 case "\${1:-}" in
 	runtime-api-version) printf '%s\n' 1 ;;
 	core-info) printf '%s\n' '{"schema_version":1,"process_api_version":1,"core_api_version":$api,"core_version":"$version","target_os":"linux","target_arch":"$TEST_CORE_ARCH","protocol_version":{"major":0,"minor":3},"features":[]}' ;;
@@ -132,6 +139,7 @@ export CANDY_SERVICE_LOCK_DIR="$tmp/service.lock"
 export CANDY_PROC_ROOT="$tmp/proc"
 export CANDY_CORE_OPERATION_FILE="$tmp/core-operation.json"
 export CANDY_CORE_ALLOW_FILE_URL=1
+export CANDY_CORE_HEALTH_WAIT_SECONDS=1
 export FAKE_SERVICE_LOG="$tmp/service.log"
 export FAKE_SERVICE_FAIL_ONCE="$tmp/service-fail-once"
 export FAKE_SERVICE_STOPPED="$tmp/service-stopped"
@@ -153,6 +161,13 @@ printf '%s\n' 99999999 > "$CANDY_CORE_LOCK_DIR/pid"
 
 make_bundle 0.4.1 1 "$tmp/core-0.4.1.tar.gz"
 sha_041=$(sha256sum "$tmp/core-0.4.1.tar.gz" | awk '{ print $1 }')
+ln -s "$tmp/missing-core-directory" "$cores/0.4.8"
+if "$manager" install 0.4.8 "file://$tmp/core-0.4.1.tar.gz" "$sha_041" >/dev/null 2>&1; then
+	echo "dangling symbolic-link Core destination was accepted" >&2
+	exit 1
+fi
+grep -F '"error_code":"destination_unsafe"' "$CANDY_CORE_OPERATION_FILE" >/dev/null
+rm -f "$cores/0.4.8"
 if CANDY_CORE_SIGNATURE_VERIFIER= CANDY_CORE_SIGNING_KEY="$tmp/missing-core-release.pub" \
 	"$manager" install 0.4.1 "file://$tmp/core-0.4.1.tar.gz" "$sha_041" >/dev/null 2>&1; then
 	echo "Core bundle was accepted without a signing key" >&2
@@ -205,6 +220,26 @@ grep -q '"current_version":"0.4.1"' <<EOF
 $("$manager" status)
 EOF
 
+make_bundle 0.4.1 1 "$tmp/core-0.4.1-corrected.tar.gz" corrected
+sha_041_corrected=$(sha256sum "$tmp/core-0.4.1-corrected.tar.gz" | awk '{ print $1 }')
+"$manager" install 0.4.1 "file://$tmp/core-0.4.1-corrected.tar.gz" "$sha_041_corrected" >"$tmp/active-replaced.out"
+grep -F 'replaced active Core 0.4.1' "$tmp/active-replaced.out" >/dev/null
+grep -F '# corrected' "$cores/0.4.1/candy-core" >/dev/null
+[ "$(cat "$cores/0.4.1/.bundle.sha256")" = "$sha_041_corrected" ]
+[ ! -f "$FAKE_SERVICE_STOPPED" ]
+"$manager" install 0.4.1 "file://$tmp/core-0.4.1-corrected.tar.gz" "$sha_041_corrected" >"$tmp/active-idempotent.out"
+grep -F 'bundle is already installed' "$tmp/active-idempotent.out" >/dev/null
+
+touch "$FAKE_SERVICE_FAIL_ONCE"
+if "$manager" install 0.4.1 "file://$tmp/core-0.4.1.tar.gz" "$sha_041" >"$tmp/active-replacement-failed.out" 2>&1; then
+	echo "unhealthy active Core replacement was accepted" >&2
+	exit 1
+fi
+grep -F '# corrected' "$cores/0.4.1/candy-core" >/dev/null
+[ "$(cat "$cores/0.4.1/.bundle.sha256")" = "$sha_041_corrected" ]
+[ ! -f "$FAKE_SERVICE_STOPPED" ]
+grep -F 'previous Core restored' "$tmp/active-replacement-failed.out" >/dev/null
+
 if "$manager" install 0.4.9 "file://$tmp/core-0.4.1.tar.gz" "$(printf '0%.0s' $(seq 1 64))" >/dev/null 2>&1; then
 	echo "bad SHA-256 was accepted" >&2
 	exit 1
@@ -224,7 +259,7 @@ make_bundle 0.4.3 1 "$tmp/core-0.4.3.tar.gz"
 sha_043=$(sha256sum "$tmp/core-0.4.3.tar.gz" | awk '{ print $1 }')
 "$manager" install 0.4.3 "file://$tmp/core-0.4.3.tar.gz" "$sha_043" >/dev/null
 "$manager" install 0.4.3 "file://$tmp/core-0.4.3.tar.gz" "$sha_043" > "$tmp/replaced.out"
-grep -F 'replaced inactive Core 0.4.3' "$tmp/replaced.out" >/dev/null
+grep -F 'bundle is already installed' "$tmp/replaced.out" >/dev/null
 "$manager" remove 0.4.3 >/dev/null
 [ ! -e "$cores/0.4.3" ]
 

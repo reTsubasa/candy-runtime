@@ -107,7 +107,7 @@ chmod 0755 "$bin/usign"
 cat > "$bin/candy-core-manager" <<'EOF'
 #!/bin/sh
 case "$1" in
-	status) printf '%s\n' '{"schema_version":1,"current_version":"0.3.4","installed":[{"version":"0.3.4","active":true,"rollback":false,"managed":true},{"version":"0.3.5","active":false,"rollback":false,"managed":false}],"operation":{"state":"completed","action":"remove","version":"0.3.9"}}' ;;
+	status) printf '{"schema_version":1,"current_version":"0.3.4","current_bundle_sha256":"%s","installed":[{"version":"0.3.4","active":true,"rollback":false,"managed":true},{"version":"0.3.5","active":false,"rollback":false,"managed":false}],"operation":{"state":"completed","action":"remove","version":"0.3.9"}}\n' "${FAKE_CURRENT_CORE_SHA:-}" ;;
 	install)
 		printf '%s\n' "$*" >> "$FAKE_CORE_LOG"
 		case "$3" in file:///*) [ -f "${3#file://}" ] ;; *) exit 1 ;; esac
@@ -287,6 +287,7 @@ export FAKE_CATALOG="$tmp/stable.json"
 export FAKE_CATALOG_SIGNATURE="$tmp/stable.json.sig"
 export FAKE_ASSET_DIR="$assets"
 export FAKE_FETCH_LOG="$tmp/fetch.log"
+export FAKE_CURRENT_CORE_SHA=0000000000000000000000000000000000000000000000000000000000000000
 export FAKE_FETCH_DEST_LOG="$tmp/fetch-destination.log"
 export FAKE_CORE_LOG="$tmp/core.log"
 export FAKE_APK_LOG="$tmp/apk.log"
@@ -526,8 +527,14 @@ tail -n +$((apk_lines_before + 1)) "$FAKE_APK_LOG" | grep -F -- '--force-old-apk
 
 make_catalog 4 3 0.3.4
 "$manager" check >/dev/null
-"$manager" install-core v0_3_4 >/dev/null
+replacement_status=$("$manager" status)
+printf '%s\n' "$replacement_status" | jq -e '.core_candidates[] | select(.version == "0.3.4") | .installed == true and .active == true and .update_available == true' >/dev/null || {
+	echo "same-version Core catalog replacement was not exposed as an update" >&2
+	exit 1
+}
+"$manager" install-core v0_3_4 >"$tmp/core-replacement.out"
 grep -Eq '^install 0\.3\.4 file:///.+ [0-9a-f]{64}$' "$FAKE_CORE_LOG"
+grep -F 'Core 0.3.4 updated and remains active' "$tmp/core-replacement.out" >/dev/null
 
 mkdir -m 0700 "$CANDY_UPDATE_UPLOAD_ROOT"
 printf '%s\n' uploaded-core > "$CANDY_UPDATE_UPLOAD_ROOT/core-test.tar.gz"

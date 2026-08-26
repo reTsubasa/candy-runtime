@@ -469,7 +469,7 @@ verify_download() {
 }
 
 install_core() {
-	local key="$1" version url sha size archive
+	local key="$1" version url sha size archive current
 	require_supported_platform || fail "this Runtime package does not support the current OpenWrt platform"
 	cached_catalog_valid || fail "no valid checked catalog is available"
 	validate_core_entry "$CATALOG_FILE" "$key" || fail "requested Core release is invalid or incompatible"
@@ -486,6 +486,12 @@ install_core() {
 	verify_download "$archive" "$size" "$sha" "$MAX_CORE_BYTES" || fail "Core download size or SHA-256 is invalid"
 	if ! CANDY_CORE_ALLOW_FILE_URL=1 CANDY_CORE_OPERATION_FILE="$CORE_OPERATION_FILE" "$CORE_MANAGER" install "$version" "file://$archive" "$sha"; then
 		propagate_core_failure "Core installation failed"
+	fi
+	current=$("$CORE_MANAGER" status 2>/dev/null | jsonfilter -e '@.current_version' 2>/dev/null || true)
+	if [ "$current" = "$version" ]; then
+		log_update info core_update install active_replaced "Updated active Core $version"
+		printf '%s\n' "Core $version updated and remains active"
+		return 0
 	fi
 	log_update info core_update install installed "Installed Core $version without activation"
 	printf '%s\n' "Core $version installed; activation remains manual"
@@ -718,10 +724,11 @@ install_runtime() {
 }
 
 core_candidates_json() {
-	local core_status="$1" core_current="$2" latest versions version key process_api core_api first=1 count=0 installed active installed_versions
+	local core_status="$1" core_current="$2" latest versions version key process_api core_api first=1 count=0 installed active installed_versions current_bundle_sha catalog_sha update_available
 	printf '['
 	[ -f "$CATALOG_FILE" ] || { printf ']'; return; }
 	installed_versions=$(printf '%s' "$core_status" | jsonfilter -e '@.installed[*].version' 2>/dev/null || true)
+	current_bundle_sha=$(printf '%s' "$core_status" | jsonfilter -e '@.current_bundle_sha256' 2>/dev/null || true)
 	latest=$(catalog_field "$CATALOG_FILE" '@.core.latest')
 	versions=$(jsonfilter -i "$CATALOG_FILE" -e '@.core.releases.*.version' 2>/dev/null | awk -F. '
 		/^[0-9]+\.[0-9]+\.[0-9]+([+.-].*)?$/ {
@@ -735,19 +742,27 @@ core_candidates_json() {
 		validate_core_entry "$CATALOG_FILE" "$key" || continue
 		process_api=$(core_entry_field "$CATALOG_FILE" "$key" process_api_version)
 		core_api=$(core_entry_field "$CATALOG_FILE" "$key" core_api_version)
+		catalog_sha=$(core_entry_field "$CATALOG_FILE" "$key" "targets.$CORE_TARGET_KEY.sha256")
 		installed=false
 		active=false
+		update_available=false
 		case "
 $installed_versions
 " in *"
 $version
 "*) installed=true ;; esac
-		[ "$version" = "$core_current" ] && active=true
+		if [ "$version" = "$core_current" ]; then
+			active=true
+			installed=true
+		fi
+		if [ "$active" = true ] && { ! valid_sha256 "$current_bundle_sha" || [ "$current_bundle_sha" != "$catalog_sha" ]; }; then
+			update_available=true
+		fi
 		[ "$first" = 1 ] || printf ','
 		first=0
 		printf '{"version_key":'; json_string "$key"
 		printf ',"version":'; json_string "$version"
-		printf ',"process_api_version":%s,"core_api_version":%s,"compatible":true,"installed":%s,"active":%s,"latest":' "$process_api" "$core_api" "$installed" "$active"
+		printf ',"process_api_version":%s,"core_api_version":%s,"compatible":true,"installed":%s,"active":%s,"update_available":%s,"latest":' "$process_api" "$core_api" "$installed" "$active" "$update_available"
 		[ "$key" = "$latest" ] && printf true || printf false
 		printf '}'
 		count=$((count + 1))

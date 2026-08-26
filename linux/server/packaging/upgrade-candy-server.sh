@@ -278,7 +278,7 @@ migrate_legacy_sdwan_state() {
 	elif [ -L "$legacy" ]; then
 		legacy_target=$(readlink "$legacy") || die "could not read legacy SD-WAN state link"
 		case "$legacy_target" in
-			/var/lib/candy/sdwan|"$canonical") sdwan_migration_pending=link ;;
+			/var/lib/candy/sdwan|"$canonical") sdwan_migration_pending='link' ;;
 			*) die "legacy SD-WAN state link does not target /var/lib/candy/sdwan" ;;
 		esac
 	elif [ -e "$legacy" ]; then

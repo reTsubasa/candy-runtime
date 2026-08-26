@@ -254,6 +254,7 @@ function candyUpdateRenderCore(data, busy) {
 		var key = candidate.version_key || candidate.key || "", version = candyUpdateText(candidate.version);
 		var installed = candidate.installed === true;
 		var active = candidate.active === true;
+		var updateAvailable = candidate.update_available === true;
 		var compatible = candidate.compatible !== false, installable = candidate.installable !== false;
 		var eligible = compatible && installable;
 		var latest = candidate.latest === true;
@@ -264,14 +265,15 @@ function candyUpdateRenderCore(data, busy) {
 		});
 		states.className = "candy-update-states";
 		if (latest) states.appendChild(candyUpdateState(candyUpdateLabels.latest, "available"));
+		if (updateAvailable) states.appendChild(candyUpdateState(candyUpdateLabels.available, "warning"));
 		if (active) states.appendChild(candyUpdateState(candyUpdateLabels.current, "current"));
 		else if (installed) states.appendChild(candyUpdateState(candyUpdateLabels.installed, "current"));
 		var stateCell = document.createElement("td"); stateCell.className = "td"; stateCell.appendChild(states); row.appendChild(stateCell);
 		actionCell = document.createElement("td"); actionCell.className = "td candy-update-toolbar";
 		if (installed && !active) { review = candyUpdateLink(candyUpdateCorePageUrl, candyUpdateLabels.reviewCore); actionCell.appendChild(review); }
 		row.appendChild(actionCell); if (body) body.appendChild(row);
-		if (select && key && eligible && !installed) {
-			var option = document.createElement("option"); option.value = key; option.textContent = version + (latest ? " - " + candyUpdateLabels.latest : ""); select.appendChild(option);
+		if (select && key && eligible && (!installed || updateAvailable)) {
+			var option = document.createElement("option"); option.value = key; option.textContent = version + (updateAvailable ? " - " + candyUpdateLabels.available : (latest ? " - " + candyUpdateLabels.latest : "")); select.appendChild(option);
 		}
 	});
 	if (body && body.children.length === 0) {

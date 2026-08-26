@@ -53,6 +53,7 @@ case "$command" in
 	stop) printf '%s\n' inactive > "$FAKE_SERVICE_STATE" ;;
 	start)
 		if [ -f "$FAKE_SERVICE_FAIL_START" ]; then
+			rm -f "$FAKE_SERVICE_FAIL_START"
 			exit 1
 		fi
 		printf '%s\n' active > "$FAKE_SERVICE_STATE"
@@ -158,6 +159,34 @@ sha_2=$(sha256sum "$bundle_2" | awk '{ print $1 }')
 "$manager" activate 1.0.1 >/dev/null
 [ "$(readlink "$cores/current")" = 1.0.1 ] || fail "second Core was not activated"
 [ "$(readlink "$cores/previous")" = 1.0.0 ] || fail "previous Core was not preserved"
+
+bundle_2_replacement=$tmp/core-1.0.1-replacement.tar.gz
+make_bundle 1.0.1 1 1 "$host_arch" 0 "$bundle_2_replacement"
+replacement_stage=$tmp/replacement-stage
+mkdir -p "$replacement_stage"
+tar -xzf "$bundle_2_replacement" -C "$replacement_stage"
+printf '%s\n' '# corrected same-version build' >>"$replacement_stage/candy-core"
+replacement_sha=$(sha256sum "$replacement_stage/candy-core" | awk '{ print $1 }')
+jq --arg sha "$replacement_sha" '.artifact.executable_sha256=$sha' "$replacement_stage/manifest.json" >"$replacement_stage/manifest.next"
+mv "$replacement_stage/manifest.next" "$replacement_stage/manifest.json"
+tar -czf "$bundle_2_replacement" -C "$replacement_stage" manifest.json manifest.sig candy-core
+sha_2_replacement=$(sha256sum "$bundle_2_replacement" | awk '{ print $1 }')
+"$manager" install 1.0.1 "$bundle_2_replacement" "$sha_2_replacement" >"$tmp/replacement.out"
+grep -F 'replaced active Core 1.0.1' "$tmp/replacement.out" >/dev/null || fail "active same-version Core was not replaced"
+grep -F '# corrected same-version build' "$cores/1.0.1/candy-core" >/dev/null || fail "replacement Core executable was not installed"
+[ "$(cat "$cores/1.0.1/.bundle.sha256")" = "$sha_2_replacement" ] || fail "replacement bundle identity was not stored"
+[ "$(cat "$service_state")" = active ] || fail "active same-version replacement did not restore the service"
+
+bundle_2_failed=$tmp/core-1.0.1-failed.tar.gz
+cp "$bundle_2" "$bundle_2_failed"
+sha_2_failed=$(sha256sum "$bundle_2_failed" | awk '{ print $1 }')
+touch "$FAKE_SERVICE_FAIL_START"
+if "$manager" install 1.0.1 "$bundle_2_failed" "$sha_2_failed" >"$tmp/replacement-failed.out" 2>&1; then
+	fail "unhealthy same-version Core replacement was accepted"
+fi
+grep -F '# corrected same-version build' "$cores/1.0.1/candy-core" >/dev/null || fail "failed replacement did not restore the corrected Core"
+[ "$(cat "$cores/1.0.1/.bundle.sha256")" = "$sha_2_replacement" ] || fail "failed replacement changed the stored bundle identity"
+[ "$(cat "$service_state")" = active ] || fail "failed replacement did not restart the restored service"
 
 bundle_bad_role=$tmp/core-1.0.2.tar.gz
 make_bundle 1.0.2 1 1 "$host_arch" 51 "$bundle_bad_role"
