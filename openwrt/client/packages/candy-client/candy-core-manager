@@ -437,11 +437,16 @@ install_core() {
 		rm -rf "$temporary"
 		fail_stage "${VALIDATION_PHASE:-validation}" "${VALIDATION_CODE:-validation_failed}" "${VALIDATION_DETAIL:-Core bundle validation failed}"
 	}
-	# Core verification runs as root, while Cloud synchronization executes the
-	# active binary as the unprivileged candy-sdwan user.
-	chmod 0755 "$temporary" || {
+	# Core verification runs as root, while Cloud synchronization and the
+	# SD-WAN agent execute the active binary as the unprivileged candy-sdwan
+	# user. Archive modes are not trusted installation policy.
+	chmod 0755 "$temporary" "$temporary/candy-core" || {
 		rm -rf "$temporary"
-		fail_stage install permission_failed "Cannot make the verified Core available to Runtime services"
+		fail_stage install permission_failed "Cannot make the Core executable available to Runtime services"
+	}
+	chmod 0644 "$temporary/manifest.json" "$temporary/manifest.sig" || {
+		rm -rf "$temporary"
+		fail_stage install permission_failed "Cannot apply the Core metadata permission policy"
 	}
 	actual_sha=$(printf '%s' "$expected_sha" | tr 'A-F' 'a-f')
 	if ! printf '%s\n' "$actual_sha" >"$temporary/$BUNDLE_SHA_FILE" ||

@@ -123,6 +123,10 @@ EOF
 {"schema_version":1,"process_api_version":1,"core":{"schema_version":1,"core_api_version":$api,"core_version":"$version","target_os":"linux","target_arch":"$TEST_CORE_ARCH","protocol_version":{"major":0,"minor":3},"features":[]},"artifact":{"target_os":"linux","target_arch":"$TEST_CORE_ARCH","libc":"musl","executable":"candy-core","executable_sha256":"$executable_sha"}}
 EOF
 	printf '%s\n' trusted-test-signature > "$stage/manifest.sig"
+	# A protected signer can create a correct bundle under umask 077. Runtime
+	# must normalize archive modes instead of inheriting them.
+	chmod 0700 "$stage/candy-core"
+	chmod 0600 "$stage/manifest.json" "$stage/manifest.sig"
 	tar -czf "$bundle" -C "$stage" manifest.json manifest.sig candy-core
 }
 
@@ -215,6 +219,16 @@ rm -f "$FAKE_FETCH_LOG"
 	echo "installed Core is not traversable by unprivileged Runtime services" >&2
 	exit 1
 }
+[ "$(ls -l "$cores/0.4.1/candy-core" | cut -c1-10)" = -rwxr-xr-x ] || {
+	echo "installed Core executable is not available to unprivileged Runtime services" >&2
+	exit 1
+}
+for metadata in manifest.json manifest.sig; do
+	[ "$(ls -l "$cores/0.4.1/$metadata" | cut -c1-10)" = -rw-r--r-- ] || {
+		echo "installed Core metadata does not use the normalized permission policy" >&2
+		exit 1
+	}
+done
 grep -q '"state":"completed"' "$CANDY_CORE_OPERATION_FILE"
 grep -q '"current_version":"0.4.1"' <<EOF
 $("$manager" status)
