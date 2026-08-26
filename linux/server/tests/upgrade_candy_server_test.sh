@@ -134,6 +134,8 @@ make_bundle() {
 	printf '%s\n' "$architecture" >"$directory/RUNTIME-ARCH"
 	printf '%s\n' 0.4.0 >"$directory/VERSION"
 	printf '%s\n' test >"$directory/README.md"
+	cp "$upgrader" "$directory/install/upgrade-candy-server.sh"
+	chmod 0755 "$directory/install/upgrade-candy-server.sh"
 	tar -C "$directory" -czf "$directory.tar.gz" .
 }
 
@@ -146,7 +148,7 @@ run_upgrade() {
 		FAKE_SYSCTL_FAIL_KEY="${FAKE_SYSCTL_FAIL_KEY:-}" FAKE_SYSCTL_FAIL_VALUE="${FAKE_SYSCTL_FAIL_VALUE:-}" \
 		CANDY_UPGRADE_ROOT="$host" CANDY_SYSTEMCTL="$fake_bin/systemctl" CANDY_SYSTEMD_TMPFILES="$fake_bin/systemd-tmpfiles" \
 		CANDY_SYSCTL="$fake_bin/sysctl" \
-		sh "$upgrader" "$@"
+		sh "${CANDY_TEST_UPGRADER:-$upgrader}" "$@"
 }
 
 grep -F 'LAUNCHER=${CANDY_SERVER_LAUNCHER:-/opt/candy/current/candy-server}' \
@@ -204,7 +206,14 @@ printf '%s\n' core-preserved >"$host/opt/candy/cores/current/candy-core"
 make_bundle "$tmp/good" x86_64 0.4.0-r62
 good_sha=$(sha256 "$tmp/good.tar.gz")
 reset_service_state
-run_upgrade --bundle-file "$tmp/good.tar.gz" --sha256 "$good_sha" --version 0.4.0-r62 >/dev/null
+installed_upgrader=$tmp/installed-upgrade-candy-server.sh
+cp "$upgrader" "$installed_upgrader"
+printf '%s\n' '# simulate the previous installed Runtime revision' >>"$installed_upgrader"
+chmod 0755 "$installed_upgrader"
+CANDY_TEST_UPGRADER="$installed_upgrader" \
+	run_upgrade --bundle-file "$tmp/good.tar.gz" --sha256 "$good_sha" --version 0.4.0-r62 >"$tmp/good.out"
+grep -F 'handing off transaction to the validated candidate upgrader' "$tmp/good.out" >/dev/null ||
+	fail "installed upgrader did not hand the transaction to the candidate"
 
 active_release=$(readlink "$host/opt/candy/current")
 [ "$active_release" != "$original_current" ] || fail "current Runtime release was not switched"

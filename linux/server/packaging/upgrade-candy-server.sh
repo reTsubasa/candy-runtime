@@ -94,6 +94,7 @@ need_command find
 need_command mktemp
 need_command mv
 need_command cp
+need_command cmp
 need_command "$SYSTEMCTL"
 need_command "$TMPFILES"
 need_command "$SYSCTL"
@@ -477,6 +478,22 @@ for unit in $unit_files; do [ -f "$extract_dir/systemd/$unit" ] || die "bundle u
 case "$(uname -m)" in x86_64|amd64) host_arch=x86_64 ;; aarch64|arm64) host_arch=aarch64 ;; *) die "unsupported host architecture: $(uname -m)" ;; esac
 [ -f "$extract_dir/RUNTIME-ARCH" ] || die "bundle architecture identity is missing"
 [ "$(tr -d '\r\n' <"$extract_dir/RUNTIME-ARCH")" = "$host_arch" ] || die "bundle architecture does not match this host"
+
+# Transaction behavior belongs to the release being installed. Once the
+# current upgrader has authenticated and structurally validated the candidate,
+# hand control to the candidate copy when it differs. The candidate's second
+# validation sees an identical script and proceeds without recursion.
+candidate_upgrader=$extract_dir/install/upgrade-candy-server.sh
+[ -f "$candidate_upgrader" ] && [ -x "$candidate_upgrader" ] && [ ! -L "$candidate_upgrader" ] ||
+	die "bundle candidate upgrader is missing or invalid"
+if ! cmp -s "$0" "$candidate_upgrader"; then
+	log "handing off transaction to the validated candidate upgrader"
+	"$candidate_upgrader" --bundle-file "$bundle" --sha256 "$expected_sha256" --version "$EXPECTED_VERSION"
+	transaction_finished=1
+	cleanup
+	trap - EXIT HUP INT TERM
+	exit 0
+fi
 
 release_suffix=$(printf '%s' "$expected_sha256" | cut -c 1-12)
 release_dir=$(host_path "/opt/candy/releases/$EXPECTED_VERSION-$release_suffix")
