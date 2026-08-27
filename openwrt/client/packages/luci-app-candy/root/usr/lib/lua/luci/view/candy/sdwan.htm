@@ -76,8 +76,14 @@ local function is_uuid(value)
 	local compact = value:gsub("%-", "")
 	return #compact == 32 and compact:match("^[0-9a-fA-F]+$") ~= nil
 end
+local function usable_string(value)
+	if type(value) ~= "string" or value == "" then return nil end
+	if value == "unavailable" or value == "unknown" or value == "not-configured" then return nil end
+	return value
+end
 local function human_name(value)
-	if type(value) ~= "string" or value == "" or is_uuid(value) then return nil end
+	value = usable_string(value)
+	if value == nil or is_uuid(value) then return nil end
 	return value
 end
 local function safe_identity_value(key, limit)
@@ -94,8 +100,8 @@ local cloud_name = cloud_address:gsub("^https://", ""):gsub("/.*$", "")
 local display_name = type(profile.device_name) == "string" and profile.device_name or safe_identity_value("display_name", 200)
 local organization_name = type(profile.organization_name) == "string" and profile.organization_name or nil
 local tenant_name = type(profile.tenant_name) == "string" and profile.tenant_name or nil
-local status_site_id = object_value(status and status.site, "id") or (type(profile.site_id) == "string" and profile.site_id or nil)
-local status_segment_id = object_value(status and status.segment, "id") or (type(profile.segment_id) == "string" and profile.segment_id or nil)
+local status_site_id = usable_string(object_value(status and status.site, "id")) or usable_string(profile.site_id)
+local status_segment_id = usable_string(object_value(status and status.segment, "id")) or usable_string(profile.segment_id)
 local site_value = human_name(object_value(status and status.site, "name"))
 local segment_value = human_name(object_value(status and status.segment, "name"))
 if (not site_value or site_value == status_site_id) and type(profile.site_id) == "string" and profile.site_id == status_site_id and type(profile.site_name) == "string" then site_value = profile.site_name end
