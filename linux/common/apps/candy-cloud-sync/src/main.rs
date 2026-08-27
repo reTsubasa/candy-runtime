@@ -1473,14 +1473,18 @@ fn sync_once_with_retry(
             ) {
                 Ok(grants) => grants,
                 Err(error) => {
+                    let error_code = grant::resolution_error_code(&error);
                     report_configuration_status(
                         &client,
                         &cloud,
                         &configuration,
                         &etag,
                         "rejected",
-                        Some("grant_resolution_failed"),
+                        Some(error_code),
                     )?;
+                    eprintln!(
+                        "level=error event=sdwan_grant_resolution_failed error_code={error_code} error={error:#}"
+                    );
                     return Err(error);
                 }
             };
@@ -3286,10 +3290,6 @@ fn resolve_grants(
     if !pools.is_empty() && configuration.grant_verification_keys.is_empty() {
         bail!("outbound SD-WAN candidates require Grant verification keys")
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("read system time for Grant renewal")?
-        .as_secs();
     let store = grant::GrantStore::new(state_dir);
     let grant_endpoint = endpoint(cloud, "auth/v1/access-grants")?;
     let mut resolved = Vec::with_capacity(pools.len());
@@ -3303,9 +3303,8 @@ fn resolve_grants(
             projection_generation: configuration.projection_generation,
             projection_content_hash: configuration.projection_content_hash.clone(),
         };
-        let outcome = store.refresh(
+        let outcome = store.refresh_current(
             &subject,
-            now,
             |request| grant::fetch_from_cloud(client, grant_endpoint.clone(), request),
             |path| {
                 verify_grant_with_core(core, path, &subject, &configuration.grant_verification_keys)

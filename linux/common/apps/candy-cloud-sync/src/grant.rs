@@ -3,6 +3,7 @@ use std::{
     io::Write,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{bail, Context, Result};
@@ -411,6 +412,7 @@ impl GrantStore {
         }
     }
 
+    #[cfg(test)]
     pub fn refresh<F, V>(
         &self,
         subject: &GrantSubject,
@@ -421,6 +423,35 @@ impl GrantStore {
     where
         F: FnOnce(&GrantIssueRequest<'_>) -> std::result::Result<GrantIssueResponse, FetchFailure>,
         V: FnOnce(&Path) -> Result<VerifiedGrantReport>,
+    {
+        self.refresh_with_clock(subject, now, fetch, verify, || Ok(now))
+    }
+
+    pub fn refresh_current<F, V>(
+        &self,
+        subject: &GrantSubject,
+        fetch: F,
+        verify: V,
+    ) -> Result<RefreshOutcome>
+    where
+        F: FnOnce(&GrantIssueRequest<'_>) -> std::result::Result<GrantIssueResponse, FetchFailure>,
+        V: FnOnce(&Path) -> Result<VerifiedGrantReport>,
+    {
+        self.refresh_with_clock(subject, unix_now()?, fetch, verify, unix_now)
+    }
+
+    fn refresh_with_clock<F, V, N>(
+        &self,
+        subject: &GrantSubject,
+        now: u64,
+        fetch: F,
+        verify: V,
+        validation_now: N,
+    ) -> Result<RefreshOutcome>
+    where
+        F: FnOnce(&GrantIssueRequest<'_>) -> std::result::Result<GrantIssueResponse, FetchFailure>,
+        V: FnOnce(&Path) -> Result<VerifiedGrantReport>,
+        N: FnOnce() -> Result<u64>,
     {
         subject.validate()?;
         let mut state = self
@@ -470,7 +501,7 @@ impl GrantStore {
                     pending.request_id,
                     response,
                     verification,
-                    now,
+                    validation_now().context("read time after Grant verification")?,
                 )?;
                 state.completed_sequence = pending.sequence;
                 state.pending = None;
@@ -561,6 +592,13 @@ impl GrantStore {
     }
 }
 
+fn unix_now() -> Result<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("read Grant validation clock")
+        .map(|duration| duration.as_secs())
+}
+
 fn validate_request_id(value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 120
@@ -590,14 +628,48 @@ fn validate_verified_grant(
     if report.grant_id != response.grant_id
         || report.expires_at_unix != response.expires_at_unix
         || report.refresh_after_unix != response.refresh_after_unix
-        || report.not_before_unix > now
-        || report.refresh_after_unix < report.not_before_unix
-        || report.refresh_after_unix >= report.expires_at_unix
-        || now >= report.expires_at_unix
     {
-        bail!("Core-verified Grant does not match the response or current time window")
+        bail!("Core-verified Grant response metadata does not match the authenticated envelope")
+    }
+    if report.not_before_unix > now {
+        bail!("Core-verified Grant is not yet valid")
+    }
+    if now >= report.expires_at_unix {
+        bail!("Core-verified Grant has expired")
+    }
+    if report.refresh_after_unix < report.not_before_unix
+        || report.refresh_after_unix >= report.expires_at_unix
+    {
+        bail!("Core-verified Grant has an invalid validity window")
     }
     Ok(())
+}
+
+pub fn resolution_error_code(error: &anyhow::Error) -> &'static str {
+    let messages = error.chain().map(ToString::to_string).collect::<Vec<_>>();
+    let contains = |needle: &str| messages.iter().any(|message| message.contains(needle));
+    if contains("Cloud revoked or denied") || contains("Cloud rejected Grant issuance") {
+        "grant_authorization_denied"
+    } else if contains("Cloud is unavailable")
+        || contains("temporarily unavailable")
+        || contains("request or decode Grant")
+    {
+        "grant_service_unavailable"
+    } else if contains("not yet valid") {
+        "grant_not_yet_valid"
+    } else if contains("has expired") {
+        "grant_expired"
+    } else if contains("response metadata") || contains("invalid validity window") {
+        "grant_response_mismatch"
+    } else if contains("not bound to the signed candidate") {
+        "grant_binding_mismatch"
+    } else if contains("Candy Core rejected the candidate Grant") {
+        "grant_core_verification_failed"
+    } else if contains("Grant state") || contains("cached Grant") {
+        "grant_state_invalid"
+    } else {
+        "grant_resolution_failed"
+    }
 }
 
 fn validate_verified_grant_binding(
@@ -1031,5 +1103,54 @@ mod tests {
             classify_grant_http_status(reqwest::StatusCode::SERVICE_UNAVAILABLE),
             "transient"
         );
+    }
+
+    #[test]
+    fn grant_resolution_errors_have_actionable_codes() {
+        for (message, expected) in [
+            (
+                "Cloud Grant issuance is temporarily unavailable with HTTP 503",
+                "grant_service_unavailable",
+            ),
+            (
+                "Cloud rejected Grant issuance with HTTP 403",
+                "grant_authorization_denied",
+            ),
+            (
+                "Candy Core rejected the candidate Grant",
+                "grant_core_verification_failed",
+            ),
+            (
+                "Core-verified Grant is not bound to the signed candidate and device identity",
+                "grant_binding_mismatch",
+            ),
+            (
+                "Core-verified Grant is not yet valid",
+                "grant_not_yet_valid",
+            ),
+            ("Core-verified Grant has expired", "grant_expired"),
+            (
+                "Core-verified Grant response metadata does not match the authenticated envelope",
+                "grant_response_mismatch",
+            ),
+        ] {
+            assert_eq!(resolution_error_code(&anyhow::anyhow!(message)), expected);
+        }
+    }
+
+    #[test]
+    fn validation_uses_the_clock_after_cloud_issuance() {
+        let root = tempdir().unwrap();
+        let mut verified = verification(10_000);
+        verified.not_before_unix = 1_001;
+        GrantStore::new(root.path())
+            .refresh_with_clock(
+                &subject(),
+                1_000,
+                |_| Ok(response(10_000)),
+                |_| Ok(verified),
+                || Ok(1_001),
+            )
+            .expect("post-response time must avoid a false not-yet-valid rejection");
     }
 }

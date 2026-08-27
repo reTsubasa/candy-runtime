@@ -4133,9 +4133,22 @@ interrupt_sdwan_processes() {
 sdwan_reconcile() {
 	local candidate_rc active_target fallback
 	if sdwan_user_stopped; then
-		sdwan_runtime_state stopped || true
-		log_event info sdwan_reconcile "result=unchanged state=user_stopped ordinary_client=preserved"
-		return 0
+		active_target=$(sdwan_active_target 2>/dev/null || true)
+		if load_sdwan_candidate && [ -n "$active_target" ] && [ "$active_target" != "$CANDY_SDWAN_CANDIDATE_TARGET" ]; then
+			if ! clear_sdwan_user_stopped; then
+				log_event error sdwan_reconcile "result=failed reason=stop_marker_not_removable ordinary_client=preserved"
+				return 1
+			fi
+			fallback=$(fallback_traffic_source)
+			write_traffic_path_state recovering "$fallback" cloud_generation_superseded_local_stop || true
+			log_event info sdwan_reconcile "result=local_stop_superseded previous=${active_target} activation=$CANDY_SDWAN_CANDIDATE_HASH fallback=$fallback ordinary_client=preserved"
+		else
+			sdwan_runtime_state stopped || true
+			fallback=$(fallback_traffic_source)
+			write_traffic_path_state degraded "$fallback" user_stopped || true
+			log_event info sdwan_reconcile "result=unchanged state=user_stopped fallback=$fallback ordinary_client=preserved"
+			return 0
+		fi
 	fi
 	if load_sdwan_candidate; then
 		active_target=$(sdwan_active_target 2>/dev/null || true)
@@ -4268,14 +4281,16 @@ stop_sdwan_data_plane() {
 }
 
 sdwan_stop_locked() {
-	local reason="${1:-user_stop}"
+	local reason="${1:-user_stop}" fallback
 	if ! set_sdwan_user_stopped; then
 		log_event error sdwan_stop "result=failed reason=stop_marker_not_persisted ordinary_client=preserved"
 		return 1
 	fi
 	if stop_sdwan_data_plane; then
 		sdwan_runtime_state stopped || true
-		log_event info sdwan_stop "result=stopped reason=$reason ordinary_client=preserved"
+		fallback=$(fallback_traffic_source)
+		write_traffic_path_state degraded "$fallback" "$reason" || true
+		log_event info sdwan_stop "result=stopped reason=$reason fallback=$fallback ordinary_client=preserved"
 		return 0
 	fi
 	log_event error sdwan_stop "result=failed reason=cleanup_incomplete escalating=full_fail_open"

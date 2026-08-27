@@ -1821,6 +1821,7 @@ done
   CANDY_INIT_SELF=$stop_dir/candy-init
   LOG_FILE=$stop_dir/candy.log
   RUNTIME_DIR=$stop_dir/run
+  CANDY_TRAFFIC_PATH_FILE=$RUNTIME_DIR/traffic-path-v1.json
   mkdir -p "$CANDY_SDWAN_STATE_DIR" "$RUNTIME_DIR"
   printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$1" >>"$CANDY_TEST_INIT_CALLS"' 'exit 0' >"$CANDY_INIT_SELF"
   chmod +x "$CANDY_INIT_SELF"
@@ -1834,21 +1835,41 @@ done
   stop_network_policy_worker_for_fail_open() { fail "explicit SD-WAN stop interrupted the ordinary policy worker"; }
   fail_open_locked() { fail "successful explicit SD-WAN stop escalated to global fail-open"; }
   stop_sdwan_data_plane() { return 0; }
+  candy_process_running() { return 0; }
+  current_readiness() { return 0; }
   sdwan_runtime_actions=
   sdwan_runtime_state() { sdwan_runtime_actions="${sdwan_runtime_actions}${sdwan_runtime_actions:+ }$1"; }
 
   sdwan_stop_locked user_stop || fail "isolated explicit SD-WAN stop failed"
   [ -f "$CANDY_SDWAN_USER_STOPPED_FILE" ] || fail "explicit SD-WAN stop marker was not persisted"
   [ "$sdwan_runtime_actions" = stopped ] || fail "explicit SD-WAN stop did not publish stopped state"
+  grep -Fq '"source":"candy_proxy"' "$CANDY_TRAFFIC_PATH_FILE" ||
+    fail "explicit SD-WAN stop did not publish the ordinary Candy fallback"
   [ ! -s "$CANDY_TEST_INIT_CALLS" ] || fail "explicit SD-WAN stop changed ordinary Candy enablement"
 
-  load_sdwan_candidate() { fail "Cloud reconciliation ignored the explicit stop marker"; }
+  sdwan_active_target() { printf '%s\n' old-activation; }
+  load_sdwan_candidate() {
+    CANDY_SDWAN_CANDIDATE_TARGET=old-activation
+    CANDY_SDWAN_CANDIDATE_HASH=$(printf '%064d' 8)
+    return 0
+  }
   sdwan_reconcile || fail "explicitly stopped SD-WAN was not an idempotent reconciliation state"
   [ "$sdwan_runtime_actions" = "stopped stopped" ] || fail "Cloud reconciliation changed explicitly stopped state"
 
+  load_sdwan_candidate() {
+    CANDY_SDWAN_CANDIDATE_TARGET=new-activation
+    CANDY_SDWAN_CANDIDATE_HASH=$(printf '%064d' 9)
+    return 0
+  }
+  sdwan_process_pids() { printf '%s\n' 123; }
+  sdwan_netd_pids() { return 0; }
+  sdwan_reconcile || fail "new Cloud generation did not supersede the old local stop"
+  [ ! -e "$CANDY_SDWAN_USER_STOPPED_FILE" ] || fail "new Cloud generation retained the old local stop marker"
+  grep -Fq 'cloud_generation_superseded_local_stop' "$CANDY_TRAFFIC_PATH_FILE" ||
+    fail "Cloud supersession did not publish the traffic transition"
+
+  set_sdwan_user_stopped || fail "could not restore explicit stop marker for start test"
   load_sdwan_candidate() { CANDY_SDWAN_CANDIDATE_HASH=$(printf '%064d' 9); return 0; }
-  candy_process_running() { return 0; }
-  current_readiness() { return 0; }
   sdwan_reconnect() { fail "start used destructive reconnect after an explicit stop"; }
   sdwan_start || fail "explicitly stopped SD-WAN could not be started"
   [ ! -e "$CANDY_SDWAN_USER_STOPPED_FILE" ] || fail "SD-WAN start retained the explicit stop marker"

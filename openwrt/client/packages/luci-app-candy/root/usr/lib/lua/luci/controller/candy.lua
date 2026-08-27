@@ -262,7 +262,10 @@ end
 local function effective_traffic_path(sdwan, service, nodes)
 	local reported = read_bounded_status_file(TRAFFIC_PATH_FILE, 16384)
 	local source = "local_wan"
-	if sdwan and sdwan.active then
+	local remote_egress = sdwan and sdwan.egress and sdwan.egress.remote
+	local remote_egress_active = sdwan and sdwan.active and type(remote_egress) == "table" and
+		remote_egress.state ~= "unavailable" and remote_egress.state ~= "not-configured"
+	if remote_egress_active then
 		source = "sdwan"
 	elseif service == "running" then
 		for _, node in ipairs(nodes or {}) do
@@ -278,9 +281,11 @@ local function effective_traffic_path(sdwan, service, nodes)
 	end
 	return {
 		schema_version = 1,
-		state = recent_transition and reported.state or (source == "sdwan" and "active" or "degraded"),
+		state = recent_transition and reported.state or
+			((source == "sdwan" or source == "candy_proxy") and "active" or "degraded"),
 		source = source,
-		reason = reported and type(reported.reason) == "string" and reported.reason or "",
+		reason = recent_transition and reported and type(reported.reason) == "string" and reported.reason or
+			(sdwan and sdwan.active and not remote_egress_active and "sdwan_policy_selective" or ""),
 		updated_at = updated_at
 	}
 end

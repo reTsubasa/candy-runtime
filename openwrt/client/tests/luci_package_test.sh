@@ -144,6 +144,9 @@ assert.ok(source.includes("Runtime version") && source.includes("Core version"),
 const controllerSource = fs.readFileSync(root + "/luci-app-candy/root/usr/lib/lua/luci/controller/candy.lua", "utf8");
 assert.ok(controllerSource.includes("path.peer_attachment_id"), "overview API must join SD-WAN performance by peer attachment");
 assert.ok(controllerSource.includes('role = remote_id and peer_id == remote_id and "remote_egress" or "sdwan_peer"'), "overview API must identify the active remote egress peer");
+assert.ok(controllerSource.includes('remote_egress_active'), "overview must distinguish selective SD-WAN routes from a remote Internet egress");
+assert.ok(controllerSource.includes('sdwan_policy_selective'), "overview must explain when unmatched traffic stays on the ordinary Candy proxy");
+assert.ok(controllerSource.includes('source == "sdwan" or source == "candy_proxy"'), "ordinary Candy fallback must be displayed as an active path");
 for (const templatePath of [statusPath, logPath]) {
 	const template = fs.readFileSync(root + "/" + templatePath, "utf8");
 	const scripts = Array.from(template.matchAll(/<script type="text\/javascript">([\s\S]*?)<\/script>/g));
@@ -423,8 +426,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=84$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=84$'
+assert_contains "$makefile" '^PKG_RELEASE:=85$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=85$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'
