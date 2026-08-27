@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -89,6 +89,32 @@ struct DeviceIdentity {
     device_id: Uuid,
     device_key_id: Uuid,
     not_after: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeProfile {
+    organization_id: Uuid,
+    organization_name: String,
+    tenant_id: Uuid,
+    tenant_name: String,
+    device_id: Uuid,
+    device_key_id: Uuid,
+    device_name: String,
+    site_id: Option<Uuid>,
+    site_name: Option<String>,
+    segment_id: Option<Uuid>,
+    segment_name: Option<String>,
+    attachment_id: Option<Uuid>,
+    #[serde(default)]
+    peer_sites: Vec<RuntimePeerSiteProfile>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimePeerSiteProfile {
+    site_id: Uuid,
+    site_name: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -454,7 +480,10 @@ struct LocalRuntimeState {
 #[derive(Debug)]
 struct VerifiedProductControl {
     site_id: String,
+    site_name: Option<String>,
     segment_id: String,
+    segment_name: Option<String>,
+    peer_site_names: BTreeMap<String, String>,
     discovery: DiscoveredControlReport,
 }
 
@@ -816,9 +845,50 @@ fn read_active_product_control(
         read_bounded_json(&generation.join("discovery-v1.json"), 1024 * 1024)
             .context("read verified Core discovery report")?;
     validate_discovered_control(&discovery, &configuration, &identity)?;
+    let site_id = canonical_uuid_hex(&discovery.site_id)?;
+    let segment_id = canonical_uuid_hex(&discovery.segment_id)?;
+    let (site_name, segment_name, peer_site_names) = match read_bounded_json::<RuntimeProfile>(
+        &state_dir.join("profile-v1.json"),
+        MAX_PROFILE_BYTES,
+    ) {
+        Ok(profile)
+            if validate_runtime_profile(&profile, &identity).is_ok()
+                && profile
+                    .site_id
+                    .map(|value| value.hyphenated().to_string())
+                    .as_deref()
+                    == Some(site_id.as_str())
+                && profile
+                    .segment_id
+                    .map(|value| value.hyphenated().to_string())
+                    .as_deref()
+                    == Some(segment_id.as_str()) =>
+        {
+            let names = profile
+                .peer_sites
+                .into_iter()
+                .map(|peer| (peer.site_id.hyphenated().to_string(), peer.site_name))
+                .collect();
+            (profile.site_name, profile.segment_name, names)
+        }
+        Ok(_) => {
+            eprintln!("level=warn event=runtime_profile_ignored reason=profile_scope_mismatch");
+            (None, None, BTreeMap::new())
+        }
+        Err(error) => {
+            eprintln!(
+                "level=warn event=runtime_profile_ignored reason={}",
+                sanitize_log_value(&format!("{error:#}"))
+            );
+            (None, None, BTreeMap::new())
+        }
+    };
     Ok(Some(VerifiedProductControl {
-        site_id: canonical_uuid_hex(&discovery.site_id)?,
-        segment_id: canonical_uuid_hex(&discovery.segment_id)?,
+        site_id,
+        site_name,
+        segment_id,
+        segment_name,
+        peer_site_names,
         discovery,
     }))
 }
@@ -854,10 +924,13 @@ fn project_product_network_status(
     let object = document
         .as_object_mut()
         .context("product Runtime status must be a JSON object")?;
-    object.insert("site".into(), serde_json::json!({"id": control.site_id}));
+    object.insert(
+        "site".into(),
+        serde_json::json!({"id": control.site_id, "name": control.site_name}),
+    );
     object.insert(
         "segment".into(),
-        serde_json::json!({"id": control.segment_id}),
+        serde_json::json!({"id": control.segment_id, "name": control.segment_name}),
     );
 
     let fully_ready = runtime_state == "running"
@@ -932,9 +1005,12 @@ fn project_product_network_status(
         .into_iter()
         .map(|(attachment_id, site_id)| {
             let path = active_paths.get(&attachment_id);
+            let name = site_id
+                .as_ref()
+                .and_then(|site_id| control.peer_site_names.get(site_id));
             serde_json::json!({
                 "id": attachment_id,
-                "name": site_id,
+                "name": name,
                 "attachment_id": attachment_id,
                 "state": if fully_ready && path.is_some() { "running" } else { "unavailable" },
                 "path": path.map(|(_, kind)| serde_json::json!({
@@ -945,6 +1021,33 @@ fn project_product_network_status(
         })
         .collect::<Vec<_>>();
     object.insert("peers".into(), serde_json::Value::Array(peers));
+
+    let remote_egress_routes = control
+        .discovery
+        .netd
+        .remote_routes
+        .iter()
+        .filter(|route| route.kind == "remote-egress")
+        .collect::<Vec<_>>();
+    let remote_egress = if remote_egress_routes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        let mut owners = remote_egress_routes
+            .iter()
+            .flat_map(|route| route.owner_attachment_ids.iter())
+            .collect::<Vec<_>>();
+        owners.sort_unstable();
+        owners.dedup();
+        serde_json::json!({
+            "state": if fully_ready { "running" } else { projected_state },
+            "route_count": remote_egress_routes.len(),
+            "peer_count": owners.len()
+        })
+    };
+    object.insert(
+        "egress".into(),
+        serde_json::json!({"local": null, "remote": remote_egress}),
+    );
 
     let mut path_kinds = active_paths
         .values()
@@ -967,6 +1070,31 @@ fn project_product_network_status(
 fn sync_once(args: &Args) -> Result<()> {
     let public_endpoint = std::env::var_os(PUBLIC_ENDPOINT_ENV);
     sync_once_with_public_endpoint_env(args, public_endpoint.as_deref())
+}
+
+fn refresh_runtime_profile(
+    state_dir: &Path,
+    client: &Client,
+    cloud: &Url,
+    identity: &DeviceIdentity,
+) -> Result<()> {
+    let response = client
+        .get(endpoint(cloud, "auth/v1/runtime/profile")?)
+        .send()
+        .context("request Runtime profile")?;
+    if response.status() != StatusCode::OK {
+        bail!(
+            "Cloud Runtime profile request failed with HTTP {}",
+            response.status()
+        )
+    }
+    require_content_type(&response, "application/json")?;
+    let profile: RuntimeProfile =
+        serde_json::from_slice(&bounded_response(response, MAX_PROFILE_BYTES)?)
+            .context("parse Runtime profile")?;
+    validate_runtime_profile(&profile, identity)?;
+    atomic_json(&state_dir.join("profile-v1.json"), &profile, 0o600)
+        .context("publish Runtime profile")
 }
 
 fn sync_once_with_public_endpoint_env(args: &Args, public_endpoint: Option<&OsStr>) -> Result<()> {
@@ -1066,6 +1194,12 @@ fn sync_once_with_retry(
         &cloud,
         &cloud_endpoints,
     )?;
+    if let Err(error) = refresh_runtime_profile(&args.state_dir, &client, &cloud, &identity) {
+        eprintln!(
+            "level=warn event=runtime_profile_refresh_failed error={}",
+            sanitize_log_value(&format!("{error:#}"))
+        );
+    }
     reconcile_transport_identity(args, public_endpoints, &client, &cloud, &identity)?;
 
     let state_path = args.state_dir.join("sync-state-v1.json");
@@ -3235,6 +3369,45 @@ fn validate_identity(identity: &DeviceIdentity) -> Result<()> {
         || identity.not_after.len() > 64
     {
         bail!("invalid local Cloud device identity")
+    }
+    Ok(())
+}
+
+fn validate_runtime_profile(profile: &RuntimeProfile, identity: &DeviceIdentity) -> Result<()> {
+    let valid_name = |value: &str| !value.trim().is_empty() && value.len() <= 200;
+    let mut peer_ids = HashSet::new();
+    let valid_peers = profile.peer_sites.len() <= 4096
+        && profile.peer_sites.iter().all(|peer| {
+            !peer.site_id.is_nil() && valid_name(&peer.site_name) && peer_ids.insert(peer.site_id)
+        });
+    if profile.organization_id != identity.organization_id
+        || Some(profile.tenant_id) != identity.tenant_id
+        || profile.device_id != identity.device_id
+        || profile.device_key_id != identity.device_key_id
+        || profile.organization_id.is_nil()
+        || profile.tenant_id.is_nil()
+        || profile.device_id.is_nil()
+        || profile.device_key_id.is_nil()
+        || !valid_name(&profile.organization_name)
+        || !valid_name(&profile.tenant_name)
+        || !valid_name(&profile.device_name)
+        || profile.site_id.is_some_and(|value| value.is_nil())
+        || profile.segment_id.is_some_and(|value| value.is_nil())
+        || profile.attachment_id.is_some_and(|value| value.is_nil())
+        || profile
+            .site_name
+            .as_deref()
+            .is_some_and(|value| !valid_name(value))
+        || profile
+            .segment_name
+            .as_deref()
+            .is_some_and(|value| !valid_name(value))
+        || profile.site_id.is_some() != profile.site_name.is_some()
+        || profile.segment_id.is_some() != profile.segment_name.is_some()
+        || profile.site_id.is_some() != profile.attachment_id.is_some()
+        || !valid_peers
+    {
+        bail!("Cloud Runtime profile does not match the authenticated device identity")
     }
     Ok(())
 }
@@ -5921,6 +6094,36 @@ default via 192.0.2.1 dev eth0 proto static
         }
     }
 
+    fn runtime_profile() -> RuntimeProfile {
+        RuntimeProfile {
+            organization_id: Uuid::from_bytes([1; 16]),
+            organization_name: "Candy".into(),
+            tenant_id: Uuid::from_bytes([2; 16]),
+            tenant_name: "Office".into(),
+            device_id: Uuid::from_bytes([3; 16]),
+            device_key_id: Uuid::from_bytes([4; 16]),
+            device_name: "Router".into(),
+            site_id: Some(Uuid::from_bytes([5; 16])),
+            site_name: Some("Hangzhou office".into()),
+            segment_id: Some(Uuid::from_bytes([6; 16])),
+            segment_name: Some("Office network".into()),
+            attachment_id: Some(Uuid::from_bytes([7; 16])),
+            peer_sites: vec![RuntimePeerSiteProfile {
+                site_id: Uuid::from_bytes([20; 16]),
+                site_name: "Shanghai office".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn runtime_profile_must_match_authenticated_identity() {
+        let identity = identity();
+        let mut profile = runtime_profile();
+        validate_runtime_profile(&profile, &identity).unwrap();
+        profile.device_id = Uuid::new_v4();
+        assert!(validate_runtime_profile(&profile, &identity).is_err());
+    }
+
     #[test]
     fn accepts_legacy_identity_without_display_name() {
         let legacy = serde_json::json!({
@@ -6091,9 +6294,20 @@ default via 192.0.2.1 dev eth0 proto static
                 content_hash: "20".repeat(32),
             },
         });
+        discovery.netd.remote_routes.push(DiscoveredRoute {
+            destination: "0.0.0.0/1".into(),
+            kind: "remote-egress".into(),
+            owner_attachment_ids: vec!["12".repeat(16)],
+        });
         let control = VerifiedProductControl {
             site_id: canonical_uuid_hex(&discovery.site_id).unwrap(),
+            site_name: Some("Hangzhou office".into()),
             segment_id: canonical_uuid_hex(&discovery.segment_id).unwrap(),
+            segment_name: Some("Office network".into()),
+            peer_site_names: BTreeMap::from([(
+                canonical_uuid_hex(&"14".repeat(16)).unwrap(),
+                "Shanghai office".into(),
+            )]),
             discovery,
         };
         let status = product_core_status();
@@ -6115,18 +6329,27 @@ default via 192.0.2.1 dev eth0 proto static
             document["segment"]["id"],
             "06060606-0606-0606-0606-060606060606"
         );
+        assert_eq!(document["site"]["name"], "Hangzhou office");
+        assert_eq!(document["segment"]["name"], "Office network");
         assert_eq!(document["tun"]["state"], "running");
         assert_eq!(document["tun"]["full_duplex"], true);
         assert_eq!(document["peers"][0]["state"], "running");
+        assert_eq!(document["peers"][0]["name"], "Shanghai office");
         assert_eq!(document["peers"][0]["path"]["kind"], "direct");
         assert_eq!(document["path"]["kind"], "direct");
+        assert_eq!(document["egress"]["remote"]["state"], "running");
+        assert_eq!(document["egress"]["remote"]["route_count"], 1);
+        assert_eq!(document["egress"]["remote"]["peer_count"], 1);
     }
 
     #[test]
     fn product_projection_rejects_core_path_outside_verified_control() {
         let control = VerifiedProductControl {
             site_id: "05050505-0505-0505-0505-050505050505".into(),
+            site_name: None,
             segment_id: "06060606-0606-0606-0606-060606060606".into(),
+            segment_name: None,
+            peer_site_names: BTreeMap::new(),
             discovery: discovery(),
         };
         let status = product_core_status();
@@ -6163,7 +6386,10 @@ default via 192.0.2.1 dev eth0 proto static
         });
         let control = VerifiedProductControl {
             site_id: "05050505-0505-0505-0505-050505050505".into(),
+            site_name: None,
             segment_id: "06060606-0606-0606-0606-060606060606".into(),
+            segment_name: None,
+            peer_site_names: BTreeMap::new(),
             discovery,
         };
         let mut document = serde_json::json!({});
@@ -6241,6 +6467,7 @@ default via 192.0.2.1 dev eth0 proto static
             0o600,
         )
         .unwrap();
+        atomic_json(&state.join("profile-v1.json"), &runtime_profile(), 0o600).unwrap();
 
         let mut configuration = configuration();
         configuration.segment_snapshot = URL_SAFE_NO_PAD.encode(b"signed-segment");
@@ -6308,7 +6535,16 @@ default via 192.0.2.1 dev eth0 proto static
             .unwrap()
             .unwrap();
         assert_eq!(control.site_id, "05050505-0505-0505-0505-050505050505");
+        assert_eq!(control.site_name.as_deref(), Some("Hangzhou office"));
         assert_eq!(control.segment_id, "06060606-0606-0606-0606-060606060606");
+        assert_eq!(control.segment_name.as_deref(), Some("Office network"));
+        assert_eq!(
+            control
+                .peer_site_names
+                .get("14141414-1414-1414-1414-141414141414")
+                .map(String::as_str),
+            Some("Shanghai office")
+        );
 
         atomic_bytes(
             &activation.join("site.projection"),

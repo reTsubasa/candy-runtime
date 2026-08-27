@@ -1890,6 +1890,21 @@ msgstr "配置 ECH 后加密 TLS ClientHello 中的服务器名称。"
 msgid "Applying network configuration"
 msgstr "正在应用网络配置"
 
+msgid "Current site"
+msgstr "当前站点"
+
+msgid "Current network"
+msgstr "当前网络"
+
+msgid "Peer site"
+msgstr "对端站点"
+
+msgid "Cloud-managed local egress"
+msgstr "Cloud 管理的本地出口"
+
+msgid "Cloud-managed remote egress"
+msgstr "Cloud 管理的远端出口"
+
 msgid "Applying SD-WAN configuration"
 msgstr "正在应用 SD-WAN 配置"
 

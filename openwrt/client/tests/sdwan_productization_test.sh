@@ -142,8 +142,16 @@ fi
 grep -F 'read_sdwan_status(uci)' "$controller" >/dev/null || fail "LuCI status endpoint omits SD-WAN"
 grep -F 'MAX_SDWAN_STATUS_BYTES = 65536' "$controller" >/dev/null || fail "SD-WAN status is unbounded"
 grep -F 'contains_credential_field(status)' "$controller" >/dev/null || fail "SD-WAN status is not redaction checked"
+grep -F 'safe_egress_object' "$controller" >/dev/null || fail "LuCI status projection drops configured egress state"
+grep -F 'result.egress.remote = safe_egress_object(status.egress.remote)' "$controller" >/dev/null || fail "LuCI status projection omits remote egress state"
 grep -F 'template("candy/sdwan")' "$controller" >/dev/null || fail "dedicated LuCI SD-WAN page is missing"
 grep -F 'tonumber(parsed.schema_version) == 1' "$sdwan" >/dev/null || fail "LuCI SD-WAN page does not require formal V1 state"
+grep -F 'profile-v1.json' "$sdwan" >/dev/null || fail "LuCI does not consume the synchronized Cloud profile"
+grep -F 'Current site' "$sdwan" >/dev/null || fail "LuCI does not provide a human-safe Site fallback"
+grep -F 'Current network' "$sdwan" >/dev/null || fail "LuCI does not provide a human-safe network fallback"
+if grep -E 'Unnamed (site|network|peer)|short_id|String\(peer\.id\)\.slice' "$sdwan" >/dev/null; then
+	fail "LuCI exposes internal SD-WAN identifiers as display names"
+fi
 for label in 'Site' 'Segment' 'Cloud' 'Full duplex' 'Peer' 'Direct' 'Relay' 'Local egress' 'Remote egress' 'Internal DNS'; do
 	grep -F "$label" "$sdwan" >/dev/null || fail "SD-WAN page is missing $label"
 done

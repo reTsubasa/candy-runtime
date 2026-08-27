@@ -71,22 +71,23 @@ local function object_value(value, key)
 	if type(value) == "table" then return value[key] or value.name or value.id end
 	return value
 end
+local function is_uuid(value)
+	if type(value) ~= "string" then return false end
+	local compact = value:gsub("%-", "")
+	return #compact == 32 and compact:match("^[0-9a-fA-F]+$") ~= nil
+end
+local function human_name(value)
+	if type(value) ~= "string" or value == "" or is_uuid(value) then return nil end
+	return value
+end
 local function safe_identity_value(key, limit)
 	local value = identity[key]
 	if type(value) ~= "string" or value == "" or #value > (limit or 256) then return nil end
 	return value
 end
-local function short_id(value)
-	if type(value) ~= "string" or value == "" then return nil end
-	if #value <= 12 then return value end
-	return value:sub(1, 8)
-end
 local function friendly_identity(value, fallback)
-	local name = type(value) == "table" and value.name or nil
-	local id = type(value) == "table" and value.id or value
-	if name and name ~= "" then return label(name) end
-	if type(id) == "string" and id ~= "" then return xml.pcdata(fallback .. " (" .. short_id(id) .. ")") end
-	return translate("Unavailable")
+	local name = type(value) == "table" and human_name(value.name) or human_name(value)
+	return label(name or fallback)
 end
 local cloud_address = registration.cloud_address or identity.cloud_address or ""
 local cloud_name = cloud_address:gsub("^https://", ""):gsub("/.*$", "")
@@ -95,17 +96,20 @@ local organization_name = type(profile.organization_name) == "string" and profil
 local tenant_name = type(profile.tenant_name) == "string" and profile.tenant_name or nil
 local status_site_id = object_value(status and status.site, "id")
 local status_segment_id = object_value(status and status.segment, "id")
-local site_value = object_value(status and status.site, "name")
-local segment_value = object_value(status and status.segment, "name")
+local site_value = human_name(object_value(status and status.site, "name"))
+local segment_value = human_name(object_value(status and status.segment, "name"))
 if (not site_value or site_value == status_site_id) and type(profile.site_id) == "string" and profile.site_id == status_site_id and type(profile.site_name) == "string" then site_value = profile.site_name end
 if (not segment_value or segment_value == status_segment_id) and type(profile.segment_id) == "string" and profile.segment_id == status_segment_id and type(profile.segment_name) == "string" then segment_value = profile.segment_name end
-if not site_value or site_value == status_site_id then site_value = status_site_id and (translate("Unnamed site") .. " (" .. short_id(status_site_id) .. ")") or nil end
-if not segment_value or segment_value == status_segment_id then segment_value = status_segment_id and (translate("Unnamed network") .. " (" .. short_id(status_segment_id) .. ")") or nil end
+site_value = human_name(site_value) or (status_site_id and translate("Current site") or nil)
+segment_value = human_name(segment_value) or (status_segment_id and translate("Current network") or nil)
 local peers = type(status and status.peers) == "table" and status.peers or {}
 local path = type(status and status.path) == "table" and status.path or nil
 local tun = type(status and status.tun) == "table" and status.tun or {}
 local egress = type(status and status.egress) == "table" and status.egress or {}
 local dns = type(status and status.dns) == "table" and status.dns or {}
+local local_egress_configured = egress["local"] ~= nil
+local remote_egress_configured = egress.remote ~= nil and (type(egress.remote) ~= "table" or (egress.remote.state ~= "unavailable" and egress.remote.state ~= "not-configured"))
+local dns_configured = dns.state ~= nil and dns.state ~= "" and dns.state ~= "unavailable" and dns.state ~= "not-configured"
 local network_ready = registration_state == "registered" and status_site_id ~= nil and status_site_id ~= "" and status_segment_id ~= nil and status_segment_id ~= ""
 local runtime_active = runtime.state == "running" and tun.state ~= "unavailable"
 local sync_failed = sync_status.state == "error"
@@ -236,15 +240,15 @@ local result = luci.http.formvalue("result") or ""
 			<div class="candy-sdwan-details">
 				<h3><%:Network status%></h3>
 				<dl class="candy-sdwan-grid">
-					<div><dt><%:Site%></dt><dd><%=label(site_value)%></dd></div>
-					<div><dt><%:Segment%></dt><dd><%=label(segment_value)%></dd></div>
+					<div><dt><%:Site%></dt><dd id="candy-sdwan-site"><%=label(site_value)%></dd></div>
+					<div><dt><%:Segment%></dt><dd id="candy-sdwan-segment"><%=label(segment_value)%></dd></div>
 					<div><dt><%:TUN%></dt><dd id="candy-sdwan-tun"><span class="candy-status-chip <%=tun.state == "running" and "ok" or (tun.state == "reconnecting" and "warn" or "")%>"><%=runtime_state_label(tun.state)%></span><% if tun.full_duplex == true then %> / <%:Full duplex%><% end %></dd></div>
 					<div><dt><%:Path%></dt><dd id="candy-sdwan-path"><% if path and (path.kind == "direct" or path.kind == "relay") then %><span class="candy-status-chip ok"><%=path.kind == "direct" and translate("Direct") or translate("Relay")%></span><% else %><span class="candy-status-chip"><%=translate("Unavailable")%></span><% end %></dd></div>
 					<div><dt><%:Runtime%></dt><dd id="candy-sdwan-runtime"><span class="candy-status-chip <%=runtime.state == "running" and "ok" or (runtime.state == "reconnecting" and "warn" or (runtime.state == "fail-open" and "bad" or ""))%>"><%=runtime_state_label(runtime.state)%></span></dd></div>
 					<div><dt><%:Freshness%></dt><dd id="candy-sdwan-freshness"><%=runtime.updated_at and label(os.date("%Y-%m-%d %H:%M:%S", runtime.updated_at)) or translate("Unavailable")%></dd></div>
-					<div><dt><%:Local egress%></dt><dd><%=friendly_identity(egress["local"], translate("Unnamed local egress"))%><% if not egress["local"] then %><small class="candy-sdwan-hint"><%:Unavailable until Candy Cloud publishes a local-egress configuration.%></small><% end %></dd></div>
-					<div><dt><%:Remote egress%></dt><dd><%=friendly_identity(egress.remote, translate("Unnamed remote egress"))%><% if not egress.remote then %><small class="candy-sdwan-hint"><%:Unavailable until Candy Cloud publishes a remote-egress configuration.%></small><% end %></dd></div>
-					<div><dt><%:Internal DNS%></dt><dd><%=runtime_state_label(dns.state)%><% if dns.state == "unavailable" or dns.state == nil or dns.state == "" then %><small class="candy-sdwan-hint"><%:Unavailable until Candy Cloud publishes an internal DNS configuration.%></small><% end %></dd></div>
+					<div id="candy-sdwan-local-egress-row"<%=local_egress_configured and "" or ' style="display:none"'%>><dt><%:Local egress%></dt><dd id="candy-sdwan-local-egress"><%=friendly_identity(egress["local"], translate("Cloud-managed local egress"))%></dd></div>
+					<div id="candy-sdwan-remote-egress-row"<%=remote_egress_configured and "" or ' style="display:none"'%>><dt><%:Remote egress%></dt><dd id="candy-sdwan-remote-egress"><% if type(egress.remote) == "table" and egress.remote.state then %><span class="candy-status-chip <%=egress.remote.state == "running" and "ok" or (egress.remote.state == "reconnecting" and "warn" or "")%>"><%=runtime_state_label(egress.remote.state)%></span><% else %><%=friendly_identity(egress.remote, translate("Cloud-managed remote egress"))%><% end %></dd></div>
+					<div id="candy-sdwan-dns-row"<%=dns_configured and "" or ' style="display:none"'%>><dt><%:Internal DNS%></dt><dd id="candy-sdwan-dns"><span class="candy-status-chip <%=dns.state == "running" and "ok" or (dns.state == "reconnecting" and "warn" or "")%>"><%=runtime_state_label(dns.state)%></span></dd></div>
 				</dl>
 				<h3 style="margin-top:1.25em"><%:Peers%></h3>
 				<div class="candy-sdwan-peer-scroll">
@@ -252,7 +256,7 @@ local result = luci.http.formvalue("result") or ""
 						<thead><tr><th><%:Peer site%></th><th><%:Status%></th><th><%:Path%></th></tr></thead>
 						<tbody id="candy-sdwan-peers">
 						<% if #peers == 0 then %><tr><td class="candy-sdwan-peer-empty" colspan="3"><%:No peer links are available until Candy Cloud publishes the Site connections.%></td></tr><% else %>
-						<% for _, peer in ipairs(peers) do local peer_name = peer.name or (peer.id and (translate("Unnamed peer") .. " (" .. short_id(peer.id) .. ")")) or "" %><tr>
+						<% for index, peer in ipairs(peers) do local peer_name = human_name(peer.name) or (translate("Peer site") .. " " .. index) %><tr>
 							<td><span class="candy-sdwan-long" title="<%=label(peer_name)%>"><%=label(peer_name)%></span></td>
 							<td><span class="candy-status-chip <%=peer.state == "running" and "ok" or (peer.state == "reconnecting" and "warn" or "bad")%>"><%=runtime_state_label(peer.state)%></span></td>
 							<td><% if type(peer.path) == "table" and (peer.path.kind == "direct" or peer.path.kind == "relay") then %><%=peer.path.kind == "direct" and translate("Direct") or translate("Relay")%><% else %>-<% end %></td>
@@ -295,9 +299,14 @@ local result = luci.http.formvalue("result") or ""
 			minutesAgo: <%=string.format("%q", translate("minutes ago"))%>,
 			now: <%=string.format("%q", translate("Now"))%>,
 			noPeers: <%=string.format("%q", translate("No peer links are available until Candy Cloud publishes the Site connections."))%>,
-			unnamedPeer: <%=string.format("%q", translate("Unnamed peer"))%>
+			peerSite: <%=string.format("%q", translate("Peer site"))%>,
+			currentSite: <%=string.format("%q", translate("Current site"))%>,
+			currentNetwork: <%=string.format("%q", translate("Current network"))%>,
+			localEgress: <%=string.format("%q", translate("Cloud-managed local egress"))%>,
+			remoteEgress: <%=string.format("%q", translate("Cloud-managed remote egress"))%>
 		};
 		function text(value) { return value === null || value === undefined || value === "" ? labels.unavailable : String(value); }
+		function isUuid(value) { return typeof value === "string" && /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i.test(value); }
 		function stateText(value) {
 			if (value === "running") return labels.running;
 			if (value === "reconnecting") return labels.reconnecting;
@@ -318,6 +327,33 @@ local result = luci.http.formvalue("result") or ""
 			element.appendChild(chip(value, state));
 			if (suffix) element.appendChild(document.createTextNode(" / " + suffix));
 		}
+		function objectName(value, fallback) {
+			var name = value && typeof value === "object" ? value.name : value;
+			return name && !isUuid(name) ? String(name) : fallback;
+		}
+		function setOptionalText(rowId, valueId, value, fallback) {
+			var row = document.getElementById(rowId), node = document.getElementById(valueId);
+			if (!row || !node) return;
+			row.style.display = value === null || value === undefined ? "none" : "";
+			if (row.style.display !== "none") node.textContent = objectName(value, fallback);
+		}
+		function setOptionalState(rowId, valueId, value) {
+			var row = document.getElementById(rowId), node = document.getElementById(valueId);
+			var state = value && typeof value === "object" ? value.state : value;
+			var configured = state && state !== "unavailable" && state !== "not-configured";
+			if (!row || !node) return;
+			row.style.display = configured ? "" : "none";
+			if (!configured) return;
+			node.textContent = "";
+			node.appendChild(chip(stateText(state), state));
+		}
+		function setOptionalEgress(rowId, valueId, value, fallback) {
+			if (value && typeof value === "object" && value.state) {
+				setOptionalState(rowId, valueId, value);
+				return;
+			}
+			setOptionalText(rowId, valueId, value, fallback);
+		}
 		function freshness(value) {
 			var timestamp = Number(value);
 			if (!isFinite(timestamp) || timestamp <= 0) return labels.unavailable;
@@ -336,9 +372,9 @@ local result = luci.http.formvalue("result") or ""
 				emptyCell.colSpan = 3; emptyCell.className = "candy-sdwan-peer-empty"; emptyCell.textContent = labels.noPeers;
 				emptyRow.appendChild(emptyCell); body.appendChild(emptyRow); return;
 			}
-			peers.forEach(function(peer) {
+			peers.forEach(function(peer, index) {
 				var row = document.createElement("tr");
-				var peerName = peer.name || (peer.id ? labels.unnamedPeer + " (" + String(peer.id).slice(0, 8) + ")" : labels.unavailable);
+				var peerName = peer.name && !isUuid(peer.name) ? peer.name : labels.peerSite + " " + (index + 1);
 				var nameCell = document.createElement("td"), nameSpan = document.createElement("span"); nameSpan.className = "candy-sdwan-long"; nameSpan.textContent = peerName; nameSpan.title = peerName; nameCell.appendChild(nameSpan); row.appendChild(nameCell);
 				var stateCell = document.createElement("td"); stateCell.appendChild(chip(stateText(peer.state), peer.state)); row.appendChild(stateCell);
 				var pathCell = document.createElement("td"), kind = peer.path && peer.path.kind; pathCell.textContent = kind === "direct" ? labels.direct : (kind === "relay" ? labels.relay : "-"); row.appendChild(pathCell);
@@ -346,10 +382,16 @@ local result = luci.http.formvalue("result") or ""
 			});
 		}
 		function render(status) {
-			var runtime = status.runtime || {}, tun = status.tun || {}, path = status.path || {};
+			var runtime = status.runtime || {}, tun = status.tun || {}, path = status.path || {}, egress = status.egress || {}, dns = status.dns || {};
+			var siteNode = document.getElementById("candy-sdwan-site"), segmentNode = document.getElementById("candy-sdwan-segment");
+			if (siteNode) siteNode.textContent = objectName(status.site, status.site ? labels.currentSite : labels.unavailable);
+			if (segmentNode) segmentNode.textContent = objectName(status.segment, status.segment ? labels.currentNetwork : labels.unavailable);
 			setStatus("candy-sdwan-runtime", stateText(runtime.state), runtime.state);
 			setStatus("candy-sdwan-tun", stateText(tun.state), tun.state, tun.full_duplex === true ? labels.fullDuplex : "");
 			setStatus("candy-sdwan-path", path.kind === "direct" ? labels.direct : (path.kind === "relay" ? labels.relay : labels.unavailable), path.state || (path.kind ? "running" : "unavailable"));
+			setOptionalEgress("candy-sdwan-local-egress-row", "candy-sdwan-local-egress", egress["local"], labels.localEgress);
+			setOptionalEgress("candy-sdwan-remote-egress-row", "candy-sdwan-remote-egress", egress.remote, labels.remoteEgress);
+			setOptionalState("candy-sdwan-dns-row", "candy-sdwan-dns", dns.state);
 			var freshnessNode = document.getElementById("candy-sdwan-freshness"); if (freshnessNode) freshnessNode.textContent = freshness(runtime.updated_at);
 			renderPeers(status.peers || []);
 		}

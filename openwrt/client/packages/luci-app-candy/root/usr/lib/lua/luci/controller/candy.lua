@@ -165,6 +165,18 @@ local function read_sdwan_status(_uci)
 		if not id and not name then return nil end
 		return { id = id, name = name }
 	end
+	local function safe_egress_object(value)
+		if type(value) ~= "table" then return safe_identity_object(value) end
+		local result = safe_identity_object(value) or {}
+		local state = safe_string(value.state, 32)
+		if state then result.state = state end
+		local route_count = tonumber(value.route_count)
+		local peer_count = tonumber(value.peer_count)
+		if route_count and route_count >= 0 and route_count <= 4096 then result.route_count = route_count end
+		if peer_count and peer_count >= 0 and peer_count <= 4096 then result.peer_count = peer_count end
+		if next(result) == nil then return nil end
+		return result
+	end
 	local registration = type(status.registration) == "table" and status.registration or {}
 	local runtime = type(status.runtime) == "table" and status.runtime or {}
 	local registration_state = safe_string(registration.state, 32) or "unregistered"
@@ -206,8 +218,8 @@ local function read_sdwan_status(_uci)
 		if kind == "direct" or kind == "relay" then result.path = { kind = kind, state = safe_string(status.path.state, 32) or "unavailable" } end
 	end
 	if type(status.egress) == "table" then
-		result.egress["local"] = safe_identity_object(status.egress["local"])
-		result.egress.remote = safe_identity_object(status.egress.remote)
+		result.egress["local"] = safe_egress_object(status.egress["local"])
+		result.egress.remote = safe_egress_object(status.egress.remote)
 	end
 	if type(status.dns) == "table" then result.dns.state = safe_string(status.dns.state, 32) or "unavailable" end
 	return result
