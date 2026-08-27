@@ -94,8 +94,8 @@ local cloud_name = cloud_address:gsub("^https://", ""):gsub("/.*$", "")
 local display_name = type(profile.device_name) == "string" and profile.device_name or safe_identity_value("display_name", 200)
 local organization_name = type(profile.organization_name) == "string" and profile.organization_name or nil
 local tenant_name = type(profile.tenant_name) == "string" and profile.tenant_name or nil
-local status_site_id = object_value(status and status.site, "id")
-local status_segment_id = object_value(status and status.segment, "id")
+local status_site_id = object_value(status and status.site, "id") or (type(profile.site_id) == "string" and profile.site_id or nil)
+local status_segment_id = object_value(status and status.segment, "id") or (type(profile.segment_id) == "string" and profile.segment_id or nil)
 local site_value = human_name(object_value(status and status.site, "name"))
 local segment_value = human_name(object_value(status and status.segment, "name"))
 if (not site_value or site_value == status_site_id) and type(profile.site_id) == "string" and profile.site_id == status_site_id and type(profile.site_name) == "string" then site_value = profile.site_name end
@@ -112,9 +112,10 @@ local remote_egress_configured = egress.remote ~= nil and (type(egress.remote) ~
 local dns_configured = dns.state ~= nil and dns.state ~= "" and dns.state ~= "unavailable" and dns.state ~= "not-configured"
 local network_ready = registration_state == "registered" and status_site_id ~= nil and status_site_id ~= "" and status_segment_id ~= nil and status_segment_id ~= ""
 local runtime_active = runtime.state == "running" and tun.state ~= "unavailable"
+local runtime_stopped = runtime.state == "stopped"
 local sync_failed = sync_status.state == "error"
-local profile_state = registration_state ~= "registered" and "disconnected" or (sync_failed and "error" or (not network_ready and "waiting" or (runtime_active and "active" or "applying")))
-local profile_state_label = profile_state == "active" and translate("Active") or (profile_state == "error" and translate("Configuration could not be applied") or (profile_state == "applying" and translate("Applying network configuration") or (profile_state == "waiting" and translate("Waiting for network configuration") or translate("Not connected"))))
+local profile_state = registration_state ~= "registered" and "disconnected" or (sync_failed and "error" or (not network_ready and "waiting" or (runtime_active and "active" or (runtime_stopped and "stopped" or "applying"))))
+local profile_state_label = profile_state == "active" and translate("Active") or (profile_state == "error" and translate("Configuration could not be applied") or (profile_state == "stopped" and translate("Stopped") or (profile_state == "applying" and translate("Applying network configuration") or (profile_state == "waiting" and translate("Waiting for network configuration") or translate("Not connected")))))
 local scope_kind = tenant_name or organization_name or translate("Cloud account")
 local result = luci.http.formvalue("result") or ""
 %>
@@ -136,6 +137,7 @@ local result = luci.http.formvalue("result") or ""
 	.candy-cloud-profile-state { display:inline-flex; align-items:center; min-height:1.75em; padding:.1em .55em; border-radius:3px; border:1px solid #f7ba1e; color:#8d4f00; background:#fffbe6; font-size:.88em; font-weight:600; white-space:nowrap; }
 	.candy-cloud-profile-state.active { border-color:#7bc48f; color:#16763c; background:#f0fff4; }
 	.candy-cloud-profile-state.applying { border-color:#93b5e8; color:#165dff; background:#e8f3ff; }
+	.candy-cloud-profile-state.stopped { border-color:#c9cdd4; color:#4e5969; background:#f7f8fa; }
 	.candy-cloud-profile-state.error { border-color:#f98981; color:#b42318; background:#fff2f0; }
 	.candy-cloud-profile-state-group { display:flex; align-items:center; gap:.65em; flex-wrap:wrap; justify-content:flex-end; }
 	.candy-cloud-profile-meta { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); padding:.9em 1em; gap:1em; }
@@ -231,7 +233,7 @@ local result = luci.http.formvalue("result") or ""
 			<div class="candy-cloud-progress">
 				<div class="done"><strong><%:Identity authorized%></strong><span><%:Cloud trust established%></span></div>
 				<div class="<%=network_ready and "done" or "current"%>"><strong><%=network_ready and translate("Network configured") or translate("Network configuration pending")%></strong><span><%=network_ready and label(site_value) or translate("Assign this node to a Site and network in Cloud")%></span></div>
-				<div class="<%=runtime_active and "done" or (network_ready and "current" or "")%>"><strong><%=runtime_active and translate("SD-WAN active") or (sync_failed and translate("Configuration could not be applied") or (network_ready and translate("Applying SD-WAN configuration") or translate("SD-WAN pending")))%></strong><span><%=runtime_active and runtime_state_label(runtime.state) or (sync_failed and translate("Open Logs for details; ordinary Candy traffic is unaffected") or translate("Activation is automatic after Cloud publishes a complete configuration"))%></span></div>
+				<div class="<%=runtime_active and "done" or (network_ready and "current" or "")%>"><strong><%=runtime_active and translate("SD-WAN active") or (runtime_stopped and translate("Stopped") or (sync_failed and translate("Configuration could not be applied") or (network_ready and translate("Applying SD-WAN configuration") or translate("SD-WAN pending"))))%></strong><span><%=runtime_active and runtime_state_label(runtime.state) or (runtime_stopped and translate("SD-WAN stopped.") or (sync_failed and translate("Open Logs for details; ordinary Candy traffic is unaffected") or translate("Activation is automatic after Cloud publishes a complete configuration")))%></span></div>
 			</div>
 			</div>
 			<% if not network_ready then %>
@@ -267,10 +269,15 @@ local result = luci.http.formvalue("result") or ""
 			</div>
 			<% if network_ready then %>
 				<div class="candy-sdwan-routing-note"><strong><%:How traffic is selected%></strong><br /><%:Published remote site networks always use the SD-WAN full-duplex TUN because their routes are more specific. When a policy selects a remote Internet egress, traffic uses the TUN to reach that site's Candy egress. Traffic that does not match an SD-WAN network or remote-egress policy continues through this router's normal Candy node and DNS rules. If SD-WAN fails, only its own routes are withdrawn and ordinary Candy traffic remains on its normal path.%></div>
-				<div class="candy-sdwan-actions">
+			<% end %>
+			<% if network_ready or runtime_stopped then %>
+				<div class="candy-sdwan-actions" id="candy-sdwan-runtime-actions">
+				<% if runtime_stopped then %>
 					<form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_start')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-apply" type="submit"><%:Start%></button></form>
+				<% else %>
 					<form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_stop')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-reset" type="submit"><%:Stop%></button></form>
 					<form method="post" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_reconnect')%>"><input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" /><button class="cbi-button cbi-button-action" type="submit"><%:Reconnect%></button></form>
+				<% end %>
 				</div>
 			<% end %>
 			<div class="candy-sdwan-profile-management">

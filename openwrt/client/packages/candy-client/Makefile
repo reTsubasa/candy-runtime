@@ -4,7 +4,7 @@ PKG_NAME:=candy-client
 PKG_VERSION:=0.4.0
 # OpenWrt requires a package revision. This is internal metadata, not part of
 # the Candy product version shown to users.
-PKG_RELEASE:=86
+PKG_RELEASE:=87
 CANDY_RUNTIME_BIN_DIR?=
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)

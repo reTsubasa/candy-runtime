@@ -426,8 +426,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=86$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=86$'
+assert_contains "$makefile" '^PKG_RELEASE:=87$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=87$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'
@@ -732,6 +732,16 @@ assert_contains "$lifecycle_view" '<%\+candy/core%>'
 assert_contains "$update_view" '<%:Runtime updates%>'
 assert_contains "$core_view" '<%:Core lifecycle%>'
 assert_contains "$sdwan" 'Candy SD-WAN connects sites through encrypted links'
+assert_contains "$sdwan" 'status_site_id = object_value\(status and status\.site, "id"\) or \(type\(profile\.site_id\) == "string" and profile\.site_id or nil\)'
+assert_contains "$sdwan" 'status_segment_id = object_value\(status and status\.segment, "id"\) or \(type\(profile\.segment_id\) == "string" and profile\.segment_id or nil\)'
+assert_contains "$sdwan" 'local runtime_stopped = runtime\.state == "stopped"'
+assert_contains "$sdwan" '<% if network_ready or runtime_stopped then %>'
+assert_contains "$sdwan" '<% if runtime_stopped then %>'
+assert_contains "$sdwan" 'id="candy-sdwan-runtime-actions"'
+network_ready_start_line=$(grep -n '<% if network_ready then %>' "$repo_root/$sdwan" | tail -1 | cut -d: -f1)
+network_ready_end_line=$(grep -n '<% end %>' "$repo_root/$sdwan" | awk -F: -v start="$network_ready_start_line" '$1 > start { print $1; exit }')
+runtime_actions_line=$(grep -n 'id="candy-sdwan-runtime-actions"' "$repo_root/$sdwan" | cut -d: -f1)
+[ "$runtime_actions_line" -gt "$network_ready_end_line" ] || fail "SD-WAN lifecycle actions disappear when Runtime is stopped"
 assert_contains "$sdwan" 'local_egress_configured'
 assert_contains "$sdwan" 'remote_egress_configured'
 assert_contains "$sdwan" 'dns_configured'
