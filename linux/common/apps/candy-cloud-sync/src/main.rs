@@ -1020,9 +1020,9 @@ fn project_product_network_status(
     }
 
     let peers = peer_sites
-        .into_iter()
+        .iter()
         .map(|(attachment_id, site_id)| {
-            let path = active_paths.get(&attachment_id);
+            let path = active_paths.get(attachment_id);
             let name = site_id
                 .as_ref()
                 .and_then(|site_id| control.peer_site_names.get(site_id));
@@ -1053,10 +1053,19 @@ fn project_product_network_status(
         let mut owners = remote_egress_routes
             .iter()
             .flat_map(|route| route.owner_attachment_ids.iter())
-            .collect::<Vec<_>>();
+            .map(|owner| canonical_uuid_hex(owner))
+            .collect::<Result<Vec<_>>>()?;
         owners.sort_unstable();
         owners.dedup();
+        let owner = (owners.len() == 1).then(|| owners[0].clone());
+        let owner_name = owner
+            .as_ref()
+            .and_then(|attachment| peer_sites.get(attachment))
+            .and_then(Option::as_ref)
+            .and_then(|site_id| control.peer_site_names.get(site_id));
         serde_json::json!({
+            "id": owner,
+            "name": owner_name,
             "state": if fully_ready { "running" } else { projected_state },
             "route_count": remote_egress_routes.len(),
             "peer_count": owners.len()
@@ -6402,6 +6411,11 @@ default via 192.0.2.1 dev eth0 proto static
         assert_eq!(document["egress"]["remote"]["state"], "running");
         assert_eq!(document["egress"]["remote"]["route_count"], 1);
         assert_eq!(document["egress"]["remote"]["peer_count"], 1);
+        assert_eq!(
+            document["egress"]["remote"]["id"],
+            "12121212-1212-1212-1212-121212121212"
+        );
+        assert_eq!(document["egress"]["remote"]["name"], "Shanghai office");
     }
 
     #[test]

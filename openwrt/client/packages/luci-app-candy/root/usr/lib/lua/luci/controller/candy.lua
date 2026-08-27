@@ -211,7 +211,7 @@ local function read_sdwan_status(_uci)
 					local kind = safe_string(peer.path.kind, 16)
 					if kind == "direct" or kind == "relay" then path = { kind = kind, state = safe_string(peer.path.state, 32) or "unavailable" } end
 				end
-				result.peers[#result.peers + 1] = { id = safe_string(peer.id, 128) or "", name = safe_string(peer.name, 128), state = safe_string(peer.state, 32) or "unavailable", path = path }
+				result.peers[#result.peers + 1] = { id = safe_string(peer.id, 128) or "", attachment_id = safe_string(peer.attachment_id, 128), name = safe_string(peer.name, 128), state = safe_string(peer.state, 32) or "unavailable", path = path }
 			end
 		end
 	end
@@ -1293,19 +1293,55 @@ function action_status_json()
 	status.nodes = status.nodes or {}
 	local sdwan_performance = status.sdwan.performance
 	local remote = status.sdwan.egress and status.sdwan.egress.remote or nil
-	if status.sdwan.active and sdwan_performance and type(remote) == "table" and (remote.name or remote.id) then
-		status.nodes[#status.nodes + 1] = {
-			name = remote.name or remote.id,
-			state = sdwan_performance.lifecycle == "active" and "running" or sdwan_performance.lifecycle,
-			groups = { "SD-WAN" },
-			role = "remote_egress",
-			rtt_ms = sdwan_performance.rtt_ms,
-			rx_bps = sdwan_performance.rx_bps,
-			tx_bps = sdwan_performance.tx_bps,
-			active_tcp_flows = nil,
-			active_udp_flows = nil,
-			telemetry_status = "reported"
-		}
+	if status.sdwan.active and sdwan_performance then
+		local function canonical_id(value)
+			if type(value) ~= "string" then return nil end
+			value = value:lower():gsub("%-", "")
+			return #value == 32 and value:match("^[0-9a-f]+$") and value or nil
+		end
+		local paths = {}
+		for _, path in ipairs(sdwan_performance.paths or {}) do
+			if type(path) == "table" then
+				local attachment_id = canonical_id(path.peer_attachment_id)
+				if attachment_id then paths[attachment_id] = path end
+			end
+		end
+		local remote_id = type(remote) == "table" and canonical_id(remote.id) or nil
+		for _, peer in ipairs(status.sdwan.peers or {}) do
+			local peer_id = canonical_id(peer.attachment_id or peer.id)
+			local path = peer_id and paths[peer_id] or nil
+			status.nodes[#status.nodes + 1] = {
+				name = peer.name or peer.id,
+				id = peer.id,
+				state = peer.state,
+				groups = { "SD-WAN" },
+				role = remote_id and peer_id == remote_id and "remote_egress" or "sdwan_peer",
+				rtt_ms = path and tonumber(path.rtt_ms) or nil,
+				jitter_ms = path and tonumber(path.jitter_ms) or nil,
+				packet_loss_ppm = path and tonumber(path.packet_loss_ppm) or nil,
+				rx_bps = path and tonumber(path.rx_bps) or nil,
+				tx_bps = path and tonumber(path.tx_bps) or nil,
+				reconnects = path and tonumber(path.reconnects) or nil,
+				path_changes = path and tonumber(path.path_changes) or nil,
+				active_tcp_flows = nil,
+				active_udp_flows = nil,
+				telemetry_status = path and "reported" or "unavailable"
+			}
+		end
+		if #(status.sdwan.peers or {}) == 0 and type(remote) == "table" and (remote.name or remote.id) then
+			status.nodes[#status.nodes + 1] = {
+				name = remote.name or remote.id,
+				state = sdwan_performance.lifecycle == "active" and "running" or sdwan_performance.lifecycle,
+				groups = { "SD-WAN" },
+				role = "remote_egress",
+				rtt_ms = sdwan_performance.rtt_ms,
+				rx_bps = sdwan_performance.rx_bps,
+				tx_bps = sdwan_performance.tx_bps,
+				active_tcp_flows = nil,
+				active_udp_flows = nil,
+				telemetry_status = "reported"
+			}
+		end
 	end
 	status.traffic_path = effective_traffic_path(status.sdwan, service, status.nodes)
 	status.diagnostics = status.diagnostics or {}
