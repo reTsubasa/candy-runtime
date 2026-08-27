@@ -66,6 +66,7 @@ chmod 0755 "$pkg_dir/candy-sdwan-runtime"
 cp "$client_package/catalog-release.pub" "$pkg_dir/catalog-release.pub"
 cp "$client_package/core-release.pub" "$pkg_dir/core-release.pub"
 cp -R "$client_package/rulesets" "$pkg_dir/rulesets"
+cp -R "$client_package/nftables" "$pkg_dir/nftables"
 
 luci_pkg_dir="$sdk/package/luci-app-candy"
 rm -rf "$luci_pkg_dir"
