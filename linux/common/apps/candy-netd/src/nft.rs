@@ -4,6 +4,7 @@ use nix::sys::socket::{
     SockType,
 };
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::process::{Command, ExitStatus};
 
 const NFNETLINK_V0: u8 = 0;
 const NLA_F_NESTED: u16 = 1 << 15;
@@ -59,6 +60,8 @@ const NFTA_NAT_REG_ADDR_MIN: u16 = 3;
 const NFT_FORWARD_CHAIN_NAME: &str = "forward";
 const NFT_POSTROUTING_CHAIN_NAME: &str = "postrouting";
 const OWNER_PREFIX: &[u8] = b"candy-netd-v1:";
+const DOCKER_USER_CHAIN: &str = "DOCKER-USER";
+const DOCKER_RULE_COMMENT: &str = "candy-netd-v1";
 
 pub fn preflight_nft(plan: &LinuxNetworkPlan) -> Result<(), NetworkError> {
     let socket = open_socket()?;
@@ -150,7 +153,77 @@ pub fn stage_firewall(
             remote_egress_masquerade_rule(plan),
         );
     }
-    send_batch(&socket, batch)
+    send_batch(&socket, batch)?;
+    stage_docker_forward_compatibility()
+}
+
+fn iptables_status(args: &[&str]) -> Result<Option<ExitStatus>, NetworkError> {
+    match Command::new("iptables").args(args).status() {
+        Ok(status) => Ok(Some(status)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(NetworkError::Backend),
+    }
+}
+
+fn docker_rule_args<'a>(operation: &'a str, direction: &'a str) -> [&'a str; 11] {
+    [
+        "-w",
+        "5",
+        operation,
+        DOCKER_USER_CHAIN,
+        direction,
+        candy_netd_proto::CANDY_INTERFACE_NAME,
+        "-m",
+        "comment",
+        "--comment",
+        DOCKER_RULE_COMMENT,
+        "-j",
+    ]
+}
+
+fn docker_rule_command<'a>(operation: &'a str, direction: &'a str) -> Vec<&'a str> {
+    let mut args = docker_rule_args(operation, direction).to_vec();
+    args.push("ACCEPT");
+    args
+}
+
+fn stage_docker_forward_compatibility() -> Result<(), NetworkError> {
+    let Some(chain) = iptables_status(&["-w", "5", "-S", DOCKER_USER_CHAIN])? else {
+        return Ok(());
+    };
+    if !chain.success() {
+        return Ok(());
+    }
+    for direction in ["-i", "-o"] {
+        let check = docker_rule_command("-C", direction);
+        if iptables_status(&check)?.is_some_and(|status| status.success()) {
+            continue;
+        }
+        let insert = docker_rule_command("-I", direction);
+        if !iptables_status(&insert)?.is_some_and(|status| status.success()) {
+            return Err(NetworkError::Backend);
+        }
+    }
+    Ok(())
+}
+
+fn remove_docker_forward_compatibility() -> Result<(), NetworkError> {
+    let Some(chain) = iptables_status(&["-w", "5", "-S", DOCKER_USER_CHAIN])? else {
+        return Ok(());
+    };
+    if !chain.success() {
+        return Ok(());
+    }
+    for direction in ["-i", "-o"] {
+        let check = docker_rule_command("-C", direction);
+        while iptables_status(&check)?.is_some_and(|status| status.success()) {
+            let delete = docker_rule_command("-D", direction);
+            if !iptables_status(&delete)?.is_some_and(|status| status.success()) {
+                return Err(NetworkError::Backend);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn base_chain(
@@ -373,6 +446,7 @@ fn compare_data(operation: u32, value: &[u8]) -> Attribute {
 }
 
 pub fn remove_firewall(plan: &LinuxNetworkPlan) -> Result<(), NetworkError> {
+    remove_docker_forward_compatibility()?;
     let socket = open_socket()?;
     match owned_table_state(&socket, plan)? {
         OwnedTableState::Absent => return Ok(()),

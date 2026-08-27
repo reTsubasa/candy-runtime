@@ -3053,12 +3053,14 @@ write_fw4_include() {
 		if [ "$block_quic" -eq 1 ]; then
 			printf 'chain candy_forward {\n'
 			printf '  type filter hook forward priority -1; policy accept;\n'
+			printf '  iifname "br-lan" oifname "candy0" counter return\n'
 			printf '  iifname "br-lan" udp dport 443 counter reject\n'
 			printf '}\n'
 		fi
 		if [ "$redirect_udp" -eq 1 ] && [ "$block_quic" -ne 1 ]; then
 			printf 'chain candy_tproxy {\n'
 			printf '  type filter hook prerouting priority mangle; policy accept;\n'
+			printf '  iifname "br-lan" fib daddr oifname "candy0" counter return\n'
 			for bypass_host in $bypass_ipv4_hosts; do
 				printf '  iifname "br-lan" ip daddr %s counter return\n' "$bypass_host"
 			done
@@ -3071,6 +3073,7 @@ write_fw4_include() {
 		fi
 		printf 'chain candy_prerouting {\n'
 		printf '  type nat hook prerouting priority -101; policy accept;\n'
+		printf '  iifname "br-lan" fib daddr oifname "candy0" counter return\n'
 		for bypass_host in $bypass_ipv4_hosts; do
 			printf '  iifname "br-lan" ip daddr %s counter return\n' "$bypass_host"
 		done
