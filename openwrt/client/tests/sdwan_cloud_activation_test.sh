@@ -126,11 +126,22 @@ export CANDY_TEST_STATUS_CALLS
 projected_state=untouched
 sdwan_runtime_state() { projected_state=$1; }
 sdwan_fail_open() { projected_state=fail-open; }
+candy_process_running() { return 0; }
+current_readiness() { return 0; }
+printf '%s\n' '{"runtime":{"state":"running"},"egress":{"remote":null}}' >"$CANDY_SDWAN_STATUS_FILE"
 export CANDY_TEST_VERIFIED_STATE=running
 sdwan_reconcile || fail "unchanged active activation could not refresh product status"
 [ "$projected_state" = untouched ] || fail "shell duplicated verified product status projection"
 grep -F 'project-local-runtime-status' "$CANDY_TEST_STATUS_CALLS" >/dev/null ||
 	fail "OpenWrt reconcile did not request verified product status projection"
+grep -Fq '"source":"candy_proxy"' "$CANDY_TRAFFIC_PATH_FILE" ||
+	fail "selective SD-WAN routes did not preserve the ordinary Candy traffic path"
+grep -Fq '"reason":"sdwan_policy_selective"' "$CANDY_TRAFFIC_PATH_FILE" ||
+	fail "selective SD-WAN routes did not explain the ordinary Candy traffic path"
+printf '%s\n' '{"runtime":{"state":"running"},"egress":{"remote":{"state":"running"}}}' >"$CANDY_SDWAN_STATUS_FILE"
+sdwan_reconcile || fail "remote egress activation could not refresh product status"
+grep -Fq '"source":"sdwan"' "$CANDY_TRAFFIC_PATH_FILE" ||
+	fail "configured remote egress did not publish the SD-WAN traffic path"
 export CANDY_TEST_VERIFIED_STATE=reconnecting
 sdwan_reconcile || fail "starting activation could not refresh product status"
 [ "$projected_state" = untouched ] || fail "shell duplicated reconnecting product status projection"
