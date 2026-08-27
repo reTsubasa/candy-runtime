@@ -367,6 +367,15 @@ if "$manager" check >/dev/null 2>&1; then
 fi
 printf '%s\n' trusted-signature > "$FAKE_CATALOG_SIGNATURE"
 
+if CANDY_UPDATE_MAX_CATALOG_BYTES=64 "$manager" check >"$tmp/oversized.out" 2>"$tmp/oversized.err"; then
+	echo "oversized catalog was accepted" >&2
+	exit 1
+fi
+grep -F 'catalog is empty or exceeds the 64-byte limit' "$tmp/oversized.err" >/dev/null || {
+	echo "oversized catalog was reported as a signature failure" >&2
+	exit 1
+}
+
 if CANDY_UPDATE_TEST_TARGET=x86/generic "$manager" check >/dev/null 2>&1; then
 	echo "catalog check accepted the wrong OpenWrt target" >&2
 	exit 1

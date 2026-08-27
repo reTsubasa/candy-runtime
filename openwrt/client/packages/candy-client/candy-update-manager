@@ -34,7 +34,7 @@ RUNTIME_ASSET_SUFFIX=
 CORE_TARGET_KEY=
 CORE_RUST_TARGET=
 CORE_ARCH=
-MAX_CATALOG_BYTES=${CANDY_UPDATE_MAX_CATALOG_BYTES:-524288}
+MAX_CATALOG_BYTES=${CANDY_UPDATE_MAX_CATALOG_BYTES:-4194304}
 MAX_SIGNATURE_BYTES=${CANDY_UPDATE_MAX_SIGNATURE_BYTES:-4096}
 MAX_RUNTIME_PACKAGE_BYTES=${CANDY_UPDATE_MAX_RUNTIME_PACKAGE_BYTES:-16777216}
 MAX_CORE_BYTES=${CANDY_UPDATE_MAX_CORE_BYTES:-134217728}
@@ -431,6 +431,10 @@ check_catalog() {
 	downloaded_signature=$TEMPORARY/stable.json.sig
 	fetch_https "$CATALOG_URL" "$downloaded_catalog" || fail "catalog download failed"
 	fetch_https "$CATALOG_SIGNATURE_URL" "$downloaded_signature" || fail "catalog signature download failed"
+	regular_bounded_file "$downloaded_catalog" "$MAX_CATALOG_BYTES" ||
+		fail "catalog is empty or exceeds the $MAX_CATALOG_BYTES-byte limit"
+	regular_bounded_file "$downloaded_signature" "$MAX_SIGNATURE_BYTES" ||
+		fail "catalog signature is empty or exceeds the $MAX_SIGNATURE_BYTES-byte limit"
 	verify_catalog_signature "$downloaded_catalog" "$downloaded_signature" || fail "catalog signature is invalid"
 	validate_catalog "$downloaded_catalog" || fail "catalog schema or platform entries are invalid"
 	new_sequence=$(catalog_field "$downloaded_catalog" '@.sequence')
