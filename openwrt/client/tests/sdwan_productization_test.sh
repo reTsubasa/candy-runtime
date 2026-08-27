@@ -139,6 +139,17 @@ if grep -E 'nft[^\n]*(add|create)[^\n]*(candy_sdwan_|table)' "$init"; then
 	fail "shell lifecycle duplicates production netd nft ownership"
 fi
 
+forward_include="$root/candy-client/nftables/10-candy-sdwan.nft"
+[ -f "$forward_include" ] || fail "package-owned fw4 SD-WAN forward include is missing"
+grep -F 'oifname "candy0" tcp flags syn tcp option maxseg size set rt mtu' "$forward_include" >/dev/null ||
+	fail "fw4 SD-WAN forward include does not clamp outbound TCP MSS"
+grep -F 'oifname "candy0" accept' "$forward_include" >/dev/null ||
+	fail "fw4 SD-WAN forward include does not accept outbound tunnel traffic"
+grep -F 'iifname "candy0" accept' "$forward_include" >/dev/null ||
+	fail "fw4 SD-WAN forward include does not accept inbound tunnel traffic"
+grep -F '$(INSTALL_DATA) ./nftables/10-candy-sdwan.nft $(1)/usr/share/nftables.d/chain-pre/forward/10-candy-sdwan.nft' "$root/candy-client/Makefile" >/dev/null ||
+	fail "OpenWrt package does not install the fw4 SD-WAN forward include"
+
 grep -F 'read_sdwan_status(uci)' "$controller" >/dev/null || fail "LuCI status endpoint omits SD-WAN"
 grep -F 'MAX_SDWAN_STATUS_BYTES = 65536' "$controller" >/dev/null || fail "SD-WAN status is unbounded"
 grep -F 'contains_credential_field(status)' "$controller" >/dev/null || fail "SD-WAN status is not redaction checked"
