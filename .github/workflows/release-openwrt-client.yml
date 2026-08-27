@@ -10,8 +10,9 @@ on:
       - Cargo.toml
       - linux/**
       - packaging/linux/**
-      - openwrt/client/packages/candy-client/Makefile
-      - openwrt/client/packages/luci-app-candy/Makefile
+      - packaging/openwrt/**
+      - openwrt/client/packages/candy-client/**
+      - openwrt/client/packages/luci-app-candy/**
       - .github/workflows/release-openwrt-client.yml
   workflow_dispatch:
     inputs:
