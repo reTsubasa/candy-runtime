@@ -2341,3 +2341,27 @@ msgstr "较差"
 
 msgid "Connecting"
 msgstr "正在连接"
+
+msgid "Current traffic egress"
+msgstr "当前流量出口"
+
+msgid "Nodes and performance"
+msgstr "节点与性能"
+
+msgid "Role / node groups"
+msgstr "角色 / 节点组"
+
+msgid "Current throughput"
+msgstr "当前吞吐"
+
+msgid "Local WAN"
+msgstr "本地 WAN"
+
+msgid "Switching"
+msgstr "切换中"
+
+msgid "Recovering"
+msgstr "恢复中"
+
+msgid "Degraded"
+msgstr "已降级"

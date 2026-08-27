@@ -36,9 +36,11 @@ CANDY_SDWAN_ACTIVATIONS_DIR=$CANDY_SDWAN_STATE_DIR/activations
 CANDY_SDWAN_CANDIDATE=$CANDY_SDWAN_STATE_DIR/candidate
 CANDY_SDWAN_ACTIVE=$CANDY_SDWAN_STATE_DIR/active
 CANDY_SDWAN_ACTIVE_PROOF=$CANDY_SDWAN_STATE_DIR/active-activation-v1.json
+CANDY_SDWAN_WITHDRAWAL_REQUEST=$CANDY_SDWAN_STATE_DIR/withdrawal-request-v1.json
 LOG_FILE=$test_root/candy.log
 RUNTIME_DIR=$test_root/run/candy
 CANDY_SDWAN_STATUS_FILE=$RUNTIME_DIR/sdwan-status.json
+CANDY_TRAFFIC_PATH_FILE=$RUNTIME_DIR/traffic-path-v1.json
 hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 delivery=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 projection=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
@@ -168,10 +170,14 @@ stop_candy_clients_for_fail_open() { ordinary_touched=1; return 1; }
 interrupt_sdwan_processes() { :; }
 sdwan_runtime_state() { :; }
 sdwan_fail_open() { :; }
+stop_sdwan_data_plane() { :; }
+fallback_traffic_source() { printf '%s\n' candy_proxy; }
 
 rm -f "$CANDY_SDWAN_CANDIDATE"
+printf '%s\n' '{"schema_version":1}' >"$CANDY_SDWAN_WITHDRAWAL_REQUEST"
 sdwan_reconcile || fail "Cloud withdrawal reconcile failed"
 [ ! -e "$CANDY_SDWAN_ACTIVE" ] && [ ! -L "$CANDY_SDWAN_ACTIVE" ] || fail "withdrawal retained the active pointer"
+[ ! -e "$CANDY_SDWAN_WITHDRAWAL_REQUEST" ] || fail "withdrawal retained its transaction marker"
 [ "$ordinary_touched" -eq 0 ] || fail "withdrawal touched ordinary Candy"
 
 ln -s "activations/$hash" "$CANDY_SDWAN_ACTIVE"

@@ -126,10 +126,12 @@ const statusPath = process.argv[3];
 const logPath = process.argv[4];
 const source = fs.readFileSync(root + "/" + statusPath, "utf8");
 assert.ok(source.includes("Function coverage"), "overview must summarize configured functions");
-assert.ok(source.includes("Performance"), "overview must summarize performance");
+assert.ok(source.includes("Nodes and performance"), "overview must combine node state and performance");
 assert.ok(source.includes("Operating status"), "overview must summarize operating status");
-assert.ok(source.includes("candy-metric-throughput"), "overview must expose aggregate RX/TX");
+assert.ok(source.includes("Current traffic egress"), "overview must expose the active traffic path");
+assert.ok(source.includes("Current throughput"), "overview must expose per-node throughput");
 assert.ok(source.includes("goodput_bps_rx") && source.includes("goodput_bps_tx"), "overview must use directional telemetry");
+assert.ok(source.includes("local.goodput_bps"), "overview must use available aggregate Core throughput");
 assert.ok(source.includes("active_tcp_flows") && source.includes("active_udp_flows"), "overview must expose active connections");
 assert.ok(source.includes("node.last_error"), "overview must expose the latest node result");
 assert.ok(source.includes("setTimeout(refresh,2000)"), "overview refresh must avoid overlapping intervals");
@@ -177,8 +179,7 @@ assert.equal(cells[3].textContent,"12.5 ms","flat RTT telemetry must render");
 assert.equal(cells[4].textContent,"12.0 Kbps / 8.0 Kbps","flat RX/TX telemetry must render");
 assert.equal(cells[5].textContent,"test","null flow telemetry must render as Not reported");
 assert.equal(cells[6].textContent,"test: 42 ms","successful URL tests must expose their result");
-assert.equal(elements.get("candy-metric-flows").textContent,"test","missing aggregate flows must not become zero");
-assert.equal(elements.get("candy-metric-throughput").textContent,"12.0 Kbps / 8.0 Kbps");
+assert.equal(elements.get("candy-status-traffic-path").textContent,"test","overview must render the effective traffic path");
 EOF
 
 node - "$repo_root" "$diagnostics" <<'EOF'
@@ -419,8 +420,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=82$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=82$'
+assert_contains "$makefile" '^PKG_RELEASE:=83$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=83$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'
@@ -935,18 +936,19 @@ assert_not_contains "$update_view" 'rollbackAvailable'
 assert_not_contains "$update_view" 'candyUpdateLabels\.incompatible'
 assert_contains "$status" 'status_json'
 assert_contains "$status" '<%:Function coverage%>'
-assert_contains "$status" '<%:Performance%>'
+assert_contains "$status" '<%:Nodes and performance%>'
+assert_contains "$status" '<%:Current traffic egress%>'
 assert_contains "$status" 'candy-summary-band'
 assert_contains "$status" 'candy-summary-item > span'
 assert_contains "$status" 'candy-feature-band'
-assert_contains "$status" 'candy-metric-throughput'
+assert_contains "$status" '<%:Current throughput%>'
 assert_contains "$status" 'candy-node-state'
 assert_contains "$status" 'goodput_bps_rx'
 assert_contains "$status" 'goodput_bps_tx'
 assert_contains "$status" 'active_tcp_flows'
 assert_contains "$status" 'active_udp_flows'
 assert_contains "$status" 'node\.last_error'
-assert_contains "$status" '<%:RX / TX%>'
+assert_contains "$status" 'local.goodput_bps'
 assert_contains "$status" '<%:Connections%>'
 assert_contains "$status" '<%:Latest result%>'
 assert_contains "$status" 'setTimeout\(refresh,2000\)'

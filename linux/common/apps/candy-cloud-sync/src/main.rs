@@ -455,7 +455,7 @@ struct RuntimePathSample {
     lost_packets: u64,
 }
 
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default, Serialize, Eq, PartialEq)]
 struct DerivedRuntimePerformance {
     rtt_ms: Option<u32>,
     jitter_ms: Option<u32>,
@@ -464,6 +464,24 @@ struct DerivedRuntimePerformance {
     tx_bps: Option<u64>,
     reconnects: Option<u64>,
     path_changes: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalRuntimePerformance<'a> {
+    schema_version: u8,
+    observed_at_unix: u64,
+    lifecycle: &'a str,
+    performance: &'a DerivedRuntimePerformance,
+    paths: &'a [RuntimePathTelemetry],
+}
+
+#[derive(Debug, Serialize)]
+struct ActivationWithdrawalRequest {
+    schema_version: u8,
+    requested_at_unix: u64,
+    active_target: Option<String>,
+    candidate_target: Option<String>,
+    reason: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1260,7 +1278,7 @@ fn sync_once_with_retry(
     let response = request.send().context("request Runtime configuration")?;
     match response.status() {
         StatusCode::NO_CONTENT => {
-            withdraw_local_activation(&args.state_dir)?;
+            request_local_activation_withdrawal(&args.state_dir)?;
             state.etag = None;
             state.configuration_sha256 = None;
             state.activation_required = false;
@@ -1536,7 +1554,7 @@ fn sync_once_with_retry(
                 state.activation_rejected_etag = None;
                 state.activation_rejected_at_unix = None;
             } else {
-                withdraw_local_activation(&args.state_dir)?;
+                request_local_activation_withdrawal(&args.state_dir)?;
                 state.activation_required = false;
                 state.activation_rejected_etag = None;
                 state.activation_rejected_at_unix = None;
@@ -1618,6 +1636,24 @@ fn report_runtime_telemetry(
             Vec::new()
         }
     };
+    let local_lifecycle = core_status.as_ref().map_or("inactive", |status| {
+        if status.fail_open_required {
+            "fail_open"
+        } else {
+            status.lifecycle.as_str()
+        }
+    });
+    atomic_json(
+        &state_dir.join("runtime-performance-v1.json"),
+        &LocalRuntimePerformance {
+            schema_version: 1,
+            observed_at_unix: unix_now()?,
+            lifecycle: local_lifecycle,
+            performance: &performance,
+            paths: &path_performance,
+        },
+        0o600,
+    )?;
     let local_networks = match discover_local_networks() {
         Ok(networks) => Some(networks),
         Err(error) => {
@@ -2714,16 +2750,59 @@ fn clear_activation_ready_receipt(state_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn withdraw_local_activation(state_dir: &Path) -> Result<()> {
-    remove_state_pointer(state_dir, "active")?;
-    File::open(state_dir)
-        .and_then(|directory| directory.sync_all())
-        .context("sync withdrawn Runtime active pointer")?;
-    remove_regular_state_file(state_dir, "active-activation-v1.json")?;
+fn request_local_activation_withdrawal(state_dir: &Path) -> Result<()> {
+    let pointer_target = |name: &str| -> Result<Option<String>> {
+        let path = state_dir.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => Ok(Some(
+                fs::read_link(&path)
+                    .with_context(|| format!("read Runtime {name} pointer"))?
+                    .to_string_lossy()
+                    .into_owned(),
+            )),
+            Ok(_) => bail!("Runtime {name} pointer must be a symbolic link"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("inspect Runtime {name} pointer")),
+        }
+    };
+    let active_target = pointer_target("active")?;
+    let candidate_target = pointer_target("candidate")?;
+    let marker = state_dir.join("withdrawal-request-v1.json");
+    let marker_exists = match fs::symlink_metadata(&marker) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => true,
+        Ok(_) => bail!("Runtime withdrawal request must be a regular file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error).context("inspect Runtime withdrawal request"),
+    };
+    let proof_exists = match fs::symlink_metadata(state_dir.join("active-activation-v1.json")) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => true,
+        Ok(_) => bail!("Runtime active activation proof must be a regular file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error).context("inspect Runtime active activation proof"),
+    };
+    if active_target.is_none() && candidate_target.is_none() && !proof_exists {
+        return Ok(());
+    }
+    if marker_exists && candidate_target.is_none() {
+        return Ok(());
+    }
+    atomic_json(
+        &marker,
+        &ActivationWithdrawalRequest {
+            schema_version: 1,
+            requested_at_unix: unix_now()?,
+            active_target,
+            candidate_target,
+            reason: "cloud_configuration_withdrawn",
+        },
+        0o600,
+    )?;
+    // Removing the candidate tells the bound agent to roll back its committed
+    // routes. Keep active and its proof until Runtime confirms cleanup.
     remove_state_pointer(state_dir, "candidate")?;
     File::open(state_dir)
         .and_then(|directory| directory.sync_all())
-        .context("sync withdrawn Runtime candidate pointer")
+        .context("sync requested Runtime activation withdrawal")
 }
 
 fn remove_state_pointer(state_dir: &Path, name: &str) -> Result<()> {
@@ -2737,24 +2816,6 @@ fn remove_state_pointer(state_dir: &Path, name: &str) -> Result<()> {
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).with_context(|| format!("inspect Runtime {name} pointer")),
-    }
-    Ok(())
-}
-
-fn remove_regular_state_file(state_dir: &Path, name: &str) -> Result<()> {
-    let path = state_dir.join(name);
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                bail!("Runtime {name} must be a regular file")
-            }
-            fs::remove_file(&path).with_context(|| format!("remove Runtime {name}"))?;
-            File::open(state_dir)
-                .and_then(|directory| directory.sync_all())
-                .with_context(|| format!("sync removed Runtime {name}"))?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).with_context(|| format!("inspect Runtime {name}")),
     }
     Ok(())
 }
@@ -6001,9 +6062,10 @@ default via 192.0.2.1 dev eth0 proto static
             format!("\"sha256-{}\"", "b".repeat(64))
         );
 
-        withdraw_local_activation(directory.path()).unwrap();
-        assert!(!directory.path().join("active").exists());
-        assert!(!proof.exists());
+        request_local_activation_withdrawal(directory.path()).unwrap();
+        assert!(directory.path().join("active").exists());
+        assert!(proof.exists());
+        assert!(directory.path().join("withdrawal-request-v1.json").exists());
     }
 
     #[test]
@@ -6863,7 +6925,7 @@ default via 192.0.2.1 dev eth0 proto static
     }
 
     #[test]
-    fn withdrawal_removes_both_activation_pointers() {
+    fn withdrawal_requests_route_cleanup_before_revoking_active_proof() {
         let directory = tempfile::tempdir().unwrap();
         let activations = directory.path().join("activations");
         fs::create_dir(&activations).unwrap();
@@ -6882,9 +6944,22 @@ default via 192.0.2.1 dev eth0 proto static
             )
             .unwrap();
         }
-        withdraw_local_activation(directory.path()).unwrap();
+        request_local_activation_withdrawal(directory.path()).unwrap();
         assert!(!directory.path().join("candidate").exists());
-        assert!(!directory.path().join("active").exists());
+        assert!(directory.path().join("active").exists());
+        let request: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.path().join("withdrawal-request-v1.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(request["reason"], "cloud_configuration_withdrawn");
+        assert_eq!(request["active_target"], format!("activations/{id}"));
+    }
+
+    #[test]
+    fn completed_withdrawal_does_not_recreate_a_cleanup_request() {
+        let directory = tempfile::tempdir().unwrap();
+        request_local_activation_withdrawal(directory.path()).unwrap();
+        assert!(!directory.path().join("withdrawal-request-v1.json").exists());
     }
 
     #[test]

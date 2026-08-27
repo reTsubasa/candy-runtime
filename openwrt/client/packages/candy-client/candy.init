@@ -93,7 +93,9 @@ CANDY_EPOCH_DIRECTORY=${CANDY_EPOCH_DIRECTORY:-/etc/candy/epochs}
 CANDY_SDWAN_STATUS_FILE=${CANDY_SDWAN_STATUS_FILE:-$RUNTIME_DIR/sdwan-status.json}
 CANDY_SDWAN_READY_FILE=${CANDY_SDWAN_READY_FILE:-$CANDY_SDWAN_STATE_DIR/activation-ready-v1.json}
 CANDY_SDWAN_ACTIVE_PROOF=${CANDY_SDWAN_ACTIVE_PROOF:-$CANDY_SDWAN_STATE_DIR/active-activation-v1.json}
+CANDY_SDWAN_WITHDRAWAL_REQUEST=${CANDY_SDWAN_WITHDRAWAL_REQUEST:-$CANDY_SDWAN_STATE_DIR/withdrawal-request-v1.json}
 CANDY_SDWAN_USER_STOPPED_FILE=${CANDY_SDWAN_USER_STOPPED_FILE:-$CANDY_SDWAN_STATE_DIR/user-stopped-v1}
+CANDY_TRAFFIC_PATH_FILE=${CANDY_TRAFFIC_PATH_FILE:-$RUNTIME_DIR/traffic-path-v1.json}
 CANDY_SDWAN_STOP_WAIT_SECONDS=${CANDY_SDWAN_STOP_WAIT_SECONDS:-15}
 CANDY_VERSION=${CANDY_VERSION:-0.4.0}
 CANDY_RELEASE=${CANDY_RELEASE:-1}
@@ -175,6 +177,41 @@ sdwan_runtime_state() {
 			log_warn "SD-WAN Runtime state action failed: $action"
 			return 1
 		}
+}
+
+write_traffic_path_state() {
+	local state="$1" source="$2" reason="${3:-}" temporary
+	temporary=$(atomic_temp_path "$CANDY_TRAFFIC_PATH_FILE") || return 1
+	{
+		printf '{"schema_version":1,"state":'
+		json_string "$state"
+		printf ',"source":'
+		json_string "$source"
+		printf ',"reason":'
+		json_string "$reason"
+		printf ',"updated_at":%s}\n' "$(date +%s 2>/dev/null || printf 0)"
+	} >"$temporary" || { rm -f "$temporary"; return 1; }
+	atomic_commit_file "$temporary" "$CANDY_TRAFFIC_PATH_FILE" 0644
+}
+
+fallback_traffic_source() {
+	if candy_process_running && current_readiness; then
+		printf '%s\n' candy_proxy
+	else
+		printf '%s\n' local_wan
+	fi
+}
+
+sdwan_withdrawal_requested() {
+	[ -s "$CANDY_SDWAN_WITHDRAWAL_REQUEST" ] &&
+		[ -f "$CANDY_SDWAN_WITHDRAWAL_REQUEST" ] &&
+		[ ! -L "$CANDY_SDWAN_WITHDRAWAL_REQUEST" ]
+}
+
+clear_sdwan_withdrawal_request() {
+	[ -e "$CANDY_SDWAN_WITHDRAWAL_REQUEST" ] || [ -L "$CANDY_SDWAN_WITHDRAWAL_REQUEST" ] || return 0
+	[ -f "$CANDY_SDWAN_WITHDRAWAL_REQUEST" ] && [ ! -L "$CANDY_SDWAN_WITHDRAWAL_REQUEST" ] || return 1
+	rm -f "$CANDY_SDWAN_WITHDRAWAL_REQUEST"
 }
 
 sdwan_refresh_runtime_state() {
@@ -590,7 +627,7 @@ run_client() {
 }
 
 run_sdwan() {
-	local attempted_hash core_status child rc stopping=0
+	local attempted_hash core_status child rc next_rc next_hash fallback stopping=0
 	[ -x "$CANDY_SDWAN_AGENT" ] || { log_event error sdwan_agent_unavailable "reason=agent_missing"; return 1; }
 	trap 'stopping=1; [ -z "${child:-}" ] || kill -TERM "$child" 2>/dev/null || true' TERM INT
 	while [ "$stopping" -eq 0 ]; do
@@ -613,6 +650,23 @@ run_sdwan() {
 		if sdwan_user_stopped; then
 			log_event info sdwan_stopped "reason=user_request ordinary_client=preserved"
 			continue
+		fi
+		if load_sdwan_candidate; then
+			next_hash=$CANDY_SDWAN_CANDIDATE_HASH
+			if [ "$next_hash" != "$attempted_hash" ]; then
+				fallback=$(fallback_traffic_source)
+				write_traffic_path_state switching "$fallback" candidate_replaced || true
+				log_event info sdwan_generation_switch "from=$attempted_hash to=$next_hash old_routes=rolled_back ordinary_client=preserved"
+				continue
+			fi
+		else
+			next_rc=$?
+			if [ "$next_rc" -eq 2 ]; then
+				fallback=$(fallback_traffic_source)
+				write_traffic_path_state degraded "$fallback" cloud_withdrawn || true
+				log_event info sdwan_withdrawal "activation=$attempted_hash old_routes=rolled_back fallback=$fallback ordinary_client=preserved"
+				continue
+			fi
 		fi
 		log_event error sdwan_exit "exit=$rc; scheduling isolated SD-WAN fail-open activation=$attempted_hash"
 		run_detached_direct_command sdwan_fail_open "sdwan_exit:$rc"
@@ -4021,13 +4075,20 @@ fail_open() {
 
 sdwan_fail_open() {
 	local reason="${1:-sdwan_failure}"
-	# SD-WAN is part of Candy's managed network path. Leaving the ordinary
-	# client alive after a failed SD-WAN activation can retain Candy-owned DNS,
-	# firewall, or policy steering and is therefore not fail-open. Reuse the
-	# single full cleanup path so the resulting network is equivalent to Candy
-	# not running at all.
-	log_event warn sdwan_fail_open "reason=$reason escalating=full_fail_open"
-	fail_open "sdwan:$reason"
+	with_service_lifecycle_lock sdwan_fail_open_locked "$reason"
+}
+
+sdwan_fail_open_locked() {
+	local reason="$1" fallback
+	if stop_sdwan_data_plane; then
+		fallback=$(fallback_traffic_source)
+		sdwan_runtime_state fail-open "$reason" || true
+		write_traffic_path_state degraded "$fallback" "$reason" || true
+		log_event warn sdwan_fail_open "reason=$reason cleanup=completed fallback=$fallback ordinary_client=preserved"
+		return 0
+	fi
+	log_event error sdwan_fail_open "reason=$reason cleanup=failed escalating=full_fail_open"
+	fail_open_locked sdwan "$reason"
 }
 
 sdwan_active_target() {
@@ -4070,7 +4131,7 @@ interrupt_sdwan_processes() {
 }
 
 sdwan_reconcile() {
-	local candidate_rc active_target
+	local candidate_rc active_target fallback
 	if sdwan_user_stopped; then
 		sdwan_runtime_state stopped || true
 		log_event info sdwan_reconcile "result=unchanged state=user_stopped ordinary_client=preserved"
@@ -4080,6 +4141,7 @@ sdwan_reconcile() {
 		active_target=$(sdwan_active_target 2>/dev/null || true)
 		if [ "$active_target" = "$CANDY_SDWAN_CANDIDATE_TARGET" ]; then
 			sdwan_refresh_runtime_state || return 1
+			write_traffic_path_state active sdwan cloud_policy_active || true
 			log_event info sdwan_reconcile "result=unchanged activation=$CANDY_SDWAN_CANDIDATE_HASH ordinary_client=preserved"
 			return 0
 		fi
@@ -4090,7 +4152,8 @@ sdwan_reconcile() {
 			return 0
 		fi
 		sdwan_runtime_state reconnect || true
-		interrupt_sdwan_processes
+		fallback=$(fallback_traffic_source)
+		write_traffic_path_state recovering "$fallback" cloud_generation_changed || true
 		log_event info sdwan_reconcile "result=activation_requested activation=$CANDY_SDWAN_CANDIDATE_HASH ordinary_client=preserved"
 		return 0
 	else
@@ -4098,18 +4161,26 @@ sdwan_reconcile() {
 	fi
 	if [ "$candidate_rc" -eq 2 ]; then
 		active_target=$(sdwan_active_target 2>/dev/null || true)
-		# A completed withdrawal is an idempotent steady state. Preserve the
-		# waiting supervisors so a later Cloud generation can activate without
-		# restarting the ordinary Candy service or reviving a procd crash loop.
-		if [ -n "$active_target" ]; then
-			interrupt_sdwan_processes
-			sdwan_fail_open cloud_withdrawn || true
+		if sdwan_withdrawal_requested || [ -n "$active_target" ]; then
+			fallback=$(fallback_traffic_source)
+			write_traffic_path_state switching "$fallback" cloud_withdrawn || true
+			log_event info sdwan_withdrawal "result=started previous=${active_target:-none} fallback=$fallback ordinary_client=preserved"
+			if ! stop_sdwan_data_plane; then
+				log_event error sdwan_reconcile "result=withdrawal_failed reason=route_cleanup_failed ordinary_client=preserved"
+				return 1
+			fi
 		fi
 		if ! clear_sdwan_active; then
 			log_event error sdwan_reconcile "result=withdrawal_failed reason=active_pointer_not_removable ordinary_client=preserved"
 			return 1
 		fi
+		if ! clear_sdwan_withdrawal_request; then
+			log_event error sdwan_reconcile "result=withdrawal_failed reason=request_marker_not_removable ordinary_client=preserved"
+			return 1
+		fi
 		sdwan_runtime_state stopped || true
+		fallback=$(fallback_traffic_source)
+		write_traffic_path_state degraded "$fallback" cloud_policy_removed || true
 		if [ -n "$active_target" ]; then
 			log_event info sdwan_reconcile "result=withdrawn ordinary_client=preserved"
 		else
@@ -4118,7 +4189,6 @@ sdwan_reconcile() {
 		return 0
 	fi
 	active_target=$(sdwan_active_target 2>/dev/null || true)
-	interrupt_sdwan_processes
 	sdwan_fail_open cloud_activation_rejected || true
 	if [ -L "$CANDY_SDWAN_CANDIDATE" ]; then
 		remove_sdwan_candidate_if_current "$(readlink "$CANDY_SDWAN_CANDIDATE" 2>/dev/null || true)" || true

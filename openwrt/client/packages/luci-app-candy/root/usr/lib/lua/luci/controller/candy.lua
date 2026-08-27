@@ -9,6 +9,8 @@ local PASSIVE_STATUS_FILE = "/var/run/candy/passive-status.json"
 local MAX_PASSIVE_STATUS_BYTES = 262144
 local SDWAN_STATUS_FILE = "/var/run/candy/sdwan-status.json"
 local MAX_SDWAN_STATUS_BYTES = 65536
+local SDWAN_PERFORMANCE_FILE = "/etc/candy/sdwan/runtime-performance-v1.json"
+local TRAFFIC_PATH_FILE = "/var/run/candy/traffic-path-v1.json"
 local SDWAN_RUNTIME = "/usr/libexec/candy-sdwan-runtime"
 local SDWAN_BOOTSTRAP_ROOT = os.getenv("CANDY_SDWAN_BOOTSTRAP_ROOT") or "/tmp/candy-sdwan-bootstrap"
 local MAX_SDWAN_BOOTSTRAP_BYTES = 16 * 1024
@@ -223,6 +225,64 @@ local function read_sdwan_status(_uci)
 	end
 	if type(status.dns) == "table" then result.dns.state = safe_string(status.dns.state, 32) or "unavailable" end
 	return result
+end
+
+local function read_bounded_status_file(path, maximum)
+	local fs = require "nixio.fs"
+	local jsonc = require "luci.jsonc"
+	local stat = fs.stat(path)
+	if not stat or stat.type ~= "reg" or tonumber(stat.size or 0) > maximum then return nil end
+	local text = fs.readfile(path)
+	if not text or #text > maximum then return nil end
+	local value = jsonc.parse(text)
+	if type(value) ~= "table" or tonumber(value.schema_version) ~= 1 or contains_credential_field(value) then return nil end
+	return value
+end
+
+local function read_sdwan_performance()
+	local value = read_bounded_status_file(SDWAN_PERFORMANCE_FILE, 262144)
+	if not value or type(value.performance) ~= "table" or type(value.paths) ~= "table" then return nil end
+	local function metric(number)
+		number = tonumber(number)
+		return number and number >= 0 and number or nil
+	end
+	local performance = value.performance
+	return {
+		observed_at = tonumber(value.observed_at_unix),
+		lifecycle = type(value.lifecycle) == "string" and value.lifecycle or "unknown",
+		rtt_ms = metric(performance.rtt_ms),
+		rx_bps = metric(performance.rx_bps),
+		tx_bps = metric(performance.tx_bps),
+		reconnects = metric(performance.reconnects),
+		path_changes = metric(performance.path_changes),
+		paths = value.paths
+	}
+end
+
+local function effective_traffic_path(sdwan, service, nodes)
+	local reported = read_bounded_status_file(TRAFFIC_PATH_FILE, 16384)
+	local source = "local_wan"
+	if sdwan and sdwan.active then
+		source = "sdwan"
+	elseif service == "running" then
+		for _, node in ipairs(nodes or {}) do
+			if node.state == "running" or node.state == "ready" or node.state == "ok" then source = "candy_proxy" break end
+		end
+	end
+	local now = os.time()
+	local updated_at = reported and tonumber(reported.updated_at) or nil
+	local recent_transition = reported and (reported.state == "switching" or reported.state == "recovering") and
+		updated_at and now >= updated_at and now - updated_at <= 60
+	if recent_transition and (reported.source == "sdwan" or reported.source == "candy_proxy" or reported.source == "local_wan") then
+		source = reported.source
+	end
+	return {
+		schema_version = 1,
+		state = recent_transition and reported.state or (source == "sdwan" and "active" or "degraded"),
+		source = source,
+		reason = reported and type(reported.reason) == "string" and reported.reason or "",
+		updated_at = updated_at
+	}
 end
 
 local function read_fault_status()
@@ -1225,11 +1285,29 @@ function action_status_json()
 	runtime.multi_node = nil
 	status.runtime = runtime
 	status.sdwan = read_sdwan_status(uci)
+	status.sdwan.performance = read_sdwan_performance()
 	status.fault = read_fault_status()
 	status.core = read_core_status()
 	status.version = status.version or "0.4.0"
 	status.release = status.release or "1"
 	status.nodes = status.nodes or {}
+	local sdwan_performance = status.sdwan.performance
+	local remote = status.sdwan.egress and status.sdwan.egress.remote or nil
+	if status.sdwan.active and sdwan_performance and type(remote) == "table" and (remote.name or remote.id) then
+		status.nodes[#status.nodes + 1] = {
+			name = remote.name or remote.id,
+			state = sdwan_performance.lifecycle == "active" and "running" or sdwan_performance.lifecycle,
+			groups = { "SD-WAN" },
+			role = "remote_egress",
+			rtt_ms = sdwan_performance.rtt_ms,
+			rx_bps = sdwan_performance.rx_bps,
+			tx_bps = sdwan_performance.tx_bps,
+			active_tcp_flows = nil,
+			active_udp_flows = nil,
+			telemetry_status = "reported"
+		}
+	end
+	status.traffic_path = effective_traffic_path(status.sdwan, service, status.nodes)
 	status.diagnostics = status.diagnostics or {}
 	local node_count, group_count, rule_count = 0, 0, 0
 	uci:foreach("candy", "node", function() node_count = node_count + 1 end)
