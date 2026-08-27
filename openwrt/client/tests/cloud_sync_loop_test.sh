@@ -5,6 +5,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../packages/candy-client" && pwd)
 sync_loop="$root/candy-cloud-sync-loop"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+export CANDY_LIFECYCLE_FILE="$tmp/lifecycle.json"
 
 fail() {
 	printf 'cloud_sync_loop_test: %s\n' "$*" >&2
@@ -197,5 +198,56 @@ PATH="$tmp/bin:$PATH" \
 grep -Fx sdwan_prune_history "$tmp/reconcile.log" >/dev/null || fail "fail-open service history was left unbounded"
 grep -F 'event=cloud_sync_reconcile result=deferred reason=runtime_fault' "$tmp/logger.log" >/dev/null ||
 	fail "completed fail-open was not reported as deferred"
+
+# Core readiness can make init status report running before the complete SD-WAN
+# startup has settled. A fresh lifecycle transition must win over that status.
+mkdir -p "$tmp/state/identity"
+printf '%s\n' '{}' >"$tmp/state/identity/device-identity-v1.json"
+printf '{"action":"start","state":"starting","updated_at":%s}\n' "$(date +%s)" >"$CANDY_LIFECYCLE_FILE"
+cat >"$tmp/candy.init" <<'EOF'
+#!/bin/sh
+case "$1" in
+	enabled) exit 0 ;;
+	status) printf '%s\n' running ;;
+	sdwan_reconcile|sdwan_prune_history) printf '%s\n' "$*" >>"$CANDY_TEST_RECONCILE_LOG" ;;
+esac
+EOF
+chmod 0755 "$tmp/candy.init"
+: >"$tmp/logger.log"
+: >"$tmp/reconcile.log"
+PATH="$tmp/bin:$PATH" \
+	CANDY_TEST_LOG="$tmp/logger.log" \
+	CANDY_TEST_RECONCILE_LOG="$tmp/reconcile.log" \
+	CANDY_TEST_IDENTITY_FILE="$tmp/state/identity/device-identity-v1.json" \
+	CANDY_CLOUD_SYNC_BIN="$tmp/sync" \
+	CANDY_SDWAN_STATE_DIR="$tmp/state" \
+	CANDY_INIT="$tmp/candy.init" \
+	CANDY_CLOUD_SYNC_INTERVAL=1 \
+	"$sync_loop" >/dev/null 2>"$stderr_log" || fail "starting lifecycle deferral failed"
+! grep -Fx sdwan_reconcile "$tmp/reconcile.log" >/dev/null || fail "Cloud sync reconciled during service startup"
+grep -Fx sdwan_prune_history "$tmp/reconcile.log" >/dev/null || fail "startup deferral left SD-WAN history unbounded"
+grep -F 'event=cloud_sync_reconcile result=deferred reason=service_starting' "$tmp/logger.log" >/dev/null ||
+	fail "startup reconciliation was not reported as deferred"
+
+# A crashed lifecycle writer must not suppress reconciliation after its bounded
+# transition window expires.
+mkdir -p "$tmp/state/identity"
+printf '%s\n' '{}' >"$tmp/state/identity/device-identity-v1.json"
+printf '%s\n' '{"action":"start","state":"starting","updated_at":1}' >"$CANDY_LIFECYCLE_FILE"
+: >"$tmp/logger.log"
+: >"$tmp/reconcile.log"
+PATH="$tmp/bin:$PATH" \
+	CANDY_TEST_LOG="$tmp/logger.log" \
+	CANDY_TEST_RECONCILE_LOG="$tmp/reconcile.log" \
+	CANDY_TEST_IDENTITY_FILE="$tmp/state/identity/device-identity-v1.json" \
+	CANDY_CLOUD_SYNC_BIN="$tmp/sync" \
+	CANDY_SDWAN_STATE_DIR="$tmp/state" \
+	CANDY_INIT="$tmp/candy.init" \
+	CANDY_LIFECYCLE_TTL_SECONDS=10 \
+	CANDY_CLOUD_SYNC_INTERVAL=1 \
+	"$sync_loop" >/dev/null 2>"$stderr_log" || fail "stale lifecycle handling failed"
+grep -Fx sdwan_reconcile "$tmp/reconcile.log" >/dev/null || fail "stale lifecycle suppressed reconciliation"
+grep -F 'event=cloud_sync_reconcile result=ok' "$tmp/logger.log" >/dev/null ||
+	fail "reconciliation after a stale lifecycle was not logged"
 
 printf '%s\n' "OpenWrt Candy Cloud sync supervisor test passed"

@@ -10,6 +10,8 @@ RUN_USER=${CANDY_CLOUD_SYNC_USER:-candy-sdwan}
 CANDY_INIT=${CANDY_INIT:-/etc/init.d/candy}
 CANDY_CORE_BIN=${CANDY_CORE_BIN:-/usr/lib/candy/cores/current/candy-core}
 FAULT_STATE_FILE=${CANDY_FAULT_STATE_FILE:-/etc/candy/runtime-fault.json}
+CANDY_LIFECYCLE_FILE=${CANDY_LIFECYCLE_FILE:-/tmp/candy.lifecycle}
+CANDY_LIFECYCLE_TTL_SECONDS=${CANDY_LIFECYCLE_TTL_SECONDS:-10}
 
 completed_runtime_fault() {
 	[ -s "$FAULT_STATE_FILE" ] && [ -f "$FAULT_STATE_FILE" ] && [ ! -L "$FAULT_STATE_FILE" ] || return 1
@@ -18,9 +20,27 @@ completed_runtime_fault() {
 	[ "$(jsonfilter -e '@.cleanup' <"$FAULT_STATE_FILE" 2>/dev/null)" = completed ]
 }
 
+current_lifecycle_transition() {
+	[ -s "$CANDY_LIFECYCLE_FILE" ] && [ -f "$CANDY_LIFECYCLE_FILE" ] && [ ! -L "$CANDY_LIFECYCLE_FILE" ] || return 1
+	state=$(sed -n 's/.*"state":"\([^"]*\)".*/\1/p' "$CANDY_LIFECYCLE_FILE" | head -n1)
+	updated_at=$(sed -n 's/.*"updated_at":\([0-9][0-9]*\).*/\1/p' "$CANDY_LIFECYCLE_FILE" | head -n1)
+	case "$state" in starting|stopping) ;; *) return 1 ;; esac
+	case "$updated_at" in ''|*[!0-9]*) return 1 ;; esac
+	now=$(date +%s 2>/dev/null || true)
+	case "$now" in ''|*[!0-9]*) return 1 ;; esac
+	age=$((now - updated_at))
+	[ "$age" -ge 0 ] && [ "$age" -le "$CANDY_LIFECYCLE_TTL_SECONDS" ] || return 1
+	printf '%s\n' "$state"
+}
+
 reconcile_sdwan() {
 	if ! "$CANDY_INIT" enabled >/dev/null 2>&1; then
 		logger -t candy -- "level=info event=cloud_sync_reconcile result=deferred reason=service_disabled"
+		return 0
+	fi
+	transition=$(current_lifecycle_transition 2>/dev/null || true)
+	if [ -n "$transition" ]; then
+		logger -t candy -- "level=info event=cloud_sync_reconcile result=deferred reason=service_$transition"
 		return 0
 	fi
 	service_state=$("$CANDY_INIT" status 2>/dev/null || true)
@@ -62,6 +82,7 @@ sync_state_from_stdout() {
 }
 
 case "$INTERVAL" in ''|*[!0-9]*|0) INTERVAL=30 ;; esac
+case "$CANDY_LIFECYCLE_TTL_SECONDS" in ''|*[!0-9]*) CANDY_LIFECYCLE_TTL_SECONDS=10 ;; esac
 [ -x "$SYNC_BIN" ] || exit 1
 [ -x "$CANDY_INIT" ] || exit 1
 command -v start-stop-daemon >/dev/null 2>&1 || exit 1
