@@ -353,6 +353,12 @@ restore_service_state() {
 	for service in $services; do
 		if [ "$(cat "$state_dir/$service.active")" = 1 ]; then "$SYSTEMCTL" start "$service" >/dev/null; fi
 	done
+	# OnUnitInactiveSec only arms after the oneshot service transitions back to
+	# inactive while the timer is watching it. A timer restored on its own can
+	# remain active(elapsed) forever after an upgrade, so dispatch one sync run.
+	if [ "$(cat "$state_dir/candy-cloud-sync.timer.active")" = 1 ]; then
+		"$SYSTEMCTL" start --no-block candy-cloud-sync.service >/dev/null
+	fi
 }
 
 restore_files() {

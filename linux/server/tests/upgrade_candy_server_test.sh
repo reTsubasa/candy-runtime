@@ -70,7 +70,14 @@ case "$command" in
 	is-active) [ "$(cat "$FAKE_SYSTEMD_STATE/$service.active" 2>/dev/null || printf 0)" = 1 ] ;;
 	enable) printf 1 >"$FAKE_SYSTEMD_STATE/$service.enabled" ;;
 	disable) printf 0 >"$FAKE_SYSTEMD_STATE/$service.enabled" ;;
-	start) printf 1 >"$FAKE_SYSTEMD_STATE/$service.active" ;;
+	start)
+		if [ "$service" = candy-cloud-sync.service ]; then
+			# Model the oneshot returning to inactive after a successful dispatch.
+			printf 0 >"$FAKE_SYSTEMD_STATE/$service.active"
+		else
+			printf 1 >"$FAKE_SYSTEMD_STATE/$service.active"
+		fi
+		;;
 	stop) printf 0 >"$FAKE_SYSTEMD_STATE/$service.active" ;;
 	daemon-reload) : ;;
 	*) printf '%s\n' "unexpected systemctl command: $command" >&2; exit 2 ;;
@@ -242,6 +249,8 @@ for service in candy-netd.service candy-server.service candy-cloud-sync.timer; d
 	[ "$(cat "$fake_state/$service.enabled")" = 1 ] && [ "$(cat "$fake_state/$service.active")" = 1 ] || fail "$service state was not restored"
 done
 [ "$(cat "$fake_state/candy-cloud-sync.service.enabled")" = 0 ] && [ "$(cat "$fake_state/candy-cloud-sync.service.active")" = 0 ] || fail "inactive Cloud sync service was enabled"
+grep -F 'start --no-block candy-cloud-sync.service' "$tmp/systemd.log" >/dev/null ||
+	fail "restored Cloud sync timer was not armed by a oneshot dispatch"
 
 # Integrity and architecture failures happen before services or files are touched.
 : >"$tmp/systemd.log"
