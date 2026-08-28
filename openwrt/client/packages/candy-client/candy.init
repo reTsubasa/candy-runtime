@@ -180,7 +180,7 @@ sdwan_runtime_state() {
 }
 
 write_traffic_path_state() {
-	local state="$1" source="$2" reason="${3:-}" temporary previous_state previous_source previous_reason level=info
+	local state="$1" source="$2" reason="${3:-}" temporary previous_state="" previous_source="" previous_reason="" level=info
 	# An isolated SD-WAN failure does not degrade the ordinary proxy path.
 	# Publish the selected fallback as healthy when it is actually ready.
 	if [ "$state" = degraded ] && [ "$source" = candy_proxy ]; then
@@ -251,7 +251,7 @@ clear_sdwan_withdrawal_request() {
 }
 
 sdwan_refresh_runtime_state() {
-	local verified_state previous_state
+	local verified_state previous_state=""
 	if bounded_regular_file "$CANDY_SDWAN_STATUS_FILE" 262144 && command -v jsonfilter >/dev/null 2>&1; then
 		previous_state=$(jsonfilter -i "$CANDY_SDWAN_STATUS_FILE" -e '@.runtime.state' 2>/dev/null || true)
 	fi
