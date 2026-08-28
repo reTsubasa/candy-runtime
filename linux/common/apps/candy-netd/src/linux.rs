@@ -32,6 +32,14 @@ mod backend {
         )
     }
 
+    fn address_add_is_idempotent(error: &rtnetlink::Error) -> bool {
+        matches!(
+            error,
+            rtnetlink::Error::NetlinkError(message)
+                if message.to_io().raw_os_error() == Some(nix::libc::EEXIST)
+        )
+    }
+
     pub struct LinuxNetworkBackend {
         runtime: tokio::runtime::Runtime,
         handle: Handle,
@@ -292,7 +300,7 @@ mod backend {
                     .execute()
                     .await
                     .map_err(|_| NetworkError::Backend)?;
-                handle
+                let result = handle
                     .address()
                     .add(
                         link.header.index,
@@ -300,8 +308,12 @@ mod backend {
                         32,
                     )
                     .execute()
-                    .await
-                    .map_err(|_| NetworkError::Backend)
+                    .await;
+                match result {
+                    Ok(()) => Ok(()),
+                    Err(error) if address_add_is_idempotent(&error) => Ok(()),
+                    Err(_) => Err(NetworkError::Backend),
+                }
             })
         }
 
