@@ -346,23 +346,17 @@ run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
 activation_b=$(printf 'b%.0s' $(seq 1 64))
 mkdir "$client_reconcile/activations/$activation_b"
 ln -sfn "activations/$activation_b" "$client_reconcile/candidate"
-if run_reconcile "$client_reconcile" candy-sdwan.service env FAKE_SYSTEMD_FAIL_ACTION=restart >/dev/null 2>&1; then
-	fail "failed candidate restart unexpectedly succeeded"
-fi
-[ "$(cat "$client_reconcile/reconcile-target-v1")" = "activations/$activation_a" ] ||
-	fail "failed restart committed the new reconciliation marker"
-run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
-[ "$(cat "$client_reconcile/reconcile-target-v1")" = "activations/$activation_b" ] ||
-	fail "successful retry did not commit the replacement candidate marker"
-rm -f "$client_reconcile/candidate"
-if run_reconcile "$client_reconcile" candy-sdwan.service env FAKE_SYSTEMD_FAIL_ACTION=stop >/dev/null 2>&1; then
-	fail "failed candidate withdrawal unexpectedly succeeded"
-fi
-[ "$(cat "$client_reconcile/reconcile-target-v1")" = "activations/$activation_b" ] ||
-	fail "failed stop committed the withdrawal marker"
-run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
-[ "$(tail -n 1 "$systemd_calls")" = 'stop candy-sdwan.service' ] || fail "candidate withdrawal did not stop the Linux client"
 calls_before=$(wc -l <"$systemd_calls")
+run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
+[ "$(wc -l <"$systemd_calls")" -eq "$calls_before" ] || fail "candidate replacement restarted the Linux client"
+[ "$(cat "$client_reconcile/reconcile-target-v1")" = "activations/$activation_b" ] ||
+	fail "hot replacement did not commit the reconciliation marker"
+rm -f "$client_reconcile/candidate"
+calls_before=$(wc -l <"$systemd_calls")
+run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
+[ "$(wc -l <"$systemd_calls")" -eq "$calls_before" ] || fail "candidate withdrawal stopped the Linux client"
+[ "$(cat "$client_reconcile/reconcile-target-v1")" = withdrawn ] ||
+	fail "hot withdrawal did not commit the reconciliation marker"
 run_reconcile "$client_reconcile" candy-sdwan.service env >/dev/null
 [ "$(wc -l <"$systemd_calls")" -eq "$calls_before" ] || fail "stable withdrawal repeated a Linux client lifecycle action"
 
@@ -392,17 +386,19 @@ run_reconcile "$cold_server_reconcile" candy-server.service env >/dev/null
 activation_d=$(printf 'd%.0s' $(seq 1 64))
 mkdir "$server_reconcile/activations/$activation_d"
 ln -s "activations/$activation_d" "$server_reconcile/candidate"
+calls_before=$(wc -l <"$systemd_calls")
 run_reconcile "$server_reconcile" candy-server.service env >/dev/null
-[ "$(tail -n 1 "$systemd_calls")" = 'restart candy-server.service' ] || fail "server candidate did not restart the unified service"
+[ "$(wc -l <"$systemd_calls")" -eq "$calls_before" ] || fail "server candidate restarted the unified service"
 calls_before=$(wc -l <"$systemd_calls")
 run_reconcile "$server_reconcile" candy-server.service env >/dev/null
 [ "$(wc -l <"$systemd_calls")" -eq "$calls_before" ] || fail "unchanged server candidate caused a restart"
 rm -f "$systemd_state/candy-server.service"
 run_reconcile "$server_reconcile" candy-server.service env >/dev/null
 [ "$(tail -n 1 "$systemd_calls")" = 'start candy-server.service' ] || fail "inactive merged server was not restored"
+calls_before=$(wc -l <"$systemd_calls")
 rm -f "$server_reconcile/candidate"
 run_reconcile "$server_reconcile" candy-server.service env >/dev/null
-[ "$(tail -n 1 "$systemd_calls")" = 'restart candy-server.service' ] || fail "server withdrawal did not restore ordinary Candy"
+[ "$(wc -l <"$systemd_calls")" -eq "$calls_before" ] || fail "server withdrawal restarted ordinary Candy"
 calls_before=$(wc -l <"$systemd_calls")
 run_reconcile "$server_reconcile" candy-server.service env >/dev/null
 [ "$(wc -l <"$systemd_calls")" -eq "$calls_before" ] || fail "stable server withdrawal repeated a restart"

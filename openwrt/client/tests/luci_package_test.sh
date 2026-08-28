@@ -144,6 +144,7 @@ assert.ok(source.includes("Runtime version") && source.includes("Core version"),
 const controllerSource = fs.readFileSync(root + "/luci-app-candy/root/usr/lib/lua/luci/controller/candy.lua", "utf8");
 assert.ok(controllerSource.includes("path.peer_attachment_id"), "overview API must join SD-WAN performance by peer attachment");
 assert.ok(controllerSource.includes('role = remote_id and peer_id == remote_id and "remote_egress" or "sdwan_peer"'), "overview API must identify the active remote egress peer");
+assert.ok(controllerSource.includes("status.candy_nodes"), "status API must preserve ordinary Candy nodes separately from SD-WAN peers");
 assert.ok(controllerSource.includes('remote_egress_active'), "overview must distinguish selective SD-WAN routes from a remote Internet egress");
 assert.ok(controllerSource.includes('sdwan_policy_selective'), "overview must explain when unmatched traffic stays on the ordinary Candy proxy");
 assert.ok(controllerSource.includes('source == "sdwan" or source == "candy_proxy"'), "ordinary Candy fallback must be displayed as an active path");
@@ -320,13 +321,8 @@ assert.equal(requests.length, 2, "manual diagnostics refresh must issue request 
 const requestB = requests[1];
 assert.equal(requestA.aborted, true, "request B must abort request A");
 
-const response = updated => ({
-	process: { cpu_percent: 1.5, resident_memory_bytes: 2048 },
-	core: { current_manifest: { core: { features: [
-		{ id: "metrics", short_name: "Metrics", status_key: "metrics" },
-		{ id: "early_data", short_name: "Early data", status_key: "early_data" }
-	] } } },
-	nodes: ["hk", "sg"].map((name, index) => ({
+const response = updated => {
+	const candyNodes = ["hk", "sg"].map((name, index) => ({
 		id: name,
 		name,
 		state: "ready",
@@ -350,8 +346,20 @@ const response = updated => ({
 			fallback_reason: index === 0 ? null : "candy-bbr-runtime-fallback",
 			peer: { goodput_bps_tx: 1000, goodput_bps_rx: 2000, trusted: true }
 		}
-	}))
-});
+	}));
+	return {
+	process: { cpu_percent: 1.5, resident_memory_bytes: 2048 },
+	core: { current_manifest: { core: { features: [
+		{ id: "metrics", short_name: "Metrics", status_key: "metrics" },
+		{ id: "early_data", short_name: "Early data", status_key: "early_data" }
+	] } } },
+	candy_nodes: candyNodes,
+	nodes: candyNodes.concat([
+		{ id: "us-site", name: "US SD-WAN site", state: "running", role: "sdwan_peer", rx_bps: 16, tx_bps: 15 },
+		{ id: "hk-egress", name: "HK remote egress", state: "unavailable", role: "remote_egress" }
+	])
+	};
+};
 
 requestB.respond(200, response(1700000000000));
 const requestCongestionStatus = requests[2];
@@ -383,6 +391,8 @@ assert.match(rows[1].children[5].textContent, /CUBIC/, "passive diagnostics must
 assert.equal(rows[1].children[0].children[0].textContent, "sg");
 const featureCards = elements.get("candy-diagnostics-feature-cards").children;
 assert.equal(featureCards.length, 2, "diagnostics must render one feature card per node");
+assert.doesNotMatch(elements.get("candy-diagnostics-nodes").textContent, /SD-WAN|remote egress/, "SD-WAN sites and egresses must not appear in Candy node telemetry");
+assert.doesNotMatch(elements.get("candy-diagnostics-feature-cards").textContent, /SD-WAN|remote egress/, "SD-WAN sites and egresses must not appear in Candy feature cards");
 assert.match(featureCards[0].textContent, /hk/);
 assert.match(featureCards[0].textContent, /Core 0\.3\.25/);
 assert.match(featureCards[0].textContent, /Metrics/);
@@ -397,6 +407,12 @@ assert.match(hkFeatures[0].attributes.title, /test.*test.*test.*test 4/, "featur
 assert.equal(hkFeatures[0].children.length, 2, "feature tiles must contain only the status icon and name");
 assert.ok(!source.includes("candy-feature-badges"), "feature cards must not render inline status badges");
 assert.ok(!source.includes("candy-feature-evidence"), "feature cards must not render evidence as a separate row");
+
+const legacyMixed = response(1800000000000);
+delete legacyMixed.candy_nodes;
+context.candyDiagnosticsRender(legacyMixed);
+assert.equal(elements.get("candy-diagnostics-nodes").children.length, 2, "legacy mixed status must filter SD-WAN roles from telemetry");
+assert.equal(elements.get("candy-diagnostics-feature-cards").children.length, 2, "legacy mixed status must filter SD-WAN roles from feature cards");
 
 context.refreshCandyDiagnosticsStatus();
 requests[3].respond(200, { runtime: { performance: {} } });
@@ -426,8 +442,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=89$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=89$'
+assert_contains "$makefile" '^PKG_RELEASE:=90$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=90$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'

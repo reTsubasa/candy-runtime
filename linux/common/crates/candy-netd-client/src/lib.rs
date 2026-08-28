@@ -42,6 +42,7 @@ enum ClientPhase {
     Stopped,
     Prepared,
     Active,
+    Suspended,
 }
 
 #[derive(Debug)]
@@ -150,6 +151,40 @@ impl NetdClient {
             return Err(IpcError::UnexpectedResponse);
         }
         Ok(effective_mtu)
+    }
+
+    pub fn suspend(&mut self) -> Result<u64, IpcError> {
+        if self.phase != ClientPhase::Active {
+            return Err(IpcError::InvalidTransition);
+        }
+        let generation = self.exchange_generation(NetdOperation::Suspend, |body| match body {
+            ResponseBody::Suspended { generation } => Some(generation),
+            _ => None,
+        })?;
+        self.phase = ClientPhase::Suspended;
+        Ok(generation)
+    }
+
+    pub fn reconfigure(&mut self, declaration: PrepareDeclaration) -> Result<u64, IpcError> {
+        if self.phase != ClientPhase::Suspended {
+            return Err(IpcError::InvalidTransition);
+        }
+        self.exchange_generation(NetdOperation::Reconfigure(declaration), |body| match body {
+            ResponseBody::Reconfigured { generation } => Some(generation),
+            _ => None,
+        })
+    }
+
+    pub fn resume(&mut self) -> Result<u64, IpcError> {
+        if self.phase != ClientPhase::Suspended {
+            return Err(IpcError::InvalidTransition);
+        }
+        let generation = self.exchange_generation(NetdOperation::Resume, |body| match body {
+            ResponseBody::Resumed { generation } => Some(generation),
+            _ => None,
+        })?;
+        self.phase = ClientPhase::Active;
+        Ok(generation)
     }
 
     pub fn status(&mut self) -> Result<(SessionPhase, u64), IpcError> {

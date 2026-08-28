@@ -217,6 +217,9 @@ pub enum NetdOperation {
     Status,
     LeaseRenew,
     MtuUpdate { effective_mtu: u16 },
+    Suspend,
+    Reconfigure(PrepareDeclaration),
+    Resume,
 }
 
 impl NetdOperation {
@@ -228,6 +231,9 @@ impl NetdOperation {
             Self::Status => 4,
             Self::LeaseRenew => 5,
             Self::MtuUpdate { .. } => 6,
+            Self::Suspend => 7,
+            Self::Reconfigure(_) => 8,
+            Self::Resume => 9,
         }
     }
 }
@@ -245,7 +251,7 @@ impl NetdRequest {
             return Err(NetdProtocolError::InvalidRequest);
         }
         self.owner.validate()?;
-        if let NetdOperation::Prepare(value) = &self.operation {
+        if let NetdOperation::Prepare(value) | NetdOperation::Reconfigure(value) = &self.operation {
             value.validate()?;
         }
         if let NetdOperation::MtuUpdate { effective_mtu } = &self.operation {
@@ -266,7 +272,7 @@ impl NetdRequest {
         varint(u64::from(self.owner.pid), &mut out);
         varint(self.owner.generation, &mut out);
         varint(self.owner.lease_deadline_mono_ms, &mut out);
-        if let NetdOperation::Prepare(value) = &self.operation {
+        if let NetdOperation::Prepare(value) | NetdOperation::Reconfigure(value) = &self.operation {
             encode_declaration(value, &mut out);
         }
         if let NetdOperation::MtuUpdate { effective_mtu } = &self.operation {
@@ -300,6 +306,9 @@ impl NetdRequest {
                 effective_mtu: u16::try_from(reader.varint()?)
                     .map_err(|_| NetdProtocolError::InvalidDeclaration)?,
             },
+            7 => NetdOperation::Suspend,
+            8 => NetdOperation::Reconfigure(decode_declaration(&mut reader)?),
+            9 => NetdOperation::Resume,
             _ => return Err(NetdProtocolError::UnknownEnum),
         };
         reader.finish()?;
@@ -413,6 +422,7 @@ pub enum SessionPhase {
     Stopped = 1,
     Prepared = 2,
     Active = 3,
+    Suspended = 4,
 }
 
 impl TryFrom<u64> for SessionPhase {
@@ -423,6 +433,7 @@ impl TryFrom<u64> for SessionPhase {
             1 => Ok(Self::Stopped),
             2 => Ok(Self::Prepared),
             3 => Ok(Self::Active),
+            4 => Ok(Self::Suspended),
             _ => Err(NetdProtocolError::UnknownEnum),
         }
     }
@@ -451,6 +462,15 @@ pub enum ResponseBody {
         generation: u64,
         effective_mtu: u16,
     },
+    Suspended {
+        generation: u64,
+    },
+    Reconfigured {
+        generation: u64,
+    },
+    Resumed {
+        generation: u64,
+    },
     Error(ErrorCode),
 }
 
@@ -475,6 +495,9 @@ impl NetdResponse {
             ResponseBody::LeaseRenewed { .. } => 5,
             ResponseBody::Error(_) => 6,
             ResponseBody::MtuUpdated { .. } => 7,
+            ResponseBody::Suspended { .. } => 8,
+            ResponseBody::Reconfigured { .. } => 9,
+            ResponseBody::Resumed { .. } => 10,
         };
         varint(tag, &mut out);
         varint(self.request_id, &mut out);
@@ -489,7 +512,10 @@ impl NetdResponse {
             }
             ResponseBody::Committed { generation }
             | ResponseBody::RolledBack { generation }
-            | ResponseBody::LeaseRenewed { generation } => {
+            | ResponseBody::LeaseRenewed { generation }
+            | ResponseBody::Suspended { generation }
+            | ResponseBody::Reconfigured { generation }
+            | ResponseBody::Resumed { generation } => {
                 valid_generation(generation)?;
                 varint(generation, &mut out);
             }
@@ -548,6 +574,15 @@ impl NetdResponse {
                 generation: reader.varint()?,
                 effective_mtu: u16::try_from(reader.varint()?)
                     .map_err(|_| NetdProtocolError::InvalidDeclaration)?,
+            },
+            8 => ResponseBody::Suspended {
+                generation: reader.varint()?,
+            },
+            9 => ResponseBody::Reconfigured {
+                generation: reader.varint()?,
+            },
+            10 => ResponseBody::Resumed {
+                generation: reader.varint()?,
             },
             _ => return Err(NetdProtocolError::UnknownEnum),
         };
@@ -658,7 +693,9 @@ impl NetdSession {
                     Ok(())
                 }
                 SessionPhase::Active => Ok(()),
-                SessionPhase::Stopped => Err(NetdSessionError::InvalidTransition),
+                SessionPhase::Stopped | SessionPhase::Suspended => {
+                    Err(NetdSessionError::InvalidTransition)
+                }
             },
             NetdOperation::Rollback => {
                 if self.owner.is_none() {
@@ -690,6 +727,27 @@ impl NetdSession {
                     .as_mut()
                     .ok_or(NetdSessionError::InvalidTransition)?;
                 declaration.effective_mtu = *effective_mtu;
+                Ok(())
+            }
+            NetdOperation::Suspend => {
+                if self.phase != SessionPhase::Active {
+                    return Err(NetdSessionError::InvalidTransition);
+                }
+                self.phase = SessionPhase::Suspended;
+                Ok(())
+            }
+            NetdOperation::Reconfigure(declaration) => {
+                if self.phase != SessionPhase::Suspended {
+                    return Err(NetdSessionError::InvalidTransition);
+                }
+                self.declaration = Some(declaration.clone());
+                Ok(())
+            }
+            NetdOperation::Resume => {
+                if self.phase != SessionPhase::Suspended {
+                    return Err(NetdSessionError::InvalidTransition);
+                }
+                self.phase = SessionPhase::Active;
                 Ok(())
             }
         }

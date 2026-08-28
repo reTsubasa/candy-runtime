@@ -328,6 +328,38 @@ fn commit_installs_policy_rule_only_after_all_prepared_state() {
 }
 
 #[test]
+fn hot_reconfigure_keeps_steering_suspended_until_replacement_is_ready() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let backend = RecordingBackend(events.clone());
+    let journal = MemoryJournal::default();
+    let mut transaction = NetworkTransaction::new(backend, journal).unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+    events.borrow_mut().clear();
+
+    let mut replacement = declaration();
+    replacement.routes[1] = RouteDeclaration {
+        prefix: Ipv4Prefix::new([10, 3, 0, 0], 16).unwrap(),
+        kind: RouteKind::Remote,
+    };
+    transaction.suspend(owner()).unwrap();
+    transaction.reconfigure(owner(), replacement).unwrap();
+    assert_eq!(
+        *events.borrow(),
+        [
+            "remove_policy_rule",
+            "remove_firewall",
+            "remove_routes",
+            "prepare_link",
+            "prepare_routes",
+            "prepare_firewall",
+        ]
+    );
+    transaction.resume(owner()).unwrap();
+    assert_eq!(events.borrow().last(), Some(&"install_policy_rule"));
+}
+
+#[test]
 fn rollback_restores_interface_sysctls_before_removing_link() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let backend = RecordingBackend(events.clone());

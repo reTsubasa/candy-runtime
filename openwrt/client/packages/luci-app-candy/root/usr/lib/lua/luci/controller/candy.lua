@@ -1296,6 +1296,10 @@ function action_status_json()
 	status.version = status.version or "0.4.0"
 	status.release = status.release or "1"
 	status.nodes = status.nodes or {}
+	status.candy_nodes = {}
+	for _, node in ipairs(status.nodes) do
+		status.candy_nodes[#status.candy_nodes + 1] = node
+	end
 	local sdwan_performance = status.sdwan.performance
 	local remote = status.sdwan.egress and status.sdwan.egress.remote or nil
 	if status.sdwan.active and sdwan_performance then

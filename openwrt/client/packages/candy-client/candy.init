@@ -4152,7 +4152,7 @@ interrupt_sdwan_processes() {
 }
 
 sdwan_reconcile() {
-	local candidate_rc active_target fallback
+	local candidate_rc active_target fallback withdrawal_transition=0
 	if sdwan_user_stopped; then
 		active_target=$(sdwan_active_target 2>/dev/null || true)
 		if load_sdwan_candidate && [ -n "$active_target" ] && [ "$active_target" != "$CANDY_SDWAN_CANDIDATE_TARGET" ]; then
@@ -4196,10 +4196,17 @@ sdwan_reconcile() {
 	if [ "$candidate_rc" -eq 2 ]; then
 		active_target=$(sdwan_active_target 2>/dev/null || true)
 		if sdwan_withdrawal_requested || [ -n "$active_target" ]; then
+			withdrawal_transition=1
 			fallback=$(fallback_traffic_source)
 			write_traffic_path_state switching "$fallback" cloud_withdrawn || true
 			log_event info sdwan_withdrawal "result=started previous=${active_target:-none} fallback=$fallback ordinary_client=preserved"
-			if ! stop_sdwan_data_plane; then
+			if [ -n "$(sdwan_agent_pids)" ]; then
+				if [ -f "$CANDY_SDWAN_STATE_DIR/activation-ready-v1.json" ] && [ ! -L "$CANDY_SDWAN_STATE_DIR/activation-ready-v1.json" ]; then
+					log_event info sdwan_reconcile "result=withdrawal_in_progress transition=hot fallback=$fallback ordinary_client=preserved"
+					return 0
+				fi
+				log_event info sdwan_reconcile "result=withdrawal_suspended transition=hot core=preserved fallback=$fallback ordinary_client=preserved"
+			elif ! stop_sdwan_data_plane; then
 				log_event error sdwan_reconcile "result=withdrawal_failed reason=route_cleanup_failed ordinary_client=preserved"
 				return 1
 			fi
@@ -4212,7 +4219,11 @@ sdwan_reconcile() {
 			log_event error sdwan_reconcile "result=withdrawal_failed reason=request_marker_not_removable ordinary_client=preserved"
 			return 1
 		fi
-		sdwan_runtime_state stopped || true
+		if [ "$withdrawal_transition" -eq 1 ]; then
+			sdwan_runtime_state fail-open "Cloud policy removed; Candy Proxy fallback active" || true
+		else
+			sdwan_runtime_state stopped || true
+		fi
 		fallback=$(fallback_traffic_source)
 		write_traffic_path_state degraded "$fallback" cloud_policy_removed || true
 		if [ -n "$active_target" ]; then

@@ -336,18 +336,8 @@ reconcile_control() {
 	case "$state" in
 		withdrawn|invalid)
 			if [ "$service" = candy-server.service ]; then
-				if systemctl is-active --quiet "$service"; then
-					if [ "$changed" = 1 ]; then
-						systemctl restart "$service"
-						acted=1
-					fi
-				else
+				if ! systemctl is-active --quiet "$service"; then
 					systemctl start "$service"
-					acted=1
-				fi
-			else
-				if systemctl is-active --quiet "$service"; then
-					systemctl stop "$service"
 					acted=1
 				fi
 			fi
@@ -365,11 +355,6 @@ reconcile_control() {
 					systemctl start "$service"
 					acted=1
 				fi
-			else
-				if systemctl is-active --quiet "$service"; then
-					systemctl stop "$service"
-					acted=1
-				fi
 			fi
 			if [ "$acted" = 1 ] || [ "$changed" = 1 ]; then
 				write_status "$(current_registration_state)" fail-open "Cloud SD-WAN candidate rejected"
@@ -377,13 +362,14 @@ reconcile_control() {
 			;;
 		*)
 			if systemctl is-active --quiet "$service"; then
-				if [ "$changed" = 1 ]; then
-					systemctl restart "$service"
-					acted=1
-				fi
+				:
 			else
 				systemctl start "$service"
 				acted=1
+			fi
+			if [ "$changed" = 1 ]; then
+				write_status "$(current_registration_state)" reconnecting ""
+				return 0
 			fi
 			if [ ! -x "$status_inspector" ]; then
 				write_status "$(current_registration_state)" fail-open "Local SD-WAN status verifier is unavailable"

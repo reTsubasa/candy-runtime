@@ -109,6 +109,7 @@ fn encode_record(record: &TransactionRecord) -> Result<Vec<u8>, NetworkError> {
         TransactionPhase::Prepared => 2,
         TransactionPhase::Active => 3,
         TransactionPhase::RollingBack => 4,
+        TransactionPhase::Suspended => 5,
     });
     bytes.extend_from_slice(&record.completed_steps.to_be_bytes());
     bytes.push(u8::try_from(record.sysctls.len()).map_err(|_| NetworkError::Journal)?);
@@ -139,6 +140,7 @@ fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
         2 => TransactionPhase::Prepared,
         3 => TransactionPhase::Active,
         4 => TransactionPhase::RollingBack,
+        5 => TransactionPhase::Suspended,
         _ => return Err(NetworkError::Journal),
     };
     let completed_steps = u16::from_be_bytes([bytes[9], bytes[10]]);

@@ -596,9 +596,15 @@ function candyDiagnosticsTelemetryRow(label, value) {
 function candyDiagnosticsTelemetryRowSub(label, value, sub) {
 	return '<div class="candy-telemetry-row"><span class="candy-telemetry-label">' + candyDiagnosticsEscape(label) + '</span><span class="candy-telemetry-value">' + candyDiagnosticsEscape(value) + '</span></div><div class="candy-telemetry-sub">' + sub + '</div>';
 }
+function candyDiagnosticsCandyNodes(data) {
+	if (data && Array.isArray(data.candy_nodes)) return data.candy_nodes;
+	return (data && Array.isArray(data.nodes) ? data.nodes : []).filter(function(node) {
+		return node && node.role !== "sdwan_peer" && node.role !== "remote_egress";
+	});
+}
 function candyDiagnosticsRenderFeatureCards(data) {
 	var body = document.getElementById("candy-diagnostics-feature-cards");
-	var definitions = data && data.core && data.core.current_manifest && data.core.current_manifest.core && data.core.current_manifest.core.features || [], nodes = data && data.nodes || [];
+	var definitions = data && data.core && data.core.current_manifest && data.core.current_manifest.core && data.core.current_manifest.core.features || [], nodes = candyDiagnosticsCandyNodes(data);
 	if (!body) return;
 	body.textContent = "";
 	if (!definitions.length || !nodes.length) {
@@ -801,7 +807,7 @@ function candyDiagnosticsRender(data) {
 	data = data || {};
 	var runtime = data.runtime || {}, performance = runtime.performance || {}, legacy = performance.passive;
 	var processStatus = data.process || {}, socketBuffers = processStatus.socket_buffers || {}, legacyLocal = legacy && legacy.local || {};
-	var nodes = data.nodes || [], body = document.getElementById("candy-diagnostics-nodes"), row, cell, text;
+	var nodes = candyDiagnosticsCandyNodes(data), body = document.getElementById("candy-diagnostics-nodes"), row, cell, text;
 	if (!nodes.length && legacy) nodes = [{ id: "-", name: "-", state: "-", passive: legacy }];
 	candyDiagnosticsRenderFeatureCards(data);
 	candyDiagnosticsUpdateCharts(nodes);

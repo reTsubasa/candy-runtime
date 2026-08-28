@@ -13,6 +13,7 @@ pub enum TransactionPhase {
     Preparing,
     Prepared,
     Active,
+    Suspended,
     RollingBack,
 }
 
@@ -116,6 +117,19 @@ pub trait NetworkController {
     fn rollback(&mut self, owner: LeaseOwner) -> Result<(), NetworkError>;
     fn renew_lease(&mut self, owner: LeaseOwner) -> Result<(), NetworkError>;
     fn update_mtu(&mut self, owner: LeaseOwner, effective_mtu: u16) -> Result<(), NetworkError>;
+    fn suspend(&mut self, _owner: LeaseOwner) -> Result<(), NetworkError> {
+        Err(NetworkError::InvalidTransition)
+    }
+    fn reconfigure(
+        &mut self,
+        _owner: LeaseOwner,
+        _declaration: PrepareDeclaration,
+    ) -> Result<(), NetworkError> {
+        Err(NetworkError::InvalidTransition)
+    }
+    fn resume(&mut self, _owner: LeaseOwner) -> Result<(), NetworkError> {
+        Err(NetworkError::InvalidTransition)
+    }
     fn recover_orphan(
         &mut self,
         owner_is_alive: bool,
@@ -152,9 +166,9 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             }
             return match record.phase {
                 TransactionPhase::Prepared | TransactionPhase::Active => Ok(()),
-                TransactionPhase::Preparing | TransactionPhase::RollingBack => {
-                    Err(NetworkError::InvalidTransition)
-                }
+                TransactionPhase::Preparing
+                | TransactionPhase::Suspended
+                | TransactionPhase::RollingBack => Err(NetworkError::InvalidTransition),
             };
         }
 
@@ -296,6 +310,89 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         self.journal.store(record)
     }
 
+    pub fn suspend(&mut self, owner: LeaseOwner) -> Result<(), NetworkError> {
+        let record = self
+            .record
+            .as_ref()
+            .ok_or(NetworkError::InvalidTransition)?;
+        ensure_owner(record.owner, owner)?;
+        if record.phase == TransactionPhase::Suspended {
+            return Ok(());
+        }
+        if record.phase != TransactionPhase::Active {
+            return Err(NetworkError::InvalidTransition);
+        }
+        let declaration = record.declaration.clone();
+        self.backend.remove_policy_rule(&declaration)?;
+        self.clear_step(STEP_POLICY_RULE)?;
+        self.set_phase(TransactionPhase::Suspended)
+    }
+
+    pub fn reconfigure(
+        &mut self,
+        owner: LeaseOwner,
+        declaration: PrepareDeclaration,
+    ) -> Result<(), NetworkError> {
+        declaration.validate().map_err(|_| NetworkError::Backend)?;
+        let record = self
+            .record
+            .as_ref()
+            .ok_or(NetworkError::InvalidTransition)?;
+        ensure_owner(record.owner, owner)?;
+        if record.phase != TransactionPhase::Suspended {
+            return Err(NetworkError::InvalidTransition);
+        }
+        let previous = record.declaration.clone();
+        if previous == declaration {
+            return Ok(());
+        }
+        if previous.firewall != declaration.firewall {
+            return Err(NetworkError::InvalidTransition);
+        }
+
+        self.backend.remove_firewall(&previous)?;
+        self.backend.remove_routes(&previous)?;
+        let applied = (|| {
+            self.backend.prepare_link(&declaration)?;
+            self.backend.prepare_routes(&declaration)?;
+            self.backend.prepare_firewall(&declaration)
+        })();
+        if let Err(error) = applied {
+            let _ = self.backend.remove_firewall(&declaration);
+            let _ = self.backend.remove_routes(&declaration);
+            let restored = self
+                .backend
+                .prepare_link(&previous)
+                .and_then(|_| self.backend.prepare_routes(&previous))
+                .and_then(|_| self.backend.prepare_firewall(&previous));
+            return restored.and(Err(error));
+        }
+        let record = self
+            .record
+            .as_mut()
+            .ok_or(NetworkError::InvalidTransition)?;
+        record.declaration = declaration;
+        self.journal.store(record)
+    }
+
+    pub fn resume(&mut self, owner: LeaseOwner) -> Result<(), NetworkError> {
+        let record = self
+            .record
+            .as_ref()
+            .ok_or(NetworkError::InvalidTransition)?;
+        ensure_owner(record.owner, owner)?;
+        if record.phase == TransactionPhase::Active {
+            return Ok(());
+        }
+        if record.phase != TransactionPhase::Suspended {
+            return Err(NetworkError::InvalidTransition);
+        }
+        let declaration = record.declaration.clone();
+        self.backend.install_policy_rule(&declaration)?;
+        self.complete_step(STEP_POLICY_RULE)?;
+        self.set_phase(TransactionPhase::Active)
+    }
+
     fn cleanup_record(&mut self) -> Result<(), NetworkError> {
         self.set_phase(TransactionPhase::RollingBack)?;
         let record = self
@@ -421,6 +518,22 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkController for NetworkTransact
 
     fn update_mtu(&mut self, owner: LeaseOwner, effective_mtu: u16) -> Result<(), NetworkError> {
         Self::update_mtu(self, owner, effective_mtu)
+    }
+
+    fn suspend(&mut self, owner: LeaseOwner) -> Result<(), NetworkError> {
+        Self::suspend(self, owner)
+    }
+
+    fn reconfigure(
+        &mut self,
+        owner: LeaseOwner,
+        declaration: PrepareDeclaration,
+    ) -> Result<(), NetworkError> {
+        Self::reconfigure(self, owner, declaration)
+    }
+
+    fn resume(&mut self, owner: LeaseOwner) -> Result<(), NetworkError> {
+        Self::resume(self, owner)
     }
 
     fn recover_orphan(

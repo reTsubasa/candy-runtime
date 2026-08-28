@@ -79,6 +79,9 @@ fn transaction_requires_exact_responses_and_preserves_lifecycle_order() {
                 }
                 NetdOperation::Rollback => (ResponseBody::RolledBack { generation: 7 }, None),
                 NetdOperation::Status => panic!("unexpected status"),
+                NetdOperation::Suspend | NetdOperation::Reconfigure(_) | NetdOperation::Resume => {
+                    panic!("unexpected hot transition operation")
+                }
             };
             let response = NetdResponse {
                 request_id: request.request_id,

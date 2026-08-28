@@ -349,6 +349,9 @@ impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
             NetdOperation::Status => "status",
             NetdOperation::LeaseRenew => "lease_renew",
             NetdOperation::MtuUpdate { .. } => "mtu_update",
+            NetdOperation::Suspend => "suspend",
+            NetdOperation::Reconfigure(_) => "reconfigure",
+            NetdOperation::Resume => "resume",
         };
         let (response, descriptor) = self.process(request, peer)?;
         match &response.body {
@@ -491,6 +494,39 @@ impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
                 ResponseBody::MtuUpdated {
                     generation: request.owner.generation,
                     effective_mtu: *effective_mtu,
+                }
+            }
+            NetdOperation::Suspend => {
+                if let Err(error) = self.network.suspend(request.owner) {
+                    return Ok((
+                        error_response(request.request_id, network_error_code(error)),
+                        None,
+                    ));
+                }
+                ResponseBody::Suspended {
+                    generation: request.owner.generation,
+                }
+            }
+            NetdOperation::Reconfigure(declaration) => {
+                if let Err(error) = self.network.reconfigure(request.owner, declaration.clone()) {
+                    return Ok((
+                        error_response(request.request_id, network_error_code(error)),
+                        None,
+                    ));
+                }
+                ResponseBody::Reconfigured {
+                    generation: request.owner.generation,
+                }
+            }
+            NetdOperation::Resume => {
+                if let Err(error) = self.network.resume(request.owner) {
+                    return Ok((
+                        error_response(request.request_id, network_error_code(error)),
+                        None,
+                    ));
+                }
+                ResponseBody::Resumed {
+                    generation: request.owner.generation,
                 }
             }
         };

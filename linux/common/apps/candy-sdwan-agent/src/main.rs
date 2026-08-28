@@ -114,7 +114,7 @@ struct ActivationDescriptor {
     grant_expires_at_unix: u64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct RuntimeArgs {
     socket: PathBuf,
     core: PathBuf,
@@ -133,6 +133,34 @@ struct RuntimeArgs {
     activation_declaration_sha256: Option<[u8; 32]>,
     activation_ready: Option<PathBuf>,
     ordinary_config: Option<PathBuf>,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct CoreReloadRequest<'a> {
+    schema_version: u16,
+    action: CoreReloadAction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<&'a Path>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<&'a Path>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CoreReloadAction {
+    Replace,
+    Suspend,
+    Resume,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoreReloadResponse {
+    schema_version: u16,
+    ok: bool,
+    generation: Option<u64>,
+    error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -710,8 +738,100 @@ fn spawn_core(args: &RuntimeArgs, tun: &OwnedFd, readiness_token: &str) -> Resul
         .arg(&args.status)
         .arg("--readiness-token")
         .arg(readiness_token)
+        .arg("--reload-socket")
+        .arg(core_reload_socket(args)?)
         .spawn()
         .with_context(|| format!("start Candy Core: {}", args.core.display()))
+}
+
+fn core_reload_socket(args: &RuntimeArgs) -> Result<PathBuf> {
+    Ok(args
+        .status
+        .parent()
+        .context("Core status path has no parent")?
+        .join("sdwan-core-reload.sock"))
+}
+
+fn reload_runtime_args(current: &RuntimeArgs) -> Result<RuntimeArgs> {
+    let link = current
+        .activation_link
+        .as_deref()
+        .context("hot reload requires a Cloud activation pointer")?;
+    let (descriptor, relative_target, config, declaration) = resolve_activation(link)?;
+    anyhow::ensure!(
+        descriptor.core_role == current.core_role,
+        "hot reload cannot change the Core role"
+    );
+    Ok(RuntimeArgs {
+        socket: current.socket.clone(),
+        core: current.core.clone(),
+        core_role: current.core_role,
+        activation_config_sha256: Some(sha256_file(&config)?),
+        activation_declaration_sha256: Some(sha256_file(&declaration)?),
+        config,
+        declaration,
+        status: current
+            .status
+            .parent()
+            .context("Core status path has no parent")?
+            .join(format!("sdwan-{}.status.json", descriptor.activation_id)),
+        instance_id: descriptor.activation_id[..32].to_owned(),
+        generation: descriptor.projection_generation,
+        lease_ms: current.lease_ms,
+        readiness_timeout_ms: current.readiness_timeout_ms,
+        activation_link: current.activation_link.clone(),
+        activation_target: Some(relative_target),
+        activation_descriptor: Some(descriptor),
+        activation_ready: current.activation_ready.clone(),
+        ordinary_config: current.ordinary_config.clone(),
+    })
+}
+
+fn request_core_control(
+    args: &RuntimeArgs,
+    child: &mut Child,
+    action: CoreReloadAction,
+) -> Result<()> {
+    use std::io::{Read as _, Write as _};
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+
+    anyhow::ensure!(
+        child.try_wait()?.is_none(),
+        "Candy Core exited before hot reload"
+    );
+    let mut stream = UnixStream::connect(core_reload_socket(args)?)
+        .context("connect Candy Core hot reload socket")?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let request = CoreReloadRequest {
+        schema_version: 1,
+        action,
+        config: matches!(action, CoreReloadAction::Replace).then_some(args.config.as_path()),
+        status: matches!(action, CoreReloadAction::Replace).then_some(args.status.as_path()),
+    };
+    stream.write_all(&serde_json::to_vec(&request)?)?;
+    stream.shutdown(Shutdown::Write)?;
+    let mut response = Vec::new();
+    stream.take(64 * 1024).read_to_end(&mut response)?;
+    let response: CoreReloadResponse =
+        serde_json::from_slice(&response).context("parse Candy Core reload response")?;
+    anyhow::ensure!(
+        response.schema_version == 1,
+        "unsupported Core reload response"
+    );
+    let generation_matches = !matches!(action, CoreReloadAction::Replace)
+        || response.generation == Some(args.generation);
+    anyhow::ensure!(
+        response.ok && generation_matches,
+        "Candy Core rejected hot reload: {}",
+        response.error.as_deref().unwrap_or("unknown error")
+    );
+    Ok(())
+}
+
+fn request_core_reload(args: &RuntimeArgs, child: &mut Child) -> Result<()> {
+    request_core_control(args, child, CoreReloadAction::Replace)
 }
 
 fn generate_readiness_token() -> Result<String> {
@@ -1580,29 +1700,155 @@ fn fail_after_rollback(
     }
 }
 
-fn finish_control_transition(
+#[derive(Default)]
+struct HotTransitionState {
+    core_suspended: bool,
+    steering_suspended: bool,
+}
+
+impl HotTransitionState {
+    fn complete(&self) -> bool {
+        self.core_suspended && self.steering_suspended
+    }
+}
+
+fn enter_proxy_fallback(
     args: &RuntimeArgs,
     child: &mut Child,
     netd: &mut NetdClient,
-    state: ActivationPointerState,
+    state: &mut HotTransitionState,
 ) -> Result<()> {
-    let (event, phase) = match state {
-        ActivationPointerState::Superseded => ("sdwan_generation_superseded", "superseded"),
-        ActivationPointerState::Withdrawn => ("sdwan_configuration_withdrawn", "withdrawn"),
-        ActivationPointerState::Unchanged => bail!("control transition requires a changed pointer"),
-    };
-    eprintln!(
-        "level=info event={} generation={} transition=expected",
-        event, args.generation
-    );
-    stop_core(child);
-    rollback_or_report(netd, "SD-WAN control transition")?;
-    remove_activation_receipt(args.activation_ready.as_deref())?;
-    eprintln!(
-        "level=info event=sdwan_stopped generation={} phase={} rollback_ok=true",
-        args.generation, phase
-    );
+    if !state.steering_suspended {
+        netd.suspend()
+            .context("remove SD-WAN steering before entering Candy Proxy fallback")?;
+        state.steering_suspended = true;
+    }
+    if !state.core_suspended {
+        request_core_control(args, child, CoreReloadAction::Suspend)
+            .context("suspend Core forwarding after steering was removed")?;
+        state.core_suspended = true;
+    }
     Ok(())
+}
+
+fn leave_proxy_fallback(
+    args: &RuntimeArgs,
+    child: &mut Child,
+    netd: &mut NetdClient,
+    state: &mut HotTransitionState,
+) -> Result<()> {
+    if state.core_suspended {
+        request_core_control(args, child, CoreReloadAction::Resume)
+            .context("resume Core forwarding before restoring SD-WAN steering")?;
+        state.core_suspended = false;
+    }
+    if state.steering_suspended {
+        if let Err(error) = netd.resume() {
+            if request_core_control(args, child, CoreReloadAction::Suspend).is_ok() {
+                state.core_suspended = true;
+            }
+            return Err(anyhow::Error::from(error).context("restore SD-WAN steering"));
+        }
+        state.steering_suspended = false;
+    }
+    Ok(())
+}
+
+fn hot_replace_activation(
+    current: &RuntimeArgs,
+    replacement: &RuntimeArgs,
+    child: &mut Child,
+    netd: &mut NetdClient,
+    readiness_token: &str,
+    transition: &mut HotTransitionState,
+) -> Result<bool> {
+    let already_suspended = transition.complete();
+    let previous_declaration = parse_declaration(&current.declaration)?;
+    let replacement_declaration = match parse_declaration(&replacement.declaration) {
+        Ok(declaration) => declaration,
+        Err(error) => {
+            write_failed_activation_receipt(replacement, "declaration_invalid")?;
+            eprintln!(
+                "level=error event=sdwan_hot_reload_rejected generation={} error_code=declaration_invalid error={}",
+                replacement.generation,
+                sanitize_log_value(&format!("{error:#}"))
+            );
+            return Ok(false);
+        }
+    };
+    if !already_suspended {
+        enter_proxy_fallback(current, child, netd, transition)
+            .context("enter Candy Proxy fallback for hot reload")?;
+    }
+    eprintln!(
+        "level=info event=sdwan_hot_reload_fallback generation={} source=candy_proxy",
+        replacement.generation
+    );
+    if let Err(error) = netd.reconfigure(replacement_declaration) {
+        if !already_suspended {
+            leave_proxy_fallback(current, child, netd, transition)
+                .context("restore last-good SD-WAN after rejected reconfigure")?;
+        }
+        write_failed_activation_receipt(replacement, "netd_reconfigure_failed")?;
+        eprintln!(
+            "level=error event=sdwan_hot_reload_rejected generation={} error_code=netd_reconfigure_failed error={}",
+            replacement.generation,
+            sanitize_log_value(&error.to_string())
+        );
+        return Ok(false);
+    }
+    if let Err(error) = remove_stale_status(&replacement.status)
+        .and_then(|_| request_core_reload(replacement, child))
+    {
+        netd.reconfigure(previous_declaration)
+            .context("restore last-good netd declaration after Core reload rejection")?;
+        if !already_suspended {
+            leave_proxy_fallback(current, child, netd, transition)
+                .context("resume last-good SD-WAN after Core reload rejection")?;
+        }
+        write_failed_activation_receipt(replacement, "core_hot_reload_failed")?;
+        eprintln!(
+            "level=error event=sdwan_hot_reload_rejected generation={} error_code=core_hot_reload_failed error={}",
+            replacement.generation,
+            sanitize_log_value(&format!("{error:#}"))
+        );
+        return Ok(false);
+    }
+
+    let deadline = Instant::now()
+        .checked_add(Duration::from_millis(replacement.readiness_timeout_ms))
+        .context("hot reload readiness deadline overflow")?;
+    loop {
+        anyhow::ensure!(
+            child.try_wait()?.is_none(),
+            "Candy Core exited during hot reload"
+        );
+        match read_core_readiness(
+            &replacement.status,
+            replacement.generation,
+            child.id(),
+            readiness_token,
+        )? {
+            Some(ReadinessState::Ready) | Some(ReadinessState::Degraded)
+                if replacement.core_role == CoreRole::Server =>
+            {
+                break
+            }
+            Some(ReadinessState::Ready) => break,
+            _ if Instant::now() >= deadline => bail!("Candy Core hot reload readiness timed out"),
+            _ => thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    leave_proxy_fallback(replacement, child, netd, transition)
+        .context("leave Candy Proxy fallback after hot reload")?;
+    write_runtime_activation_receipt(replacement, "committed", None)?;
+    eprintln!(
+        "level=info event=sdwan_hot_reload_committed previous_generation={} generation={} core_pid={} fallback=candy_proxy",
+        current.generation,
+        replacement.generation,
+        child.id()
+    );
+    Ok(true)
 }
 
 fn fail_without_core(
@@ -1643,10 +1889,10 @@ fn fail_without_core(
     }
 }
 
-fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
+fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     if args.generation == 0 {
         return fail_before_prepare(
-            args,
+            &args,
             "invalid SD-WAN generation",
             "invalid_generation",
             anyhow::anyhow!("generation must be non-zero"),
@@ -1654,7 +1900,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     }
     if !(MIN_LEASE_MS..=MAX_LEASE_MS).contains(&args.lease_ms) {
         return fail_before_prepare(
-            args,
+            &args,
             "invalid SD-WAN lease",
             "invalid_lease",
             anyhow::anyhow!("lease-ms is outside the supported bound"),
@@ -1662,7 +1908,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     }
     if !(MIN_READINESS_TIMEOUT_MS..=MAX_READINESS_TIMEOUT_MS).contains(&args.readiness_timeout_ms) {
         return fail_before_prepare(
-            args,
+            &args,
             "invalid Core readiness timeout",
             "invalid_readiness_timeout",
             anyhow::anyhow!("readiness-timeout-ms is outside the supported bound"),
@@ -1670,7 +1916,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     }
     if let Err(error) = install_shutdown_handlers() {
         return fail_before_prepare(
-            args,
+            &args,
             "install SD-WAN shutdown handlers",
             "signal_handler_failed",
             error,
@@ -1680,7 +1926,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
         Ok(declaration) => declaration,
         Err(error) => {
             return fail_before_prepare(
-                args,
+                &args,
                 "invalid netd declaration",
                 "declaration_invalid",
                 error,
@@ -1694,7 +1940,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
         Ok(deadline) => deadline,
         Err(error) => {
             return fail_before_prepare(
-                args,
+                &args,
                 "invalid monotonic lease deadline",
                 "lease_clock_failed",
                 error,
@@ -1705,7 +1951,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
         Ok(instance_id) => instance_id,
         Err(error) => {
             return fail_before_prepare(
-                args,
+                &args,
                 "invalid SD-WAN instance identity",
                 "instance_id_invalid",
                 error,
@@ -1726,12 +1972,12 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     let prepared = match netd.prepare(declaration).context("netd prepare") {
         Ok(prepared) => prepared,
         Err(error) => {
-            return fail_before_prepare(args, "netd prepare failed", "netd_prepare_failed", error)
+            return fail_before_prepare(&args, "netd prepare failed", "netd_prepare_failed", error)
         }
     };
     if let Err(error) = remove_stale_status(&args.status) {
         return fail_without_core(
-            args,
+            &args,
             &mut netd,
             "stale Core readiness cleanup failed",
             "status_cleanup_failed",
@@ -1756,7 +2002,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
         Ok(token) => token,
         Err(error) => {
             return fail_without_core(
-                args,
+                &args,
                 &mut netd,
                 "Core readiness token generation failed",
                 "readiness_token_failed",
@@ -1764,11 +2010,11 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
             )
         }
     };
-    let mut child = match spawn_core(args, &prepared.tun, &readiness_token) {
+    let mut child = match spawn_core(&args, &prepared.tun, &readiness_token) {
         Ok(child) => child,
         Err(error) => {
             return fail_without_core(
-                args,
+                &args,
                 &mut netd,
                 "Candy Core start failed",
                 "core_start_failed",
@@ -1776,7 +2022,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
             );
         }
     };
-    match wait_for_core_readiness(args, &mut child, &readiness_token, &mut netd) {
+    match wait_for_core_readiness(&args, &mut child, &readiness_token, &mut netd) {
         Ok(ReadinessWait::Ready) => {}
         Ok(ReadinessWait::ShutdownRequested) => {
             stop_core(&mut child);
@@ -1793,7 +2039,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
         Err(error) => {
             return if error.downcast_ref::<TransientReadinessFailure>().is_some() {
                 retry_after_rollback(
-                    args,
+                    &args,
                     &mut child,
                     &mut netd,
                     "Candy Core readiness failed",
@@ -1802,7 +2048,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 )
             } else {
                 fail_after_rollback(
-                    args,
+                    &args,
                     &mut child,
                     &mut netd,
                     "Candy Core readiness failed",
@@ -1815,7 +2061,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     if let Err(error) = netd.commit() {
         return if recovery_attempt {
             retry_after_rollback(
-                args,
+                &args,
                 &mut child,
                 &mut netd,
                 "netd recovery commit failed",
@@ -1824,7 +2070,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
             )
         } else {
             fail_after_rollback(
-                args,
+                &args,
                 &mut child,
                 &mut netd,
                 "netd commit failed",
@@ -1833,9 +2079,9 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
             )
         };
     }
-    if let Err(error) = write_runtime_activation_receipt(args, "committed", None) {
+    if let Err(error) = write_runtime_activation_receipt(&args, "committed", None) {
         return fail_after_rollback(
-            args,
+            &args,
             &mut child,
             &mut netd,
             "activation receipt publication failed",
@@ -1850,19 +2096,83 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     let renew_every = Duration::from_millis((args.lease_ms / 3).max(1_000));
     let mut next_renewal = Instant::now() + renew_every;
     let mut traffic_monitor = TrafficBlackholeMonitor::default();
+    let mut transition = HotTransitionState::default();
     loop {
-        match activation_pointer_state(args) {
+        match activation_pointer_state(&args) {
             Ok(ActivationPointerState::Unchanged) => {}
-            Ok(state) => return finish_control_transition(args, &mut child, &mut netd, state),
-            Err(error) => {
-                return fail_after_rollback(
-                    args,
+            Ok(ActivationPointerState::Superseded) => {
+                let replacement = match reload_runtime_args(&args) {
+                    Ok(replacement) => replacement,
+                    Err(error) => {
+                        eprintln!(
+                            "level=error event=sdwan_hot_reload_rejected generation={} error_code=activation_invalid error={}",
+                            args.generation,
+                            sanitize_log_value(&format!("{error:#}"))
+                        );
+                        thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                };
+                match hot_replace_activation(
+                    &args,
+                    &replacement,
                     &mut child,
                     &mut netd,
-                    "Cloud candidate pointer inspection failed",
-                    "candidate_inspection_failed",
-                    error,
-                )
+                    &readiness_token,
+                    &mut transition,
+                ) {
+                    Ok(true) => {
+                        args = replacement;
+                        traffic_monitor = TrafficBlackholeMonitor::default();
+                        next_renewal = Instant::now() + renew_every;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        if !transition.complete() {
+                            let _ =
+                                enter_proxy_fallback(&args, &mut child, &mut netd, &mut transition);
+                        }
+                        let _ =
+                            write_failed_activation_receipt(&replacement, "hot_transition_failed");
+                        eprintln!(
+                            "level=error event=sdwan_hot_reload_rejected generation={} error_code=hot_transition_failed fallback={} error={}",
+                            replacement.generation,
+                            if transition.steering_suspended { "candy_proxy" } else { "last_good_sdwan" },
+                            sanitize_log_value(&format!("{error:#}"))
+                        );
+                    }
+                }
+                continue;
+            }
+            Ok(ActivationPointerState::Withdrawn) => {
+                if !transition.complete() {
+                    if let Err(error) =
+                        enter_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
+                    {
+                        eprintln!(
+                            "level=error event=sdwan_hot_degrade_retry generation={} error_code=proxy_fallback_failed error={}",
+                            args.generation,
+                            sanitize_log_value(&format!("{error:#}"))
+                        );
+                        thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                    remove_activation_receipt(args.activation_ready.as_deref())?;
+                    eprintln!(
+                        "level=info event=sdwan_hot_degraded generation={} source=candy_proxy core_pid={} reason=cloud_policy_withdrawn",
+                        args.generation,
+                        child.id()
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "level=error event=sdwan_candidate_inspection_retry generation={} error_code=candidate_inspection_failed fallback=last_good_sdwan error={}",
+                    args.generation,
+                    sanitize_log_value(&format!("{error:#}"))
+                );
+                thread::sleep(Duration::from_millis(100));
+                continue;
             }
         }
         if shutdown_requested() {
@@ -1881,7 +2191,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
             Ok(status) => status,
             Err(error) => {
                 return retry_after_rollback(
-                    args,
+                    &args,
                     &mut child,
                     &mut netd,
                     "Candy Core process inspection failed",
@@ -1893,7 +2203,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
         if let Some(status) = child_status {
             let code = status.code().unwrap_or(1);
             return retry_after_rollback(
-                args,
+                &args,
                 &mut child,
                 &mut netd,
                 "Candy Core SD-WAN exited",
@@ -1901,87 +2211,99 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 anyhow::anyhow!("Candy Core SD-WAN exited with status {code}"),
             );
         }
-        let readiness_policy = if args.core_role == CoreRole::Server {
-            ReadinessPolicy::CommittedServer
+        if !transition.steering_suspended {
+            let readiness_policy = if args.core_role == CoreRole::Server {
+                ReadinessPolicy::CommittedServer
+            } else {
+                ReadinessPolicy::Strict
+            };
+            match read_core_readiness_with_policy(
+                &args.status,
+                args.generation,
+                child.id(),
+                &readiness_token,
+                readiness_policy,
+            ) {
+                Ok(Some(ReadinessState::Ready)) => {}
+                Ok(Some(ReadinessState::Degraded)) if args.core_role == CoreRole::Server => {}
+                Ok(Some(ReadinessState::Degraded)) => {
+                    return retry_after_rollback(
+                        &args,
+                        &mut child,
+                        &mut netd,
+                        "Candy Core lost full SD-WAN route readiness",
+                        "core_route_readiness_lost",
+                        anyhow::anyhow!("Candy Core has only partial route readiness"),
+                    );
+                }
+                Ok(Some(ReadinessState::ListenerReady)) => {
+                    return retry_after_rollback(
+                        &args,
+                        &mut child,
+                        &mut netd,
+                        "Candy Core lost SD-WAN route readiness",
+                        "core_route_readiness_lost",
+                        anyhow::anyhow!(
+                            "Candy Core listener remains ready but no route owner is active"
+                        ),
+                    );
+                }
+                Ok(Some(ReadinessState::Waiting)) | Ok(None) => {
+                    return retry_after_rollback(
+                        &args,
+                        &mut child,
+                        &mut netd,
+                        "Candy Core lost SD-WAN readiness",
+                        "core_readiness_lost",
+                        anyhow::anyhow!("Candy Core lost SD-WAN readiness after netd commit"),
+                    );
+                }
+                Ok(Some(ReadinessState::RecoverablePeerLoss)) => {}
+                Ok(Some(ReadinessState::Failed)) => {
+                    unreachable!("failed readiness returns an error")
+                }
+                Err(error) => {
+                    return retry_after_rollback(
+                        &args,
+                        &mut child,
+                        &mut netd,
+                        "Candy Core reported SD-WAN failure",
+                        "core_runtime_failed",
+                        error.context("Candy Core failed after netd commit"),
+                    );
+                }
+            }
+            match read_core_status(&args.status, args.generation, child.id(), &readiness_token) {
+                Ok(Some(status)) if traffic_monitor.observe(status.counters, Instant::now()) => {
+                    if transition.steering_suspended {
+                        traffic_monitor = TrafficBlackholeMonitor::default();
+                        continue;
+                    }
+                    return fail_after_rollback(
+                        &args,
+                        &mut child,
+                        &mut netd,
+                        "Candy Core dropped all intercepted traffic",
+                        "core_traffic_blackhole",
+                        anyhow::anyhow!(
+                            "Candy Core received intercepted packets but forwarded none"
+                        ),
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return retry_after_rollback(
+                        &args,
+                        &mut child,
+                        &mut netd,
+                        "Candy Core traffic status inspection failed",
+                        "core_status_inspection_failed",
+                        error,
+                    );
+                }
+            }
         } else {
-            ReadinessPolicy::Strict
-        };
-        match read_core_readiness_with_policy(
-            &args.status,
-            args.generation,
-            child.id(),
-            &readiness_token,
-            readiness_policy,
-        ) {
-            Ok(Some(ReadinessState::Ready)) => {}
-            Ok(Some(ReadinessState::Degraded)) if args.core_role == CoreRole::Server => {}
-            Ok(Some(ReadinessState::Degraded)) => {
-                return retry_after_rollback(
-                    args,
-                    &mut child,
-                    &mut netd,
-                    "Candy Core lost full SD-WAN route readiness",
-                    "core_route_readiness_lost",
-                    anyhow::anyhow!("Candy Core has only partial route readiness"),
-                );
-            }
-            Ok(Some(ReadinessState::ListenerReady)) => {
-                return retry_after_rollback(
-                    args,
-                    &mut child,
-                    &mut netd,
-                    "Candy Core lost SD-WAN route readiness",
-                    "core_route_readiness_lost",
-                    anyhow::anyhow!(
-                        "Candy Core listener remains ready but no route owner is active"
-                    ),
-                );
-            }
-            Ok(Some(ReadinessState::Waiting)) | Ok(None) => {
-                return retry_after_rollback(
-                    args,
-                    &mut child,
-                    &mut netd,
-                    "Candy Core lost SD-WAN readiness",
-                    "core_readiness_lost",
-                    anyhow::anyhow!("Candy Core lost SD-WAN readiness after netd commit"),
-                );
-            }
-            Ok(Some(ReadinessState::RecoverablePeerLoss)) => {}
-            Ok(Some(ReadinessState::Failed)) => unreachable!("failed readiness returns an error"),
-            Err(error) => {
-                return retry_after_rollback(
-                    args,
-                    &mut child,
-                    &mut netd,
-                    "Candy Core reported SD-WAN failure",
-                    "core_runtime_failed",
-                    error.context("Candy Core failed after netd commit"),
-                );
-            }
-        }
-        match read_core_status(&args.status, args.generation, child.id(), &readiness_token) {
-            Ok(Some(status)) if traffic_monitor.observe(status.counters, Instant::now()) => {
-                return fail_after_rollback(
-                    args,
-                    &mut child,
-                    &mut netd,
-                    "Candy Core dropped all intercepted traffic",
-                    "core_traffic_blackhole",
-                    anyhow::anyhow!("Candy Core received intercepted packets but forwarded none"),
-                );
-            }
-            Ok(_) => {}
-            Err(error) => {
-                return retry_after_rollback(
-                    args,
-                    &mut child,
-                    &mut netd,
-                    "Candy Core traffic status inspection failed",
-                    "core_status_inspection_failed",
-                    error,
-                );
-            }
+            traffic_monitor = TrafficBlackholeMonitor::default();
         }
         if Instant::now() < next_renewal {
             thread::sleep(Duration::from_millis(100));
@@ -1994,7 +2316,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
             Ok(deadline) => deadline,
             Err(error) => {
                 return retry_after_rollback(
-                    args,
+                    &args,
                     &mut child,
                     &mut netd,
                     "netd lease clock failed",
@@ -2005,7 +2327,7 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
         };
         if let Err(error) = netd.renew_lease(next_deadline) {
             return retry_after_rollback(
-                args,
+                &args,
                 &mut child,
                 &mut netd,
                 "netd lease renewal failed",
@@ -2032,7 +2354,7 @@ fn run(args: RuntimeArgs) -> Result<()> {
     let mut recovery_attempt = false;
     loop {
         let attempt_started = Instant::now();
-        match run_once(&args, recovery_attempt) {
+        match run_once(args.clone(), recovery_attempt) {
             Err(error) if error.downcast_ref::<RetryableFailure>().is_some() => {
                 let error_code = error
                     .downcast_ref::<RetryableFailure>()
@@ -2832,7 +3154,7 @@ exit 17
         let status = args.status.clone();
         let netd = start_netd_mock(&socket, Some(true));
 
-        let error = run_once(&args, false).unwrap_err();
+        let error = run_once(args.clone(), false).unwrap_err();
 
         netd.join().unwrap();
         let failure = error
@@ -2889,7 +3211,7 @@ exit 17
         SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
         let netd = start_netd_mock(&socket, None);
 
-        let error = run_once(&args, true).unwrap_err();
+        let error = run_once(args, true).unwrap_err();
 
         netd.join().unwrap();
         let failure = error
