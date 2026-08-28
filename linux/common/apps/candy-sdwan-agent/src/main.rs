@@ -1,8 +1,8 @@
 use anyhow::{bail, Context, Result};
-use candy_netd_client::NetdClient;
+use candy_netd_client::{IpcError, NetdClient};
 use candy_netd_proto::{
-    FirewallPolicy, Ipv4Prefix, LeaseOwner, PrepareDeclaration, RouteDeclaration, RouteKind,
-    UnderlayExclusion, UnderlayKind,
+    ErrorCode, FirewallPolicy, Ipv4Prefix, LeaseOwner, PrepareDeclaration, RouteDeclaration,
+    RouteKind, UnderlayExclusion, UnderlayKind,
 };
 use clap::{Parser, ValueEnum};
 use nix::fcntl::{fcntl, FcntlArg, FdFlag};
@@ -43,6 +43,19 @@ fn sanitize_log_value(value: &str) -> String {
             character => character,
         })
         .collect()
+}
+
+fn netd_reconfigure_error_code(error: &IpcError) -> &'static str {
+    match error {
+        IpcError::Remote(ErrorCode::InvalidRequest) | IpcError::InvalidTransition => {
+            "netd_reconfigure_invalid_transition"
+        }
+        IpcError::Remote(ErrorCode::GenerationConflict) => "netd_reconfigure_owner_conflict",
+        IpcError::Remote(ErrorCode::PreflightFailed) => "netd_reconfigure_platform_failed",
+        IpcError::Remote(ErrorCode::UnauthorizedPeer) => "netd_reconfigure_unauthorized",
+        IpcError::Remote(ErrorCode::SystemFailure) => "netd_reconfigure_system_failed",
+        _ => "netd_reconfigure_ipc_failed",
+    }
 }
 
 #[cfg(test)]
@@ -1754,6 +1767,25 @@ fn leave_proxy_fallback(
     Ok(())
 }
 
+fn restore_last_good_activation(
+    current: &RuntimeArgs,
+    child: &mut Child,
+    netd: &mut NetdClient,
+    previous_declaration: PrepareDeclaration,
+    transition: &mut HotTransitionState,
+) -> Result<()> {
+    let core_result = remove_stale_status(&current.status)
+        .and_then(|_| request_core_reload(current, child))
+        .context("restore last-good Core configuration");
+    let netd_result = netd
+        .reconfigure(previous_declaration)
+        .context("restore last-good netd declaration");
+    core_result?;
+    netd_result?;
+    leave_proxy_fallback(current, child, netd, transition)
+        .context("resume last-good SD-WAN after rejected hot reload")
+}
+
 fn hot_replace_activation(
     current: &RuntimeArgs,
     replacement: &RuntimeArgs,
@@ -1789,10 +1821,12 @@ fn hot_replace_activation(
             leave_proxy_fallback(current, child, netd, transition)
                 .context("restore last-good SD-WAN after rejected reconfigure")?;
         }
-        write_failed_activation_receipt(replacement, "netd_reconfigure_failed")?;
+        let error_code = netd_reconfigure_error_code(&error);
+        write_failed_activation_receipt(replacement, error_code)?;
         eprintln!(
-            "level=error event=sdwan_hot_reload_rejected generation={} error_code=netd_reconfigure_failed error={}",
+            "level=error event=sdwan_hot_reload_rejected generation={} error_code={} error={}",
             replacement.generation,
+            error_code,
             sanitize_log_value(&error.to_string())
         );
         return Ok(false);
@@ -1800,12 +1834,7 @@ fn hot_replace_activation(
     if let Err(error) = remove_stale_status(&replacement.status)
         .and_then(|_| request_core_reload(replacement, child))
     {
-        netd.reconfigure(previous_declaration)
-            .context("restore last-good netd declaration after Core reload rejection")?;
-        if !already_suspended {
-            leave_proxy_fallback(current, child, netd, transition)
-                .context("resume last-good SD-WAN after Core reload rejection")?;
-        }
+        restore_last_good_activation(current, child, netd, previous_declaration, transition)?;
         write_failed_activation_receipt(replacement, "core_hot_reload_failed")?;
         eprintln!(
             "level=error event=sdwan_hot_reload_rejected generation={} error_code=core_hot_reload_failed error={}",
@@ -1818,26 +1847,54 @@ fn hot_replace_activation(
     let deadline = Instant::now()
         .checked_add(Duration::from_millis(replacement.readiness_timeout_ms))
         .context("hot reload readiness deadline overflow")?;
-    loop {
-        anyhow::ensure!(
-            child.try_wait()?.is_none(),
-            "Candy Core exited during hot reload"
-        );
+    let readiness_failure = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                break Some((
+                    "core_exit_during_hot_reload",
+                    anyhow::anyhow!("Candy Core exited during hot reload with status {status}"),
+                ))
+            }
+            Err(error) => {
+                break Some((
+                    "core_readiness_failed",
+                    anyhow::Error::from(error).context("inspect Candy Core during hot reload"),
+                ))
+            }
+            Ok(None) => {}
+        }
         match read_core_readiness(
             &replacement.status,
             replacement.generation,
             child.id(),
             readiness_token,
-        )? {
-            Some(ReadinessState::Ready) | Some(ReadinessState::Degraded)
+        ) {
+            Err(error) => break Some(("core_readiness_failed", error)),
+            Ok(Some(ReadinessState::Ready)) | Ok(Some(ReadinessState::Degraded))
                 if replacement.core_role == CoreRole::Server =>
             {
-                break
+                break None
             }
-            Some(ReadinessState::Ready) => break,
-            _ if Instant::now() >= deadline => bail!("Candy Core hot reload readiness timed out"),
+            Ok(Some(ReadinessState::Ready)) => break None,
+            Ok(_) if Instant::now() >= deadline => {
+                break Some((
+                    "core_readiness_timeout",
+                    anyhow::anyhow!("Candy Core hot reload readiness timed out"),
+                ))
+            }
             _ => thread::sleep(Duration::from_millis(20)),
         }
+    };
+    if let Some((error_code, error)) = readiness_failure {
+        restore_last_good_activation(current, child, netd, previous_declaration, transition)?;
+        write_failed_activation_receipt(replacement, error_code)?;
+        eprintln!(
+            "level=error event=sdwan_hot_reload_rejected generation={} error_code={} fallback=last_good_sdwan error={}",
+            replacement.generation,
+            error_code,
+            sanitize_log_value(&format!("{error:#}"))
+        );
+        return Ok(false);
     }
     leave_proxy_fallback(replacement, child, netd, transition)
         .context("leave Candy Proxy fallback after hot reload")?;
@@ -2097,6 +2154,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     let mut next_renewal = Instant::now() + renew_every;
     let mut traffic_monitor = TrafficBlackholeMonitor::default();
     let mut transition = HotTransitionState::default();
+    let mut rejected_activation = None::<PathBuf>;
     loop {
         match activation_pointer_state(&args) {
             Ok(ActivationPointerState::Unchanged) => {}
@@ -2113,38 +2171,50 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                         continue;
                     }
                 };
-                match hot_replace_activation(
-                    &args,
-                    &replacement,
-                    &mut child,
-                    &mut netd,
-                    &readiness_token,
-                    &mut transition,
-                ) {
-                    Ok(true) => {
-                        args = replacement;
-                        traffic_monitor = TrafficBlackholeMonitor::default();
-                        next_renewal = Instant::now() + renew_every;
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        if !transition.complete() {
-                            let _ =
-                                enter_proxy_fallback(&args, &mut child, &mut netd, &mut transition);
+                if rejected_activation.as_ref() != replacement.activation_target.as_ref() {
+                    match hot_replace_activation(
+                        &args,
+                        &replacement,
+                        &mut child,
+                        &mut netd,
+                        &readiness_token,
+                        &mut transition,
+                    ) {
+                        Ok(true) => {
+                            args = replacement;
+                            rejected_activation = None;
+                            traffic_monitor = TrafficBlackholeMonitor::default();
+                            next_renewal = Instant::now() + renew_every;
                         }
-                        let _ =
-                            write_failed_activation_receipt(&replacement, "hot_transition_failed");
-                        eprintln!(
-                            "level=error event=sdwan_hot_reload_rejected generation={} error_code=hot_transition_failed fallback={} error={}",
-                            replacement.generation,
-                            if transition.steering_suspended { "candy_proxy" } else { "last_good_sdwan" },
-                            sanitize_log_value(&format!("{error:#}"))
-                        );
+                        Ok(false) => {
+                            rejected_activation = replacement.activation_target.clone();
+                        }
+                        Err(error) => {
+                            if !transition.complete() {
+                                let _ = enter_proxy_fallback(
+                                    &args,
+                                    &mut child,
+                                    &mut netd,
+                                    &mut transition,
+                                );
+                            }
+                            let _ = write_failed_activation_receipt(
+                                &replacement,
+                                "hot_transition_failed",
+                            );
+                            rejected_activation = replacement.activation_target.clone();
+                            eprintln!(
+                                "level=error event=sdwan_hot_reload_rejected generation={} error_code=hot_transition_failed fallback={} error={}",
+                                replacement.generation,
+                                if transition.steering_suspended { "candy_proxy" } else { "last_good_sdwan" },
+                                sanitize_log_value(&format!("{error:#}"))
+                            );
+                        }
                     }
                 }
-                continue;
             }
             Ok(ActivationPointerState::Withdrawn) => {
+                rejected_activation = None;
                 if !transition.complete() {
                     if let Err(error) =
                         enter_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
