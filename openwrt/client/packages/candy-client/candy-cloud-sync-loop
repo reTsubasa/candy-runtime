@@ -5,7 +5,7 @@ set -u
 SYNC_BIN=${CANDY_CLOUD_SYNC_BIN:-/usr/libexec/candy-cloud-sync}
 STATE_DIR=${CANDY_SDWAN_STATE_DIR:-/etc/candy/sdwan}
 IDENTITY_FILE=${CANDY_CLOUD_IDENTITY_FILE:-$STATE_DIR/identity/device-identity-v1.json}
-INTERVAL=${CANDY_CLOUD_SYNC_INTERVAL:-30}
+INTERVAL=${CANDY_CLOUD_SYNC_INTERVAL:-1}
 RUN_USER=${CANDY_CLOUD_SYNC_USER:-candy-sdwan}
 CANDY_INIT=${CANDY_INIT:-/etc/init.d/candy}
 CANDY_CORE_BIN=${CANDY_CORE_BIN:-/usr/lib/candy/cores/current/candy-core}
@@ -81,7 +81,7 @@ sync_state_from_stdout() {
 	printf '%s' "$json" | jsonfilter -e '@.state' 2>/dev/null
 }
 
-case "$INTERVAL" in ''|*[!0-9]*|0) INTERVAL=30 ;; esac
+case "$INTERVAL" in ''|*[!0-9]*|0) INTERVAL=1 ;; esac
 case "$CANDY_LIFECYCLE_TTL_SECONDS" in ''|*[!0-9]*) CANDY_LIFECYCLE_TTL_SECONDS=10 ;; esac
 [ -x "$SYNC_BIN" ] || exit 1
 [ -x "$CANDY_INIT" ] || exit 1

@@ -1279,7 +1279,9 @@ fn sync_once_with_retry(
         }
     }
 
-    let mut request = client.get(endpoint(&cloud, "auth/v1/runtime/configuration")?);
+    let mut request = client
+        .get(endpoint(&cloud, "auth/v1/runtime/configuration")?)
+        .header("prefer", "wait=20");
     if let Some(etag) = state.etag.as_deref() {
         validate_etag(etag)?;
         request = request.header(IF_NONE_MATCH, etag);
@@ -3551,7 +3553,7 @@ fn build_client(
     let mut builder = Client::builder()
         .identity(identity)
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(35))
         .https_only(true)
         .user_agent(concat!("candy-cloud-sync/", env!("CARGO_PKG_VERSION")));
     if cloud

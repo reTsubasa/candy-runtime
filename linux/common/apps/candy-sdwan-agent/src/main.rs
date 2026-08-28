@@ -915,6 +915,28 @@ fn activation_pointer_unchanged(args: &RuntimeArgs) -> Result<bool> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActivationPointerState {
+    Unchanged,
+    Superseded,
+    Withdrawn,
+}
+
+fn activation_pointer_state(args: &RuntimeArgs) -> Result<ActivationPointerState> {
+    match (&args.activation_link, &args.activation_target) {
+        (Some(link), Some(target)) => match fs::read_link(link) {
+            Ok(current) if current == *target => Ok(ActivationPointerState::Unchanged),
+            Ok(_) => Ok(ActivationPointerState::Superseded),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(ActivationPointerState::Withdrawn)
+            }
+            Err(error) => Err(error).context("read active candidate pointer"),
+        },
+        (None, None) => Ok(ActivationPointerState::Unchanged),
+        _ => bail!("incomplete activation pointer binding"),
+    }
+}
+
 fn activation_binding_unchanged(args: &RuntimeArgs) -> Result<bool> {
     let (
         Some(link),
@@ -1558,6 +1580,31 @@ fn fail_after_rollback(
     }
 }
 
+fn finish_control_transition(
+    args: &RuntimeArgs,
+    child: &mut Child,
+    netd: &mut NetdClient,
+    state: ActivationPointerState,
+) -> Result<()> {
+    let (event, phase) = match state {
+        ActivationPointerState::Superseded => ("sdwan_generation_superseded", "superseded"),
+        ActivationPointerState::Withdrawn => ("sdwan_configuration_withdrawn", "withdrawn"),
+        ActivationPointerState::Unchanged => bail!("control transition requires a changed pointer"),
+    };
+    eprintln!(
+        "level=info event={} generation={} transition=expected",
+        event, args.generation
+    );
+    stop_core(child);
+    rollback_or_report(netd, "SD-WAN control transition")?;
+    remove_activation_receipt(args.activation_ready.as_deref())?;
+    eprintln!(
+        "level=info event=sdwan_stopped generation={} phase={} rollback_ok=true",
+        args.generation, phase
+    );
+    Ok(())
+}
+
 fn fail_without_core(
     args: &RuntimeArgs,
     netd: &mut NetdClient,
@@ -1804,18 +1851,9 @@ fn run_once(args: &RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     let mut next_renewal = Instant::now() + renew_every;
     let mut traffic_monitor = TrafficBlackholeMonitor::default();
     loop {
-        match activation_pointer_unchanged(args) {
-            Ok(true) => {}
-            Ok(false) => {
-                return fail_after_rollback(
-                    args,
-                    &mut child,
-                    &mut netd,
-                    "Cloud candidate was withdrawn or replaced",
-                    "candidate_replaced",
-                    anyhow::anyhow!("Cloud candidate pointer changed after activation"),
-                )
-            }
+        match activation_pointer_state(args) {
+            Ok(ActivationPointerState::Unchanged) => {}
+            Ok(state) => return finish_control_transition(args, &mut child, &mut netd, state),
             Err(error) => {
                 return fail_after_rollback(
                     args,
@@ -2577,6 +2615,10 @@ exit 17
             ordinary_config: None,
         };
         assert!(activation_pointer_unchanged(&args).unwrap());
+        assert_eq!(
+            activation_pointer_state(&args).unwrap(),
+            ActivationPointerState::Unchanged
+        );
         fs::remove_file(&candidate).unwrap();
         symlink(
             "activations/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
@@ -2584,6 +2626,15 @@ exit 17
         )
         .unwrap();
         assert!(!activation_pointer_unchanged(&args).unwrap());
+        assert_eq!(
+            activation_pointer_state(&args).unwrap(),
+            ActivationPointerState::Superseded
+        );
+        fs::remove_file(&candidate).unwrap();
+        assert_eq!(
+            activation_pointer_state(&args).unwrap(),
+            ActivationPointerState::Withdrawn
+        );
         drop(root);
     }
 

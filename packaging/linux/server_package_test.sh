@@ -125,10 +125,10 @@ grep -F 'Environment=CANDY_SDWAN_STATE_DIR=/var/lib/candy/sdwan' "$edge_stage/sy
 	fail "Linux Edge Cloud synchronization does not export the canonical state root"
 grep -F -- '--state-dir /var/lib/candy/sdwan' "$edge_stage/systemd/candy-cloud-sync.service" >/dev/null ||
 	fail "Linux Edge Cloud synchronization does not pass the canonical state root"
-grep -F 'OnActiveSec=15s' "$edge_stage/systemd/candy-cloud-sync.timer" >/dev/null ||
-	fail "Cloud synchronization timer has no post-upgrade first trigger"
-grep -F 'OnUnitInactiveSec=30s' "$edge_stage/systemd/candy-cloud-sync.timer" >/dev/null ||
-	fail "Cloud synchronization timer has the wrong cadence"
+grep -F 'OnBootSec=2s' "$edge_stage/systemd/candy-cloud-sync.timer" >/dev/null ||
+	fail "Cloud synchronization timer has no prompt boot trigger"
+grep -F 'OnUnitInactiveSec=1s' "$edge_stage/systemd/candy-cloud-sync.timer" >/dev/null ||
+	fail "Cloud synchronization timer must reconnect event waits promptly"
 if grep -F 'OnUnitActiveSec=' "$edge_stage/systemd/candy-cloud-sync.timer" >/dev/null; then
 	fail "Cloud synchronization timer still depends on a pre-upgrade service activation"
 fi
