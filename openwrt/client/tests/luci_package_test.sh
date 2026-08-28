@@ -140,11 +140,13 @@ assert.ok(!source.includes("candy-capability-tags"), "overview must not render p
 assert.ok(source.includes("values.tcp===null&&values.udp===null?labels.unreported"), "missing flow telemetry must not be rendered as zero");
 assert.ok(source.includes("node.rx_bps") && source.includes("peer.goodput_bps_rx"), "overview must support flat and nested RX telemetry");
 assert.ok(source.includes("node.tx_bps") && source.includes("peer.goodput_bps_tx"), "overview must support flat and nested TX telemetry");
+assert.ok(source.includes('if(!node||typeof node!=="object")return'), "overview must ignore malformed node records");
 assert.ok(source.includes("Runtime version") && source.includes("Core version"), "overview must label Runtime and Core versions explicitly");
 const controllerSource = fs.readFileSync(root + "/luci-app-candy/root/usr/lib/lua/luci/controller/candy.lua", "utf8");
 assert.ok(controllerSource.includes("path.peer_attachment_id"), "overview API must join SD-WAN performance by peer attachment");
 assert.ok(controllerSource.includes('role = remote_id and peer_id == remote_id and "remote_egress" or "sdwan_peer"'), "overview API must identify the active remote egress peer");
 assert.ok(controllerSource.includes("status.candy_nodes"), "status API must preserve ordinary Candy nodes separately from SD-WAN peers");
+assert.ok(controllerSource.includes("clone_json_value(node)"), "status API must clone ordinary nodes before adding SD-WAN peers");
 assert.ok(controllerSource.includes('remote_egress_active'), "overview must distinguish selective SD-WAN routes from a remote Internet egress");
 assert.ok(controllerSource.includes('sdwan_policy_selective'), "overview must explain when unmatched traffic stays on the ordinary Candy proxy");
 assert.ok(controllerSource.includes('source == "sdwan" or source == "candy_proxy"'), "ordinary Candy fallback must be displayed as an active path");
@@ -442,8 +444,8 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=95$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=95$'
+assert_contains "$makefile" '^PKG_RELEASE:=96$'
+assert_contains "$client_makefile" '^PKG_RELEASE:=96$'
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'

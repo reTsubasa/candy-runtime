@@ -100,6 +100,19 @@ local function read_node_status()
 	return jsonc.parse(fs.readfile("/tmp/candy.nodes") or "") or {}
 end
 
+-- luci.jsonc emits repeated table references as null. Clone values that are
+-- exposed in separate JSON branches before the aggregate is extended.
+local function clone_json_value(value)
+	if type(value) ~= "table" then
+		return value
+	end
+	local copy = {}
+	for key, nested in pairs(value) do
+		copy[key] = clone_json_value(nested)
+	end
+	return copy
+end
+
 local function contains_credential_field(value)
 	if type(value) ~= "table" then
 		return false
@@ -1298,7 +1311,7 @@ function action_status_json()
 	status.nodes = status.nodes or {}
 	status.candy_nodes = {}
 	for _, node in ipairs(status.nodes) do
-		status.candy_nodes[#status.candy_nodes + 1] = node
+		status.candy_nodes[#status.candy_nodes + 1] = clone_json_value(node)
 	end
 	local sdwan_performance = status.sdwan.performance
 	local remote = status.sdwan.egress and status.sdwan.egress.remote or nil
