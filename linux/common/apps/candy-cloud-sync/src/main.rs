@@ -1251,11 +1251,15 @@ fn sync_once_with_retry(
             if state.etag.as_deref() == Some(activation.descriptor.delivery_etag.as_str()) {
                 match activation.receipt.state.as_str() {
                     "committed" => {
-                        if report_activation_status(&client, &cloud, &activation, "active", None)? {
-                            promote_committed_activation(&args.state_dir, &activation)?;
-                            state.activation_rejected_etag = None;
-                            state.activation_rejected_at_unix = None;
-                        }
+                        // The receipt is authoritative local evidence that the
+                        // agent and netd transaction committed. Refresh the
+                        // proof before reporting Cloud status: Cloud may return
+                        // 409 when this generation is already ACTIVE, but the
+                        // replacement agent PID must still become authoritative.
+                        promote_committed_activation(&args.state_dir, &activation)?;
+                        report_activation_status(&client, &cloud, &activation, "active", None)?;
+                        state.activation_rejected_etag = None;
+                        state.activation_rejected_at_unix = None;
                     }
                     "rejected" => {
                         if report_activation_status(
@@ -7062,6 +7066,47 @@ default via 192.0.2.1 dev eth0 proto static
         assert_eq!(proof.activation_id, activation_id);
         assert_eq!(proof.projection_generation, 7);
         assert_eq!(proof.state, "committed");
+    }
+
+    #[test]
+    fn committed_receipt_refreshes_stale_proof_for_same_active_candidate() {
+        use std::os::unix::fs::symlink;
+
+        let (directory, activation_id) = activation_outcome_fixture("committed", None, 7);
+        let target = Path::new("activations").join(&activation_id);
+        symlink(&target, directory.path().join("active")).unwrap();
+        atomic_json(
+            &directory.path().join("active-activation-v1.json"),
+            &serde_json::json!({
+                "schema_version": 1,
+                "activation_id": activation_id,
+                "candidate_target": target,
+                "projection_generation": 7,
+                "delivery_etag": format!("\"sha256-{}\"", "b".repeat(64)),
+                "agent_pid": u32::MAX,
+                "state": "committed",
+                "committed_at_unix": 1
+            }),
+            0o600,
+        )
+        .unwrap();
+
+        let outcome = read_activation_ready_receipt(directory.path())
+            .unwrap()
+            .unwrap();
+        promote_committed_activation(directory.path(), &outcome).unwrap();
+
+        let proof: ActiveActivationProof = read_bounded_json(
+            &directory.path().join("active-activation-v1.json"),
+            MAX_PROFILE_BYTES,
+        )
+        .unwrap();
+        assert_eq!(proof.activation_id, activation_id);
+        assert_eq!(proof.agent_pid, std::process::id());
+        assert_eq!(
+            fs::read_link(directory.path().join("active")).unwrap(),
+            target
+        );
     }
 
     #[test]
