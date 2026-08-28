@@ -275,31 +275,47 @@ end
 local function effective_traffic_path(sdwan, service, nodes)
 	local reported = read_bounded_status_file(TRAFFIC_PATH_FILE, 16384)
 	local source = "local_wan"
+	local proxy_active = false
 	local remote_egress = sdwan and sdwan.egress and sdwan.egress.remote
-	local remote_egress_active = sdwan and sdwan.active and type(remote_egress) == "table" and
+	local remote_egress_active = service == "running" and sdwan and sdwan.active and type(remote_egress) == "table" and
 		remote_egress.state ~= "unavailable" and remote_egress.state ~= "not-configured"
+	if service == "running" then
+		for _, node in ipairs(nodes or {}) do
+			if node.state == "running" or node.state == "ready" or node.state == "ok" then
+				proxy_active = true
+				break
+			end
+		end
+	end
 	if remote_egress_active then
 		source = "sdwan"
-	elseif service == "running" then
-		for _, node in ipairs(nodes or {}) do
-			if node.state == "running" or node.state == "ready" or node.state == "ok" then source = "candy_proxy" break end
-		end
+	elseif proxy_active then
+		source = "candy_proxy"
 	end
 	local now = os.time()
 	local updated_at = reported and tonumber(reported.updated_at) or nil
 	local recent_transition = reported and (reported.state == "switching" or reported.state == "recovering") and
-		updated_at and now >= updated_at and now - updated_at <= 60
-	if recent_transition and (reported.source == "sdwan" or reported.source == "candy_proxy" or reported.source == "local_wan") then
+		updated_at and now >= updated_at and now - updated_at <= 60 and reported.source == source
+	if recent_transition then
 		source = reported.source
 	end
+	local runtime_state = service == "running" and sdwan and sdwan.runtime and sdwan.runtime.state or "unavailable"
+	local sdwan_state = remote_egress_active and "active" or
+		(runtime_state == "running" and "standby" or
+		((runtime_state == "fail-open" or runtime_state == "reconnecting" or runtime_state == "error" or runtime_state == "rejected") and "degraded" or "inactive"))
 	return {
 		schema_version = 1,
 		state = recent_transition and reported.state or
-			((source == "sdwan" or source == "candy_proxy") and "active" or "degraded"),
+			((source == "sdwan" or source == "candy_proxy") and "active" or "fallback"),
 		source = source,
 		reason = recent_transition and reported and type(reported.reason) == "string" and reported.reason or
 			(sdwan and sdwan.active and not remote_egress_active and "sdwan_policy_selective" or ""),
-		updated_at = updated_at
+		updated_at = updated_at,
+		paths = {
+			sdwan = { state = sdwan_state },
+			candy_proxy = { state = proxy_active and "active" or "inactive" },
+			local_wan = { state = source == "local_wan" and "active" or "standby" }
+		}
 	}
 end
 
@@ -459,7 +475,7 @@ end
 
 local function sync_node_states_with_service(status, service)
 	local nodes = status.nodes or {}
-	if status.runtime and status.runtime.multi_node then
+	if service == "running" and status.runtime and status.runtime.multi_node then
 		return
 	end
 
@@ -1365,7 +1381,7 @@ function action_status_json()
 			}
 		end
 	end
-	status.traffic_path = effective_traffic_path(status.sdwan, service, status.nodes)
+	status.traffic_path = effective_traffic_path(status.sdwan, service, status.candy_nodes)
 	status.diagnostics = status.diagnostics or {}
 	local node_count, group_count, rule_count = 0, 0, 0
 	uci:foreach("candy", "node", function() node_count = node_count + 1 end)

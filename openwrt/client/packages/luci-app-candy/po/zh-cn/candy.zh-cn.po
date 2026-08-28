@@ -2365,3 +2365,12 @@ msgstr "恢复中"
 
 msgid "Degraded"
 msgstr "已降级"
+
+msgid "Fallback path active"
+msgstr "回退路径已接管"
+
+msgid "Candy Proxy unavailable"
+msgstr "Candy Proxy 不可用"
+
+msgid "SD-WAN degraded; Candy Proxy remains active"
+msgstr "SD-WAN 已降级，Candy Proxy 仍正常"

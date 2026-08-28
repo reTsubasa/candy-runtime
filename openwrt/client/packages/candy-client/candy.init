@@ -180,7 +180,20 @@ sdwan_runtime_state() {
 }
 
 write_traffic_path_state() {
-	local state="$1" source="$2" reason="${3:-}" temporary
+	local state="$1" source="$2" reason="${3:-}" temporary previous_state previous_source previous_reason level=info
+	# An isolated SD-WAN failure does not degrade the ordinary proxy path.
+	# Publish the selected fallback as healthy when it is actually ready.
+	if [ "$state" = degraded ] && [ "$source" = candy_proxy ]; then
+		state=active
+	fi
+	if [ -f "$CANDY_TRAFFIC_PATH_FILE" ] && [ ! -L "$CANDY_TRAFFIC_PATH_FILE" ] && command -v jsonfilter >/dev/null 2>&1; then
+		previous_state=$(jsonfilter -i "$CANDY_TRAFFIC_PATH_FILE" -e '@.state' 2>/dev/null || true)
+		previous_source=$(jsonfilter -i "$CANDY_TRAFFIC_PATH_FILE" -e '@.source' 2>/dev/null || true)
+		previous_reason=$(jsonfilter -i "$CANDY_TRAFFIC_PATH_FILE" -e '@.reason' 2>/dev/null || true)
+		if [ "$previous_state" = "$state" ] && [ "$previous_source" = "$source" ] && [ "$previous_reason" = "$reason" ]; then
+			return 0
+		fi
+	fi
 	temporary=$(atomic_temp_path "$CANDY_TRAFFIC_PATH_FILE") || return 1
 	{
 		printf '{"schema_version":1,"state":'
@@ -191,7 +204,9 @@ write_traffic_path_state() {
 		json_string "$reason"
 		printf ',"updated_at":%s}\n' "$(date +%s 2>/dev/null || printf 0)"
 	} >"$temporary" || { rm -f "$temporary"; return 1; }
-	atomic_commit_file "$temporary" "$CANDY_TRAFFIC_PATH_FILE" 0644
+	atomic_commit_file "$temporary" "$CANDY_TRAFFIC_PATH_FILE" 0644 || return 1
+	[ "$state" != degraded ] || level=warn
+	log_event "$level" traffic_path "state=$state source=$source reason=${reason:-none}"
 }
 
 fallback_traffic_source() {
@@ -236,7 +251,10 @@ clear_sdwan_withdrawal_request() {
 }
 
 sdwan_refresh_runtime_state() {
-	local verified_state
+	local verified_state previous_state
+	if bounded_regular_file "$CANDY_SDWAN_STATUS_FILE" 262144 && command -v jsonfilter >/dev/null 2>&1; then
+		previous_state=$(jsonfilter -i "$CANDY_SDWAN_STATUS_FILE" -e '@.runtime.state' 2>/dev/null || true)
+	fi
 	if [ ! -x "$CANDY_SDWAN_STATUS_INSPECTOR" ]; then
 		sdwan_fail_open status_verifier_unavailable || true
 		log_event error sdwan_status "result=verification_failed reason=verifier_unavailable"
@@ -251,6 +269,19 @@ sdwan_refresh_runtime_state() {
 	case "$verified_state" in
 		running|reconnecting) ;;
 		fail-open)
+			# Cloud Sync can observe the previous fail-open projection while a
+			# newly started activation is already preparing or committed. The
+			# activation supervisor owns its timeout and fail-open path; do not
+			# let stale projected state roll back a live recovery attempt.
+			if [ -n "$(sdwan_agent_pids)" ]; then
+				sdwan_runtime_state reconnect "SD-WAN activation is still converging" || true
+				log_event info sdwan_status "result=recovery_in_progress stale_state=fail-open ordinary_client=preserved"
+				return 0
+			fi
+			if [ "$previous_state" = reconnecting ]; then
+				log_event info sdwan_status "result=recovery_pending stale_state=fail-open ordinary_client=preserved"
+				return 0
+			fi
 			sdwan_fail_open core_not_ready || true
 			return 1
 			;;

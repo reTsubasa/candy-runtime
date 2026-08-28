@@ -1813,6 +1813,41 @@ done
 )
 
 (
+  refresh_dir=$(mktemp -d)
+  trap 'rm -rf "$refresh_dir"' EXIT
+  . "$repo_root/candy-client/candy.init"
+  LOG_FILE=$refresh_dir/candy.log
+  CANDY_SDWAN_STATUS_INSPECTOR=$refresh_dir/status-inspector
+  CANDY_SDWAN_STATUS_FILE=$refresh_dir/sdwan-status.json
+  printf '%s\n' '#!/bin/sh' 'printf "%s\n" fail-open' >"$CANDY_SDWAN_STATUS_INSPECTOR"
+  chmod +x "$CANDY_SDWAN_STATUS_INSPECTOR"
+  command() { [ "$1" = -v ] && [ "$2" = jsonfilter ]; }
+  jsonfilter() { sed -n 's/.*"runtime"[^{]*{[^}]*"state":"\([^"]*\)".*/\1/p' "$2"; }
+  sdwan_runtime_actions=
+  sdwan_runtime_state() { sdwan_runtime_actions="${sdwan_runtime_actions}${sdwan_runtime_actions:+ }$1"; }
+  sdwan_agent_pids() { printf '%s\n' 123; }
+  sdwan_fail_open() { fail "stale fail-open state rolled back an active SD-WAN recovery"; }
+  sdwan_refresh_runtime_state || fail "active SD-WAN recovery was rejected from stale status"
+  [ "$sdwan_runtime_actions" = reconnect ] || fail "stale fail-open state was not normalized to reconnecting"
+  grep -Fq 'result=recovery_in_progress stale_state=fail-open' "$LOG_FILE" ||
+    fail "deferred SD-WAN recovery was not logged"
+
+  sdwan_agent_pids() { return 0; }
+  printf '%s\n' '{"schema_version":1,"runtime":{"state":"reconnecting"}}' >"$CANDY_SDWAN_STATUS_FILE"
+  sdwan_refresh_runtime_state || fail "new SD-WAN supervisor was rejected before its activation process started"
+  grep -Fq 'result=recovery_pending stale_state=fail-open' "$LOG_FILE" ||
+    fail "pending SD-WAN recovery grace was not logged"
+
+  rm -f "$CANDY_SDWAN_STATUS_FILE"
+  sdwan_fail_open_actions=
+  sdwan_fail_open() { sdwan_fail_open_actions="${sdwan_fail_open_actions}${sdwan_fail_open_actions:+ }$1"; }
+  if sdwan_refresh_runtime_state; then
+    fail "terminal SD-WAN fail-open state was accepted without an activation process"
+  fi
+  [ "$sdwan_fail_open_actions" = core_not_ready ] || fail "terminal SD-WAN failure did not clean up the isolated data plane"
+)
+
+(
   stop_dir=$(mktemp -d)
   . "$repo_root/candy-client/candy.init"
   CANDY_SDWAN_STATE_DIR=$stop_dir/sdwan
@@ -1829,6 +1864,15 @@ done
   export CANDY_TEST_INIT_CALLS
   : >"$CANDY_TEST_INIT_CALLS"
   : >"$LOG_FILE"
+  command() { [ "$1" = -v ] && [ "$2" = jsonfilter ]; }
+  jsonfilter() {
+    case "$4" in
+      '@.state') sed -n 's/.*"state":"\([^"]*\)".*/\1/p' "$2" ;;
+      '@.source') sed -n 's/.*"source":"\([^"]*\)".*/\1/p' "$2" ;;
+      '@.reason') sed -n 's/.*"reason":"\([^"]*\)".*/\1/p' "$2" ;;
+      *) return 1 ;;
+    esac
+  }
   chown() { return 0; }
   candy_client_pids() { fail "explicit SD-WAN stop inspected the ordinary Candy process"; }
   network_cleanup() { fail "explicit SD-WAN stop removed ordinary Candy network policy"; }
@@ -1845,6 +1889,14 @@ done
   [ "$sdwan_runtime_actions" = stopped ] || fail "explicit SD-WAN stop did not publish stopped state"
   grep -Fq '"source":"candy_proxy"' "$CANDY_TRAFFIC_PATH_FILE" ||
     fail "explicit SD-WAN stop did not publish the ordinary Candy fallback"
+  grep -Fq '"state":"active"' "$CANDY_TRAFFIC_PATH_FILE" ||
+    fail "healthy ordinary Candy fallback was incorrectly marked degraded"
+  grep -Eq 'event=traffic_path.*state=active source=candy_proxy reason=user_stop' "$LOG_FILE" ||
+    fail "SD-WAN fallback path transition was not logged"
+  traffic_path_events=$(grep -Ec 'event=traffic_path.*state=active source=candy_proxy reason=user_stop' "$LOG_FILE")
+  write_traffic_path_state degraded candy_proxy user_stop || fail "repeated Proxy fallback publication failed"
+  [ "$(grep -Ec 'event=traffic_path.*state=active source=candy_proxy reason=user_stop' "$LOG_FILE")" = "$traffic_path_events" ] ||
+    fail "unchanged traffic path transition was logged more than once"
   [ ! -s "$CANDY_TEST_INIT_CALLS" ] || fail "explicit SD-WAN stop changed ordinary Candy enablement"
 
   sdwan_active_target() { printf '%s\n' old-activation; }
