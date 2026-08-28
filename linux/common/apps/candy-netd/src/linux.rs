@@ -624,6 +624,7 @@ pub struct LinuxNetworkPlan {
     pub policy_priority: u32,
     pub local_prefixes: Vec<Ipv4Prefix>,
     pub remote_routes: Vec<Ipv4Prefix>,
+    pub remote_egress_gateway_routes: Vec<Ipv4Prefix>,
     pub exclusions: Vec<UnderlayExclusion>,
     pub nft_table_name: String,
     pub route_mtu: u16,
@@ -641,6 +642,13 @@ impl LinuxNetworkPlan {
             .routes
             .iter()
             .any(|route| route.kind == RouteKind::RemoteEgressGateway);
+        let remote_egress_gateway_routes = declaration
+            .routes
+            .iter()
+            .filter_map(|route| {
+                (route.kind == RouteKind::RemoteEgressGateway).then_some(route.prefix)
+            })
+            .collect::<Vec<_>>();
         let remote_routes = declaration
             .routes
             .iter()
@@ -663,6 +671,7 @@ impl LinuxNetworkPlan {
             policy_priority,
             local_prefixes,
             remote_routes,
+            remote_egress_gateway_routes,
             exclusions: declaration.exclusions.clone(),
             nft_table_name: format!("candy_sdwan_{}", declaration.table_id),
             route_mtu: declaration.effective_mtu,
@@ -678,7 +687,13 @@ impl LinuxNetworkPlan {
         self.remote_routes
             .iter()
             .flat_map(|destination| {
-                if self.local_prefixes.is_empty() {
+                // Replies from the public Internet arrive with arbitrary
+                // source addresses. An egress gateway must route them back by
+                // destination Site prefix alone; local-prefix source filters
+                // are valid only for ordinary inter-Site forwarding.
+                if self.remote_egress_gateway_routes.contains(destination)
+                    || self.local_prefixes.is_empty()
+                {
                     vec![(None, *destination)]
                 } else {
                     self.local_prefixes
