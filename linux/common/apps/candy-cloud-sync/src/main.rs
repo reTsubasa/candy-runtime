@@ -1418,7 +1418,15 @@ fn sync_once_with_retry(
     // assertion. If the receipt is absent, the normal configuration request
     // below remains responsible for obtaining or renewing a candidate.
     if state.activation_required {
-        if let Some(activation) = read_activation_ready_receipt(&args.state_dir)? {
+        let activation = match read_activation_ready_receipt(&args.state_dir)? {
+            Some(activation) => Some(activation),
+            // The agent removes activation-ready after this path has been
+            // consumed. Keep reconciling from the durable active proof so a
+            // transient Cloud response cannot leave configuration status
+            // permanently stuck on the previous generation.
+            None => read_committed_activation_outcome(&args.state_dir)?,
+        };
+        if let Some(activation) = activation {
             if state.etag.as_deref() == Some(activation.descriptor.delivery_etag.as_str()) {
                 match activation.receipt.state.as_str() {
                     "committed" => {
@@ -1427,7 +1435,9 @@ fn sync_once_with_retry(
                         // proof before reporting Cloud status: Cloud may return
                         // 409 when this generation is already ACTIVE, but the
                         // replacement agent PID must still become authoritative.
-                        promote_committed_activation(&args.state_dir, &activation)?;
+                        if read_activation_ready_receipt(&args.state_dir)?.is_some() {
+                            promote_committed_activation(&args.state_dir, &activation)?;
+                        }
                         report_activation_status(&client, &cloud, &activation, "active", None)?;
                         state.activation_rejected_etag = None;
                         state.activation_rejected_at_unix = None;
@@ -2497,6 +2507,27 @@ fn read_active_activation(
         return Ok(None);
     };
     Ok(Some((descriptor, proof)))
+}
+
+// A committed proof is durable evidence of the activation even after the
+// one-shot agent receipt has been consumed by a previous sync run. Rebuild the
+// status payload from that proof so Cloud cannot retain a stale REJECTED row.
+fn read_committed_activation_outcome(state_dir: &Path) -> Result<Option<ActivationOutcome>> {
+    let Some((descriptor, proof)) = read_active_activation(state_dir)? else {
+        return Ok(None);
+    };
+    Ok(Some(ActivationOutcome {
+        receipt: ActivationReadyReceipt {
+            schema_version: 1,
+            activation_id: proof.activation_id,
+            candidate_target: proof.candidate_target,
+            generation: proof.projection_generation,
+            agent_pid: proof.agent_pid,
+            state: "committed".into(),
+            error_code: None,
+        },
+        descriptor,
+    }))
 }
 
 fn valid_active_descriptor(descriptor: &ActivationDescriptor, activation_id: &str) -> Result<bool> {
