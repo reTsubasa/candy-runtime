@@ -109,6 +109,7 @@ if (not segment_value or segment_value == status_segment_id) and type(profile.se
 site_value = human_name(site_value) or (status_site_id and translate("Current site") or nil)
 segment_value = human_name(segment_value) or (status_segment_id and translate("Current network") or nil)
 local peers = type(status and status.peers) == "table" and status.peers or {}
+local policies = type(status and status.policies) == "table" and status.policies or {}
 local path = type(status and status.path) == "table" and status.path or nil
 local tun = type(status and status.tun) == "table" and status.tun or {}
 local egress = type(status and status.egress) == "table" and status.egress or {}
@@ -188,6 +189,10 @@ local result = luci.http.formvalue("result") or ""
 	.candy-sdwan-peer-table th:nth-child(1), .candy-sdwan-peer-table td:nth-child(1) { width:52%; }
 	.candy-sdwan-peer-table th:nth-child(2), .candy-sdwan-peer-table td:nth-child(2) { width:26%; }
 	.candy-sdwan-peer-table th:nth-child(3), .candy-sdwan-peer-table td:nth-child(3) { width:22%; }
+	.candy-sdwan-policy-table th:nth-child(1), .candy-sdwan-policy-table td:nth-child(1) { width:29%; }
+	.candy-sdwan-policy-table th:nth-child(2), .candy-sdwan-policy-table td:nth-child(2) { width:31%; }
+	.candy-sdwan-policy-table th:nth-child(3), .candy-sdwan-policy-table td:nth-child(3) { width:18%; }
+	.candy-sdwan-policy-table th:nth-child(4), .candy-sdwan-policy-table td:nth-child(4) { width:22%; }
 	.candy-sdwan-long { display:block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 	.candy-sdwan-hint { display:block; margin-top:.3em; color:#86909c; font-size:.88em; line-height:1.45; }
 	.candy-sdwan-peer-empty { color:#86909c; }
@@ -258,6 +263,21 @@ local result = luci.http.formvalue("result") or ""
 					<div id="candy-sdwan-remote-egress-row"<%=remote_egress_configured and "" or ' style="display:none"'%>><dt><%:Remote egress%></dt><dd id="candy-sdwan-remote-egress"><% if type(egress.remote) == "table" and egress.remote.state then %><span class="candy-status-chip <%=egress.remote.state == "running" and "ok" or (egress.remote.state == "reconnecting" and "warn" or "")%>"><%=runtime_state_label(egress.remote.state)%></span><% else %><%=friendly_identity(egress.remote, translate("Cloud-managed remote egress"))%><% end %></dd></div>
 					<div id="candy-sdwan-dns-row"<%=dns_configured and "" or ' style="display:none"'%>><dt><%:Internal DNS%></dt><dd id="candy-sdwan-dns"><span class="candy-status-chip <%=dns.state == "running" and "ok" or (dns.state == "reconnecting" and "warn" or "")%>"><%=runtime_state_label(dns.state)%></span></dd></div>
 				</dl>
+				<h3 style="margin-top:1.25em"><%:Locally effective policies%></h3>
+				<div class="candy-sdwan-peer-scroll">
+					<table class="candy-sdwan-peer-table candy-sdwan-policy-table">
+						<thead><tr><th><%:Match%></th><th><%:Egress%></th><th><%:Source%></th><th><%:Local state%></th></tr></thead>
+						<tbody id="candy-sdwan-policies">
+						<% if #policies == 0 then %><tr><td class="candy-sdwan-peer-empty" colspan="4"><%:No Cloud policy is active on this device.%></td></tr><% else %>
+						<% for _, policy in ipairs(policies) do %><tr>
+							<td><span class="candy-sdwan-long" title="<%=label(policy.destination)%>"><%=label(policy.destination)%></span></td>
+							<td><%=friendly_identity(policy.egress, translate("Remote Internet egress"))%></td>
+							<td><%:Candy Cloud%></td>
+							<td><span class="candy-status-chip <%=policy.state == "applied" and "ok" or "warn"%>"><%=policy.state == "applied" and translate("Applied") or translate("Not active")%></span></td>
+						</tr><% end %><% end %>
+						</tbody>
+					</table>
+				</div>
 				<h3 style="margin-top:1.25em"><%:Peers%></h3>
 				<div class="candy-sdwan-peer-scroll">
 					<table class="candy-sdwan-peer-table">
@@ -316,7 +336,12 @@ local result = luci.http.formvalue("result") or ""
 			currentSite: <%=string.format("%q", translate("Current site"))%>,
 			currentNetwork: <%=string.format("%q", translate("Current network"))%>,
 			localEgress: <%=string.format("%q", translate("Cloud-managed local egress"))%>,
-			remoteEgress: <%=string.format("%q", translate("Cloud-managed remote egress"))%>
+			remoteEgress: <%=string.format("%q", translate("Cloud-managed remote egress"))%>,
+			noPolicies: <%=string.format("%q", translate("No Cloud policy is active on this device."))%>,
+			remoteInternetEgress: <%=string.format("%q", translate("Remote Internet egress"))%>,
+			candyCloud: <%=string.format("%q", translate("Candy Cloud"))%>,
+			applied: <%=string.format("%q", translate("Applied"))%>,
+			notActive: <%=string.format("%q", translate("Not active"))%>
 		};
 		function text(value) { return value === null || value === undefined || value === "" ? labels.unavailable : String(value); }
 		function isUuid(value) { return typeof value === "string" && /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i.test(value); }
@@ -394,6 +419,25 @@ local result = luci.http.formvalue("result") or ""
 				body.appendChild(row);
 			});
 		}
+		function renderPolicies(policies) {
+			var body = document.getElementById("candy-sdwan-policies");
+			if (!body) return;
+			body.textContent = "";
+			if (!policies || !policies.length) {
+				var emptyRow = document.createElement("tr"), emptyCell = document.createElement("td");
+				emptyCell.colSpan = 4; emptyCell.className = "candy-sdwan-peer-empty"; emptyCell.textContent = labels.noPolicies;
+				emptyRow.appendChild(emptyCell); body.appendChild(emptyRow); return;
+			}
+			policies.forEach(function(policy) {
+				var row = document.createElement("tr"), destinationCell = document.createElement("td");
+				var destination = policy.destination || labels.unavailable, destinationSpan = document.createElement("span");
+				destinationSpan.className = "candy-sdwan-long"; destinationSpan.textContent = destination; destinationSpan.title = destination; destinationCell.appendChild(destinationSpan); row.appendChild(destinationCell);
+				var actionCell = document.createElement("td"); actionCell.textContent = objectName(policy.egress, labels.remoteInternetEgress); row.appendChild(actionCell);
+				var sourceCell = document.createElement("td"); sourceCell.textContent = labels.candyCloud; row.appendChild(sourceCell);
+				var stateCell = document.createElement("td"); stateCell.appendChild(chip(policy.state === "applied" ? labels.applied : labels.notActive, policy.state === "applied" ? "running" : "reconnecting")); row.appendChild(stateCell);
+				body.appendChild(row);
+			});
+		}
 		function render(status) {
 			var runtime = status.runtime || {}, tun = status.tun || {}, path = status.path || {}, egress = status.egress || {}, dns = status.dns || {};
 			var siteNode = document.getElementById("candy-sdwan-site"), segmentNode = document.getElementById("candy-sdwan-segment");
@@ -407,6 +451,7 @@ local result = luci.http.formvalue("result") or ""
 			setOptionalState("candy-sdwan-dns-row", "candy-sdwan-dns", dns.state);
 			var freshnessNode = document.getElementById("candy-sdwan-freshness"); if (freshnessNode) freshnessNode.textContent = freshness(runtime.updated_at);
 			renderPeers(status.peers || []);
+			renderPolicies(status.policies || []);
 		}
 		function refresh() {
 			if (timer !== null) { clearTimeout(timer); timer = null; }

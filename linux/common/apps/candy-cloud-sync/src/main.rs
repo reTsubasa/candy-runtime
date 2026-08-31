@@ -131,6 +131,8 @@ struct CloudEndpointCache {
 #[serde(deny_unknown_fields)]
 struct RuntimeConfiguration {
     schema_version: u8,
+    #[serde(default = "default_activation_phase")]
+    activation_phase: String,
     projection_publication_id: Uuid,
     projection_id: Uuid,
     segment_id: Uuid,
@@ -146,6 +148,10 @@ struct RuntimeConfiguration {
     #[serde(default)]
     compatibility_generations: Vec<RuntimeCompatibilityGeneration>,
     grant_verification_keys: Vec<RuntimeGrantVerificationKey>,
+}
+
+fn default_activation_phase() -> String {
+    "commit".into()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -392,6 +398,8 @@ struct CoreRuntimeStatus {
     required_route_owners: u32,
     ready_route_owners: u32,
     fail_open_required: bool,
+    #[serde(default)]
+    steering_suspended: bool,
     last_error_code: Option<String>,
     #[serde(default)]
     counters: CorePacketCounters,
@@ -401,6 +409,15 @@ struct CoreRuntimeStatus {
     reconnects: u64,
     #[serde(default)]
     path_changes: u64,
+}
+
+fn core_data_plane_ready(status: &CoreRuntimeStatus) -> bool {
+    status.lifecycle == "active"
+        && status.required_route_owners > 0
+        && status.ready_route_owners == status.required_route_owners
+        && !status.fail_open_required
+        && !status.steering_suspended
+        && status.last_error_code.is_none()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -493,6 +510,15 @@ struct LocalRuntimeStatus {
 #[derive(Debug, Deserialize)]
 struct LocalRuntimeState {
     state: String,
+    #[serde(default)]
+    last_error_code: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeFailureMarker {
+    schema_version: u8,
+    generation: u64,
+    error_code: String,
 }
 
 #[derive(Debug)]
@@ -649,22 +675,99 @@ fn verified_local_runtime_state(state_dir: &Path, run_dir: &Path) -> Result<&'st
     Ok(verified_local_runtime_snapshot(state_dir, run_dir)?.0)
 }
 
+fn read_runtime_failure_code(
+    state_dir: &Path,
+    status_path: &Path,
+    generation: u64,
+) -> Result<Option<String>> {
+    let name = status_path
+        .file_name()
+        .context("Core status path has no file name")?
+        .to_string_lossy();
+    let path = status_path.with_file_name(format!("{name}.error.json"));
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect Runtime failure marker"),
+    };
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > MAX_PROFILE_BYTES
+    {
+        bail!("Runtime failure marker must be a bounded regular file")
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            bail!("Runtime failure marker must have mode 0600")
+        }
+        let owner = fs::symlink_metadata(state_dir).context("inspect SD-WAN state owner")?;
+        if metadata.uid() != owner.uid() || metadata.gid() != owner.gid() {
+            bail!("Runtime failure marker owner does not match the state owner")
+        }
+    }
+    let marker: RuntimeFailureMarker = read_bounded_json(&path, MAX_PROFILE_BYTES)?;
+    if marker.schema_version != 1
+        || marker.generation != generation
+        || marker.error_code.is_empty()
+        || marker.error_code.len() > 80
+        || !marker
+            .error_code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        bail!("Runtime failure marker is invalid")
+    }
+    Ok(Some(marker.error_code))
+}
+
 fn verified_local_runtime_snapshot(
     state_dir: &Path,
     run_dir: &Path,
-) -> Result<(&'static str, Option<CoreRuntimeStatus>, Option<String>)> {
+) -> Result<(
+    &'static str,
+    Option<CoreRuntimeStatus>,
+    Option<String>,
+    Option<String>,
+)> {
     let Some((descriptor, proof)) = read_active_activation(state_dir)? else {
         return if fs::symlink_metadata(state_dir.join("active")).is_ok() {
-            Ok(("fail-open", None, None))
+            Ok((
+                "fail-open",
+                None,
+                None,
+                Some("runtime_activation_unavailable".into()),
+            ))
         } else {
-            Ok(("reconnecting", None, None))
+            Ok(("reconnecting", None, None, None))
         };
     };
     let activation_id = Some(descriptor.activation_id.clone());
-    if !process_is_alive_and_owned_by_state(proof.agent_pid, state_dir)? {
-        return Ok(("fail-open", None, activation_id));
-    }
     let status_path = run_dir.join(format!("sdwan-{}.status.json", descriptor.activation_id));
+    let persisted_error_code = match read_runtime_failure_code(
+        state_dir,
+        &status_path,
+        descriptor.projection_generation,
+    ) {
+        Ok(error_code) => error_code,
+        Err(error) => {
+            eprintln!(
+                "level=warn event=runtime_failure_marker_ignored reason={}",
+                sanitize_log_value(&format!("{error:#}"))
+            );
+            None
+        }
+    };
+    if !process_is_alive_and_owned_by_state(proof.agent_pid, state_dir)? {
+        return Ok((
+            "fail-open",
+            None,
+            activation_id,
+            persisted_error_code.or_else(|| Some("runtime_agent_exit".into())),
+        ));
+    }
     let status = match fs::symlink_metadata(&status_path) {
         Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
             read_bounded_json::<CoreRuntimeStatus>(&status_path, MAX_PROFILE_BYTES)
@@ -672,15 +775,32 @@ fn verified_local_runtime_snapshot(
         }
         Ok(_) => bail!("activation-specific Core Runtime status must be a regular file"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(("fail-open", None, activation_id))
+            return Ok((
+                "fail-open",
+                None,
+                activation_id,
+                persisted_error_code.or_else(|| Some("core_status_unavailable".into())),
+            ))
         }
         Err(error) => return Err(error).context("inspect activation-specific Core Runtime status"),
     };
     if status.generation != descriptor.projection_generation
         || !valid_core_status_metadata(&status)?
-        || !process_is_alive_and_owned_by_state(status.pid, state_dir)?
     {
-        return Ok(("fail-open", None, activation_id));
+        return Ok((
+            "fail-open",
+            None,
+            activation_id,
+            persisted_error_code.or_else(|| Some("core_status_invalid".into())),
+        ));
+    }
+    if !process_is_alive_and_owned_by_state(status.pid, state_dir)? {
+        let error_code = status
+            .last_error_code
+            .clone()
+            .or(persisted_error_code)
+            .or_else(|| Some("core_exit".into()));
+        return Ok(("fail-open", None, activation_id, error_code));
     }
     if status.fail_open_required
         || status.last_error_code.is_some()
@@ -689,27 +809,41 @@ fn verified_local_runtime_snapshot(
             "failed" | "stopping" | "stopped" | "degraded"
         )
     {
-        return Ok(("fail-open", Some(status), activation_id));
+        let error_code = status
+            .last_error_code
+            .clone()
+            .or(persisted_error_code)
+            .or_else(|| Some("core_runtime_failed".into()));
+        return Ok(("fail-open", Some(status), activation_id, error_code));
+    }
+    if status.steering_suspended {
+        return Ok(("reconnecting", Some(status), activation_id, None));
     }
     if status.lifecycle == "active" {
-        if status.configured_peers > 0
-            && status.active_peers == status.configured_peers
-            && status.required_route_owners > 0
-            && status.ready_route_owners == status.required_route_owners
-            && status.last_error_code.is_none()
-        {
-            return Ok(("running", Some(status), activation_id));
+        if core_data_plane_ready(&status) {
+            return Ok(("running", Some(status), activation_id, None));
         }
-        return Ok(("fail-open", Some(status), activation_id));
+        return Ok((
+            "fail-open",
+            Some(status),
+            activation_id,
+            Some("core_route_readiness_lost".into()),
+        ));
     }
     if status.lifecycle == "starting" {
-        return Ok(("reconnecting", Some(status), activation_id));
+        return Ok(("reconnecting", Some(status), activation_id, None));
     }
-    Ok(("fail-open", Some(status), activation_id))
+    Ok((
+        "fail-open",
+        Some(status),
+        activation_id,
+        Some("core_runtime_failed".into()),
+    ))
 }
 
 fn project_verified_local_runtime_status(state_dir: &Path, run_dir: &Path) -> Result<&'static str> {
-    let (state, core_status, activation_id) = verified_local_runtime_snapshot(state_dir, run_dir)?;
+    let (state, core_status, activation_id, error_code) =
+        verified_local_runtime_snapshot(state_dir, run_dir)?;
     let durable_path = state_dir.join("status-v1.json");
     let mut document: serde_json::Value = read_bounded_json(&durable_path, MAX_PROFILE_BYTES)
         .context("read product Runtime status")?;
@@ -728,11 +862,11 @@ fn project_verified_local_runtime_status(state_dir: &Path, run_dir: &Path) -> Re
     runtime.insert("updated_at".into(), serde_json::Value::from(unix_now()?));
     runtime.insert(
         "last_error".into(),
-        serde_json::Value::String(if state == "fail-open" {
-            "active_runtime_verification_failed".into()
-        } else {
-            String::new()
-        }),
+        serde_json::Value::String(error_code.clone().unwrap_or_default()),
+    );
+    runtime.insert(
+        "last_error_code".into(),
+        error_code.map_or(serde_json::Value::Null, serde_json::Value::String),
     );
     clear_product_network_status(&mut document)?;
     match read_active_product_control(state_dir, activation_id.as_deref()) {
@@ -778,6 +912,7 @@ fn clear_product_network_status(document: &mut serde_json::Value) -> Result<()> 
         "egress".into(),
         serde_json::json!({"local": null, "remote": null}),
     );
+    object.insert("policies".into(), serde_json::json!([]));
     object.insert("dns".into(), serde_json::json!({"state": "unavailable"}));
     Ok(())
 }
@@ -951,15 +1086,7 @@ fn project_product_network_status(
         serde_json::json!({"id": control.segment_id, "name": control.segment_name}),
     );
 
-    let fully_ready = runtime_state == "running"
-        && core_status.is_some_and(|status| {
-            status.lifecycle == "active"
-                && status.configured_peers > 0
-                && status.active_peers == status.configured_peers
-                && status.required_route_owners > 0
-                && status.ready_route_owners == status.required_route_owners
-                && !status.fail_open_required
-        });
+    let fully_ready = runtime_state == "running" && core_status.is_some_and(core_data_plane_ready);
     let projected_state = if fully_ready {
         "running"
     } else if runtime_state == "running" {
@@ -1047,6 +1174,50 @@ fn project_product_network_status(
         .iter()
         .filter(|route| route.kind == "remote-egress")
         .collect::<Vec<_>>();
+    let mut effective_routes = remote_egress_routes
+        .iter()
+        .map(|route| {
+            let mut owners = route
+                .owner_attachment_ids
+                .iter()
+                .map(|owner| canonical_uuid_hex(owner))
+                .collect::<Result<Vec<_>>>()?;
+            owners.sort_unstable();
+            owners.dedup();
+            Ok((route.destination.clone(), owners))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let default_slices = ["0.0.0.0/1", "128.0.0.0/1"];
+    if effective_routes.len() == 2
+        && default_slices
+            .iter()
+            .all(|destination| effective_routes.iter().any(|route| route.0 == *destination))
+        && effective_routes[0].1 == effective_routes[1].1
+    {
+        effective_routes = vec![("0.0.0.0/0".into(), effective_routes[0].1.clone())];
+    }
+    let policies = effective_routes
+        .iter()
+        .map(|(destination, owners)| {
+            let owner = (owners.len() == 1).then(|| owners[0].clone());
+            let owner_name = owner
+                .as_ref()
+                .and_then(|attachment| peer_sites.get(attachment))
+                .and_then(Option::as_ref)
+                .and_then(|site_id| control.peer_site_names.get(site_id));
+            serde_json::json!({
+                "source": "cloud",
+                "destination": destination,
+                "action": "remote-egress",
+                "egress": {"id": owner, "name": owner_name},
+                "state": if fully_ready { "applied" } else { "inactive" }
+            })
+        })
+        .collect::<Vec<_>>();
+    object.insert(
+        "policies".into(),
+        serde_json::Value::Array(policies.clone()),
+    );
     let remote_egress = if remote_egress_routes.is_empty() {
         serde_json::Value::Null
     } else {
@@ -1067,7 +1238,7 @@ fn project_product_network_status(
             "id": owner,
             "name": owner_name,
             "state": if fully_ready { "running" } else { projected_state },
-            "route_count": remote_egress_routes.len(),
+            "route_count": policies.len(),
             "peer_count": owners.len()
         })
     };
@@ -1507,6 +1678,7 @@ fn sync_once_with_retry(
                 configuration.route_signing_public_key.as_bytes(),
                 &bytes,
                 &discovery_bytes,
+                configuration.activation_phase == "commit",
             ) {
                 report_configuration_status(
                     &client,
@@ -1518,6 +1690,35 @@ fn sync_once_with_retry(
                 )
                 .context("report rejected local publication to Cloud")?;
                 return Err(error);
+            }
+            if configuration.activation_phase == "prepare" {
+                report_configuration_status(
+                    &client,
+                    &cloud,
+                    &configuration,
+                    &etag,
+                    "prepared",
+                    None,
+                )
+                .context("report prepared Runtime configuration to Cloud")?;
+                state.activation_required = false;
+                state.activation_rejected_etag = None;
+                state.activation_rejected_at_unix = None;
+                state.etag = Some(etag);
+                state.configuration_sha256 = Some(digest);
+                atomic_json(&state_path, &state, 0o600)?;
+                write_local_sync_status(&args.state_dir, "configuration_prepared", None)?;
+                println!(
+                    "{}",
+                    serde_json::to_string(&SyncResult {
+                        schema_version: 1,
+                        state: "configuration_prepared",
+                        network_ready: true,
+                        configuration_changed: false,
+                        etag: state.etag.as_deref(),
+                    })?
+                );
+                return Ok(());
             }
             let activation_result = if let Some(server_config) = args.server_config.as_deref() {
                 activation_required(true, &configuration, &discovery).then(|| {
@@ -1632,6 +1833,16 @@ fn report_runtime_telemetry(
             observed_monotonic_ms.max(sample.sequence.saturating_add(1))
         });
     let core_status = read_active_core_status(state_dir, run_dir, true)?;
+    let verified_snapshot = match verified_local_runtime_snapshot(state_dir, run_dir) {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            eprintln!(
+                "level=warn event=runtime_snapshot_telemetry_omitted reason={}",
+                sanitize_log_value(&format!("{error:#}"))
+            );
+            None
+        }
+    };
     let current_sample = core_status
         .as_ref()
         .filter(|status| status.schema_version >= 2)
@@ -1646,6 +1857,13 @@ fn report_runtime_telemetry(
         previous_sample.as_ref(),
         current_sample.as_ref(),
     ) {
+        Ok(_)
+            if core_status
+                .as_ref()
+                .is_some_and(|status| status.steering_suspended) =>
+        {
+            Vec::new()
+        }
         Ok(paths) => paths,
         Err(error) => {
             eprintln!(
@@ -1658,6 +1876,8 @@ fn report_runtime_telemetry(
     let local_lifecycle = core_status.as_ref().map_or("inactive", |status| {
         if status.fail_open_required {
             "fail_open"
+        } else if status.steering_suspended {
+            "starting"
         } else {
             status.lifecycle.as_str()
         }
@@ -1689,12 +1909,24 @@ fn report_runtime_telemetry(
         .is_some_and(|status| status.fail_open_required)
     {
         "fail_open"
+    } else if core_status
+        .as_ref()
+        .is_some_and(|status| status.steering_suspended)
+    {
+        "starting"
     } else if let Some(status) = core_status.as_ref() {
         match status.lifecycle.as_str() {
             "active" => "active",
             "starting" => "starting",
             "degraded" => "degraded",
             "failed" => "fail_open",
+            _ => "unknown",
+        }
+    } else if let Some((state, _, _, _)) = verified_snapshot.as_ref() {
+        match *state {
+            "fail-open" => "fail_open",
+            "reconnecting" => "starting",
+            "running" => "active",
             _ => "unknown",
         }
     } else {
@@ -1718,6 +1950,7 @@ fn report_runtime_telemetry(
         required_route_owners: 0,
         ready_route_owners: 0,
         fail_open_required: lifecycle == "fail_open",
+        steering_suspended: false,
         last_error_code: None,
         counters: CorePacketCounters::default(),
         paths: Vec::new(),
@@ -1725,6 +1958,11 @@ fn report_runtime_telemetry(
         path_changes: 0,
     };
     let status = core_status.as_ref().unwrap_or(&empty);
+    let reported_error_code = status
+        .last_error_code
+        .as_deref()
+        .or_else(|| verified_snapshot.as_ref()?.3.as_deref())
+        .or_else(|| local_status.as_ref()?.runtime.last_error_code.as_deref());
     let response = client
         .put(endpoint(cloud, "auth/v1/runtime/telemetry")?)
         .json(&RuntimeTelemetry {
@@ -1737,7 +1975,7 @@ fn report_runtime_telemetry(
             required_route_owners: status.required_route_owners,
             ready_route_owners: status.ready_route_owners,
             fail_open_required: lifecycle == "fail_open",
-            last_error_code: status.last_error_code.as_deref(),
+            last_error_code: reported_error_code,
             rtt_ms: performance.rtt_ms,
             jitter_ms: performance.jitter_ms,
             packet_loss_ppm: performance.packet_loss_ppm,
@@ -2213,10 +2451,11 @@ fn read_active_core_status(
     if status.generation != descriptor.projection_generation {
         return Ok(None);
     }
-    if !valid_core_status_metadata(&status)?
-        || !process_is_alive_and_owned_by_state(status.pid, state_dir)?
-    {
+    if !valid_core_status_metadata(&status)? {
         bail!("active Core Runtime status is invalid")
+    }
+    if !process_is_alive_and_owned_by_state(status.pid, state_dir)? {
+        return Ok(None);
     }
     Ok(Some(status))
 }
@@ -3489,6 +3728,7 @@ fn validate_runtime_profile(profile: &RuntimeProfile, identity: &DeviceIdentity)
 
 fn validate_configuration(value: &RuntimeConfiguration, identity: &DeviceIdentity) -> Result<()> {
     if value.schema_version != 1
+        || !matches!(value.activation_phase.as_str(), "prepare" | "commit")
         || value.projection_publication_id.is_nil()
         || value.projection_id.is_nil()
         || value.segment_id.is_nil()
@@ -3790,6 +4030,7 @@ fn configuration_delivery_digest(
     let mut digest = Sha256::new();
     digest.update(b"candy/runtime-delivery-v1\0");
     digest.update(signed_objects_hash);
+    digest.update(configuration.activation_phase.as_bytes());
     digest.update((configuration.route_signing_key_id.len() as u64).to_be_bytes());
     digest.update(configuration.route_signing_key_id.as_bytes());
     digest.update(decode_hex_32(&configuration.route_signing_public_key)?);
@@ -4869,6 +5110,7 @@ fn publish_configuration_generation(
     route_key: &[u8],
     manifest: &[u8],
     discovery: &[u8],
+    activate: bool,
 ) -> Result<()> {
     validate_hex(digest, 32, "Runtime configuration digest")?;
     let generations = state_dir.join("generations");
@@ -4964,6 +5206,10 @@ fn publish_configuration_generation(
             compatibility_catalogs,
             decoded_compatibility,
         )?;
+    }
+
+    if !activate {
+        return Ok(());
     }
 
     let current = state_dir.join("configuration");
@@ -5334,6 +5580,7 @@ default via 192.0.2.1 dev eth0 proto static
             required_route_owners: 1,
             ready_route_owners: 1,
             fail_open_required: false,
+            steering_suspended: false,
             last_error_code: None,
             counters: CorePacketCounters {
                 tun_bytes_received: 3_000,
@@ -5498,6 +5745,13 @@ default via 192.0.2.1 dev eth0 proto static
             verified_local_runtime_state(&state, &run).unwrap(),
             "fail-open"
         );
+        assert_eq!(
+            verified_local_runtime_snapshot(&state, &run)
+                .unwrap()
+                .3
+                .as_deref(),
+            Some("runtime_activation_unavailable")
+        );
         let proof_path = state.join("active-activation-v1.json");
         fs::write(
             &proof_path,
@@ -5618,6 +5872,20 @@ default via 192.0.2.1 dev eth0 proto static
             verified_local_runtime_state(&state, &run).unwrap(),
             "fail-open"
         );
+        assert_eq!(
+            verified_local_runtime_snapshot(&state, &run)
+                .unwrap()
+                .3
+                .as_deref(),
+            Some("core_route_readiness_lost")
+        );
+        project_verified_local_runtime_status(&state, &run).unwrap();
+        let product: serde_json::Value =
+            serde_json::from_slice(&fs::read(state.join("status-v1.json")).unwrap()).unwrap();
+        assert_eq!(
+            product["runtime"]["last_error_code"],
+            "core_route_readiness_lost"
+        );
 
         fs::write(
             &activation_status,
@@ -5643,6 +5911,13 @@ default via 192.0.2.1 dev eth0 proto static
             verified_local_runtime_state(&state, &run).unwrap(),
             "fail-open"
         );
+        assert_eq!(
+            verified_local_runtime_snapshot(&state, &run)
+                .unwrap()
+                .3
+                .as_deref(),
+            Some("core_status_invalid")
+        );
 
         fs::write(
             &activation_status,
@@ -5661,16 +5936,55 @@ default via 192.0.2.1 dev eth0 proto static
             .to_string(),
         )
         .unwrap();
-        assert!(read_active_core_status(&state, &run, false).is_err());
+        assert!(read_active_core_status(&state, &run, false)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            verified_local_runtime_snapshot(&state, &run)
+                .unwrap()
+                .3
+                .as_deref(),
+            Some("core_exit")
+        );
         assert_eq!(
             verified_local_runtime_state(&state, &run).unwrap(),
             "fail-open"
         );
+        let failure_marker = activation_status.with_file_name(format!(
+            "{}.error.json",
+            activation_status.file_name().unwrap().to_string_lossy()
+        ));
+        fs::write(
+            &failure_marker,
+            serde_json::json!({
+                "schema_version": 1,
+                "generation": 7,
+                "error_code": "netd_lease_failed"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::set_permissions(&failure_marker, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            verified_local_runtime_snapshot(&state, &run)
+                .unwrap()
+                .3
+                .as_deref(),
+            Some("netd_lease_failed")
+        );
+        fs::remove_file(failure_marker).unwrap();
 
         fs::remove_file(&activation_status).unwrap();
         assert!(read_active_core_status(&state, &run, false)
             .unwrap()
             .is_none());
+        assert_eq!(
+            verified_local_runtime_snapshot(&state, &run)
+                .unwrap()
+                .3
+                .as_deref(),
+            Some("core_status_unavailable")
+        );
 
         fs::write(
             run.join("sdwan-status.json"),
@@ -5802,11 +6116,49 @@ default via 192.0.2.1 dev eth0 proto static
 
     #[test]
     #[cfg(unix)]
-    fn running_requires_root_durable_proof_and_complete_readiness() {
+    fn running_requires_committed_unsuspended_route_readiness() {
         let fixture = active_contract_fixture();
         assert_eq!(
             verified_local_runtime_state(&fixture.state, &fixture.run).unwrap(),
             "running"
+        );
+
+        // A peer that does not own any currently selected route may be down
+        // without forcing working SD-WAN routes onto the fallback path.
+        fixture.write_status(serde_json::json!({
+            "schema_version": 3,
+            "generation": 7,
+            "pid": std::process::id(),
+            "lifecycle": "active",
+            "configured_peers": 2,
+            "active_peers": 1,
+            "required_route_owners": 1,
+            "ready_route_owners": 1,
+            "fail_open_required": false,
+            "steering_suspended": false,
+            "last_error_code": null
+        }));
+        assert_eq!(
+            verified_local_runtime_state(&fixture.state, &fixture.run).unwrap(),
+            "running"
+        );
+
+        fixture.write_status(serde_json::json!({
+            "schema_version": 3,
+            "generation": 7,
+            "pid": std::process::id(),
+            "lifecycle": "active",
+            "configured_peers": 2,
+            "active_peers": 1,
+            "required_route_owners": 1,
+            "ready_route_owners": 1,
+            "fail_open_required": false,
+            "steering_suspended": true,
+            "last_error_code": null
+        }));
+        assert_eq!(
+            verified_local_runtime_state(&fixture.state, &fixture.run).unwrap(),
+            "reconnecting"
         );
 
         fixture.write_status(serde_json::json!({
@@ -6217,9 +6569,18 @@ default via 192.0.2.1 dev eth0 proto static
         validate_identity(&identity).unwrap();
     }
 
+    #[test]
+    fn legacy_cloud_configuration_defaults_to_immediate_commit() {
+        let mut value = serde_json::to_value(configuration()).unwrap();
+        value.as_object_mut().unwrap().remove("activation_phase");
+        let parsed: RuntimeConfiguration = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.activation_phase, "commit");
+    }
+
     fn configuration() -> RuntimeConfiguration {
         RuntimeConfiguration {
             schema_version: 1,
+            activation_phase: "commit".into(),
             projection_publication_id: Uuid::from_bytes([8; 16]),
             projection_id: Uuid::from_bytes([9; 16]),
             segment_id: Uuid::from_bytes([6; 16]),
@@ -6323,6 +6684,7 @@ default via 192.0.2.1 dev eth0 proto static
             required_route_owners: 1,
             ready_route_owners: 1,
             fail_open_required: false,
+            steering_suspended: false,
             last_error_code: None,
             counters: CorePacketCounters::default(),
             paths: vec![CorePathStatus {
@@ -6371,7 +6733,7 @@ default via 192.0.2.1 dev eth0 proto static
             },
         });
         discovery.netd.remote_routes.push(DiscoveredRoute {
-            destination: "0.0.0.0/1".into(),
+            destination: "0.0.0.0/0".into(),
             kind: "remote-egress".into(),
             owner_attachment_ids: vec!["12".repeat(16)],
         });
@@ -6386,7 +6748,7 @@ default via 192.0.2.1 dev eth0 proto static
             )]),
             discovery,
         };
-        let status = product_core_status();
+        let mut status = product_core_status();
         let mut document = serde_json::json!({
             "schema_version": 1,
             "runtime": {"state": "running"},
@@ -6421,6 +6783,42 @@ default via 192.0.2.1 dev eth0 proto static
             "12121212-1212-1212-1212-121212121212"
         );
         assert_eq!(document["egress"]["remote"]["name"], "Shanghai office");
+        assert_eq!(document["policies"][0]["source"], "cloud");
+        assert_eq!(document["policies"][0]["destination"], "0.0.0.0/0");
+        assert_eq!(document["policies"][0]["action"], "remote-egress");
+        assert_eq!(document["policies"][0]["state"], "applied");
+
+        status.configured_peers = 2;
+        status.active_peers = 1;
+        let mut partial_peer_document = serde_json::json!({});
+        project_product_network_status(
+            &mut partial_peer_document,
+            "running",
+            &control,
+            Some(&status),
+        )
+        .unwrap();
+        assert_eq!(partial_peer_document["tun"]["state"], "running");
+        assert_eq!(
+            partial_peer_document["egress"]["remote"]["state"],
+            "running"
+        );
+
+        status.steering_suspended = true;
+        let mut suspended_document = serde_json::json!({});
+        project_product_network_status(
+            &mut suspended_document,
+            "reconnecting",
+            &control,
+            Some(&status),
+        )
+        .unwrap();
+        assert_eq!(suspended_document["tun"]["state"], "reconnecting");
+        assert_eq!(
+            suspended_document["egress"]["remote"]["state"],
+            "reconnecting"
+        );
+        assert_eq!(suspended_document["policies"][0]["state"], "inactive");
     }
 
     #[test]
@@ -6794,6 +7192,34 @@ default via 192.0.2.1 dev eth0 proto static
     }
 
     #[test]
+    fn prepared_configuration_does_not_replace_the_active_pointer() {
+        let directory = tempfile::tempdir().unwrap();
+        publish_configuration_generation(
+            directory.path(),
+            &format!("{:x}", Sha256::digest(b"prepared-generation")),
+            b"prepared-segment",
+            b"prepared-projection",
+            &[],
+            &[],
+            &[],
+            &[],
+            b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            br#"{"generation":1,"activation_phase":"prepare"}"#,
+            br#"{"schema_version":1}"#,
+            false,
+        )
+        .unwrap();
+
+        assert!(!directory.path().join("configuration").exists());
+        assert_eq!(
+            fs::read_dir(directory.path().join("generations"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn configuration_generation_switch_is_atomic_and_immutable() {
         let directory = tempfile::tempdir().unwrap();
         publish_configuration_generation(
@@ -6808,6 +7234,7 @@ default via 192.0.2.1 dev eth0 proto static
             b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             br#"{"generation":1}"#,
             br#"{"schema_version":1}"#,
+            true,
         )
         .unwrap();
         let current = directory.path().join("configuration");
@@ -6832,6 +7259,7 @@ default via 192.0.2.1 dev eth0 proto static
             b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             br#"{"generation":2}"#,
             br#"{"schema_version":1}"#,
+            true,
         )
         .unwrap();
         assert_eq!(

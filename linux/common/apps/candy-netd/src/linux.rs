@@ -730,11 +730,7 @@ mod tests {
             effective_mtu: 1_300,
             routes: vec![
                 RouteDeclaration {
-                    prefix: Ipv4Prefix::new([0, 0, 0, 0], 1).unwrap(),
-                    kind: RouteKind::RemoteEgress,
-                },
-                RouteDeclaration {
-                    prefix: Ipv4Prefix::new([128, 0, 0, 0], 1).unwrap(),
+                    prefix: Ipv4Prefix::new([0, 0, 0, 0], 0).unwrap(),
                     kind: RouteKind::RemoteEgress,
                 },
                 RouteDeclaration {

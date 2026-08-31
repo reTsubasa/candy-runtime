@@ -152,7 +152,7 @@ end
 local function read_sdwan_status(_uci)
 	local fs = require "nixio.fs"
 	local jsonc = require "luci.jsonc"
-	local unavailable = { active = false, schema_version = 1, phase = "unavailable", registration = { state = "unregistered", cloud_address = "" }, runtime = { state = "unavailable" }, site = nil, segment = nil, tun = { state = "unavailable", full_duplex = nil }, peers = {}, path = nil, egress = { ["local"] = nil, remote = nil }, dns = { state = "unavailable" } }
+	local unavailable = { active = false, schema_version = 1, phase = "unavailable", registration = { state = "unregistered", cloud_address = "" }, runtime = { state = "unavailable" }, site = nil, segment = nil, tun = { state = "unavailable", full_duplex = nil }, peers = {}, path = nil, egress = { ["local"] = nil, remote = nil }, policies = {}, dns = { state = "unavailable" } }
 	local stat = fs.stat(SDWAN_STATUS_FILE)
 	local status
 	if not stat or stat.type ~= "reg" or tonumber(stat.size or 0) > MAX_SDWAN_STATUS_BYTES then
@@ -210,6 +210,7 @@ local function read_sdwan_status(_uci)
 		peers = {},
 		path = nil,
 		egress = { ["local"] = nil, remote = nil },
+		policies = {},
 		dns = { state = "unavailable" }
 	}
 	if type(status.tun) == "table" then
@@ -235,6 +236,20 @@ local function read_sdwan_status(_uci)
 	if type(status.egress) == "table" then
 		result.egress["local"] = safe_egress_object(status.egress["local"])
 		result.egress.remote = safe_egress_object(status.egress.remote)
+	end
+	if type(status.policies) == "table" then
+		for _, policy in ipairs(status.policies) do
+			if type(policy) == "table" then
+				local source = safe_string(policy.source, 32)
+				local destination = safe_string(policy.destination, 64)
+				local action = safe_string(policy.action, 32)
+				local state = safe_string(policy.state, 32)
+				local egress = safe_identity_object(policy.egress)
+				if source == "cloud" and destination and action == "remote-egress" and (state == "applied" or state == "inactive") then
+					result.policies[#result.policies + 1] = { source = source, destination = destination, action = action, state = state, egress = egress }
+				end
+			end
+		end
 	end
 	if type(status.dns) == "table" then result.dns.state = safe_string(status.dns.state, 32) or "unavailable" end
 	return result

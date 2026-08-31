@@ -19,11 +19,11 @@ pub struct Ipv4Prefix {
 
 impl Ipv4Prefix {
     pub fn new(network: [u8; 4], prefix_len: u8) -> Result<Self, NetdProtocolError> {
-        if prefix_len == 0 || prefix_len > 32 {
+        if prefix_len > 32 {
             return Err(NetdProtocolError::InvalidDeclaration);
         }
         let value = u32::from_be_bytes(network);
-        let mask = u32::MAX << (32 - prefix_len);
+        let mask = prefix_mask(prefix_len);
         if value & !mask != 0 {
             return Err(NetdProtocolError::InvalidDeclaration);
         }
@@ -34,12 +34,20 @@ impl Ipv4Prefix {
     }
 
     pub fn contains(self, address: [u8; 4]) -> bool {
-        let mask = u32::MAX << (32 - self.prefix_len);
+        let mask = prefix_mask(self.prefix_len);
         u32::from_be_bytes(address) & mask == u32::from_be_bytes(self.network)
     }
 
     pub fn overlaps(self, other: Self) -> bool {
         self.contains(other.network) || other.contains(self.network)
+    }
+}
+
+fn prefix_mask(prefix_len: u8) -> u32 {
+    match prefix_len {
+        0 => 0,
+        32 => u32::MAX,
+        value => u32::MAX << (32 - value),
     }
 }
 
@@ -60,7 +68,7 @@ impl PartialOrd for Ipv4Prefix {
 pub enum RouteKind {
     Local = 1,
     Remote = 2,
-    /// A signed default-route slice owned by Candy for remote egress.
+    /// A signed destination, including an authorized default route, owned by Candy for remote egress.
     /// It is allowed to overlap site routes because normal longest-prefix
     /// routing keeps private site prefixes more specific.
     RemoteEgress = 3,
@@ -147,6 +155,14 @@ impl PrepareDeclaration {
         }
         if !strictly_sorted_by(&self.routes, |route| (route.prefix, route.kind as u64))
             || !strictly_sorted_by(&self.exclusions, |value| (value.prefix, value.kind as u64))
+            || self
+                .routes
+                .iter()
+                .any(|route| route.prefix.prefix_len == 0 && route.kind != RouteKind::RemoteEgress)
+            || self
+                .exclusions
+                .iter()
+                .any(|value| value.prefix.prefix_len == 0)
             || has_prefix_overlap(self.routes.iter().filter_map(|route| {
                 (route.kind != RouteKind::RemoteEgress).then_some(route.prefix)
             }))

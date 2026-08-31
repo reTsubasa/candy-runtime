@@ -2374,3 +2374,27 @@ msgstr "Candy Proxy 不可用"
 
 msgid "SD-WAN degraded; Candy Proxy remains active"
 msgstr "SD-WAN 已降级，Candy Proxy 仍正常"
+
+msgid "Locally effective policies"
+msgstr "本机生效策略"
+
+msgid "Match"
+msgstr "匹配范围"
+
+msgid "Egress"
+msgstr "出口"
+
+msgid "Local state"
+msgstr "本机状态"
+
+msgid "No Cloud policy is active on this device."
+msgstr "当前没有在本机生效的 Cloud 策略。"
+
+msgid "Remote Internet egress"
+msgstr "远端互联网出口"
+
+msgid "Candy Cloud"
+msgstr "Candy Cloud"
+
+msgid "Not active"
+msgstr "未生效"

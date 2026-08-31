@@ -158,6 +158,7 @@ grep -F 'MAX_SDWAN_STATUS_BYTES = 65536' "$controller" >/dev/null || fail "SD-WA
 grep -F 'contains_credential_field(status)' "$controller" >/dev/null || fail "SD-WAN status is not redaction checked"
 grep -F 'safe_egress_object' "$controller" >/dev/null || fail "LuCI status projection drops configured egress state"
 grep -F 'result.egress.remote = safe_egress_object(status.egress.remote)' "$controller" >/dev/null || fail "LuCI status projection omits remote egress state"
+grep -F 'result.policies[#result.policies + 1]' "$controller" >/dev/null || fail "LuCI status projection omits locally effective Cloud policies"
 grep -F 'template("candy/sdwan")' "$controller" >/dev/null || fail "dedicated LuCI SD-WAN page is missing"
 grep -F 'tonumber(parsed.schema_version) == 1' "$sdwan" >/dev/null || fail "LuCI SD-WAN page does not require formal V1 state"
 grep -F 'profile-v1.json' "$sdwan" >/dev/null || fail "LuCI does not consume the synchronized Cloud profile"
@@ -169,6 +170,8 @@ fi
 for label in 'Site' 'Segment' 'Cloud' 'Full duplex' 'Peer' 'Direct' 'Relay' 'Local egress' 'Remote egress' 'Internal DNS'; do
 	grep -F "$label" "$sdwan" >/dev/null || fail "SD-WAN page is missing $label"
 done
+grep -F 'Locally effective policies' "$sdwan" >/dev/null || fail "SD-WAN page omits the local effective-policy table"
+grep -F 'renderPolicies(status.policies || [])' "$sdwan" >/dev/null || fail "SD-WAN policy table is not refreshed from Runtime state"
 for control in 'Node join file' 'Import and join' 'Reconnect' 'Leave current Profile'; do
 	grep -F "$control" "$sdwan" >/dev/null || fail "SD-WAN page is missing $control control"
 done

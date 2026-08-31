@@ -30,8 +30,6 @@ const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 const RETRY_STABLE_RESET: Duration = Duration::from_secs(60);
 const RETRY_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const TRAFFIC_BLACKHOLE_PACKET_THRESHOLD: u64 = 8;
-const TRAFFIC_BLACKHOLE_WINDOW: Duration = Duration::from_secs(5);
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn sanitize_log_value(value: &str) -> String {
@@ -188,6 +186,13 @@ struct ActivationReadyReceipt {
     error_code: Option<&'static str>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct RuntimeFailureMarker {
+    schema_version: u8,
+    generation: u64,
+    error_code: String,
+}
+
 #[derive(clap::Subcommand, Debug)]
 enum CommandKind {
     Run,
@@ -257,55 +262,6 @@ struct CoreReadinessStatus {
     last_error_code: Option<String>,
     #[serde(default)]
     paths: Option<Vec<CoreReadinessPath>>,
-    #[serde(default)]
-    counters: CoreTrafficCounters,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
-struct CoreTrafficCounters {
-    tun_packets_received: u64,
-    tun_packets_sent: u64,
-    peer_records_sent: u64,
-    drops: u64,
-}
-
-#[derive(Debug, Default)]
-struct TrafficBlackholeMonitor {
-    baseline: Option<(CoreTrafficCounters, Instant)>,
-}
-
-impl TrafficBlackholeMonitor {
-    fn observe(&mut self, counters: CoreTrafficCounters, now: Instant) -> bool {
-        let Some((baseline, baseline_at)) = self.baseline else {
-            self.baseline = Some((counters, now));
-            return false;
-        };
-        if now.saturating_duration_since(baseline_at) > TRAFFIC_BLACKHOLE_WINDOW {
-            self.baseline = Some((counters, now));
-            return false;
-        }
-        let received = counters
-            .tun_packets_received
-            .saturating_sub(baseline.tun_packets_received);
-        let forwarded = counters
-            .peer_records_sent
-            .saturating_sub(baseline.peer_records_sent)
-            .saturating_add(
-                counters
-                    .tun_packets_sent
-                    .saturating_sub(baseline.tun_packets_sent),
-            );
-        let dropped = counters.drops.saturating_sub(baseline.drops);
-        if forwarded > 0 {
-            self.baseline = Some((counters, now));
-            return false;
-        }
-        if received >= TRAFFIC_BLACKHOLE_PACKET_THRESHOLD {
-            self.baseline = Some((counters, now));
-            return dropped >= received;
-        }
-        false
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1036,6 +992,70 @@ fn write_failed_activation_receipt(args: &RuntimeArgs, error_code: &'static str)
     }
 }
 
+fn runtime_failure_marker_path(status: &Path) -> Result<PathBuf> {
+    let name = status
+        .file_name()
+        .context("Core status path has no file name")?
+        .to_string_lossy();
+    Ok(status.with_file_name(format!("{name}.error.json")))
+}
+
+fn write_runtime_failure_marker(args: &RuntimeArgs, error_code: &'static str) -> Result<()> {
+    let path = runtime_failure_marker_path(&args.status)?;
+    let parent = path
+        .parent()
+        .context("Runtime failure marker has no parent")?;
+    let metadata = fs::symlink_metadata(parent).context("inspect Runtime status directory")?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        bail!("Runtime status directory must be a real directory")
+    }
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .context("Runtime failure marker has no file name")?
+            .to_string_lossy(),
+        std::process::id()
+    ));
+    let bytes = serde_json::to_vec(&RuntimeFailureMarker {
+        schema_version: 1,
+        generation: args.generation,
+        error_code: error_code.into(),
+    })?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .context("create Runtime failure marker")?;
+    let result = (|| {
+        file.write_all(&bytes)
+            .context("write Runtime failure marker")?;
+        file.sync_all().context("sync Runtime failure marker")?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        drop(file);
+        fs::rename(&temporary, &path).context("publish Runtime failure marker")?;
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .context("sync Runtime status directory")
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn remove_runtime_failure_marker(status: &Path) -> Result<()> {
+    let path = runtime_failure_marker_path(status)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            fs::remove_file(path).context("remove Runtime failure marker")
+        }
+        Ok(_) => bail!("Runtime failure marker must be a regular file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("inspect Runtime failure marker"),
+    }
+}
+
 fn activation_pointer_unchanged(args: &RuntimeArgs) -> Result<bool> {
     match (&args.activation_link, &args.activation_target) {
         (Some(link), Some(target)) => match fs::read_link(link) {
@@ -1560,8 +1580,24 @@ fn retry_after_rollback(
         sanitize_log_value(&format!("{error:#}"))
     );
     stop_core(child);
-    rollback_or_report(netd, cause)?;
+    let rollback = rollback_or_report(netd, cause);
+    let reported_error_code = if rollback.is_err() {
+        "rollback_failed"
+    } else {
+        error_code
+    };
+    if let Err(rollback_error) = &rollback {
+        eprintln!("level=error event=sdwan_rollback_failed error={rollback_error:#}");
+    }
     remove_activation_receipt(args.activation_ready.as_deref())?;
+    if let Err(marker_error) = write_runtime_failure_marker(args, reported_error_code) {
+        eprintln!(
+            "level=error event=sdwan_runtime_failure_marker_failed error_code={} error={}",
+            reported_error_code,
+            sanitize_log_value(&format!("{marker_error:#}"))
+        );
+    }
+    rollback?;
     remove_stale_status(&args.status)?;
     if shutdown_requested() {
         eprintln!(
@@ -2146,13 +2182,18 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
             error,
         );
     }
+    if let Err(error) = remove_runtime_failure_marker(&args.status) {
+        eprintln!(
+            "level=warn event=sdwan_runtime_failure_marker_cleanup_failed error={}",
+            sanitize_log_value(&format!("{error:#}"))
+        );
+    }
     eprintln!(
         "level=info event=sdwan_commit generation={}",
         owner.generation
     );
     let renew_every = Duration::from_millis((args.lease_ms / 3).max(1_000));
     let mut next_renewal = Instant::now() + renew_every;
-    let mut traffic_monitor = TrafficBlackholeMonitor::default();
     let mut transition = HotTransitionState::default();
     let mut rejected_activation = None::<PathBuf>;
     loop {
@@ -2183,7 +2224,6 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                         Ok(true) => {
                             args = replacement;
                             rejected_activation = None;
-                            traffic_monitor = TrafficBlackholeMonitor::default();
                             next_renewal = Instant::now() + renew_every;
                         }
                         Ok(false) => {
@@ -2344,22 +2384,6 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 }
             }
             match read_core_status(&args.status, args.generation, child.id(), &readiness_token) {
-                Ok(Some(status)) if traffic_monitor.observe(status.counters, Instant::now()) => {
-                    if transition.steering_suspended {
-                        traffic_monitor = TrafficBlackholeMonitor::default();
-                        continue;
-                    }
-                    return fail_after_rollback(
-                        &args,
-                        &mut child,
-                        &mut netd,
-                        "Candy Core dropped all intercepted traffic",
-                        "core_traffic_blackhole",
-                        anyhow::anyhow!(
-                            "Candy Core received intercepted packets but forwarded none"
-                        ),
-                    );
-                }
                 Ok(_) => {}
                 Err(error) => {
                     return retry_after_rollback(
@@ -2372,8 +2396,6 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     );
                 }
             }
-        } else {
-            traffic_monitor = TrafficBlackholeMonitor::default();
         }
         if Instant::now() < next_renewal {
             thread::sleep(Duration::from_millis(100));
@@ -3233,6 +3255,12 @@ exit 17
         assert_eq!(failure.error_code, "core_exit");
         assert!(!receipt.exists(), "committed receipt survived fail-open");
         assert!(!status.exists(), "stale Core status survived fail-open");
+        let marker: RuntimeFailureMarker = serde_json::from_slice(
+            &fs::read(runtime_failure_marker_path(&status).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker.generation, args.generation);
+        assert_eq!(marker.error_code, "core_exit");
         assert!(activation_retry_eligible(&args).unwrap());
     }
 
@@ -3401,78 +3429,6 @@ exit 17
         assert!(read_core_readiness(&path, 9, 42, "11112233445566778899aabbccddeeff").is_err());
         fs::write(&path, status(9, "active", 1, 0)).unwrap();
         assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
-    }
-
-    #[test]
-    fn sustained_total_traffic_loss_is_a_blackhole() {
-        let mut monitor = TrafficBlackholeMonitor::default();
-        let now = Instant::now();
-        assert!(!monitor.observe(CoreTrafficCounters::default(), now));
-        assert!(!monitor.observe(
-            CoreTrafficCounters {
-                tun_packets_received: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD - 1,
-                drops: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD - 1,
-                ..CoreTrafficCounters::default()
-            },
-            now + Duration::from_secs(1)
-        ));
-        assert!(monitor.observe(
-            CoreTrafficCounters {
-                tun_packets_received: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD,
-                drops: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD,
-                ..CoreTrafficCounters::default()
-            },
-            now + Duration::from_secs(2)
-        ));
-    }
-
-    #[test]
-    fn successful_forwarding_resets_blackhole_detection() {
-        let mut monitor = TrafficBlackholeMonitor::default();
-        let now = Instant::now();
-        assert!(!monitor.observe(CoreTrafficCounters::default(), now));
-        assert!(!monitor.observe(
-            CoreTrafficCounters {
-                tun_packets_received: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD,
-                peer_records_sent: 1,
-                drops: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD - 1,
-                ..CoreTrafficCounters::default()
-            },
-            now + Duration::from_secs(1)
-        ));
-        assert!(!monitor.observe(
-            CoreTrafficCounters {
-                tun_packets_received: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD * 2 - 1,
-                peer_records_sent: 1,
-                drops: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD * 2 - 2,
-                ..CoreTrafficCounters::default()
-            },
-            now + Duration::from_secs(2)
-        ));
-        assert!(monitor.observe(
-            CoreTrafficCounters {
-                tun_packets_received: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD * 2,
-                peer_records_sent: 1,
-                drops: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD * 2 - 1,
-                ..CoreTrafficCounters::default()
-            },
-            now + Duration::from_secs(3)
-        ));
-    }
-
-    #[test]
-    fn sparse_drops_do_not_trip_blackhole_detection() {
-        let mut monitor = TrafficBlackholeMonitor::default();
-        let now = Instant::now();
-        assert!(!monitor.observe(CoreTrafficCounters::default(), now));
-        assert!(!monitor.observe(
-            CoreTrafficCounters {
-                tun_packets_received: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD,
-                drops: TRAFFIC_BLACKHOLE_PACKET_THRESHOLD,
-                ..CoreTrafficCounters::default()
-            },
-            now + TRAFFIC_BLACKHOLE_WINDOW + Duration::from_secs(1)
-        ));
     }
 
     #[test]

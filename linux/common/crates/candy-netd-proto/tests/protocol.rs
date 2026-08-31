@@ -81,7 +81,7 @@ fn request_and_response_round_trip_canonically() {
 
 #[test]
 fn declaration_rejects_arbitrary_interface_default_noncanonical_and_table_ids() {
-    assert!(Ipv4Prefix::new([0, 0, 0, 0], 0).is_err());
+    assert!(Ipv4Prefix::new([0, 0, 0, 0], 0).is_ok());
     assert!(Ipv4Prefix::new([10, 1, 0, 1], 24).is_err());
 
     let mut value = declaration();
@@ -93,6 +93,19 @@ fn declaration_rejects_arbitrary_interface_default_noncanonical_and_table_ids() 
     let mut value = declaration();
     value.effective_mtu = 1401;
     assert!(value.validate().is_err());
+
+    let mut value = declaration();
+    value.routes.insert(
+        0,
+        RouteDeclaration {
+            prefix: prefix([0, 0, 0, 0], 0),
+            kind: RouteKind::Remote,
+        },
+    );
+    assert!(value.validate().is_err());
+
+    value.routes[0].kind = RouteKind::RemoteEgress;
+    assert!(value.validate().is_ok());
 }
 
 #[test]
