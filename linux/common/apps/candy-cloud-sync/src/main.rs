@@ -732,7 +732,7 @@ fn verified_local_runtime_snapshot(
     Option<String>,
     Option<String>,
 )> {
-    let Some((descriptor, proof)) = read_active_activation(state_dir)? else {
+    let Some((descriptor, _proof)) = read_active_activation(state_dir)? else {
         return if fs::symlink_metadata(state_dir.join("active")).is_ok() {
             Ok((
                 "fail-open",
@@ -760,14 +760,9 @@ fn verified_local_runtime_snapshot(
             None
         }
     };
-    if !process_is_alive_and_owned_by_state(proof.agent_pid, state_dir)? {
-        return Ok((
-            "fail-open",
-            None,
-            activation_id,
-            persisted_error_code.or_else(|| Some("runtime_agent_exit".into())),
-        ));
-    }
+    // The committed proof records the Agent that performed the activation,
+    // but that process is intentionally replaced across service restarts.
+    // Current Core status below is the runtime liveness authority.
     let status = match fs::symlink_metadata(&status_path) {
         Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
             read_bounded_json::<CoreRuntimeStatus>(&status_path, MAX_PROFILE_BYTES)
@@ -2432,12 +2427,12 @@ fn read_active_core_status(
     run_dir: &Path,
     allow_legacy_status: bool,
 ) -> Result<Option<CoreRuntimeStatus>> {
-    let Some((descriptor, proof)) = read_active_activation(state_dir)? else {
+    let Some((descriptor, _proof)) = read_active_activation(state_dir)? else {
         return Ok(None);
     };
-    if !process_is_alive_and_owned_by_state(proof.agent_pid, state_dir)? {
-        return Ok(None);
-    }
+    // The proof's Agent PID identifies the process that committed the
+    // activation, not the process serving it after a restart. Validate the
+    // current Core PID and ownership below instead.
     let activation_id = &descriptor.activation_id;
     let activation_status = run_dir.join(format!("sdwan-{activation_id}.status.json"));
     let legacy_status = run_dir.join("sdwan-status.json");
@@ -6154,6 +6149,24 @@ default via 192.0.2.1 dev eth0 proto static
             "running"
         );
 
+        // The Agent is restarted independently from Core. Its PID in the
+        // durable activation proof may therefore be stale while the current
+        // activation and Core status remain valid.
+        fixture.write_proof(serde_json::json!({
+            "schema_version": 1,
+            "activation_id": fixture.activation_id,
+            "candidate_target": format!("activations/{}", fixture.activation_id),
+            "projection_generation": 7,
+            "delivery_etag": format!("\"sha256-{}\"", "b".repeat(64)),
+            "agent_pid": u32::MAX,
+            "state": "committed",
+            "committed_at_unix": 1_787_350_000_u64
+        }));
+        assert_eq!(
+            verified_local_runtime_state(&fixture.state, &fixture.run).unwrap(),
+            "running"
+        );
+
         // A peer that does not own any currently selected route may be down
         // without forcing working SD-WAN routes onto the fallback path.
         fixture.write_status(serde_json::json!({
@@ -6315,7 +6328,6 @@ default via 192.0.2.1 dev eth0 proto static
                 "delivery_etag",
                 serde_json::json!(format!("\"sha256-{}\"", "d".repeat(64))),
             ),
-            ("agent_pid", serde_json::json!(u32::MAX)),
             ("state", serde_json::json!("preparing")),
         ] {
             let mut invalid = valid.clone();

@@ -175,6 +175,10 @@ grep -F 'ExecStartPost=+/usr/local/libexec/candy-sdwan-runtime reconcile candy-s
 	fail "server Cloud sync does not reconcile candidate lifecycle changes"
 grep -F 'Environment=CANDY_SDWAN_SERVICE_USER=candy' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||
 	fail "server Cloud reconciliation does not retain the candy service identity"
+grep -F 'Environment=CANDY_SDWAN_SERVICE_USER=candy' "$stage/systemd/candy-server.service" >/dev/null ||
+	fail "server unit does not pin SD-WAN state owner"
+grep -F 'Environment=CANDY_SDWAN_SERVICE_GROUP=candy' "$stage/systemd/candy-server.service" >/dev/null ||
+	fail "server unit does not pin SD-WAN state group"
 grep -F 'Wants=network-online.target candy-netd.service' "$stage/systemd/candy-server.service" >/dev/null ||
 	fail "ordinary server does not order optional netd startup"
 if grep -Eq 'Requires=candy-netd|BindsTo=candy-netd|candy-sdwan\.service' "$stage/systemd/candy-server.service"; then

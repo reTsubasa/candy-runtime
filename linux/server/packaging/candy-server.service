@@ -13,6 +13,8 @@ Environment=CANDY_CORE_CURRENT_LINK=/opt/candy/cores/current
 Environment=CANDY_SDWAN_AGENT=/usr/local/libexec/candy-sdwan-agent
 Environment=CANDY_SDWAN_STATE_DIR=/var/lib/candy/sdwan
 Environment=CANDY_SDWAN_STATE_ROOT=/var/lib/candy/sdwan
+Environment=CANDY_SDWAN_SERVICE_USER=candy
+Environment=CANDY_SDWAN_SERVICE_GROUP=candy
 Environment=CANDY_SDWAN_ACTIVATION_LINK=/var/lib/candy/sdwan/candidate
 Environment=CANDY_SDWAN_ACTIVATION_READY=/var/lib/candy/sdwan/activation-ready-v1.json
 Environment=CANDY_NETD_SOCKET=/run/candy-netd/netd.sock
