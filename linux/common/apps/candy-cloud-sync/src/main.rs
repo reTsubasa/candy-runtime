@@ -306,6 +306,10 @@ struct SyncState {
     etag: Option<String>,
     configuration_sha256: Option<String>,
     #[serde(default)]
+    projection_publication_id: Option<Uuid>,
+    #[serde(default)]
+    projection_content_hash: Option<String>,
+    #[serde(default)]
     activation_required: bool,
     #[serde(default)]
     activation_rejected_etag: Option<String>,
@@ -1533,6 +1537,33 @@ fn sync_once_with_retry(
                 }
                 atomic_json(&state_path, &state, 0o600)?;
             }
+            if !activation_rejected {
+                // A 304 means the local configuration is still current. Keep
+                // Cloud's status row fresh as well; otherwise a status row
+                // left in REJECTED remains visible forever after recovery.
+                if let (Some(projection_publication_id), Some(projection_content_hash)) = (
+                    state.projection_publication_id,
+                    state.projection_content_hash.as_deref(),
+                ) {
+                    report_configuration_status_fields(
+                        &client,
+                        &cloud,
+                        projection_publication_id,
+                        projection_content_hash,
+                        &etag,
+                        "active",
+                        None,
+                    )
+                    .context("report unchanged Runtime configuration status")?;
+                } else if allow_unconditional_retry {
+                    // Pre-existing state files did not persist the publication
+                    // identity. Fetch one full response once to establish it.
+                    state.etag = None;
+                    state.configuration_sha256 = None;
+                    atomic_json(&state_path, &state, 0o600)?;
+                    return sync_once_with_retry(args, public_endpoints, false);
+                }
+            }
             let result_state = if activation_rejected {
                 "activation_rejected"
             } else {
@@ -1711,6 +1742,8 @@ fn sync_once_with_retry(
                 state.activation_rejected_at_unix = None;
                 state.etag = Some(etag);
                 state.configuration_sha256 = Some(digest);
+                state.projection_publication_id = Some(configuration.projection_publication_id);
+                state.projection_content_hash = Some(configuration.projection_content_hash.clone());
                 atomic_json(&state_path, &state, 0o600)?;
                 write_local_sync_status(&args.state_dir, "configuration_prepared", None)?;
                 println!(
@@ -1786,6 +1819,8 @@ fn sync_once_with_retry(
             }
             state.etag = Some(etag);
             state.configuration_sha256 = Some(digest);
+            state.projection_publication_id = Some(configuration.projection_publication_id);
+            state.projection_content_hash = Some(configuration.projection_content_hash.clone());
             atomic_json(&state_path, &state, 0o600)?;
             let result_state = if state.activation_required {
                 "activation_pending"
@@ -3112,12 +3147,32 @@ fn report_configuration_status(
     state: &str,
     error_code: Option<&str>,
 ) -> Result<()> {
+    report_configuration_status_fields(
+        client,
+        cloud,
+        configuration.projection_publication_id,
+        &configuration.projection_content_hash,
+        etag,
+        state,
+        error_code,
+    )
+}
+
+fn report_configuration_status_fields(
+    client: &Client,
+    cloud: &Url,
+    projection_publication_id: Uuid,
+    projection_content_hash: &str,
+    etag: &str,
+    state: &str,
+    error_code: Option<&str>,
+) -> Result<()> {
     let response = client
         .put(endpoint(cloud, "auth/v1/runtime/configuration/status")?)
         .header(IF_MATCH, etag)
         .json(&ConfigurationStatus {
-            projection_publication_id: configuration.projection_publication_id,
-            projection_content_hash: &configuration.projection_content_hash,
+            projection_publication_id,
+            projection_content_hash,
             state,
             error_code,
         })
