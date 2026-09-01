@@ -1,6 +1,6 @@
 use candy_netd::{
-    restore_sysctl_value, NetworkBackend, NetworkError, NetworkJournal, NetworkTransaction,
-    TransactionRecord,
+    restore_sysctl_value, NetworkBackend, NetworkController, NetworkError, NetworkJournal,
+    NetworkTransaction, TransactionRecord,
 };
 use candy_netd_proto::{
     FirewallPolicy, Ipv4Prefix, LeaseOwner, PrepareDeclaration, RouteDeclaration, RouteKind,
@@ -343,7 +343,14 @@ fn hot_reconfigure_keeps_steering_suspended_until_replacement_is_ready() {
         kind: RouteKind::Remote,
     };
     transaction.suspend(owner()).unwrap();
-    transaction.reconfigure(owner(), replacement).unwrap();
+    let replacement_owner = LeaseOwner {
+        generation: 8,
+        lease_deadline_mono_ms: 60_000,
+        ..owner()
+    };
+    transaction
+        .reconfigure(replacement_owner, replacement)
+        .unwrap();
     assert_eq!(
         *events.borrow(),
         [
@@ -355,8 +362,28 @@ fn hot_reconfigure_keeps_steering_suspended_until_replacement_is_ready() {
             "prepare_firewall",
         ]
     );
-    transaction.resume(owner()).unwrap();
+    transaction.resume(replacement_owner).unwrap();
     assert_eq!(events.borrow().last(), Some(&"install_policy_rule"));
+    assert_eq!(transaction.retained_owner(), Some(replacement_owner));
+}
+
+#[test]
+fn hot_reconfigure_rejects_a_different_process() {
+    let backend = RecordingBackend(Rc::new(RefCell::new(Vec::new())));
+    let journal = MemoryJournal::default();
+    let mut transaction = NetworkTransaction::new(backend, journal).unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+    transaction.suspend(owner()).unwrap();
+    let replacement_owner = LeaseOwner {
+        pid: 9001,
+        generation: 8,
+        ..owner()
+    };
+    assert!(matches!(
+        transaction.reconfigure(replacement_owner, declaration()),
+        Err(NetworkError::Conflict)
+    ));
 }
 
 #[test]

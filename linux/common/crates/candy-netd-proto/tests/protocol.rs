@@ -258,6 +258,57 @@ fn active_generation_rejects_replacement_activation_takeover() {
 }
 
 #[test]
+fn suspended_hot_reconfigure_switches_generation_atomically() {
+    let prepare = NetdRequest {
+        request_id: 1,
+        owner: owner(),
+        operation: NetdOperation::Prepare(declaration()),
+    };
+    let mut session = NetdSession::new();
+    session.apply(&prepare).unwrap();
+    session
+        .apply(&NetdRequest {
+            request_id: 2,
+            owner: owner(),
+            operation: NetdOperation::Commit,
+        })
+        .unwrap();
+    session
+        .apply(&NetdRequest {
+            request_id: 3,
+            owner: owner(),
+            operation: NetdOperation::Suspend,
+        })
+        .unwrap();
+
+    let mut replacement_owner = owner();
+    replacement_owner.generation += 1;
+    replacement_owner.lease_deadline_mono_ms += 10_000;
+    session
+        .apply(&NetdRequest {
+            request_id: 4,
+            owner: replacement_owner,
+            operation: NetdOperation::Reconfigure(declaration()),
+        })
+        .unwrap();
+    session
+        .apply(&NetdRequest {
+            request_id: 5,
+            owner: replacement_owner,
+            operation: NetdOperation::Resume,
+        })
+        .unwrap();
+
+    let status = NetdRequest {
+        request_id: 6,
+        owner: replacement_owner,
+        operation: NetdOperation::Status,
+    };
+    assert!(session.apply(&status).is_ok());
+    assert_eq!(session.phase(), candy_netd_proto::SessionPhase::Active);
+}
+
+#[test]
 fn error_codes_are_stable() {
     assert_eq!(ErrorCode::InvalidRequest as u64, 1);
     assert_eq!(ErrorCode::UnauthorizedPeer as u64, 2);

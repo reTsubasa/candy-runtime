@@ -166,13 +166,60 @@ impl NetdClient {
     }
 
     pub fn reconfigure(&mut self, declaration: PrepareDeclaration) -> Result<u64, IpcError> {
+        self.reconfigure_with_owner(
+            declaration,
+            self.owner.generation,
+            self.owner.lease_deadline_mono_ms,
+        )
+    }
+
+    /// Replace the declaration and advance the lease generation as one netd
+    /// transaction. Hot activation keeps the prepared session suspended, but
+    /// the netd owner must still move with the immutable Cloud generation.
+    pub fn reconfigure_with_owner(
+        &mut self,
+        declaration: PrepareDeclaration,
+        generation: u64,
+        lease_deadline_mono_ms: u64,
+    ) -> Result<u64, IpcError> {
         if self.phase != ClientPhase::Suspended {
             return Err(IpcError::InvalidTransition);
         }
-        self.exchange_generation(NetdOperation::Reconfigure(declaration), |body| match body {
-            ResponseBody::Reconfigured { generation } => Some(generation),
-            _ => None,
-        })
+        if generation == 0 || lease_deadline_mono_ms == 0 {
+            return Err(IpcError::InvalidTransition);
+        }
+        let previous_generation = self.owner.generation;
+        let previous_deadline = self.owner.lease_deadline_mono_ms;
+        self.owner.generation = generation;
+        self.owner.lease_deadline_mono_ms = lease_deadline_mono_ms;
+        let result =
+            self.exchange_generation(NetdOperation::Reconfigure(declaration), |body| match body {
+                ResponseBody::Reconfigured { generation } => Some(generation),
+                _ => None,
+            });
+        if result.is_err() {
+            // The request may have been committed by netd before an IPC
+            // failure (or a malformed response) reached us. Reconcile the
+            // retained generation before rolling back local owner state; an
+            // unconditional rollback here creates a split-brain transaction
+            // where netd accepts only the replacement owner.
+            let committed = matches!(
+                self.exchange(NetdOperation::Status),
+                Ok((
+                    ResponseBody::Status {
+                        phase: SessionPhase::Suspended,
+                        generation: observed,
+                    },
+                    None,
+                )) if observed == generation
+            );
+            if committed {
+                return Ok(generation);
+            }
+            self.owner.generation = previous_generation;
+            self.owner.lease_deadline_mono_ms = previous_deadline;
+        }
+        result
     }
 
     pub fn resume(&mut self) -> Result<u64, IpcError> {

@@ -338,12 +338,21 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             .record
             .as_ref()
             .ok_or(NetworkError::InvalidTransition)?;
-        ensure_owner(record.owner, owner)?;
+        // A suspended replacement is an in-place transaction: the process and
+        // instance remain authenticated, while Cloud advances (or rolls back)
+        // the immutable generation. The owner is committed below only after
+        // the replacement network state has been prepared successfully.
+        ensure_reconfigure_owner(record.owner, owner)?;
         if record.phase != TransactionPhase::Suspended {
             return Err(NetworkError::InvalidTransition);
         }
-        let previous = record.declaration.clone();
+        let previous_record = record.clone();
+        let previous = previous_record.declaration.clone();
         if previous == declaration {
+            let mut replacement_record = previous_record;
+            replacement_record.owner = owner;
+            self.journal.store(&replacement_record)?;
+            self.record = Some(replacement_record);
             return Ok(());
         }
         if previous.firewall != declaration.firewall {
@@ -367,12 +376,29 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
                 .and_then(|_| self.backend.prepare_firewall(&previous));
             return restored.and(Err(error));
         }
-        let record = self
-            .record
-            .as_mut()
-            .ok_or(NetworkError::InvalidTransition)?;
-        record.declaration = declaration;
-        self.journal.store(record)
+        let mut replacement_record = previous_record.clone();
+        replacement_record.owner = owner;
+        replacement_record.declaration = declaration;
+        if let Err(error) = self.journal.store(&replacement_record) {
+            // Keep the in-memory record and durable journal aligned with the
+            // network state. A journal failure must not leave a new owner
+            // generation pointing at a declaration that cannot be recovered.
+            let _ = self
+                .backend
+                .remove_firewall(&replacement_record.declaration);
+            let _ = self.backend.remove_routes(&replacement_record.declaration);
+            let restored = self
+                .backend
+                .prepare_link(&previous_record.declaration)
+                .and_then(|_| self.backend.prepare_routes(&previous_record.declaration))
+                .and_then(|_| self.backend.prepare_firewall(&previous_record.declaration));
+            if restored.is_ok() {
+                let _ = self.journal.store(&previous_record);
+            }
+            return Err(error);
+        }
+        self.record = Some(replacement_record);
+        Ok(())
     }
 
     pub fn resume(&mut self, owner: LeaseOwner) -> Result<(), NetworkError> {
@@ -554,6 +580,14 @@ fn ensure_owner(retained: LeaseOwner, request: LeaseOwner) -> Result<(), Network
         && retained.pid == request.pid
         && retained.generation == request.generation
     {
+        Ok(())
+    } else {
+        Err(NetworkError::Conflict)
+    }
+}
+
+fn ensure_reconfigure_owner(retained: LeaseOwner, request: LeaseOwner) -> Result<(), NetworkError> {
+    if retained.instance_id == request.instance_id && retained.pid == request.pid {
         Ok(())
     } else {
         Err(NetworkError::Conflict)

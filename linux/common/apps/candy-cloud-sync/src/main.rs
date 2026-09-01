@@ -2003,31 +2003,56 @@ fn report_runtime_telemetry(
         .as_deref()
         .or_else(|| verified_snapshot.as_ref()?.3.as_deref())
         .or_else(|| local_status.as_ref()?.runtime.last_error_code.as_deref());
+    let telemetry_endpoint = endpoint(cloud, "auth/v1/runtime/telemetry")?;
+    let telemetry = RuntimeTelemetry {
+        schema_version: 1,
+        boot_id,
+        sequence,
+        lifecycle,
+        configured_peers: status.configured_peers,
+        active_peers: status.active_peers,
+        required_route_owners: status.required_route_owners,
+        ready_route_owners: status.ready_route_owners,
+        fail_open_required: lifecycle == "fail_open",
+        last_error_code: reported_error_code,
+        rtt_ms: performance.rtt_ms,
+        jitter_ms: performance.jitter_ms,
+        packet_loss_ppm: performance.packet_loss_ppm,
+        rx_bps: performance.rx_bps,
+        tx_bps: performance.tx_bps,
+        reconnects: performance.reconnects,
+        path_changes: performance.path_changes,
+        paths: &path_performance,
+        local_networks: local_networks.as_deref(),
+    };
     let response = client
-        .put(endpoint(cloud, "auth/v1/runtime/telemetry")?)
-        .json(&RuntimeTelemetry {
-            schema_version: 1,
-            boot_id,
-            sequence,
-            lifecycle,
-            configured_peers: status.configured_peers,
-            active_peers: status.active_peers,
-            required_route_owners: status.required_route_owners,
-            ready_route_owners: status.ready_route_owners,
-            fail_open_required: lifecycle == "fail_open",
-            last_error_code: reported_error_code,
-            rtt_ms: performance.rtt_ms,
-            jitter_ms: performance.jitter_ms,
-            packet_loss_ppm: performance.packet_loss_ppm,
-            rx_bps: performance.rx_bps,
-            tx_bps: performance.tx_bps,
-            reconnects: performance.reconnects,
-            path_changes: performance.path_changes,
-            paths: &path_performance,
-            local_networks: local_networks.as_deref(),
-        })
+        .put(telemetry_endpoint.clone())
+        .json(&telemetry)
         .send()
         .context("report Runtime telemetry")?;
+    // A newly committed activation can briefly race Cloud's configuration
+    // status row. Cloud quite correctly rejects path identities from the new
+    // publication while its ACTIVE row still names the previous one. Preserve
+    // the aggregate health heartbeat and retry without path details; the next
+    // report will restore paths once the publication status catches up.
+    let response = if response.status() == StatusCode::CONFLICT && !telemetry.paths.is_empty() {
+        eprintln!(
+            "level=info event=runtime_telemetry_path_conflict_retry paths={} generation={} \
+             reason=cloud_publication_status_not_caught_up",
+            telemetry.paths.len(),
+            status.generation,
+        );
+        client
+            .put(telemetry_endpoint)
+            .json(&RuntimeTelemetry {
+                paths: &[],
+                ..telemetry
+            })
+            .send()
+            .context("retry Runtime telemetry without paths")?
+    } else {
+        response
+    };
     if response.status() != StatusCode::NO_CONTENT {
         bail!(
             "Cloud rejected Runtime telemetry with HTTP {}",

@@ -285,6 +285,10 @@ enum ReadinessState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReadinessPolicy {
     Strict,
+    /// The activation has already committed netd steering. Losing all
+    /// authenticated peers is recoverable: keep the Core/dialers alive while
+    /// steering is suspended, then resume when a peer returns.
+    Committed,
     CommittedServer,
 }
 
@@ -1247,10 +1251,14 @@ fn classify_core_readiness(
     let listener_ready = status.inbound_listener_configured
         && status.inbound_listener_ready
         && !status.inbound_listener_endpoints.is_empty();
-    let recoverable_committed_server_peer_loss = policy == ReadinessPolicy::CommittedServer
-        && matches!(status.lifecycle.as_str(), "failed" | "starting")
-        && status.fail_open_required
-        && listener_ready
+    let recoverable_committed_peer_loss = matches!(
+        policy,
+        ReadinessPolicy::Committed | ReadinessPolicy::CommittedServer
+    ) && matches!(
+        status.lifecycle.as_str(),
+        "failed" | "starting"
+    ) && status.fail_open_required
+        && (policy == ReadinessPolicy::Committed || listener_ready)
         && status.configured_peers > 0
         && status.required_route_owners > 0
         && status.ready_route_owners == 0
@@ -1288,7 +1296,7 @@ fn classify_core_readiness(
         {
             ReadinessState::Waiting
         }
-        "failed" | "starting" if recoverable_committed_server_peer_loss => {
+        "failed" | "starting" if recoverable_committed_peer_loss => {
             ReadinessState::RecoverablePeerLoss
         }
         "failed" | "stopping" | "stopped" => ReadinessState::Failed,
@@ -1810,14 +1818,14 @@ fn restore_last_good_activation(
     previous_declaration: PrepareDeclaration,
     transition: &mut HotTransitionState,
 ) -> Result<()> {
-    let core_result = remove_stale_status(&current.status)
+    let deadline = monotonic_ms()?
+        .checked_add(current.lease_ms)
+        .context("last-good lease deadline overflow")?;
+    netd.reconfigure_with_owner(previous_declaration, current.generation, deadline)
+        .context("restore last-good netd declaration")?;
+    remove_stale_status(&current.status)
         .and_then(|_| request_core_reload(current, child))
-        .context("restore last-good Core configuration");
-    let netd_result = netd
-        .reconfigure(previous_declaration)
-        .context("restore last-good netd declaration");
-    core_result?;
-    netd_result?;
+        .context("restore last-good Core configuration")?;
     leave_proxy_fallback(current, child, netd, transition)
         .context("resume last-good SD-WAN after rejected hot reload")
 }
@@ -1852,7 +1860,14 @@ fn hot_replace_activation(
         "level=info event=sdwan_hot_reload_fallback generation={} source=candy_proxy",
         replacement.generation
     );
-    if let Err(error) = netd.reconfigure(replacement_declaration) {
+    let replacement_deadline = monotonic_ms()?
+        .checked_add(replacement.lease_ms)
+        .context("hot reload lease deadline overflow")?;
+    if let Err(error) = netd.reconfigure_with_owner(
+        replacement_declaration,
+        replacement.generation,
+        replacement_deadline,
+    ) {
         if !already_suspended {
             leave_proxy_fallback(current, child, netd, transition)
                 .context("restore last-good SD-WAN after rejected reconfigure")?;
@@ -2195,6 +2210,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     let renew_every = Duration::from_millis((args.lease_ms / 3).max(1_000));
     let mut next_renewal = Instant::now() + renew_every;
     let mut transition = HotTransitionState::default();
+    let mut peer_loss_fallback = false;
     let mut rejected_activation = None::<PathBuf>;
     loop {
         match activation_pointer_state(&args) {
@@ -2223,6 +2239,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     ) {
                         Ok(true) => {
                             args = replacement;
+                            peer_loss_fallback = false;
                             rejected_activation = None;
                             next_renewal = Instant::now() + renew_every;
                         }
@@ -2254,8 +2271,12 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 }
             }
             Ok(ActivationPointerState::Withdrawn) => {
+                // A withdrawn Cloud policy owns the fallback decision. Do not
+                // let a stale pre-withdrawal readiness report resume steering.
+                peer_loss_fallback = false;
                 rejected_activation = None;
-                if !transition.complete() {
+                let was_in_fallback = transition.complete();
+                if !was_in_fallback {
                     if let Err(error) =
                         enter_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
                     {
@@ -2267,12 +2288,24 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                         thread::sleep(Duration::from_millis(100));
                         continue;
                     }
-                    remove_activation_receipt(args.activation_ready.as_deref())?;
                     eprintln!(
                         "level=info event=sdwan_hot_degraded generation={} source=candy_proxy core_pid={} reason=cloud_policy_withdrawn",
                         args.generation,
                         child.id()
                     );
+                }
+                // The policy may be withdrawn while the agent is already in
+                // the peer-loss fallback path. Receipt removal must therefore
+                // be unconditional; otherwise Cloud keeps observing the old
+                // activation as committed after the policy is gone.
+                if let Err(error) = remove_activation_receipt(args.activation_ready.as_deref()) {
+                    eprintln!(
+                        "level=error event=sdwan_activation_receipt_cleanup_failed generation={} error_code=activation_receipt_cleanup_failed error={}",
+                        args.generation,
+                        sanitize_log_value(&format!("{error:#}"))
+                    );
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
                 }
             }
             Err(error) => {
@@ -2321,11 +2354,11 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 anyhow::anyhow!("Candy Core SD-WAN exited with status {code}"),
             );
         }
-        if !transition.steering_suspended {
+        if !transition.steering_suspended || peer_loss_fallback {
             let readiness_policy = if args.core_role == CoreRole::Server {
                 ReadinessPolicy::CommittedServer
             } else {
-                ReadinessPolicy::Strict
+                ReadinessPolicy::Committed
             };
             match read_core_readiness_with_policy(
                 &args.status,
@@ -2334,7 +2367,24 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 &readiness_token,
                 readiness_policy,
             ) {
-                Ok(Some(ReadinessState::Ready)) => {}
+                Ok(Some(ReadinessState::Ready)) => {
+                    if peer_loss_fallback {
+                        if let Err(error) =
+                            leave_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
+                        {
+                            eprintln!(
+                                "level=warn event=sdwan_recovery_pending error_code=steering_resume_failed error={}",
+                                sanitize_log_value(&format!("{error:#}"))
+                            );
+                        } else {
+                            peer_loss_fallback = false;
+                            eprintln!(
+                                "level=info event=sdwan_recovered generation={} source=peer_reconnect",
+                                args.generation
+                            );
+                        }
+                    }
+                }
                 Ok(Some(ReadinessState::Degraded)) if args.core_role == CoreRole::Server => {}
                 Ok(Some(ReadinessState::Degraded)) => {
                     return retry_after_rollback(
@@ -2368,7 +2418,27 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                         anyhow::anyhow!("Candy Core lost SD-WAN readiness after netd commit"),
                     );
                 }
-                Ok(Some(ReadinessState::RecoverablePeerLoss)) => {}
+                Ok(Some(ReadinessState::RecoverablePeerLoss)) => {
+                    if args.core_role == CoreRole::ClientSdwan && !peer_loss_fallback {
+                        if let Err(error) =
+                            enter_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
+                        {
+                            return retry_after_rollback(
+                                &args,
+                                &mut child,
+                                &mut netd,
+                                "SD-WAN peer loss fallback failed",
+                                "peer_loss_fallback_failed",
+                                error,
+                            );
+                        }
+                        peer_loss_fallback = true;
+                        eprintln!(
+                            "level=warn event=sdwan_peer_loss_fallback generation={} source=candy_proxy reason=all_peer_lanes_unavailable",
+                            args.generation
+                        );
+                    }
+                }
                 Ok(Some(ReadinessState::Failed)) => {
                     unreachable!("failed readiness returns an error")
                 }
@@ -3053,6 +3123,20 @@ exit 17
     }
 
     #[test]
+    fn withdrawn_activation_receipt_cleanup_is_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        let receipt = root.path().join("activation-ready-v1.json");
+        write_private(&receipt, br#"{"state":"committed","generation":7}"#);
+
+        remove_activation_receipt(Some(&receipt)).unwrap();
+        // A withdrawn policy is observed repeatedly until its candidate is
+        // replaced. Reprocessing the event must remain harmless after the
+        // first successful cleanup.
+        remove_activation_receipt(Some(&receipt)).unwrap();
+        assert!(!receipt.exists());
+    }
+
+    #[test]
     fn retry_backoff_is_exponential_capped_and_resets_after_stability() {
         let mut backoff = RetryBackoff::new();
         assert_eq!(
@@ -3480,7 +3564,7 @@ exit 17
     }
 
     #[test]
-    fn recoverable_peer_loss_is_only_allowed_for_committed_server_monitoring() {
+    fn recoverable_peer_loss_requires_a_committed_activation() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("status.json");
         let mut failed = serde_json::json!({
@@ -3503,6 +3587,17 @@ exit 17
         write_private(&path, &serde_json::to_vec(&failed).unwrap());
 
         assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
+        assert_eq!(
+            read_core_readiness_with_policy(
+                &path,
+                9,
+                42,
+                "00112233445566778899aabbccddeeff",
+                ReadinessPolicy::Committed,
+            )
+            .unwrap(),
+            Some(ReadinessState::RecoverablePeerLoss)
+        );
         assert_eq!(
             read_core_readiness_with_policy(
                 &path,

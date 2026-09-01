@@ -654,11 +654,23 @@ impl NetdSession {
             .validate()
             .map_err(|_| NetdSessionError::InvalidDeclaration)?;
         let mut advancing_generation = false;
+        let mut reconfigure_generation = false;
         if let Some(owner) = self.owner {
             let stopped_prepare = self.phase == SessionPhase::Stopped
                 && matches!(request.operation, NetdOperation::Prepare(_));
             if stopped_prepare && request.owner.generation > owner.generation {
                 advancing_generation = true;
+            } else if self.phase == SessionPhase::Suspended
+                && matches!(request.operation, NetdOperation::Reconfigure(_))
+                && request.owner.instance_id == owner.instance_id
+                && request.owner.pid == owner.pid
+                && request.owner.generation != owner.generation
+            {
+                // A suspended hot replacement is the only in-place operation
+                // allowed to switch generation. It retains the session phase
+                // while moving the lease owner atomically with the declaration;
+                // rollback may legitimately move back to the previous generation.
+                reconfigure_generation = true;
             } else if stopped_prepare && owner.generation == request.owner.generation {
                 // A completed rollback owns no network state. A replacement
                 // activation may therefore retry this generation, subject to
@@ -676,6 +688,9 @@ impl NetdSession {
         if advancing_generation {
             self.owner = None;
             self.declaration = None;
+        }
+        if reconfigure_generation {
+            self.owner = Some(request.owner);
         }
         match &request.operation {
             NetdOperation::Prepare(declaration) => {
