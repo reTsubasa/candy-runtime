@@ -269,7 +269,8 @@ struct CoreReadinessStatus {
 #[derive(Debug, Deserialize)]
 struct CoreReadinessPath {
     rtt_sample_count: u64,
-    rx_bytes: u64,
+    #[serde(rename = "rx_bytes")]
+    _rx_bytes: u64,
     #[serde(rename = "rx_idle_ms")]
     _rx_idle_ms: u64,
 }
@@ -1244,11 +1245,15 @@ fn classify_core_readiness(
 ) -> Result<ReadinessState> {
     // Route-owner readiness is the lifecycle authority. Receive idleness is
     // telemetry freshness and must not restart an otherwise authenticated path.
+    // A newly authenticated QUIC lane can legitimately have no received
+    // payload bytes yet (for example, immediately after a peer reconnect or
+    // while the route is idle).  RX bytes are telemetry, not an admission
+    // requirement.  Use the Core-owned path inventory and RTT sample as the
+    // authentication/readiness evidence; otherwise recovery is classified as
+    // failed and the agent tears down the freshly restored lane again.
     let has_authenticated_path_evidence = status.paths.as_ref().is_some_and(|paths| {
         paths.len() >= status.ready_route_owners
-            && paths
-                .iter()
-                .all(|path| path.rtt_sample_count > 0 && path.rx_bytes > 0)
+            && paths.iter().all(|path| path.rtt_sample_count > 0)
     });
     let listener_ready = status.inbound_listener_configured
         && status.inbound_listener_ready
@@ -3492,6 +3497,16 @@ exit 17
         assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
         let mut active =
             serde_json::from_str::<serde_json::Value>(&status(9, "active", 1, 1)).unwrap();
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Ready)
+        );
+        // A freshly reconnected lane may not have received payload bytes yet,
+        // but its authenticated path and RTT sample are sufficient to resume
+        // SD-WAN.  RX counters must not force an unnecessary Core restart.
+        active["paths"] =
+            serde_json::json!([{ "rtt_sample_count": 1, "rx_bytes": 0, "rx_idle_ms": 0 }]);
         fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
         assert_eq!(
             read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
