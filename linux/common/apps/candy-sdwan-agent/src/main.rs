@@ -261,6 +261,8 @@ struct CoreReadinessStatus {
     #[serde(default)]
     last_error_code: Option<String>,
     #[serde(default)]
+    last_error_detail: Option<String>,
+    #[serde(default)]
     paths: Option<Vec<CoreReadinessPath>>,
 }
 
@@ -1310,8 +1312,11 @@ fn classify_core_readiness(
         _ => bail!("SD-WAN Core readiness status has an invalid lifecycle"),
     };
     if state == ReadinessState::Failed {
-        let detail = status.last_error_code.as_deref().unwrap_or("not_ready");
-        bail!("SD-WAN Core candidate failed readiness: {detail}")
+        let code = status.last_error_code.as_deref().unwrap_or("not_ready");
+        if let Some(detail) = status.last_error_detail.as_deref() {
+            bail!("SD-WAN Core candidate failed readiness: {code}: {detail}")
+        }
+        bail!("SD-WAN Core candidate failed readiness: {code}")
     }
     Ok(state)
 }
@@ -1605,8 +1610,25 @@ fn retry_after_rollback(
             sanitize_log_value(&format!("{marker_error:#}"))
         );
     }
-    rollback?;
-    remove_stale_status(&args.status)?;
+    // A netd daemon restart can close the IPC socket after it has already
+    // removed the transaction.  Treat that as a recoverable cleanup failure:
+    // the next activation creates a fresh owner/session.  Propagating the
+    // ECONNRESET here used to terminate the agent and made a peer outage
+    // permanent until a service restart.
+    if let Err(rollback_error) = rollback {
+        eprintln!(
+            "level=warn event=sdwan_rollback_deferred generation={} error_code=rollback_ipc_unavailable error={}",
+            args.generation,
+            sanitize_log_value(&format!("{rollback_error:#}"))
+        );
+    }
+    if let Err(status_error) = remove_stale_status(&args.status) {
+        eprintln!(
+            "level=warn event=sdwan_status_cleanup_deferred generation={} error={}",
+            args.generation,
+            sanitize_log_value(&format!("{status_error:#}"))
+        );
+    }
     if shutdown_requested() {
         eprintln!(
             "level=info event=sdwan_stopped generation={} phase=runtime_failure rollback_ok=true",
@@ -1781,9 +1803,21 @@ fn enter_proxy_fallback(
         state.steering_suspended = true;
     }
     if !state.core_suspended {
-        request_core_control(args, child, CoreReloadAction::Suspend)
-            .context("suspend Core forwarding after steering was removed")?;
-        state.core_suspended = true;
+        // If the data-plane process has already exited, forwarding is already
+        // stopped.  Do not turn that expected failure state into a second
+        // fatal "fallback failed" error; leave the steering suspended and let
+        // the outer retry loop start a new Core instance.
+        if child
+            .try_wait()
+            .context("inspect Core before entering fallback")?
+            .is_some()
+        {
+            state.core_suspended = true;
+        } else {
+            request_core_control(args, child, CoreReloadAction::Suspend)
+                .context("suspend Core forwarding after steering was removed")?;
+            state.core_suspended = true;
+        }
     }
     Ok(())
 }

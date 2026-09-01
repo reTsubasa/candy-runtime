@@ -354,6 +354,8 @@ struct RuntimeTelemetry<'a> {
     ready_route_owners: u32,
     fail_open_required: bool,
     last_error_code: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error_detail: Option<&'a str>,
     rtt_ms: Option<u32>,
     jitter_ms: Option<u32>,
     packet_loss_ppm: Option<u32>,
@@ -405,6 +407,8 @@ struct CoreRuntimeStatus {
     #[serde(default)]
     steering_suspended: bool,
     last_error_code: Option<String>,
+    #[serde(default)]
+    last_error_detail: Option<String>,
     #[serde(default)]
     counters: CorePacketCounters,
     #[serde(default)]
@@ -1992,6 +1996,7 @@ fn report_runtime_telemetry(
         fail_open_required: lifecycle == "fail_open",
         steering_suspended: false,
         last_error_code: None,
+        last_error_detail: None,
         counters: CorePacketCounters::default(),
         paths: Vec::new(),
         reconnects: 0,
@@ -2003,6 +2008,7 @@ fn report_runtime_telemetry(
         .as_deref()
         .or_else(|| verified_snapshot.as_ref()?.3.as_deref())
         .or_else(|| local_status.as_ref()?.runtime.last_error_code.as_deref());
+    let reported_error_detail = status.last_error_detail.as_deref();
     let telemetry_endpoint = endpoint(cloud, "auth/v1/runtime/telemetry")?;
     let telemetry = RuntimeTelemetry {
         schema_version: 1,
@@ -2015,6 +2021,7 @@ fn report_runtime_telemetry(
         ready_route_owners: status.ready_route_owners,
         fail_open_required: lifecycle == "fail_open",
         last_error_code: reported_error_code,
+        last_error_detail: reported_error_detail,
         rtt_ms: performance.rtt_ms,
         jitter_ms: performance.jitter_ms,
         packet_loss_ppm: performance.packet_loss_ppm,
@@ -5688,6 +5695,7 @@ default via 192.0.2.1 dev eth0 proto static
             fail_open_required: false,
             steering_suspended: false,
             last_error_code: None,
+            last_error_detail: None,
             counters: CorePacketCounters {
                 tun_bytes_received: 3_000,
                 tun_bytes_sent: 5_000,
@@ -6809,6 +6817,7 @@ default via 192.0.2.1 dev eth0 proto static
             fail_open_required: false,
             steering_suspended: false,
             last_error_code: None,
+            last_error_detail: None,
             counters: CorePacketCounters::default(),
             paths: vec![CorePathStatus {
                 peer_attachment_id: "12".repeat(16),
