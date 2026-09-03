@@ -1494,11 +1494,15 @@ fn maybe_renew_device_certificate(args: &Args) -> Result<bool> {
     let identity: DeviceIdentity = read_bounded_json(&identity_path, MAX_PROFILE_BYTES)
         .context("read device identity for certificate renewal")?;
     validate_identity(&identity)?;
+    let state_path = identity_dir.join("certificate-renewal-v1.json");
     if !certificate_renewal_due(&identity.not_after, Utc::now())? {
+        // The identity document is written last during certificate install. If
+        // it already carries an expiry outside the renewal window, a leftover
+        // transaction can only be from a crash after that commit marker.
+        remove_certificate_renewal_state(&state_path, &identity_dir)?;
         return Ok(false);
     }
 
-    let state_path = identity_dir.join("certificate-renewal-v1.json");
     let now = unix_now()?;
     let mut state = match read_bounded_json::<CertificateRenewalState>(&state_path, 16 * 1024) {
         Ok(state) => state,
@@ -1524,13 +1528,7 @@ fn maybe_renew_device_certificate(args: &Args) -> Result<bool> {
             let replayed = response.replayed;
             let renewed_not_after = response.not_after.clone();
             install_renewed_device_identity(&identity_dir, &identity, response)?;
-            match fs::remove_file(&state_path) {
-                Ok(()) => File::open(&identity_dir)
-                    .and_then(|directory| directory.sync_all())
-                    .context("sync certificate renewal completion")?,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error).context("remove certificate renewal state"),
-            }
+            remove_certificate_renewal_state(&state_path, &identity_dir)?;
             eprintln!(
                 "level=info event=device_certificate_renewal result=succeeded replayed={} expires_at={}",
                 replayed,
@@ -1547,6 +1545,16 @@ fn maybe_renew_device_certificate(args: &Args) -> Result<bool> {
                 "certificate renewal attempt failed; retry in {delay} seconds"
             ))
         }
+    }
+}
+
+fn remove_certificate_renewal_state(state_path: &Path, identity_dir: &Path) -> Result<()> {
+    match fs::remove_file(state_path) {
+        Ok(()) => File::open(identity_dir)
+            .and_then(|directory| directory.sync_all())
+            .context("sync certificate renewal completion"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("remove certificate renewal state"),
     }
 }
 
@@ -6118,6 +6126,17 @@ mod tests {
             "replayed": true
         }))
         .is_ok());
+    }
+
+    #[test]
+    fn completed_certificate_renewal_state_is_removed_idempotently() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("certificate-renewal-v1.json");
+        fs::write(&state_path, b"stale").unwrap();
+
+        remove_certificate_renewal_state(&state_path, directory.path()).unwrap();
+        assert!(!state_path.exists());
+        remove_certificate_renewal_state(&state_path, directory.path()).unwrap();
     }
 
     #[test]
