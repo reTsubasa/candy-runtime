@@ -12,6 +12,7 @@ CANDY_CORE_BIN=${CANDY_CORE_BIN:-/usr/lib/candy/cores/current/candy-core}
 FAULT_STATE_FILE=${CANDY_FAULT_STATE_FILE:-/etc/candy/runtime-fault.json}
 CANDY_LIFECYCLE_FILE=${CANDY_LIFECYCLE_FILE:-/tmp/candy.lifecycle}
 CANDY_LIFECYCLE_TTL_SECONDS=${CANDY_LIFECYCLE_TTL_SECONDS:-10}
+MAX_ERROR_BACKOFF=${CANDY_CLOUD_SYNC_MAX_ERROR_BACKOFF:-60}
 
 completed_runtime_fault() {
 	[ -s "$FAULT_STATE_FILE" ] && [ -f "$FAULT_STATE_FILE" ] && [ ! -L "$FAULT_STATE_FILE" ] || return 1
@@ -83,16 +84,19 @@ sync_state_from_stdout() {
 
 case "$INTERVAL" in ''|*[!0-9]*|0) INTERVAL=1 ;; esac
 case "$CANDY_LIFECYCLE_TTL_SECONDS" in ''|*[!0-9]*) CANDY_LIFECYCLE_TTL_SECONDS=10 ;; esac
+case "$MAX_ERROR_BACKOFF" in ''|*[!0-9]*|0) MAX_ERROR_BACKOFF=60 ;; esac
 [ -x "$SYNC_BIN" ] || exit 1
 [ -x "$CANDY_INIT" ] || exit 1
 command -v start-stop-daemon >/dev/null 2>&1 || exit 1
 [ "$(id -u 2>/dev/null || printf 1)" = 0 ] || exit 1
 
 trap 'exit 0' TERM INT
+backoff=0
 while identity_available; do
 	# stdout is the machine-readable result channel. stderr remains attached to
 	# procd so Runtime diagnostics stay visible without entering state parsing.
 	if output=$(start-stop-daemon -S -c "$RUN_USER" -x "$SYNC_BIN" -- --state-dir "$STATE_DIR" --core "$CANDY_CORE_BIN" sync-once); then
+		backoff=0
 		state=$(sync_state_from_stdout "$output" || true)
 		case "$state" in
 			waiting_for_network_configuration|configuration_unchanged|configuration_updated|activation_pending|activation_rejected) ;;
@@ -107,6 +111,8 @@ while identity_available; do
 		rc=$?
 		detail=$(printf '%s' "$output" | tr '\r\n' '  ' | cut -c 1-384)
 		logger -t candy -- "level=warn event=cloud_sync result=failed exit=$rc activation=unchanged detail=$detail"
+		if [ "$backoff" -eq 0 ]; then backoff=2; else backoff=$((backoff * 2)); fi
+		[ "$backoff" -le "$MAX_ERROR_BACKOFF" ] || backoff="$MAX_ERROR_BACKOFF"
 	fi
-	sleep "$INTERVAL"
+	if [ "$backoff" -gt "$INTERVAL" ]; then sleep "$backoff"; else sleep "$INTERVAL"; fi
 done

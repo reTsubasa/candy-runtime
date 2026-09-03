@@ -2398,3 +2398,12 @@ msgstr "Candy Cloud"
 
 msgid "Not active"
 msgstr "未生效"
+
+msgid "Waiting for real traffic"
+msgstr "等待真实流量验证"
+
+msgid "Unavailable"
+msgstr "不可用"
+
+msgid "Checking"
+msgstr "检查中"

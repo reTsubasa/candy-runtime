@@ -41,6 +41,8 @@ if grep -F 'sync-once 2>&1' "$cloud_sync_loop" >/dev/null; then
 fi
 grep -F 'sync_state_from_stdout "$output"' "$cloud_sync_loop" >/dev/null || fail "Cloud synchronization does not parse its explicit stdout result"
 grep -F 'detail=$(printf' "$cloud_sync_loop" >/dev/null || fail "failed Cloud synchronization does not retain bounded diagnostic detail"
+grep -F 'MAX_ERROR_BACKOFF' "$cloud_sync_loop" >/dev/null || fail "Cloud synchronization has no bounded error backoff"
+grep -F 'backoff=$((backoff * 2))' "$cloud_sync_loop" >/dev/null || fail "Cloud synchronization does not exponentially back off repeated failures"
 grep -F 'exec "$core_bin" client sdwan "$@"' "$root/candy-client/candy-sdwan" >/dev/null || fail "candy-sdwan does not use the Core process API"
 grep -F 'runtime-api-version' "$root/candy-client/candy-sdwan" >/dev/null || fail "candy-sdwan does not bootstrap the Core process API"
 if grep -F '/usr/lib/candy/cores/current/candy-' "$makefile" >/dev/null; then

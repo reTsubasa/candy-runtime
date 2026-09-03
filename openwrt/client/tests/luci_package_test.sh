@@ -152,9 +152,11 @@ assert.ok(controllerSource.includes("clone_json_value(node)"), "status API must 
 assert.ok(controllerSource.includes('source == "local_wan" and "active" or "standby"'), "status API must report traffic path components independently");
 assert.ok(controllerSource.includes('service == "running" and sdwan and sdwan.active'), "stopped service must not expose stale SD-WAN as an active egress");
 assert.ok(controllerSource.includes('effective_traffic_path(status.sdwan, service, status.candy_nodes)'), "Proxy availability must be derived only from ordinary Candy nodes");
+assert.ok(controllerSource.includes('node.proxy_data_plane'), "Proxy availability must use real data-plane session evidence");
+assert.ok(!controllerSource.includes('node.state == "running" or node.state == "ready" or node.state == "ok"'), "Proxy traffic status must not be inferred from the control connection alone");
 assert.ok(controllerSource.includes('remote_egress_active'), "overview must distinguish selective SD-WAN routes from a remote Internet egress");
 assert.ok(controllerSource.includes('sdwan_policy_selective'), "overview must explain when unmatched traffic stays on the ordinary Candy proxy");
-assert.ok(controllerSource.includes('source == "sdwan" or source == "candy_proxy"'), "ordinary Candy fallback must be displayed as an active path");
+assert.ok(controllerSource.includes('source == "candy_proxy" and (proxy_state == "active"'), "ordinary Candy path must expose its independent data-plane state");
 for (const templatePath of [statusPath, logPath]) {
 	const template = fs.readFileSync(root + "/" + templatePath, "utf8");
 	const scripts = Array.from(template.matchAll(/<script type="text\/javascript">([\s\S]*?)<\/script>/g));

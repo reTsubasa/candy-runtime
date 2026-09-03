@@ -290,21 +290,33 @@ end
 local function effective_traffic_path(sdwan, service, nodes)
 	local reported = read_bounded_status_file(TRAFFIC_PATH_FILE, 16384)
 	local source = "local_wan"
-	local proxy_active = false
+	local proxy_state = "inactive"
+	local proxy_error
 	local remote_egress = sdwan and sdwan.egress and sdwan.egress.remote
 	local remote_egress_active = service == "running" and sdwan and sdwan.active and type(remote_egress) == "table" and
 		remote_egress.state ~= "unavailable" and remote_egress.state ~= "not-configured"
 	if service == "running" then
 		for _, node in ipairs(nodes or {}) do
-			if node.state == "running" or node.state == "ready" or node.state == "ok" then
-				proxy_active = true
+			local data_plane = type(node.proxy_data_plane) == "table" and node.proxy_data_plane or nil
+			local state = data_plane and data_plane.state or "unproven"
+			if state == "active" then
+				proxy_state = "active"
+				proxy_error = nil
 				break
+			elseif state == "degraded" and proxy_state ~= "active" then
+				proxy_state = "degraded"
+				proxy_error = data_plane.last_error
+			elseif state == "unproven" and proxy_state ~= "degraded" then
+				proxy_state = "unproven"
+			elseif state == "unavailable" and proxy_state == "inactive" then
+				proxy_state = "unavailable"
+				proxy_error = data_plane.last_error or node.last_error
 			end
 		end
 	end
 	if remote_egress_active then
 		source = "sdwan"
-	elseif proxy_active then
+	elseif proxy_state == "active" or proxy_state == "degraded" or proxy_state == "unproven" then
 		source = "candy_proxy"
 	end
 	local now = os.time()
@@ -320,15 +332,15 @@ local function effective_traffic_path(sdwan, service, nodes)
 		((runtime_state == "fail-open" or runtime_state == "reconnecting" or runtime_state == "error" or runtime_state == "rejected") and "degraded" or "inactive"))
 	return {
 		schema_version = 1,
-		state = recent_transition and reported.state or
-			((source == "sdwan" or source == "candy_proxy") and "active" or "fallback"),
+		state = recent_transition and reported.state or (source == "sdwan" and "active" or
+			(source == "candy_proxy" and (proxy_state == "active" and "active" or proxy_state == "unproven" and "checking" or "degraded") or "fallback")),
 		source = source,
 		reason = recent_transition and reported and type(reported.reason) == "string" and reported.reason or
 			(sdwan and sdwan.active and not remote_egress_active and "sdwan_policy_selective" or ""),
 		updated_at = updated_at,
 		paths = {
 			sdwan = { state = sdwan_state },
-			candy_proxy = { state = proxy_active and "active" or "inactive" },
+			candy_proxy = { state = proxy_state, last_error = proxy_error },
 			local_wan = { state = source == "local_wan" and "active" or "standby" }
 		}
 	}
