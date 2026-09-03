@@ -1628,6 +1628,7 @@ fn install_renewed_device_identity(
         &operational_key.verifying_key().to_bytes(),
         current.device_id,
         current.device_key_id,
+        new_expiry.timestamp(),
     )?;
 
     let leaf_pem = pem_certificate(&certificate_der);
@@ -1702,14 +1703,16 @@ fn validate_device_certificate(
     operational_public_key: &[u8; 32],
     device_id: Uuid,
     device_key_id: Uuid,
+    expected_not_after_unix: i64,
 ) -> Result<()> {
     let (remaining, certificate) =
         parse_x509_certificate(der).context("parse renewed device certificate")?;
     if !remaining.is_empty()
         || certificate.public_key().subject_public_key.data.as_ref() != operational_public_key
         || !certificate.validity().is_valid()
+        || certificate.validity().not_after.timestamp() != expected_not_after_unix
     {
-        bail!("renewed device certificate is invalid or not bound to the operational key")
+        bail!("renewed device certificate is invalid or not bound to its key and expiry metadata")
     }
     let san = certificate
         .subject_alternative_name()
