@@ -363,6 +363,10 @@ struct RuntimeTelemetry<'a> {
     tx_bps: Option<u64>,
     reconnects: Option<u64>,
     path_changes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transport_mode: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_generation: Option<u64>,
     paths: &'a [RuntimePathTelemetry],
     #[serde(skip_serializing_if = "Option::is_none")]
     local_networks: Option<&'a [LocalNetworkTelemetry]>,
@@ -391,6 +395,55 @@ struct RuntimePathTelemetry {
     tx_bps: Option<u64>,
     reconnects: u64,
     path_changes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transport_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route_generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    congestion_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ready_streams: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queue_depth: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queue_limit: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_ack_seq: Option<u64>,
+    streams: Vec<RuntimeStreamTelemetry>,
+}
+
+#[derive(Debug, Serialize, Eq, PartialEq)]
+struct RuntimeStreamTelemetry {
+    slot: u16,
+    stream_id: u64,
+    state: String,
+    generation: u64,
+    tx_packets: u64,
+    rx_packets: u64,
+    tx_bytes: u64,
+    rx_bytes: u64,
+    tx_frames: u64,
+    rx_frames: u64,
+    active_flows: u64,
+    queue_depth: u64,
+    queue_limit: u64,
+    queue_peak: u64,
+    last_ack_seq: Option<u64>,
+    ack_rtt_ms: Option<u32>,
+    rx_bps: Option<u64>,
+    tx_bps: Option<u64>,
+    reset_count: u64,
+    decode_errors: u64,
+    high_watermark_hits: u64,
+    low_watermark_hits: u64,
+    blocked_ms: u64,
+    send_window_bytes: u64,
+    last_tx_monotonic_ms: Option<u64>,
+    last_rx_monotonic_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -417,6 +470,8 @@ struct CoreRuntimeStatus {
     reconnects: u64,
     #[serde(default)]
     path_changes: u64,
+    #[serde(default)]
+    transport_mode: Option<String>,
 }
 
 fn core_data_plane_ready(status: &CoreRuntimeStatus) -> bool {
@@ -454,6 +509,58 @@ struct CorePathStatus {
     path_mtu: u16,
     reconnects: u64,
     path_changes: u64,
+    #[serde(default)]
+    transport_mode: Option<String>,
+    #[serde(default)]
+    route_generation: Option<u64>,
+    #[serde(default)]
+    congestion_state: Option<String>,
+    #[serde(default)]
+    stream_count: Option<u32>,
+    #[serde(default)]
+    ready_streams: Option<u32>,
+    #[serde(default)]
+    queue_depth: Option<u64>,
+    #[serde(default)]
+    queue_limit: Option<u64>,
+    #[serde(default)]
+    last_ack_seq: Option<u64>,
+    #[serde(default)]
+    streams: Vec<CoreStreamStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreStreamStatus {
+    slot: u16,
+    stream_id: u64,
+    state: String,
+    generation: u64,
+    tx_packets: u64,
+    rx_packets: u64,
+    tx_bytes: u64,
+    rx_bytes: u64,
+    tx_frames: u64,
+    rx_frames: u64,
+    active_flows: u64,
+    queue_depth: u64,
+    queue_limit: u64,
+    queue_peak: u64,
+    #[serde(default)]
+    last_ack_seq: Option<u64>,
+    #[serde(default)]
+    ack_rtt_micros: Option<u64>,
+    reset_count: u64,
+    decode_errors: u64,
+    high_watermark_hits: u64,
+    low_watermark_hits: u64,
+    blocked_micros: u64,
+    send_window_bytes: u64,
+    #[serde(default)]
+    last_tx_monotonic_ms: Option<u64>,
+    #[serde(default)]
+    last_rx_monotonic_ms: Option<u64>,
+    #[serde(default)]
+    last_error_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -478,6 +585,17 @@ struct RuntimePathSample {
     rx_bytes: u64,
     sent_packets: u64,
     lost_packets: u64,
+    #[serde(default)]
+    streams: BTreeMap<u16, RuntimeStreamSample>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeStreamSample {
+    stream_id: u64,
+    generation: u64,
+    tx_bytes: u64,
+    rx_bytes: u64,
 }
 
 #[derive(Debug, Default, Serialize, Eq, PartialEq)]
@@ -2001,6 +2119,7 @@ fn report_runtime_telemetry(
         paths: Vec::new(),
         reconnects: 0,
         path_changes: 0,
+        transport_mode: None,
     };
     let status = core_status.as_ref().unwrap_or(&empty);
     let reported_error_code = status
@@ -2029,6 +2148,8 @@ fn report_runtime_telemetry(
         tx_bps: performance.tx_bps,
         reconnects: performance.reconnects,
         path_changes: performance.path_changes,
+        transport_mode: status.transport_mode.as_deref(),
+        runtime_generation: (status.generation != 0).then_some(status.generation),
         paths: &path_performance,
         local_networks: local_networks.as_deref(),
     };
@@ -2282,6 +2403,21 @@ fn runtime_telemetry_sample(
                         rx_bytes: path.rx_bytes,
                         sent_packets: path.sent_packets,
                         lost_packets: path.lost_packets,
+                        streams: path
+                            .streams
+                            .iter()
+                            .map(|stream| {
+                                (
+                                    stream.slot,
+                                    RuntimeStreamSample {
+                                        stream_id: stream.stream_id,
+                                        generation: stream.generation,
+                                        tx_bytes: stream.tx_bytes,
+                                        rx_bytes: stream.rx_bytes,
+                                    },
+                                )
+                            })
+                            .collect(),
                     },
                 )
             })
@@ -2422,6 +2558,47 @@ fn derive_runtime_paths(
                 tx_bps: None,
                 reconnects: path.reconnects,
                 path_changes: path.path_changes,
+                transport_mode: path.transport_mode.clone(),
+                route_generation: path.route_generation,
+                congestion_state: path.congestion_state.clone(),
+                stream_count: path.stream_count,
+                ready_streams: path.ready_streams,
+                queue_depth: path.queue_depth,
+                queue_limit: path.queue_limit,
+                last_ack_seq: path.last_ack_seq,
+                streams: path
+                    .streams
+                    .iter()
+                    .map(|stream| RuntimeStreamTelemetry {
+                        slot: stream.slot,
+                        stream_id: stream.stream_id,
+                        state: stream.state.clone(),
+                        generation: stream.generation,
+                        tx_packets: stream.tx_packets,
+                        rx_packets: stream.rx_packets,
+                        tx_bytes: stream.tx_bytes,
+                        rx_bytes: stream.rx_bytes,
+                        tx_frames: stream.tx_frames,
+                        rx_frames: stream.rx_frames,
+                        active_flows: stream.active_flows,
+                        queue_depth: stream.queue_depth,
+                        queue_limit: stream.queue_limit,
+                        queue_peak: stream.queue_peak,
+                        last_ack_seq: stream.last_ack_seq,
+                        ack_rtt_ms: stream.ack_rtt_micros.map(micros_to_millis),
+                        rx_bps: None,
+                        tx_bps: None,
+                        reset_count: stream.reset_count,
+                        decode_errors: stream.decode_errors,
+                        high_watermark_hits: stream.high_watermark_hits,
+                        low_watermark_hits: stream.low_watermark_hits,
+                        blocked_ms: stream.blocked_micros / 1_000,
+                        send_window_bytes: stream.send_window_bytes,
+                        last_tx_monotonic_ms: stream.last_tx_monotonic_ms,
+                        last_rx_monotonic_ms: stream.last_rx_monotonic_ms,
+                        last_error_code: stream.last_error_code.clone(),
+                    })
+                    .collect(),
             };
             let Some((previous, current)) = interval else {
                 return Ok(result);
@@ -2460,6 +2637,29 @@ fn derive_runtime_paths(
             if sent > 0 {
                 result.packet_loss_ppm =
                     Some(((u128::from(lost.min(sent)) * 1_000_000) / u128::from(sent)) as u32);
+            }
+            for stream in &mut result.streams {
+                let Some(previous_stream) = previous_path.streams.get(&stream.slot) else {
+                    continue;
+                };
+                let Some(current_stream) = current_path.streams.get(&stream.slot) else {
+                    continue;
+                };
+                if current_stream.stream_id != previous_stream.stream_id
+                    || current_stream.generation != previous_stream.generation
+                    || current_stream.tx_bytes < previous_stream.tx_bytes
+                    || current_stream.rx_bytes < previous_stream.rx_bytes
+                {
+                    continue;
+                }
+                stream.tx_bps = Some(rate_bps(
+                    current_stream.tx_bytes.saturating_sub(previous_stream.tx_bytes),
+                    elapsed_ms,
+                ));
+                stream.rx_bps = Some(rate_bps(
+                    current_stream.rx_bytes.saturating_sub(previous_stream.rx_bytes),
+                    elapsed_ms,
+                ));
             }
             Ok(result)
         })
@@ -2717,7 +2917,7 @@ fn validate_core_path_status(status: &CoreRuntimeStatus) -> Result<()> {
             validate_hex(candidate_id, 16, "Core path candidate id")?;
         }
         if !matches!(path.path_kind.as_str(), "direct" | "relay")
-            || path.transport != "quic_udp"
+            || !matches!(path.transport.as_str(), "quic_stream" | "quic_udp")
             || path.connection_epoch == 0
             || path.lost_packets > path.sent_packets
             || path.rtt_micros > 60_000_000
@@ -2728,6 +2928,14 @@ fn validate_core_path_status(status: &CoreRuntimeStatus) -> Result<()> {
             || path.reconnects > status.reconnects
             || path.path_changes > status.path_changes
             || paths.insert(&path.peer_attachment_id, ()).is_some()
+            || path.streams.len() > 8
+            || path.streams.iter().any(|stream| {
+                stream.stream_id == 0
+                    || stream.generation == 0
+                    || stream.queue_depth > stream.queue_limit
+                    || stream.queue_peak < stream.queue_depth
+                    || stream.last_ack_seq.is_some_and(|ack| ack > stream.tx_packets)
+            })
         {
             bail!("active Core Runtime path telemetry is invalid")
         }
@@ -5717,9 +5925,45 @@ default via 192.0.2.1 dev eth0 proto static
                 path_mtu: 1_400,
                 reconnects: 2,
                 path_changes: 1,
+                transport_mode: Some("stream_primary".into()),
+                route_generation: Some(7),
+                congestion_state: Some("normal".into()),
+                stream_count: Some(2),
+                ready_streams: Some(2),
+                queue_depth: Some(4),
+                queue_limit: Some(1024),
+                last_ack_seq: Some(140),
+                streams: vec![CoreStreamStatus {
+                    slot: 0,
+                    stream_id: 101,
+                    state: "ready".into(),
+                    generation: 7,
+                    tx_packets: 70,
+                    rx_packets: 68,
+                    tx_bytes: 4_500,
+                    rx_bytes: 4_000,
+                    tx_frames: 70,
+                    rx_frames: 68,
+                    active_flows: 2,
+                    queue_depth: 4,
+                    queue_limit: 1024,
+                    queue_peak: 18,
+                    last_ack_seq: Some(70),
+                    ack_rtt_micros: Some(2_000),
+                    reset_count: 0,
+                    decode_errors: 0,
+                    high_watermark_hits: 0,
+                    low_watermark_hits: 1,
+                    blocked_micros: 0,
+                    send_window_bytes: 64_000,
+                    last_tx_monotonic_ms: Some(10_000),
+                    last_rx_monotonic_ms: Some(10_001),
+                    last_error_code: None,
+                }],
             }],
             reconnects: 2,
             path_changes: 1,
+            transport_mode: Some("stream_primary".into()),
         }
     }
 
@@ -5754,6 +5998,27 @@ default via 192.0.2.1 dev eth0 proto static
                 path_changes: Some(1),
             }
         );
+    }
+
+    #[test]
+    fn stream_telemetry_is_projected_with_real_counters_and_generation() {
+        let status = core_status_v2();
+        let boot_id = Uuid::new_v4();
+        let previous = runtime_telemetry_sample(boot_id, 1, 1_000, &status);
+        let mut next_status = core_status_v2();
+        next_status.paths[0].streams[0].tx_bytes = 8_500;
+        next_status.paths[0].streams[0].rx_bytes = 8_000;
+        let current = runtime_telemetry_sample(boot_id, 2, 3_000, &next_status);
+        let paths = derive_runtime_paths(Some(&next_status), Some(&previous), Some(&current)).unwrap();
+        assert_eq!(paths[0].transport_mode.as_deref(), Some("stream_primary"));
+        assert_eq!(paths[0].route_generation, Some(7));
+        assert_eq!(paths[0].queue_depth, Some(4));
+        assert_eq!(paths[0].last_ack_seq, Some(140));
+        assert_eq!(paths[0].streams.len(), 1);
+        assert_eq!(paths[0].streams[0].slot, 0);
+        assert_eq!(paths[0].streams[0].tx_bps, Some(16_000));
+        assert_eq!(paths[0].streams[0].rx_bps, Some(16_000));
+        assert_eq!(paths[0].streams[0].queue_peak, 18);
     }
 
     #[test]
@@ -6836,9 +7101,19 @@ default via 192.0.2.1 dev eth0 proto static
                 path_mtu: 1_280,
                 reconnects: 0,
                 path_changes: 0,
+                transport_mode: Some("stream_primary".into()),
+                route_generation: Some(5),
+                congestion_state: Some("normal".into()),
+                stream_count: Some(1),
+                ready_streams: Some(1),
+                queue_depth: Some(0),
+                queue_limit: Some(1024),
+                last_ack_seq: Some(1),
+                streams: Vec::new(),
             }],
             reconnects: 0,
             path_changes: 0,
+            transport_mode: Some("stream_primary".into()),
         }
     }
 
