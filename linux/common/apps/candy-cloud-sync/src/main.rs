@@ -309,6 +309,12 @@ struct SyncState {
     projection_publication_id: Option<Uuid>,
     #[serde(default)]
     projection_content_hash: Option<String>,
+    /// Activation phase associated with `etag`. Conditional 304 responses
+    /// must preserve PREPARED until Cloud advances the rollout to COMMIT;
+    /// reporting ACTIVE here would make the control plane disagree with the
+    /// local Core, which is still running the previous generation.
+    #[serde(default)]
+    activation_phase: Option<String>,
     #[serde(default)]
     activation_required: bool,
     #[serde(default)]
@@ -1598,6 +1604,7 @@ fn sync_once_with_retry(
             request_local_activation_withdrawal(&args.state_dir)?;
             state.etag = None;
             state.configuration_sha256 = None;
+            state.activation_phase = None;
             state.activation_required = false;
             state.activation_rejected_etag = None;
             state.activation_rejected_at_unix = None;
@@ -1667,13 +1674,28 @@ fn sync_once_with_retry(
                     state.projection_publication_id,
                     state.projection_content_hash.as_deref(),
                 ) {
+                    let reported_state = match state.activation_phase.as_deref() {
+                        Some("prepare") => "prepared",
+                        Some("commit") => "active",
+                        // State files written before activation_phase was
+                        // introduced must be refreshed unconditionally so a
+                        // stale PREPARED record can never be reported ACTIVE.
+                        _ if allow_unconditional_retry => {
+                            state.etag = None;
+                            state.configuration_sha256 = None;
+                            state.activation_phase = None;
+                            atomic_json(&state_path, &state, 0o600)?;
+                            return sync_once_with_retry(args, public_endpoints, false);
+                        }
+                        _ => bail!("Cloud returned 304 without a persisted activation phase"),
+                    };
                     report_configuration_status_fields(
                         &client,
                         &cloud,
                         projection_publication_id,
                         projection_content_hash,
                         &etag,
-                        "active",
+                        reported_state,
                         None,
                     )
                     .context("report unchanged Runtime configuration status")?;
@@ -1866,6 +1888,7 @@ fn sync_once_with_retry(
                 state.configuration_sha256 = Some(digest);
                 state.projection_publication_id = Some(configuration.projection_publication_id);
                 state.projection_content_hash = Some(configuration.projection_content_hash.clone());
+                state.activation_phase = Some(configuration.activation_phase.clone());
                 atomic_json(&state_path, &state, 0o600)?;
                 write_local_sync_status(&args.state_dir, "configuration_prepared", None)?;
                 println!(
@@ -1943,6 +1966,7 @@ fn sync_once_with_retry(
             state.configuration_sha256 = Some(digest);
             state.projection_publication_id = Some(configuration.projection_publication_id);
             state.projection_content_hash = Some(configuration.projection_content_hash.clone());
+            state.activation_phase = Some(configuration.activation_phase.clone());
             atomic_json(&state_path, &state, 0o600)?;
             let result_state = if state.activation_required {
                 "activation_pending"
