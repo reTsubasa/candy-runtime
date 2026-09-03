@@ -183,6 +183,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64",
+ "chrono",
  "clap",
  "ed25519-dalek",
  "nix 0.29.0",
@@ -194,6 +195,7 @@ dependencies = [
  "toml_edit",
  "url",
  "uuid",
+ "x509-parser",
 ]
 
 [[package]]

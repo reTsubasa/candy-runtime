@@ -11,7 +11,11 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{pkcs8::DecodePrivateKey, SigningKey};
 use reqwest::{
@@ -23,6 +27,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
+use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
 mod grant;
 mod transport_identity;
@@ -43,6 +48,8 @@ const CONFIGURATION_MEDIA_TYPE: &str = "application/vnd.candy.runtime-configurat
 const PUBLIC_ENDPOINT_ENV: &str = "CANDY_PUBLIC_ENDPOINT";
 const CLOUD_ENDPOINT_CACHE: &str = "cloud-api-endpoints-v1.json";
 const MAX_CLOUD_ENDPOINTS: usize = 16;
+const CERTIFICATE_RENEWAL_WINDOW_SECONDS: i64 = 48 * 60 * 60;
+const CERTIFICATE_RENEWAL_MAX_BACKOFF_SECONDS: u64 = 6 * 60 * 60;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -89,6 +96,29 @@ struct DeviceIdentity {
     device_id: Uuid,
     device_key_id: Uuid,
     not_after: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CertificateRenewalResponse {
+    certificate_der: String,
+    certificate_chain_pem: String,
+    not_after: String,
+    replayed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct CertificateRenewalRequest {
+    request_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CertificateRenewalState {
+    schema_version: u8,
+    request_id: Uuid,
+    failures: u32,
+    next_attempt_at_unix: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1424,6 +1454,12 @@ fn refresh_runtime_profile(
 
 fn sync_once_with_public_endpoint_env(args: &Args, public_endpoint: Option<&OsStr>) -> Result<()> {
     ensure_private_state_root(&args.state_dir)?;
+    if let Err(error) = maybe_renew_device_certificate(args) {
+        eprintln!(
+            "level=warn event=device_certificate_renewal result=failed error_code=certificate_renewal_failed detail={}",
+            sanitize_log_value(&format!("{error:#}"))
+        );
+    }
     let public_endpoints = effective_public_endpoints(args, public_endpoint)?;
     if args.server_config.is_some() && public_endpoints.is_empty() {
         write_local_sync_status(
@@ -1447,6 +1483,261 @@ fn sync_once_with_public_endpoint_env(args: &Args, public_endpoint: Option<&OsSt
         return Ok(());
     }
     sync_once_with_retry(args, &public_endpoints, true)
+}
+
+fn maybe_renew_device_certificate(args: &Args) -> Result<bool> {
+    let identity_dir = args
+        .identity_dir
+        .clone()
+        .unwrap_or_else(|| args.state_dir.join("identity"));
+    let identity_path = identity_dir.join("device-identity-v1.json");
+    let identity: DeviceIdentity = read_bounded_json(&identity_path, MAX_PROFILE_BYTES)
+        .context("read device identity for certificate renewal")?;
+    validate_identity(&identity)?;
+    if !certificate_renewal_due(&identity.not_after, Utc::now())? {
+        return Ok(false);
+    }
+
+    let state_path = identity_dir.join("certificate-renewal-v1.json");
+    let now = unix_now()?;
+    let mut state = match read_bounded_json::<CertificateRenewalState>(&state_path, 16 * 1024) {
+        Ok(state) => state,
+        Err(error) if !state_path.exists() => CertificateRenewalState {
+            schema_version: 1,
+            request_id: Uuid::new_v4(),
+            failures: 0,
+            next_attempt_at_unix: 0,
+        },
+        Err(error) => return Err(error).context("read certificate renewal state"),
+    };
+    if state.schema_version != 1 || state.request_id.is_nil() {
+        bail!("invalid certificate renewal state")
+    }
+    if now < state.next_attempt_at_unix {
+        return Ok(false);
+    }
+    atomic_json(&state_path, &state, 0o600)?;
+
+    let renewal = renew_device_certificate(args, &identity_dir, &identity, state.request_id);
+    match renewal {
+        Ok(response) => {
+            let replayed = response.replayed;
+            let renewed_not_after = response.not_after.clone();
+            install_renewed_device_identity(&identity_dir, &identity, response)?;
+            match fs::remove_file(&state_path) {
+                Ok(()) => File::open(&identity_dir)
+                    .and_then(|directory| directory.sync_all())
+                    .context("sync certificate renewal completion")?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("remove certificate renewal state"),
+            }
+            eprintln!(
+                "level=info event=device_certificate_renewal result=succeeded replayed={} expires_at={}",
+                replayed,
+                sanitize_log_value(&renewed_not_after)
+            );
+            Ok(true)
+        }
+        Err(error) => {
+            state.failures = state.failures.saturating_add(1);
+            let delay = certificate_renewal_backoff(state.failures);
+            state.next_attempt_at_unix = now.saturating_add(delay);
+            atomic_json(&state_path, &state, 0o600)?;
+            Err(error).context(format!(
+                "certificate renewal attempt failed; retry in {delay} seconds"
+            ))
+        }
+    }
+}
+
+fn certificate_renewal_due(not_after: &str, now: DateTime<Utc>) -> Result<bool> {
+    let expires_at = DateTime::parse_from_rfc3339(not_after)
+        .context("parse device certificate expiry")?
+        .with_timezone(&Utc);
+    Ok(expires_at.signed_duration_since(now).num_seconds() <= CERTIFICATE_RENEWAL_WINDOW_SECONDS)
+}
+
+fn certificate_renewal_backoff(failures: u32) -> u64 {
+    let exponent = failures.saturating_sub(1).min(12);
+    30_u64
+        .saturating_mul(1_u64 << exponent)
+        .min(CERTIFICATE_RENEWAL_MAX_BACKOFF_SECONDS)
+}
+
+fn renew_device_certificate(
+    args: &Args,
+    identity_dir: &Path,
+    identity: &DeviceIdentity,
+    request_id: Uuid,
+) -> Result<CertificateRenewalResponse> {
+    let cloud = validate_cloud(&identity.cloud_address)?;
+    let cloud_endpoints = resolve_cloud_endpoints(&args.state_dir, &cloud)?;
+    let client = build_client(
+        identity_dir,
+        args.ca_certificate.as_deref(),
+        &cloud,
+        &cloud_endpoints,
+    )?;
+    let response = client
+        .post(endpoint(&cloud, "auth/v1/device-certificates/renew")?)
+        .json(&CertificateRenewalRequest {
+            request_id: request_id.to_string(),
+        })
+        .send()
+        .context("request device certificate renewal")?;
+    if response.status() != StatusCode::OK {
+        let status = response.status();
+        let error_code = bounded_response(response, 4096)
+            .ok()
+            .map(|body| String::from_utf8_lossy(&body).trim().to_owned())
+            .filter(|body| !body.is_empty())
+            .unwrap_or_else(|| "certificate_renewal_http_error".into());
+        bail!(
+            "Cloud device certificate renewal failed with HTTP {status}: {}",
+            sanitize_log_value(&error_code)
+        )
+    }
+    require_content_type(&response, "application/json")?;
+    serde_json::from_slice(&bounded_response(response, MAX_PROFILE_BYTES)?)
+        .context("parse device certificate renewal response")
+}
+
+fn install_renewed_device_identity(
+    identity_dir: &Path,
+    current: &DeviceIdentity,
+    response: CertificateRenewalResponse,
+) -> Result<()> {
+    let old_expiry = DateTime::parse_from_rfc3339(&current.not_after)
+        .context("parse current device certificate expiry")?;
+    let new_expiry = DateTime::parse_from_rfc3339(&response.not_after)
+        .context("parse renewed device certificate expiry")?;
+    if new_expiry <= old_expiry || new_expiry <= Utc::now() {
+        bail!("renewed device certificate did not extend the validity window")
+    }
+    validate_pem_chain(&response.certificate_chain_pem)?;
+    let certificate_der = STANDARD
+        .decode(&response.certificate_der)
+        .context("decode renewed device certificate DER")?;
+    let operational_key_pem = read_bounded(&identity_dir.join("operational-key.pem"), 64 * 1024)?;
+    let operational_key_text = std::str::from_utf8(&operational_key_pem)
+        .context("operational private key PEM is not UTF-8")?;
+    let operational_key = SigningKey::from_pkcs8_pem(operational_key_text)
+        .context("decode operational private key for certificate renewal")?;
+    validate_device_certificate(
+        &certificate_der,
+        &operational_key.verifying_key().to_bytes(),
+        current.device_id,
+        current.device_key_id,
+    )?;
+
+    let leaf_pem = pem_certificate(&certificate_der);
+    let mut mtls_identity = Vec::new();
+    mtls_identity.extend_from_slice(leaf_pem.as_bytes());
+    mtls_identity.extend_from_slice(response.certificate_chain_pem.as_bytes());
+    if !response.certificate_chain_pem.ends_with('\n') {
+        mtls_identity.push(b'\n');
+    }
+    mtls_identity.extend_from_slice(&operational_key_pem);
+    let renewed_identity = DeviceIdentity {
+        not_after: response.not_after,
+        ..current.clone()
+    };
+
+    let renewed_identity = serde_json::to_vec(&renewed_identity)?;
+    replace_identity_bundle(
+        identity_dir,
+        &[
+            ("device-cert.der", certificate_der.as_slice()),
+            ("device-cert.pem", leaf_pem.as_bytes()),
+            (
+                "device-chain.pem",
+                response.certificate_chain_pem.as_bytes(),
+            ),
+            ("device-mtls.pem", mtls_identity.as_slice()),
+            // The identity document is the transaction commit marker.
+            ("device-identity-v1.json", renewed_identity.as_slice()),
+        ],
+    )?;
+    Ok(())
+}
+
+fn replace_identity_bundle(identity_dir: &Path, replacements: &[(&str, &[u8])]) -> Result<()> {
+    let mut previous = Vec::with_capacity(replacements.len());
+    for (name, _) in replacements {
+        let path = identity_dir.join(name);
+        previous.push((path.clone(), read_bounded(&path, 1024 * 1024)?));
+    }
+    for (index, (name, bytes)) in replacements.iter().enumerate() {
+        if let Err(error) = atomic_bytes(&identity_dir.join(name), bytes, 0o600) {
+            let mut rollback_error = None;
+            for (path, contents) in previous.iter().take(index).rev() {
+                if let Err(error) = atomic_bytes(path, contents, 0o600) {
+                    rollback_error = Some(error);
+                }
+            }
+            if let Some(rollback_error) = rollback_error {
+                return Err(error).context(format!(
+                    "replace device identity bundle; rollback also failed: {rollback_error:#}"
+                ));
+            }
+            return Err(error).context("replace device identity bundle; old identity restored");
+        }
+    }
+    Ok(())
+}
+
+fn validate_pem_chain(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > MAX_PROFILE_BYTES as usize
+        || !value.contains("-----BEGIN CERTIFICATE-----")
+        || !value.contains("-----END CERTIFICATE-----")
+    {
+        bail!("Cloud returned an invalid device certificate chain")
+    }
+    Ok(())
+}
+
+fn validate_device_certificate(
+    der: &[u8],
+    operational_public_key: &[u8; 32],
+    device_id: Uuid,
+    device_key_id: Uuid,
+) -> Result<()> {
+    let (remaining, certificate) =
+        parse_x509_certificate(der).context("parse renewed device certificate")?;
+    if !remaining.is_empty()
+        || certificate.public_key().subject_public_key.data.as_ref() != operational_public_key
+        || !certificate.validity().is_valid()
+    {
+        bail!("renewed device certificate is invalid or not bound to the operational key")
+    }
+    let san = certificate
+        .subject_alternative_name()
+        .context("read renewed device certificate SAN")?
+        .context("renewed device certificate has no SAN")?;
+    let mut has_device = false;
+    let mut has_key = false;
+    for name in &san.value.general_names {
+        if let GeneralName::URI(uri) = name {
+            has_device |= *uri == format!("candy:device:{device_id}");
+            has_key |= *uri == format!("candy:device-key:{device_key_id}");
+        }
+    }
+    if !has_device || !has_key {
+        bail!("renewed device certificate identity does not match local identity")
+    }
+    Ok(())
+}
+
+fn pem_certificate(der: &[u8]) -> String {
+    let encoded = STANDARD.encode(der);
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    for chunk in encoded.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(chunk).expect("base64 is UTF-8"));
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem
 }
 
 fn effective_public_endpoints(
@@ -2677,11 +2968,15 @@ fn derive_runtime_paths(
                     continue;
                 }
                 stream.tx_bps = Some(rate_bps(
-                    current_stream.tx_bytes.saturating_sub(previous_stream.tx_bytes),
+                    current_stream
+                        .tx_bytes
+                        .saturating_sub(previous_stream.tx_bytes),
                     elapsed_ms,
                 ));
                 stream.rx_bps = Some(rate_bps(
-                    current_stream.rx_bytes.saturating_sub(previous_stream.rx_bytes),
+                    current_stream
+                        .rx_bytes
+                        .saturating_sub(previous_stream.rx_bytes),
                     elapsed_ms,
                 ));
             }
@@ -2958,7 +3253,9 @@ fn validate_core_path_status(status: &CoreRuntimeStatus) -> Result<()> {
                     || stream.generation == 0
                     || stream.queue_depth > stream.queue_limit
                     || stream.queue_peak < stream.queue_depth
-                    || stream.last_ack_seq.is_some_and(|ack| ack > stream.tx_packets)
+                    || stream
+                        .last_ack_seq
+                        .is_some_and(|ack| ack > stream.tx_packets)
             })
         {
             bail!("active Core Runtime path telemetry is invalid")
@@ -5784,6 +6081,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn certificate_renewal_window_and_backoff_are_bounded() {
+        let now = DateTime::parse_from_rfc3339("2026-09-03T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(!certificate_renewal_due("2026-09-05T00:00:01Z", now).unwrap());
+        assert!(certificate_renewal_due("2026-09-05T00:00:00Z", now).unwrap());
+        assert!(certificate_renewal_due("2026-09-02T00:00:00Z", now).unwrap());
+        assert!(certificate_renewal_due("invalid", now).is_err());
+        assert_eq!(certificate_renewal_backoff(1), 30);
+        assert_eq!(certificate_renewal_backoff(2), 60);
+        assert_eq!(
+            certificate_renewal_backoff(u32::MAX),
+            CERTIFICATE_RENEWAL_MAX_BACKOFF_SECONDS
+        );
+    }
+
+    #[test]
+    fn certificate_renewal_wire_contract_contains_no_device_scope() {
+        let request_id = Uuid::parse_str("018f8f72-43b8-7f1d-8d5d-4bb13253acaa").unwrap();
+        let request = serde_json::to_value(CertificateRenewalRequest {
+            request_id: request_id.to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            request,
+            serde_json::json!({"request_id": request_id.to_string()})
+        );
+        assert!(serde_json::from_value::<CertificateRenewalResponse>(serde_json::json!({
+            "certificate_der": "AA==",
+            "certificate_chain_pem": "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n",
+            "not_after": "2026-09-10T00:00:00Z",
+            "replayed": true
+        }))
+        .is_ok());
+    }
+
+    #[test]
     fn local_network_routes_are_canonical_sorted_and_deduplicated() {
         let routes = r#"
 10.20.30.77/24 dev eth1 proto kernel scope link src 10.20.30.9 metric 10
@@ -6033,7 +6367,8 @@ default via 192.0.2.1 dev eth0 proto static
         next_status.paths[0].streams[0].tx_bytes = 8_500;
         next_status.paths[0].streams[0].rx_bytes = 8_000;
         let current = runtime_telemetry_sample(boot_id, 2, 3_000, &next_status);
-        let paths = derive_runtime_paths(Some(&next_status), Some(&previous), Some(&current)).unwrap();
+        let paths =
+            derive_runtime_paths(Some(&next_status), Some(&previous), Some(&current)).unwrap();
         assert_eq!(paths[0].transport_mode.as_deref(), Some("stream_primary"));
         assert_eq!(paths[0].route_generation, Some(7));
         assert_eq!(paths[0].queue_depth, Some(4));
