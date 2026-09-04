@@ -638,10 +638,18 @@ impl LinuxNetworkPlan {
         let policy_priority = CANDY_POLICY_PRIORITY_MIN
             .checked_add(declaration.table_id - CANDY_TABLE_MIN)
             .ok_or(NetworkError::Backend)?;
-        let remote_egress = declaration
-            .routes
-            .iter()
-            .any(|route| route.kind == RouteKind::RemoteEgressGateway);
+        // A remote-egress gateway receives packets from a remote Site on
+        // candy0 and forwards them to its public WAN.  Its declaration uses a
+        // `RemoteEgressGateway` route for the signed return prefix, rather
+        // than installing 0/0 locally.  It still needs the same source NAT
+        // as a `RemoteEgress` route; otherwise packets leave with the remote
+        // site's private source address and are dropped upstream.
+        let remote_egress = declaration.routes.iter().any(|route| {
+            matches!(
+                route.kind,
+                RouteKind::RemoteEgress | RouteKind::RemoteEgressGateway
+            )
+        });
         let remote_egress_gateway_routes = declaration
             .routes
             .iter()
