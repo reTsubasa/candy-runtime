@@ -24,6 +24,10 @@ const MAX_LEASE_MS: u64 = 120_000;
 const MIN_READINESS_TIMEOUT_MS: u64 = 1_000;
 const MAX_READINESS_TIMEOUT_MS: u64 = 120_000;
 const MAX_STATUS_BYTES: u64 = 256 * 1024;
+// A connected QUIC lane can briefly rewrite/remove its readiness report while
+// reconnecting.  Once netd has committed SD-WAN, keep the Core and its dialers
+// alive during that hand-off instead of tearing down the whole data plane.
+const CORE_READINESS_RECOVERY_GRACE: Duration = Duration::from_secs(20);
 const MAX_ACTIVATION_BYTES: u64 = 64 * 1024;
 const CORE_TERMINATION_GRACE: Duration = Duration::from_secs(15);
 const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -2250,6 +2254,13 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     let mut next_renewal = Instant::now() + renew_every;
     let mut transition = HotTransitionState::default();
     let mut peer_loss_fallback = false;
+    // This is deliberately separate from `peer_loss_fallback`: the latter is
+    // the current forwarding mode, while this flag records that this process
+    // has completed one successful activation.  A post-commit readiness flap
+    // is recoverable and must not be treated like an initial activation
+    // failure.
+    let mut committed_ready = true;
+    let mut readiness_lost_since = None::<Instant>;
     let mut rejected_activation = None::<PathBuf>;
     loop {
         match activation_pointer_state(&args) {
@@ -2407,6 +2418,8 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 readiness_policy,
             ) {
                 Ok(Some(ReadinessState::Ready)) => {
+                    committed_ready = true;
+                    readiness_lost_since = None;
                     if peer_loss_fallback {
                         if let Err(error) =
                             leave_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
@@ -2426,6 +2439,32 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 }
                 Ok(Some(ReadinessState::Degraded)) if args.core_role == CoreRole::Server => {}
                 Ok(Some(ReadinessState::Degraded)) => {
+                    if committed_ready {
+                        let lost_since = readiness_lost_since.get_or_insert_with(Instant::now);
+                        if !peer_loss_fallback {
+                            if let Err(error) =
+                                enter_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
+                            {
+                                return retry_after_rollback(
+                                    &args,
+                                    &mut child,
+                                    &mut netd,
+                                    "SD-WAN degraded fallback failed",
+                                    "peer_loss_fallback_failed",
+                                    error,
+                                );
+                            }
+                            peer_loss_fallback = true;
+                            eprintln!(
+                                "level=warn event=sdwan_peer_loss_fallback generation={} source=candy_proxy reason=route_readiness_degraded error_code=peer_readiness_transient action=preserve_core_and_retry",
+                                args.generation
+                            );
+                        }
+                        if lost_since.elapsed() < CORE_READINESS_RECOVERY_GRACE {
+                            thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
+                    }
                     return retry_after_rollback(
                         &args,
                         &mut child,
@@ -2436,6 +2475,32 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     );
                 }
                 Ok(Some(ReadinessState::ListenerReady)) => {
+                    if committed_ready {
+                        let lost_since = readiness_lost_since.get_or_insert_with(Instant::now);
+                        if !peer_loss_fallback {
+                            if let Err(error) =
+                                enter_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
+                            {
+                                return retry_after_rollback(
+                                    &args,
+                                    &mut child,
+                                    &mut netd,
+                                    "SD-WAN route readiness fallback failed",
+                                    "peer_loss_fallback_failed",
+                                    error,
+                                );
+                            }
+                            peer_loss_fallback = true;
+                            eprintln!(
+                                "level=warn event=sdwan_peer_loss_fallback generation={} source=candy_proxy reason=route_readiness_lost error_code=peer_readiness_transient action=preserve_core_and_retry",
+                                args.generation
+                            );
+                        }
+                        if lost_since.elapsed() < CORE_READINESS_RECOVERY_GRACE {
+                            thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
+                    }
                     return retry_after_rollback(
                         &args,
                         &mut child,
@@ -2448,6 +2513,32 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     );
                 }
                 Ok(Some(ReadinessState::Waiting)) | Ok(None) => {
+                    if committed_ready {
+                        let lost_since = readiness_lost_since.get_or_insert_with(Instant::now);
+                        if !peer_loss_fallback {
+                            if let Err(error) =
+                                enter_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
+                            {
+                                return retry_after_rollback(
+                                    &args,
+                                    &mut child,
+                                    &mut netd,
+                                    "SD-WAN readiness fallback failed",
+                                    "peer_loss_fallback_failed",
+                                    error,
+                                );
+                            }
+                            peer_loss_fallback = true;
+                            eprintln!(
+                                "level=warn event=sdwan_peer_loss_fallback generation={} source=candy_proxy reason=core_readiness_temporarily_unavailable error_code=peer_readiness_transient action=preserve_core_and_retry",
+                                args.generation
+                            );
+                        }
+                        if lost_since.elapsed() < CORE_READINESS_RECOVERY_GRACE {
+                            thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
+                    }
                     return retry_after_rollback(
                         &args,
                         &mut child,
@@ -2458,6 +2549,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     );
                 }
                 Ok(Some(ReadinessState::RecoverablePeerLoss)) => {
+                    readiness_lost_since.get_or_insert_with(Instant::now);
                     if args.core_role == CoreRole::ClientSdwan && !peer_loss_fallback {
                         if let Err(error) =
                             enter_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
@@ -2493,6 +2585,11 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 }
             }
             match read_core_status(&args.status, args.generation, child.id(), &readiness_token) {
+                // During the bounded post-commit recovery window the status
+                // file may legitimately be absent while Core atomically
+                // replaces it.  Readiness handling above already put traffic
+                // on the independent Candy Proxy fallback in that case.
+                Ok(None) if peer_loss_fallback => {}
                 Ok(_) => {}
                 Err(error) => {
                     return retry_after_rollback(
