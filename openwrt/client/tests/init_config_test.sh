@@ -1894,7 +1894,7 @@ done
   grep -Eq 'event=traffic_path.*state=active source=candy_proxy reason=user_stop' "$LOG_FILE" ||
     fail "SD-WAN fallback path transition was not logged"
   traffic_path_events=$(grep -Ec 'event=traffic_path.*state=active source=candy_proxy reason=user_stop' "$LOG_FILE")
-  write_traffic_path_state degraded candy_proxy user_stop || fail "repeated Proxy fallback publication failed"
+  write_fallback_traffic_path user_stop || fail "repeated Proxy fallback publication failed"
   [ "$(grep -Ec 'event=traffic_path.*state=active source=candy_proxy reason=user_stop' "$LOG_FILE")" = "$traffic_path_events" ] ||
     fail "unchanged traffic path transition was logged more than once"
   [ ! -s "$CANDY_TEST_INIT_CALLS" ] || fail "explicit SD-WAN stop changed ordinary Candy enablement"
@@ -1930,11 +1930,12 @@ done
 
   set_sdwan_user_stopped || fail "could not restore explicit stop marker for failure test"
   stop_sdwan_data_plane() { return 1; }
-  fail_open_args=
-  fail_open_locked() { fail_open_args="$*"; return 0; }
-  sdwan_stop_locked user_stop || fail "failed isolated cleanup did not complete global fail-open"
-  [ "$fail_open_args" = "sdwan user_stop_cleanup_failed" ] ||
-    fail "failed isolated cleanup did not escalate through the safety fail-open path"
+  fail_open_locked() { fail "failed isolated SD-WAN cleanup stopped ordinary Candy"; }
+  if sdwan_stop_locked user_stop; then
+    fail "failed isolated SD-WAN cleanup reported success"
+  fi
+  grep -Fq 'ordinary_client=preserved retry_required=1' "$LOG_FILE" ||
+    fail "failed isolated cleanup did not preserve and report ordinary Candy"
 )
 
 (

@@ -2402,6 +2402,9 @@ msgstr "未生效"
 msgid "Waiting for real traffic"
 msgstr "等待真实流量验证"
 
+msgid "Standby; no traffic currently uses this node"
+msgstr "备用中；当前没有流量使用此节点"
+
 msgid "Unavailable"
 msgstr "不可用"
 

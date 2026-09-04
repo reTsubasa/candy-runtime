@@ -181,11 +181,10 @@ sdwan_runtime_state() {
 
 write_traffic_path_state() {
 	local state="$1" source="$2" reason="${3:-}" temporary previous_state="" previous_source="" previous_reason="" level=info
-	# An isolated SD-WAN failure does not degrade the ordinary proxy path.
-	# Publish the selected fallback as healthy when it is actually ready.
-	if [ "$state" = degraded ] && [ "$source" = candy_proxy ]; then
-		state=active
-	fi
+	# SD-WAN and Candy Proxy are independent data planes.  Never rewrite a
+	# degraded state into active here: the UI must be able to distinguish an
+	# actually healthy proxy fallback from a fallback that is only selected but
+	# has not passed its own readiness/traffic checks.
 	if [ -f "$CANDY_TRAFFIC_PATH_FILE" ] && [ ! -L "$CANDY_TRAFFIC_PATH_FILE" ] && command -v jsonfilter >/dev/null 2>&1; then
 		previous_state=$(jsonfilter -i "$CANDY_TRAFFIC_PATH_FILE" -e '@.state' 2>/dev/null || true)
 		previous_source=$(jsonfilter -i "$CANDY_TRAFFIC_PATH_FILE" -e '@.source' 2>/dev/null || true)
@@ -215,6 +214,17 @@ fallback_traffic_source() {
 	else
 		printf '%s\n' local_wan
 	fi
+}
+
+write_fallback_traffic_path() {
+	local reason="${1:-sdwan_failure}" fallback state
+	fallback=$(fallback_traffic_source)
+	if [ "$fallback" = candy_proxy ]; then
+		state=active
+	else
+		state=degraded
+	fi
+	write_traffic_path_state "$state" "$fallback" "$reason"
 }
 
 sdwan_remote_egress_configured() {
@@ -715,7 +725,7 @@ run_sdwan() {
 			next_rc=$?
 			if [ "$next_rc" -eq 2 ]; then
 				fallback=$(fallback_traffic_source)
-				write_traffic_path_state degraded "$fallback" cloud_withdrawn || true
+				write_fallback_traffic_path cloud_withdrawn || true
 				log_event info sdwan_withdrawal "activation=$attempted_hash old_routes=rolled_back fallback=$fallback ordinary_client=preserved"
 				continue
 			fi
@@ -4135,12 +4145,17 @@ sdwan_fail_open_locked() {
 	if stop_sdwan_data_plane; then
 		fallback=$(fallback_traffic_source)
 		sdwan_runtime_state fail-open "$reason" || true
-		write_traffic_path_state degraded "$fallback" "$reason" || true
+		write_fallback_traffic_path "$reason" || true
 		log_event warn sdwan_fail_open "reason=$reason cleanup=completed fallback=$fallback ordinary_client=preserved"
 		return 0
 	fi
-	log_event error sdwan_fail_open "reason=$reason cleanup=failed escalating=full_fail_open"
-	fail_open_locked sdwan "$reason"
+	# Do not escalate an SD-WAN cleanup failure into the ordinary Proxy
+	# fail-open path.  The two data planes have separate lifecycles; stopping
+	# or flushing Proxy state here would turn a recoverable SD-WAN fault into a
+	# full outage.  Keep ordinary Candy running and report the cleanup failure
+	# for operator action/retry.
+	log_event error sdwan_fail_open "reason=$reason cleanup=failed ordinary_client=preserved retry_required=1"
+	return 1
 }
 
 sdwan_active_target() {
@@ -4197,7 +4212,7 @@ sdwan_reconcile() {
 		else
 			sdwan_runtime_state stopped || true
 			fallback=$(fallback_traffic_source)
-			write_traffic_path_state degraded "$fallback" user_stopped || true
+			write_fallback_traffic_path user_stopped || true
 			log_event info sdwan_reconcile "result=unchanged state=user_stopped fallback=$fallback ordinary_client=preserved"
 			return 0
 		fi
@@ -4256,7 +4271,7 @@ sdwan_reconcile() {
 			sdwan_runtime_state stopped || true
 		fi
 		fallback=$(fallback_traffic_source)
-		write_traffic_path_state degraded "$fallback" cloud_policy_removed || true
+		write_fallback_traffic_path cloud_policy_removed || true
 		if [ -n "$active_target" ]; then
 			log_event info sdwan_reconcile "result=withdrawn ordinary_client=preserved"
 		else
@@ -4352,12 +4367,12 @@ sdwan_stop_locked() {
 	if stop_sdwan_data_plane; then
 		sdwan_runtime_state stopped || true
 		fallback=$(fallback_traffic_source)
-		write_traffic_path_state degraded "$fallback" "$reason" || true
+		write_fallback_traffic_path "$reason" || true
 		log_event info sdwan_stop "result=stopped reason=$reason fallback=$fallback ordinary_client=preserved"
 		return 0
 	fi
-	log_event error sdwan_stop "result=failed reason=cleanup_incomplete escalating=full_fail_open"
-	fail_open_locked sdwan user_stop_cleanup_failed
+	log_event error sdwan_stop "result=failed reason=cleanup_incomplete ordinary_client=preserved retry_required=1"
+	return 1
 }
 
 sdwan_stop() {

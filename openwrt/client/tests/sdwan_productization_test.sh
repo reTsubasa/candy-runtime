@@ -72,6 +72,13 @@ printf '%s\n' "$sdwan_failure_body" | grep -F 'sdwan_fail_open_locked' >/dev/nul
 isolated_failure_body=$(sed -n '/^sdwan_fail_open_locked()/,/^}/p' "$init")
 printf '%s\n' "$isolated_failure_body" | grep -F 'ordinary_client=preserved' >/dev/null || fail "SD-WAN failure does not preserve ordinary Candy"
 printf '%s\n' "$isolated_failure_body" | grep -F 'stop_sdwan_data_plane' >/dev/null || fail "SD-WAN failure does not clean its owned routes"
+if printf '%s\n' "$isolated_failure_body" | grep -F 'fail_open_locked sdwan' >/dev/null; then
+	fail "SD-WAN failure escalates into the ordinary Proxy fail-open path"
+fi
+grep -F 'write_fallback_traffic_path' "$init" >/dev/null || fail "fallback selection does not use independent Proxy readiness"
+if grep -F 'state=degraded && [ "$source" = candy_proxy ]' "$init" >/dev/null; then
+	fail "fallback publication rewrites an unhealthy Proxy to active"
+fi
 grep -F 'procd_set_param user candy-sdwan' "$init" >/dev/null || fail "SD-WAN supervisor is not unprivileged"
 grep -F 'wait_for_sdwan_netd' "$init" >/dev/null || fail "client start does not wait for netd"
 grep -F 'CANDY_SDWAN_CANDIDATE=${CANDY_SDWAN_CANDIDATE:-$CANDY_SDWAN_STATE_DIR/candidate}' "$init" >/dev/null || fail "Cloud activation candidate is not explicit"

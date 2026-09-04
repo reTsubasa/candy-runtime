@@ -307,7 +307,11 @@ local function effective_traffic_path(sdwan, service, nodes)
 				proxy_state = "degraded"
 				proxy_error = data_plane.last_error
 			elseif state == "unproven" and proxy_state ~= "degraded" then
-				proxy_state = "unproven"
+				-- A connected standby node is not broken just because the current
+				-- policy is carrying traffic over SD-WAN (or another proxy node).
+				-- Keep this as a neutral standby state until a real session/probe
+				-- provides data-plane evidence.
+				proxy_state = "standby"
 			elseif state == "unavailable" and proxy_state == "inactive" then
 				proxy_state = "unavailable"
 				proxy_error = data_plane.last_error or node.last_error
@@ -316,7 +320,7 @@ local function effective_traffic_path(sdwan, service, nodes)
 	end
 	if remote_egress_active then
 		source = "sdwan"
-	elseif proxy_state == "active" or proxy_state == "degraded" or proxy_state == "unproven" then
+	elseif proxy_state == "active" or proxy_state == "degraded" then
 		source = "candy_proxy"
 	end
 	local now = os.time()
@@ -333,7 +337,7 @@ local function effective_traffic_path(sdwan, service, nodes)
 	return {
 		schema_version = 1,
 		state = recent_transition and reported.state or (source == "sdwan" and "active" or
-			(source == "candy_proxy" and (proxy_state == "active" and "active" or proxy_state == "unproven" and "checking" or "degraded") or "fallback")),
+		(source == "candy_proxy" and (proxy_state == "active" and "active" or proxy_state == "standby" and "standby" or "degraded") or "fallback")),
 		source = source,
 		reason = recent_transition and reported and type(reported.reason) == "string" and reported.reason or
 			(sdwan and sdwan.active and not remote_egress_active and "sdwan_policy_selective" or ""),
