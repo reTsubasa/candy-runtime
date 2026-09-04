@@ -451,7 +451,7 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-expected_release=$(sed -n 's/^PKG_RELEASE:=//p' "$makefile")
+expected_release=$(sed -n 's/^PKG_RELEASE:=//p' "$repo_root/$makefile")
 [ -n "$expected_release" ] || fail "LuCI package release is missing"
 assert_contains "$makefile" "^PKG_RELEASE:=${expected_release}$"
 assert_contains "$client_makefile" "^PKG_RELEASE:=${expected_release}$"
