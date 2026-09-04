@@ -2238,6 +2238,7 @@ fn sync_once_with_retry(
                         &identity,
                         &segment,
                         &projection,
+                        &peer_projections,
                         &discovery,
                         &resolved_grants,
                     )
@@ -5108,6 +5109,7 @@ fn publish_client_activation(
     identity: &DeviceIdentity,
     segment: &[u8],
     projection: &[u8],
+    peer_projections: &[Vec<u8>],
     discovery: &DiscoveredControlReport,
     grants: &[(grant::GrantSubject, grant::CachedGrant)],
 ) -> Result<String> {
@@ -5131,6 +5133,20 @@ fn publish_client_activation(
         let result = (|| {
             atomic_bytes(&staging.join("segment.snapshot"), segment, 0o600)?;
             atomic_bytes(&staging.join("site.projection"), projection, 0o600)?;
+            let staged_peers = staging.join("peer-projections");
+            ensure_private_directory(&staged_peers)?;
+            for (entry, envelope) in configuration
+                .peer_projection_catalog
+                .iter()
+                .zip(peer_projections)
+            {
+                let name = format!(
+                    "{}-{}.projection",
+                    entry.projection_id.simple(),
+                    entry.projection_generation
+                );
+                atomic_bytes(&staged_peers.join(name), envelope, 0o600)?;
+            }
             let key_pem = String::from_utf8(read_bounded(
                 &identity_dir.join("operational-key.pem"),
                 MAX_PROFILE_BYTES,
