@@ -15,8 +15,10 @@ printf '%s\n' "$manifest" | grep -F '"sdwan"' >/dev/null || fail "SD-WAN module 
 
 init="$runtime_root/openwrt/client/packages/candy-client/candy.init"
 product="$runtime_root/openwrt/client/tests/sdwan_productization_test.sh"
+flow="$runtime_root/openwrt/client/tests/traffic_flow_test.sh"
 [ -f "$init" ] || fail "OpenWrt init is missing"
 [ -f "$product" ] || fail "productization regression test is missing"
+[ -f "$flow" ] || fail "traffic-flow regression test is missing"
 
 sdwan_body=$(sed -n '/^sdwan_fail_open_locked()/,/^}/p' "$init")
 printf '%s\n' "$sdwan_body" | grep -F 'ordinary_client=preserved' >/dev/null ||
@@ -30,4 +32,5 @@ grep -F 'proxy_data_plane.status(' "$runtime_root/../candy-core/crates/candy-car
   fail "Proxy data-plane evidence is not exported"
 
 (CDPATH= cd -- "$runtime_root" && sh openwrt/client/tests/sdwan_productization_test.sh)
+(CDPATH= cd -- "$runtime_root" && sh openwrt/client/tests/traffic_flow_test.sh)
 printf '%s\n' 'runtime_preflight: PASS'
