@@ -451,8 +451,10 @@ fi
 
 assert_contains "$makefile" '^PKG_NAME:=luci-app-candy$'
 assert_contains "$makefile" '^PKG_VERSION:=0\.4\.0$'
-assert_contains "$makefile" '^PKG_RELEASE:=103$'
-assert_contains "$client_makefile" '^PKG_RELEASE:=103$'
+expected_release=$(sed -n 's/^PKG_RELEASE:=//p' "$makefile")
+[ -n "$expected_release" ] || fail "LuCI package release is missing"
+assert_contains "$makefile" "^PKG_RELEASE:=${expected_release}$"
+assert_contains "$client_makefile" "^PKG_RELEASE:=${expected_release}$"
 assert_contains "$client_makefile" 'USERID:=candy-sdwan=789:candy-sdwan=789'
 assert_not_contains "$client_makefile" 'adduser -S'
 assert_contains "$client_makefile" 'id -u candy-sdwan'
