@@ -1227,12 +1227,18 @@ fn read_core_status(
     let status: CoreReadinessStatus =
         serde_json::from_slice(&fs::read(path).context("read SD-WAN Core readiness status")?)
             .context("parse SD-WAN Core readiness status")?;
-    if status.schema_version != 3
-        || status.generation != generation
-        || status.pid != pid
-        || status.readiness_token != readiness_token
+    if status.schema_version != 3 || status.pid != pid || status.readiness_token != readiness_token
     {
         bail!("SD-WAN Core readiness status does not match the candidate process")
+    }
+    if status.generation < generation {
+        // The status writer follows the routing actor asynchronously. An
+        // authenticated report from this process for the previous generation
+        // is not a rejection of the newly acknowledged policy.
+        return Ok(None);
+    }
+    if status.generation > generation {
+        bail!("SD-WAN Core readiness generation is newer than the requested activation")
     }
     if status.active_peers > status.configured_peers
         || status.ready_route_owners > status.active_peers
@@ -1881,6 +1887,20 @@ fn hot_replace_activation(
     readiness_token: &str,
     transition: &mut HotTransitionState,
 ) -> Result<bool> {
+    // A stale activation can be delivered while Cloud is reconciling a
+    // rollout (or after a retry races the committed pointer).  Never tear
+    // down the currently active lane for it: doing so turns a harmless
+    // ordering race into a site-wide outage. Rollback must be a new signed
+    // generation; equal-generation credential refresh remains supported.
+    if replacement.generation < current.generation {
+        eprintln!(
+            "level=warn event=sdwan_hot_reload_ignored_stale generation={} active_generation={} error_code=stale_policy_generation",
+            replacement.generation,
+            current.generation
+        );
+        write_failed_activation_receipt(replacement, "stale_policy_generation")?;
+        return Ok(false);
+    }
     let already_suspended = transition.complete();
     let previous_declaration = parse_declaration(&current.declaration)?;
     let replacement_declaration = match parse_declaration(&replacement.declaration) {
@@ -1980,18 +2000,18 @@ fn hot_replace_activation(
         }
     };
     if let Some((error_code, error)) = readiness_failure {
-        restore_last_good_activation(current, child, netd, previous_declaration, transition)?;
         write_failed_activation_receipt(replacement, error_code)?;
         eprintln!(
-            "level=error event=sdwan_hot_reload_rejected generation={} error_code={} fallback=last_good_sdwan error={}",
+            "level=error event=sdwan_hot_reload_recovering generation={} error_code={} fallback=candy_proxy error={}",
             replacement.generation,
             error_code,
             sanitize_log_value(&format!("{error:#}"))
         );
-        return Ok(false);
+        return Err(anyhow::Error::new(AppliedHotReloadPending(error)));
     }
-    leave_proxy_fallback(replacement, child, netd, transition)
-        .context("leave Candy Proxy fallback after hot reload")?;
+    if let Err(error) = leave_proxy_fallback(replacement, child, netd, transition) {
+        return Err(anyhow::Error::new(AppliedHotReloadPending(error)));
+    }
     write_runtime_activation_receipt(replacement, "committed", None)?;
     eprintln!(
         "level=info event=sdwan_hot_reload_committed previous_generation={} generation={} core_pid={} fallback=candy_proxy",
@@ -2001,6 +2021,21 @@ fn hot_replace_activation(
     );
     Ok(true)
 }
+
+#[derive(Debug)]
+struct AppliedHotReloadPending(anyhow::Error);
+
+impl std::fmt::Display for AppliedHotReloadPending {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Core accepted the policy; activation recovery pending: {:#}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for AppliedHotReloadPending {}
 
 fn fail_without_core(
     args: &RuntimeArgs,
@@ -2296,6 +2331,16 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                         Ok(false) => {
                             rejected_activation = replacement.activation_target.clone();
                         }
+                        Err(error) if error.downcast_ref::<AppliedHotReloadPending>().is_some() => {
+                            // Core has crossed its commit point. Keep ownership
+                            // and readiness checks on that generation and retry
+                            // forwarding, never attempt a lower signed generation.
+                            args = replacement;
+                            peer_loss_fallback = true;
+                            rejected_activation = None;
+                            next_renewal = Instant::now();
+                            eprintln!("level=warn event=sdwan_activation_recovery_pending generation={} error={}", args.generation, sanitize_log_value(&format!("{error:#}")));
+                        }
                         Err(error) => {
                             if !transition.complete() {
                                 let _ = enter_proxy_fallback(
@@ -2430,6 +2475,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                             );
                         } else {
                             peer_loss_fallback = false;
+                            write_runtime_activation_receipt(&args, "committed", None)?;
                             eprintln!(
                                 "level=info event=sdwan_recovered generation={} source=peer_reconnect",
                                 args.generation
@@ -3654,7 +3700,11 @@ exit 17
             serde_json::json!([{ "rtt_sample_count": 0, "rx_bytes": 1, "rx_idle_ms": 0 }]);
         fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
         assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
-        assert!(read_core_readiness(&path, 10, 42, "00112233445566778899aabbccddeeff").is_err());
+        assert_eq!(
+            read_core_readiness(&path, 10, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            None
+        );
+        assert!(read_core_readiness(&path, 8, 42, "00112233445566778899aabbccddeeff").is_err());
         assert!(read_core_readiness(&path, 9, 43, "00112233445566778899aabbccddeeff").is_err());
         assert!(read_core_readiness(&path, 9, 42, "11112233445566778899aabbccddeeff").is_err());
         fs::write(&path, status(9, "active", 1, 0)).unwrap();
