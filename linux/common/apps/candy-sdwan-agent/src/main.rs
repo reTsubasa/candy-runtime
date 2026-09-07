@@ -2000,7 +2000,9 @@ fn hot_replace_activation(
         }
     };
     if let Some((error_code, error)) = readiness_failure {
-        write_failed_activation_receipt(replacement, error_code)?;
+        // Core has already committed. A REJECTED receipt makes cloud-sync
+        // remove this candidate, which disables recovery and strands steering
+        // in fallback. Only terminal pre-commit failures may reject a candidate.
         eprintln!(
             "level=error event=sdwan_hot_reload_recovering generation={} error_code={} fallback=candy_proxy error={}",
             replacement.generation,
@@ -2012,7 +2014,8 @@ fn hot_replace_activation(
     if let Err(error) = leave_proxy_fallback(replacement, child, netd, transition) {
         return Err(anyhow::Error::new(AppliedHotReloadPending(error)));
     }
-    write_runtime_activation_receipt(replacement, "committed", None)?;
+    write_runtime_activation_receipt(replacement, "committed", None)
+        .map_err(|error| anyhow::Error::new(AppliedHotReloadPending(error)))?;
     eprintln!(
         "level=info event=sdwan_hot_reload_committed previous_generation={} generation={} core_pid={} fallback=candy_proxy",
         current.generation,
@@ -2462,12 +2465,30 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 &readiness_token,
                 readiness_policy,
             ) {
+                Ok(Some(ReadinessState::Ready | ReadinessState::Degraded))
+                    if args.core_role == CoreRole::Server =>
+                {
+                    committed_ready = true;
+                    readiness_lost_since = None;
+                    if peer_loss_fallback {
+                        match leave_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
+                            .and_then(|_| write_runtime_activation_receipt(&args, "committed", None))
+                        {
+                            Ok(()) => {
+                                peer_loss_fallback = false;
+                                eprintln!("level=info event=sdwan_recovered generation={} source=peer_reconnect", args.generation);
+                            }
+                            Err(error) => eprintln!("level=warn event=sdwan_recovery_pending generation={} error={}", args.generation, sanitize_log_value(&format!("{error:#}"))),
+                        }
+                    }
+                }
                 Ok(Some(ReadinessState::Ready)) => {
                     committed_ready = true;
                     readiness_lost_since = None;
                     if peer_loss_fallback {
                         if let Err(error) =
                             leave_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
+                                .and_then(|_| write_runtime_activation_receipt(&args, "committed", None))
                         {
                             eprintln!(
                                 "level=warn event=sdwan_recovery_pending error_code=steering_resume_failed error={}",
@@ -2475,7 +2496,6 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                             );
                         } else {
                             peer_loss_fallback = false;
-                            write_runtime_activation_receipt(&args, "committed", None)?;
                             eprintln!(
                                 "level=info event=sdwan_recovered generation={} source=peer_reconnect",
                                 args.generation
@@ -2483,7 +2503,6 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                         }
                     }
                 }
-                Ok(Some(ReadinessState::Degraded)) if args.core_role == CoreRole::Server => {}
                 Ok(Some(ReadinessState::Degraded)) => {
                     if committed_ready {
                         let lost_since = readiness_lost_since.get_or_insert_with(Instant::now);
