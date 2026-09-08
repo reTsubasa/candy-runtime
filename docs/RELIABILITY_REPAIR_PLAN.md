@@ -20,7 +20,7 @@ Items are checked only after the corresponding focused regression passes.
 | R01 | P0 | Core fail-open latch survives partial route-owner recovery | **Done:** failed-owner coverage is tracked; regression covers healthy alternate owner, recovery and re-failure. |
 | R02 | P0 | Policy replacement closes old Peer streams before new streams are usable | Stage authenticated, ready replacement lanes before commit; preserve unaffected lanes; abort candidate without dropping current traffic. Test failed preparation and successful switch. Cross-node zero loss requires separate evidence. |
 | R03 | P0 | Runtime suspends old forwarding before policy replacement | Coordinate Core prepare/commit and netd transaction ordering; test candidate failure, rollback, process identity and unchanged Proxy. Do not equate a Proxy fallback with preserving existing NAT/TCP flows. |
-| R04 | P1 | Partial route readiness can trigger global Runtime fallback | Distinguish per-route unavailability from total loss/fatal process or TUN errors. Test listener/client coverage, recovery and fatal failures without broad error whitelists. |
+| R04 | P1 | Partial route readiness can trigger global Runtime fallback | **Improved:** committed all-peer loss is now recoverable even while Core reports `lifecycle=active`; Runtime suspends SD-WAN steering, preserves Core dialers, records counters/error detail, and retries reconnect. Per-route partial coverage and fatal Core/TUN errors still require separate handling tests. |
 | R05 | P1 | Cloud status reader rejects persisted `PREPARED` receipt | **Done:** API accepts all three persisted states; DB-backed regression is present (requires `DATABASE_URL`). |
 | R06 | P1 | Segment aggregate failure/update colors unrelated links | **Done:** link state uses peer endpoints/attachments; three-site isolation tests pass. |
 | R07 | P1 | Offline rejected nodes/sites remain red | **Done:** freshness/online classification precedes faults; stale rejected node/site/link tests pass. |
@@ -29,7 +29,7 @@ Items are checked only after the corresponding focused regression passes.
 | R10 | P2 | Runtime clears all path diagnostics while steering is suspended | **Done:** path evidence is preserved with explicit `forwarding_active`; Cloud distinguishes inactive forwarding. |
 | R11 | P2 | Runtime preflight greps private Core source and fails on valid formatting | **Done:** structured manifest contract and isolated checkout/malformed JSON tests integrated into verification. |
 | R12 | P2 | Core manifest test hardcodes an obsolete package version | **Done:** compile-time package version assertion passes. |
-| R13 | P2 | Local DB tests may silently skip and socket tests fail under sandbox | Report skipped prerequisites honestly; run actual MySQL tests when available and loopback tests with scoped permissions. Never treat permission errors as product failures. |
+| R13 | P2 | Local DB tests may silently skip and socket tests fail under sandbox | Report skipped prerequisites honestly; run actual MySQL tests when available and loopback tests with scoped permissions. Never treat permission errors as product failures. Current Runtime unit suite has 20/33 passing here; 13 integration tests require loopback socket permission and are environment-gated. |
 | R14 | P2 | Runtime test fixture writes into real `/etc/candy` | **Done:** lifecycle fixture paths are redirected into temporary state roots. |
 | R15 | P2 | Core Action can build production Core; Cloud release pins duplicate versions | **Done:** Core build workflow removed; Cloud x86/ARM64 inputs reference published `core-v0.3.42`. |
 | R16 | P3 | Release/platform docs contradict actual targets and signing ownership | **Done:** Core/Cloud docs and matrix describe current five-target and signing boundary. |
@@ -65,3 +65,23 @@ removed while any verification or packaging process is using them.
   a passing source test. A fixed 30-minute traffic gate is not required here.
 - Multi-Segment runtime support and multiple independently scaled streams per
   Peer need contract evidence before any compatibility/schema expansion.
+
+## Runtime follow-up findings (2026-09-08)
+
+- **P1 fixed:** `candy-sdwan-agent` previously treated an `active` Core status
+  with `fail_open_required=true`, zero ready route owners, and a known
+  all-peer-loss code as fatal. Under sustained traffic this caused repeated
+  Core teardown and the observed `all_peer_lanes_unavailable` recovery loop.
+  It is now classified as `RecoverablePeerLoss`; Core remains alive while
+  steering is suspended and reconnect evidence is logged.
+- **P2 fixed:** Broken netd IPC (`BrokenPipe`, `ConnectionReset`, or
+  `UnexpectedEof`) now has the explicit `netd_reconfigure_peer_closed` code so
+  Cloud does not display the generic/unknown error. The transaction layer still
+  reconciles status before retrying the signed generation.
+- **P2 open:** The LuCI process helper uses a bounded pipe capture and closes
+  descriptors correctly; no reproducible Broken pipe remains in Runtime code.
+  A real-device repro is still needed to validate the external `candy-client`
+  helper and netd daemon restart race.
+- **P0 open:** Hot replacement still suspends old steering before replacement
+  readiness; true make-before-break/NAT-preserving migration needs a Core/netd
+  protocol change and cross-node traffic evidence.
