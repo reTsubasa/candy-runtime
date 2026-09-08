@@ -28,6 +28,7 @@ const MAX_STATUS_BYTES: u64 = 256 * 1024;
 // reconnecting.  Once netd has committed SD-WAN, keep the Core and its dialers
 // alive during that hand-off instead of tearing down the whole data plane.
 const CORE_READINESS_RECOVERY_GRACE: Duration = Duration::from_secs(20);
+const PARTIAL_ROUTE_RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_ACTIVATION_BYTES: u64 = 64 * 1024;
 const CORE_TERMINATION_GRACE: Duration = Duration::from_secs(15);
 const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -1367,8 +1368,11 @@ fn classify_core_readiness(
     // authentication/readiness evidence; otherwise recovery is classified as
     // failed and the agent tears down the freshly restored lane again.
     let has_authenticated_path_evidence = status.paths.as_ref().is_some_and(|paths| {
-        paths.len() >= status.ready_route_owners
-            && paths.iter().all(|path| path.rtt_sample_count > 0)
+        paths
+            .iter()
+            .filter(|path| path.rtt_sample_count > 0)
+            .count()
+            >= status.ready_route_owners
     });
     let listener_ready = status.inbound_listener_configured
         && status.inbound_listener_ready
@@ -1395,6 +1399,17 @@ fn classify_core_readiness(
             && status.required_route_owners > 0
             && status.ready_route_owners == 0
             && recoverable_peer_loss_code;
+    let recoverable_committed_partial_loss =
+        matches!(
+            policy,
+            ReadinessPolicy::Committed | ReadinessPolicy::CommittedServer
+        ) && matches!(status.lifecycle.as_str(), "active" | "failed" | "starting")
+            && (policy == ReadinessPolicy::Committed || listener_ready)
+            && status.required_route_owners > 1
+            && status.ready_route_owners > 0
+            && status.ready_route_owners < status.required_route_owners
+            && has_authenticated_path_evidence
+            && (!status.fail_open_required || recoverable_peer_loss_code);
     let state = match status.lifecycle.as_str() {
         "starting" if !status.fail_open_required && listener_ready => ReadinessState::ListenerReady,
         "starting" if !status.fail_open_required => ReadinessState::Waiting,
@@ -1405,6 +1420,9 @@ fn classify_core_readiness(
                 && has_authenticated_path_evidence =>
         {
             ReadinessState::Ready
+        }
+        "active" | "failed" | "starting" if recoverable_committed_partial_loss => {
+            ReadinessState::Degraded
         }
         "active"
             if !status.fail_open_required
@@ -2542,6 +2560,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     // failure.
     let mut committed_ready = true;
     let mut readiness_lost_since = None::<Instant>;
+    let mut last_partial_route_log = None::<Instant>;
     let mut rejected_activation = None::<PathBuf>;
     let mut preparation_retry_target = None::<PathBuf>;
     let mut next_preparation_retry = Instant::now();
@@ -2752,6 +2771,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 {
                     committed_ready = true;
                     readiness_lost_since = None;
+                    last_partial_route_log = None;
                     if peer_loss_fallback {
                         match leave_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
                             .and_then(|_| {
@@ -2772,6 +2792,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 Ok(Some(ReadinessState::Ready)) => {
                     committed_ready = true;
                     readiness_lost_since = None;
+                    last_partial_route_log = None;
                     if peer_loss_fallback {
                         if let Err(error) =
                             leave_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
@@ -2793,42 +2814,51 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     }
                 }
                 Ok(Some(ReadinessState::Degraded)) => {
-                    // Until netd can withdraw individual failed prefixes, keeping
-                    // all steering active would blackhole their traffic in TUN.
-                    if committed_ready {
-                        let lost_since = readiness_lost_since.get_or_insert_with(Instant::now);
-                        if !peer_loss_fallback {
-                            if let Err(error) =
-                                enter_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
-                            {
-                                return retry_after_rollback(
-                                    &args,
-                                    &mut child,
-                                    &mut netd,
-                                    "SD-WAN degraded fallback failed",
-                                    "peer_loss_fallback_failed",
-                                    error,
-                                );
-                            }
-                            peer_loss_fallback = true;
+                    committed_ready = true;
+                    readiness_lost_since = None;
+                    // A recovered owner must restore healthy-route forwarding
+                    // immediately after an all-peer fallback. The current
+                    // Core/netd contract cannot identify and withdraw only the
+                    // failed owner's prefixes, so keep the failure explicitly
+                    // visible instead of tearing down every healthy route.
+                    if peer_loss_fallback {
+                        if let Err(error) =
+                            leave_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
+                                .and_then(|_| {
+                                    write_runtime_activation_receipt(&args, "committed", None)
+                                })
+                        {
                             eprintln!(
-                                "level=warn event=sdwan_peer_loss_fallback generation={} source=candy_proxy reason=route_readiness_degraded error_code=peer_readiness_transient action=preserve_core_and_retry",
-                                args.generation
+                                "level=warn event=sdwan_partial_route_recovery_pending generation={} error_code=steering_resume_failed error={}",
+                                args.generation,
+                                sanitize_log_value(&format!("{error:#}"))
                             );
-                        }
-                        if lost_since.elapsed() < CORE_READINESS_RECOVERY_GRACE {
                             thread::sleep(Duration::from_millis(100));
                             continue;
                         }
+                        peer_loss_fallback = false;
                     }
-                    return retry_after_rollback(
-                        &args,
-                        &mut child,
-                        &mut netd,
-                        "Candy Core lost full SD-WAN route readiness",
-                        "core_route_readiness_lost",
-                        anyhow::anyhow!("Candy Core has only partial route readiness"),
-                    );
+                    let should_log = last_partial_route_log
+                        .is_none_or(|logged| logged.elapsed() >= PARTIAL_ROUTE_RETRY_LOG_INTERVAL);
+                    if should_log {
+                        last_partial_route_log = Some(Instant::now());
+                        let evidence = read_core_status(
+                            &args.status,
+                            args.generation,
+                            child.id(),
+                            &readiness_token,
+                        )
+                        .ok()
+                        .flatten();
+                        eprintln!(
+                            "level=warn event=sdwan_partial_route_degraded generation={} error_code=partial_route_owner_unavailable action=preserve_healthy_routes_and_retry failed_prefix_fallback=unavailable_contract configured_peers={} active_peers={} required_routes={} ready_routes={}",
+                            args.generation,
+                            evidence.as_ref().map_or(0, |status| status.configured_peers),
+                            evidence.as_ref().map_or(0, |status| status.active_peers),
+                            evidence.as_ref().map_or(0, |status| status.required_route_owners),
+                            evidence.as_ref().map_or(0, |status| status.ready_route_owners),
+                        );
+                    }
                 }
                 Ok(Some(ReadinessState::ListenerReady)) => {
                     if committed_ready {
@@ -4608,6 +4638,62 @@ exit 17
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn committed_partial_route_loss_preserves_healthy_owners() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("status.json");
+        let status = serde_json::json!({
+            "schema_version": 3,
+            "generation": 9,
+            "pid": 42,
+            "readiness_token": "00112233445566778899aabbccddeeff",
+            "lifecycle": "active",
+            "configured_peers": 2,
+            "active_peers": 1,
+            "required_route_owners": 2,
+            "ready_route_owners": 1,
+            "inbound_listener_configured": false,
+            "inbound_listener_ready": false,
+            "inbound_listener_endpoints": [],
+            "fail_open_required": false,
+            "last_error_code": "route_has_no_active_peer",
+            "last_error_detail": "one route owner is unavailable",
+            "paths": [{"rtt_sample_count": 1, "rx_bytes": 512, "rx_idle_ms": 0}]
+        });
+        write_private(&path, &serde_json::to_vec(&status).unwrap());
+
+        assert_eq!(
+            read_core_readiness_with_policy(
+                &path,
+                9,
+                42,
+                "00112233445566778899aabbccddeeff",
+                ReadinessPolicy::Committed,
+            )
+            .unwrap(),
+            Some(ReadinessState::Degraded)
+        );
+        // Initial activation remains conservative: without a committed
+        // steering owner, partial readiness must not be admitted.
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Waiting)
+        );
+
+        let mut fatal = status;
+        fatal["last_error_code"] = serde_json::json!("tun_read_failed");
+        fatal["fail_open_required"] = serde_json::json!(true);
+        write_private(&path, &serde_json::to_vec(&fatal).unwrap());
+        assert!(read_core_readiness_with_policy(
+            &path,
+            9,
+            42,
+            "00112233445566778899aabbccddeeff",
+            ReadinessPolicy::Committed,
+        )
+        .is_err());
     }
 
     #[test]
