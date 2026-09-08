@@ -85,3 +85,16 @@ removed while any verification or packaging process is using them.
 - **P0 open:** Hot replacement still suspends old steering before replacement
   readiness; true make-before-break/NAT-preserving migration needs a Core/netd
   protocol change and cross-node traffic evidence.
+
+## Remaining P0-P2 execution list
+
+| Priority | Remaining work | Next implementation gate |
+| --- | --- | --- |
+| P0 | Make-before-break policy cutover with old/new stream overlap and bounded drain | Core staged lane transaction, netd dual-generation owner, fault-injection test proving old lane remains usable until replacement `stream_ready`; then real two-node traffic test |
+| P0 | Preserve established TCP/NAT state across egress switch | netd connection/NAT ownership design and packet-flow test; cannot be inferred from process hot reload |
+| P1 | Handle clean EOF, task panic and cancellation as typed peer events | Core event contract test for EOF/reset/panic/cancel, Runtime reconnect without process restart, Cloud event projection |
+| P1 | Scope partial route loss to affected prefix/peer | per-route readiness and fallback tests with one healthy unrelated route |
+| P1 | End-to-end Cloud/Core/Runtime event convergence | signed generation plus event-id/sequence contract and integration test |
+| P2 | Multiple independently recoverable Streams per Peer | stream slot lifecycle contract, bounded scheduler, per-stream telemetry and backpressure tests |
+| P2 | Actual MySQL receipt regression and loopback QUIC suite | CI database job and permissioned network runner; local skip must remain visible |
+| P2 | OpenWrt helper/netd restart race | device reproduction with netd restart during reconfigure; verify retry code and no stale owner |
