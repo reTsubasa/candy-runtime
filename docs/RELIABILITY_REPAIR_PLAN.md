@@ -18,7 +18,7 @@ Items are checked only after the corresponding focused regression passes.
 | ID | Priority | Observed problem / scope | Repair and acceptance |
 | --- | --- | --- | --- |
 | R01 | P0 | Core fail-open latch survives partial route-owner recovery | **Done:** failed-owner coverage is tracked; regression covers healthy alternate owner, recovery and re-failure. |
-| R02 | P0 | Policy replacement closes old Peer streams before new streams are usable | Stage authenticated, ready replacement lanes before commit; preserve unaffected lanes; abort candidate without dropping current traffic. Test failed preparation and successful switch. Cross-node zero loss requires separate evidence. |
+| R02 | P0 | Policy replacement closes old Peer streams before new streams are usable | **Partially implemented:** production inbound/outbound handoff now completes both packet-stream halves before registration/replacement. Failed or cancelled preparation closes the candidate. Core regression proves old-lane traffic during preparation and usable new lane at commit. Cross-node commit coordination and old-lane drain remain open. |
 | R03 | P0 | Runtime suspends old forwarding before policy replacement | Coordinate Core prepare/commit and netd transaction ordering; test candidate failure, rollback, process identity and unchanged Proxy. Do not equate a Proxy fallback with preserving existing NAT/TCP flows. |
 | R04 | P1 | Partial route readiness can trigger global Runtime fallback | **Improved:** committed all-peer loss is now recoverable even while Core reports `lifecycle=active`; Runtime suspends SD-WAN steering, preserves Core dialers, records counters/error detail, and retries reconnect. Per-route partial coverage and fatal Core/TUN errors still require separate handling tests. |
 | R05 | P1 | Cloud status reader rejects persisted `PREPARED` receipt | **Done:** API accepts all three persisted states; DB-backed regression is present (requires `DATABASE_URL`). |
@@ -134,3 +134,32 @@ removed while any verification or packaging process is using them.
   staged ownership; established flow handling across different public egress
   addresses; end-to-end live fault-event convergence. None of these is proven
   by the local replay fix or a successful compile. No node update was performed.
+
+## Candidate preparation and netd rollback follow-up
+
+- The production `open_sdwan_peer` path and inbound accepted-tunnel handler
+  now negotiate both IP Packet Stream halves before handing the candidate to
+  the live supervisor. A prepared candidate binds its stream to the exact
+  QUIC connection and tunnel ID; a closed or mismatched candidate is rejected
+  before live policy mutation. Replacing an existing lane without a prepared
+  stream is rejected even when partial topology is otherwise allowed.
+- A cancellation guard closes abandoned candidates, including during timeout
+  or stream identity failure. The old routing actor continues processing packets
+  while preparation runs in the caller's asynchronous task.
+- Real QUIC regression: SD-WAN tests pass 22/22, including old-lane traffic while
+  withholding the new peer's header, successful immediate traffic after commit,
+  cancellation and mismatched identity. These are local packet-loop assertions,
+  not proof that Runtime currently keeps host steering active during preparation.
+  Core process entry/configuration tests pass 18/18; Core and Runtime workspace
+  checks pass. Preparation start/success/rejection logs identify the attachment,
+  tunnel, connection, duration and failure code.
+- netd's old-rule removal was outside its restore-on-error block. A partially
+  failing firewall/route removal could leave the old declaration in the journal
+  but not installed in the kernel. Removal now participates in the same rollback
+  path as candidate installation. Network transaction tests pass 10/10, including
+  both removal failure points, restoration ordering and retained owner/journal.
+- **Remaining P0 boundary:** Runtime still suspends steering before requesting
+  Core replacement. netd dual-generation ownership, coordinated two-peer commit,
+  old queued packet drain and established NAT/TCP flow handling are not completed
+  by this patch. Reconfiguration rollback failure itself still needs durable
+  recovery intent to prevent a premature resume. No release or node update.

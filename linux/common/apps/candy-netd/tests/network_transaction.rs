@@ -204,12 +204,15 @@ impl NetworkBackend for CleanupFailingBackend {
     }
 
     fn prepare_link(&mut self, _: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.event("prepare_link");
         Ok(())
     }
     fn prepare_routes(&mut self, _: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.event("prepare_routes");
         Ok(())
     }
     fn prepare_firewall(&mut self, _: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.event("prepare_firewall");
         Ok(())
     }
     fn prepare_sysctls(
@@ -368,6 +371,48 @@ fn hot_reconfigure_keeps_steering_suspended_until_replacement_is_ready() {
 }
 
 #[test]
+fn hot_reconfigure_cleanup_failure_restores_previous_policy_and_owner() {
+    for fail_at in ["remove_firewall", "remove_routes"] {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let journal = MemoryJournal::default();
+        let retained = journal.clone();
+        let mut transaction = NetworkTransaction::new(
+            CleanupFailingBackend {
+                inner: RecordingBackend(events.clone()),
+                fail_at,
+            },
+            journal,
+        )
+        .unwrap();
+        transaction.prepare(owner(), declaration()).unwrap();
+        transaction.commit(owner()).unwrap();
+        transaction.suspend(owner()).unwrap();
+        let before = retained.load().unwrap();
+        let mut next = declaration();
+        next.routes[1] = RouteDeclaration {
+            prefix: Ipv4Prefix::new([10, 3, 0, 0], 16).unwrap(),
+            kind: RouteKind::Remote,
+        };
+        assert!(transaction
+            .reconfigure(
+                LeaseOwner {
+                    generation: 8,
+                    ..owner()
+                },
+                next
+            )
+            .is_err());
+        assert_eq!(transaction.retained_owner(), Some(owner()));
+        assert_eq!(retained.load().unwrap(), before);
+        // Restore is mandatory even when removal itself is the failed step.
+        assert!(events
+            .borrow()
+            .ends_with(&["prepare_link", "prepare_routes", "prepare_firewall"]));
+        transaction.resume(owner()).unwrap();
+    }
+}
+
+#[test]
 fn hot_reconfigure_rejects_a_different_process() {
     let backend = RecordingBackend(Rc::new(RefCell::new(Vec::new())));
     let journal = MemoryJournal::default();
@@ -496,6 +541,7 @@ fn cleanup_continues_after_failure_and_retains_only_failed_intent() {
     .unwrap();
     transaction.prepare(owner(), declaration()).unwrap();
     transaction.commit(owner()).unwrap();
+    events.borrow_mut().clear();
     assert!(transaction.rollback(owner()).is_err());
     assert_eq!(
         *events.borrow(),

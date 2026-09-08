@@ -359,9 +359,12 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             return Err(NetworkError::InvalidTransition);
         }
 
-        self.backend.remove_firewall(&previous)?;
-        self.backend.remove_routes(&previous)?;
         let applied = (|| {
+            // Cleanup may mutate part of the old rules before returning an
+            // error. It belongs to the rollback transaction just as much as
+            // installing the candidate; never resume a half-removed policy.
+            self.backend.remove_firewall(&previous)?;
+            self.backend.remove_routes(&previous)?;
             self.backend.prepare_link(&declaration)?;
             self.backend.prepare_routes(&declaration)?;
             self.backend.prepare_firewall(&declaration)
