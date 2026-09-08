@@ -56,6 +56,19 @@ fn netd_reconfigure_error_code(error: &IpcError) -> &'static str {
         IpcError::Remote(ErrorCode::PreflightFailed) => "netd_reconfigure_platform_failed",
         IpcError::Remote(ErrorCode::UnauthorizedPeer) => "netd_reconfigure_unauthorized",
         IpcError::Remote(ErrorCode::SystemFailure) => "netd_reconfigure_system_failed",
+        // netd closes the per-request Unix socket after a daemon restart or
+        // transaction rollback.  Keep this distinct from a platform failure;
+        // callers can safely retry the same generation after reconnecting.
+        IpcError::Io(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::UnexpectedEof
+            ) =>
+        {
+            "netd_reconfigure_peer_closed"
+        }
         _ => "netd_reconfigure_ipc_failed",
     }
 }
@@ -1268,21 +1281,28 @@ fn classify_core_readiness(
     let listener_ready = status.inbound_listener_configured
         && status.inbound_listener_ready
         && !status.inbound_listener_endpoints.is_empty();
-    let recoverable_committed_peer_loss = matches!(
-        policy,
-        ReadinessPolicy::Committed | ReadinessPolicy::CommittedServer
-    ) && matches!(
-        status.lifecycle.as_str(),
-        "failed" | "starting"
-    ) && status.fail_open_required
-        && (policy == ReadinessPolicy::Committed || listener_ready)
-        && status.configured_peers > 0
-        && status.required_route_owners > 0
-        && status.ready_route_owners == 0
-        && matches!(
-            status.last_error_code.as_deref(),
-            Some("all_peer_reads_failed" | "all_peer_writes_failed" | "route_has_no_active_peer")
-        );
+    // These errors describe loss of all peer lanes, not a broken Core/TUN
+    // process.  Once an activation has committed, keep the dialers alive and
+    // let the agent suspend only SD-WAN steering while peers reconnect.  In
+    // particular, Core reports this condition with lifecycle="active" before
+    // its status writer transitions to "failed"; treating only failed/starting
+    // as recoverable caused the agent to tear down a perfectly recoverable
+    // session under sustained traffic (the all_peer_lanes_unavailable loop).
+    let recoverable_peer_loss_code = matches!(
+        status.last_error_code.as_deref(),
+        Some("all_peer_reads_failed" | "all_peer_writes_failed" | "route_has_no_active_peer")
+    );
+    let recoverable_committed_peer_loss =
+        matches!(
+            policy,
+            ReadinessPolicy::Committed | ReadinessPolicy::CommittedServer
+        ) && matches!(status.lifecycle.as_str(), "active" | "failed" | "starting")
+            && status.fail_open_required
+            && (policy == ReadinessPolicy::Committed || listener_ready)
+            && status.configured_peers > 0
+            && status.required_route_owners > 0
+            && status.ready_route_owners == 0
+            && recoverable_peer_loss_code;
     let state = match status.lifecycle.as_str() {
         "starting" if !status.fail_open_required && listener_ready => ReadinessState::ListenerReady,
         "starting" if !status.fail_open_required => ReadinessState::Waiting,
@@ -1313,7 +1333,7 @@ fn classify_core_readiness(
         {
             ReadinessState::Waiting
         }
-        "failed" | "starting" if recoverable_committed_peer_loss => {
+        "active" | "failed" | "starting" if recoverable_committed_peer_loss => {
             ReadinessState::RecoverablePeerLoss
         }
         "failed" | "stopping" | "stopped" => ReadinessState::Failed,
@@ -2636,9 +2656,31 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                             );
                         }
                         peer_loss_fallback = true;
+                        let evidence = read_core_status(
+                            &args.status,
+                            args.generation,
+                            child.id(),
+                            &readiness_token,
+                        )
+                        .ok()
+                        .flatten();
+                        let error_code = evidence
+                            .as_ref()
+                            .and_then(|status| status.last_error_code.as_deref())
+                            .unwrap_or("sdwan_peer_loss");
+                        let detail = evidence
+                            .as_ref()
+                            .and_then(|status| status.last_error_detail.as_deref())
+                            .unwrap_or("all required peer lanes are unavailable");
                         eprintln!(
-                            "level=warn event=sdwan_peer_loss_fallback generation={} source=candy_proxy reason=all_peer_lanes_unavailable",
-                            args.generation
+                            "level=warn event=sdwan_peer_loss_fallback generation={} source=candy_proxy reason=all_peer_lanes_unavailable error_code={} detail={} configured_peers={} active_peers={} required_routes={} ready_routes={} action=preserve_core_and_reconnect",
+                            args.generation,
+                            error_code,
+                            sanitize_log_value(detail),
+                            evidence.as_ref().map_or(0, |status| status.configured_peers),
+                            evidence.as_ref().map_or(0, |status| status.active_peers),
+                            evidence.as_ref().map_or(0, |status| status.required_route_owners),
+                            evidence.as_ref().map_or(0, |status| status.ready_route_owners),
                         );
                     }
                 }
@@ -2771,6 +2813,26 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broken_netd_ipc_is_classified_as_retryable_peer_closed() {
+        let error = IpcError::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "write failed",
+        ));
+        assert_eq!(
+            netd_reconfigure_error_code(&error),
+            "netd_reconfigure_peer_closed"
+        );
+        let error = IpcError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "netd closed response",
+        ));
+        assert_eq!(
+            netd_reconfigure_error_code(&error),
+            "netd_reconfigure_peer_closed"
+        );
+    }
     use candy_netd_client::{recv_request, send_response};
     use candy_netd_proto::{ErrorCode, NetdOperation, NetdResponse, ResponseBody};
     use std::os::fd::AsRawFd;
@@ -3827,6 +3889,24 @@ exit 17
                 42,
                 "00112233445566778899aabbccddeeff",
                 ReadinessPolicy::CommittedServer,
+            )
+            .unwrap(),
+            Some(ReadinessState::RecoverablePeerLoss)
+        );
+
+        // Core can remain lifecycle=active while the routing actor records
+        // fail-open after the final peer lane drops.  This is the normal
+        // transient state seen during a reconnect and must not trigger a
+        // process restart or permanent rejection.
+        failed["lifecycle"] = serde_json::json!("active");
+        write_private(&path, &serde_json::to_vec(&failed).unwrap());
+        assert_eq!(
+            read_core_readiness_with_policy(
+                &path,
+                9,
+                42,
+                "00112233445566778899aabbccddeeff",
+                ReadinessPolicy::Committed,
             )
             .unwrap(),
             Some(ReadinessState::RecoverablePeerLoss)

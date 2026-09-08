@@ -13,6 +13,7 @@ Proxy errors are reported as `proxy_*` and remain local to the Proxy module.
 | `sdwan_prepare_failed` | netd rejected the SD-WAN transaction during prepare | SD-WAN | rollback transaction; keep Proxy |
 | `sdwan_reconfigure_invalid_transition` | SD-WAN hot reload attempted an invalid owner transition | SD-WAN | retain last-good generation |
 | `sdwan_reconfigure_platform_failed` | Platform preflight rejected the SD-WAN declaration | SD-WAN | retain last-good generation |
+| `netd_reconfigure_peer_closed` | netd closed the request socket during a daemon restart or transaction rollback (Broken pipe/connection reset) | SD-WAN | reconcile netd status, reconnect, and retry the same signed generation |
 | `sdwan_core_readiness_lost` | SD-WAN Core lost readiness after commit | SD-WAN | suspend SD-WAN steering and retry |
 | `sdwan_peer_loss` | All required SD-WAN peer lanes are unavailable | SD-WAN | fail over to Proxy or local WAN |
 | `sdwan_rollback_failed` | SD-WAN-owned netd state could not be rolled back | SD-WAN | retry cleanup; never invoke Proxy fail-open |
