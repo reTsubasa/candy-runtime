@@ -172,12 +172,16 @@ struct CoreReloadRequest<'a> {
     config: Option<&'a Path>,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<&'a Path>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transaction_id: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum CoreReloadAction {
-    Replace,
+    Prepare,
+    Commit,
+    Abort,
     Suspend,
     Resume,
 }
@@ -783,7 +787,21 @@ fn reload_runtime_args(current: &RuntimeArgs) -> Result<RuntimeArgs> {
 fn request_core_control(
     args: &RuntimeArgs,
     child: &mut Child,
+    netd: &mut NetdClient,
     action: CoreReloadAction,
+) -> Result<()> {
+    let mut next = Instant::now();
+    request_core_transaction(args, child, action, None, || {
+        renew_transition_lease(args, netd, &mut next)
+    })
+}
+
+fn request_core_transaction(
+    args: &RuntimeArgs,
+    child: &mut Child,
+    action: CoreReloadAction,
+    transaction_id: Option<&str>,
+    mut progress: impl FnMut() -> Result<()>,
 ) -> Result<()> {
     use std::io::{Read as _, Write as _};
     use std::net::Shutdown;
@@ -795,26 +813,54 @@ fn request_core_control(
     );
     let mut stream = UnixStream::connect(core_reload_socket(args)?)
         .context("connect Candy Core hot reload socket")?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_read_timeout(Some(Duration::from_millis(250)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let request = CoreReloadRequest {
         schema_version: 1,
         action,
-        config: matches!(action, CoreReloadAction::Replace).then_some(args.config.as_path()),
-        status: matches!(action, CoreReloadAction::Replace).then_some(args.status.as_path()),
+        config: matches!(action, CoreReloadAction::Prepare).then_some(args.config.as_path()),
+        status: matches!(action, CoreReloadAction::Prepare).then_some(args.status.as_path()),
+        transaction_id,
     };
     stream.write_all(&serde_json::to_vec(&request)?)?;
     stream.shutdown(Shutdown::Write)?;
     let mut response = Vec::new();
-    stream.take(64 * 1024).read_to_end(&mut response)?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        progress()?;
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "Candy Core reload response timed out"
+        );
+        let mut buffer = [0_u8; 4096];
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                anyhow::ensure!(
+                    response.len() + count <= 64 * 1024,
+                    "Core reload response too large"
+                );
+                response.extend_from_slice(&buffer[..count]);
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     let response: CoreReloadResponse =
         serde_json::from_slice(&response).context("parse Candy Core reload response")?;
     anyhow::ensure!(
         response.schema_version == 1,
         "unsupported Core reload response"
     );
-    let generation_matches = !matches!(action, CoreReloadAction::Replace)
-        || response.generation == Some(args.generation);
+    let generation_matches =
+        !matches!(action, CoreReloadAction::Prepare | CoreReloadAction::Commit)
+            || response.generation == Some(args.generation);
     anyhow::ensure!(
         response.ok && generation_matches,
         "Candy Core rejected hot reload: {}",
@@ -823,8 +869,43 @@ fn request_core_control(
     Ok(())
 }
 
-fn request_core_reload(args: &RuntimeArgs, child: &mut Child) -> Result<()> {
-    request_core_control(args, child, CoreReloadAction::Replace)
+fn renew_transition_lease(
+    args: &RuntimeArgs,
+    netd: &mut NetdClient,
+    next: &mut Instant,
+) -> Result<()> {
+    if Instant::now() >= *next {
+        let deadline = monotonic_ms()?
+            .checked_add(args.lease_ms)
+            .context("transition lease overflow")?;
+        netd.renew_lease(deadline)
+            .context("renew netd lease during policy transition")?;
+        *next = Instant::now() + Duration::from_millis((args.lease_ms / 3).max(1_000));
+    }
+    Ok(())
+}
+
+fn abort_core_preparation(args: &RuntimeArgs, child: &mut Child, id: &str) {
+    // Abort is best effort and has a Core-side TTL. Do not spend another
+    // response timeout here without renewing the still-active old lease.
+    let result: Result<()> = (|| {
+        anyhow::ensure!(child.try_wait()?.is_none(), "Core exited before abort");
+        let mut stream = std::os::unix::net::UnixStream::connect(core_reload_socket(args)?)?;
+        stream.set_write_timeout(Some(Duration::from_millis(250)))?;
+        stream.write_all(&serde_json::to_vec(&CoreReloadRequest {
+            schema_version: 1,
+            action: CoreReloadAction::Abort,
+            config: None,
+            status: None,
+            transaction_id: Some(id),
+        })?)?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        eprintln!("level=warn event=sdwan_policy_abort_pending transaction_id={} generation={} error={} action=expire_candidate",
+            id, args.generation, sanitize_log_value(&format!("{error:#}")));
+    }
 }
 
 fn generate_readiness_token() -> Result<String> {
@@ -1565,6 +1646,9 @@ fn finish_shutdown_after_rollback(
 struct RetryableFailure {
     error_code: &'static str,
     detail: String,
+    // run_once may have hot-switched since run() started. Recovery must bind
+    // to that latest immutable activation, never the initial launch snapshot.
+    activation: Box<RuntimeArgs>,
 }
 
 impl std::fmt::Display for RetryableFailure {
@@ -1674,6 +1758,7 @@ fn retry_after_rollback(
     Err(anyhow::Error::new(RetryableFailure {
         error_code,
         detail: format!("{error:#}"),
+        activation: Box::new(args.clone()),
     }))
 }
 
@@ -1849,7 +1934,7 @@ fn enter_proxy_fallback(
         {
             state.core_suspended = true;
         } else {
-            request_core_control(args, child, CoreReloadAction::Suspend)
+            request_core_control(args, child, netd, CoreReloadAction::Suspend)
                 .context("suspend Core forwarding after steering was removed")?;
             state.core_suspended = true;
         }
@@ -1864,13 +1949,13 @@ fn leave_proxy_fallback(
     state: &mut HotTransitionState,
 ) -> Result<()> {
     if state.core_suspended {
-        request_core_control(args, child, CoreReloadAction::Resume)
+        request_core_control(args, child, netd, CoreReloadAction::Resume)
             .context("resume Core forwarding before restoring SD-WAN steering")?;
         state.core_suspended = false;
     }
     if state.steering_suspended {
         if let Err(error) = netd.resume() {
-            if request_core_control(args, child, CoreReloadAction::Suspend).is_ok() {
+            if request_core_control(args, child, netd, CoreReloadAction::Suspend).is_ok() {
                 state.core_suspended = true;
             }
             return Err(anyhow::Error::from(error).context("restore SD-WAN steering"));
@@ -1880,23 +1965,26 @@ fn leave_proxy_fallback(
     Ok(())
 }
 
-fn restore_last_good_activation(
+fn restore_uncommitted_netd_activation(
     current: &RuntimeArgs,
     child: &mut Child,
     netd: &mut NetdClient,
     previous_declaration: PrepareDeclaration,
     transition: &mut HotTransitionState,
+    resume_previous: bool,
 ) -> Result<()> {
     let deadline = monotonic_ms()?
         .checked_add(current.lease_ms)
         .context("last-good lease deadline overflow")?;
     netd.reconfigure_with_owner(previous_declaration, current.generation, deadline)
         .context("restore last-good netd declaration")?;
-    remove_stale_status(&current.status)
-        .and_then(|_| request_core_reload(current, child))
-        .context("restore last-good Core configuration")?;
-    leave_proxy_fallback(current, child, netd, transition)
-        .context("resume last-good SD-WAN after rejected hot reload")
+    // Core has not received Commit. Its old policy and dialers are still
+    // installed; redialing them here would destroy that safety boundary.
+    if resume_previous {
+        leave_proxy_fallback(current, child, netd, transition)
+            .context("resume last-good SD-WAN after rejected hot reload")?;
+    }
+    Ok(())
 }
 
 fn hot_replace_activation(
@@ -1935,9 +2023,49 @@ fn hot_replace_activation(
             return Ok(false);
         }
     };
+    let transaction_id = format!(
+        "{}{}",
+        generate_readiness_token()?,
+        generate_readiness_token()?
+    );
+    let mut next_renewal = Instant::now();
+    eprintln!("level=info event=sdwan_policy_preparing generation={} transaction_id={} steering=unchanged",
+        replacement.generation, transaction_id);
+    let prepared = request_core_transaction(
+        replacement,
+        child,
+        CoreReloadAction::Prepare,
+        Some(&transaction_id),
+        || renew_transition_lease(current, netd, &mut next_renewal),
+    )
+    .and_then(|_| {
+        anyhow::ensure!(
+            !shutdown_requested() && activation_binding_unchanged(replacement)?,
+            "candidate withdrawn or changed during preparation"
+        );
+        Ok(())
+    });
+    if let Err(error) = prepared {
+        abort_core_preparation(replacement, child, &transaction_id);
+        // A receipt write failure must not turn a preparation rejection into
+        // the caller's destructive transition-failure path.
+        if let Err(receipt_error) =
+            write_failed_activation_receipt(replacement, "core_policy_prepare_failed")
+        {
+            eprintln!(
+                "level=warn event=sdwan_activation_receipt_failed error={}",
+                sanitize_log_value(&format!("{receipt_error:#}"))
+            );
+        }
+        eprintln!("level=error event=sdwan_policy_prepare_failed generation={} transaction_id={} error_code=core_policy_prepare_failed steering=unchanged error={}",
+            replacement.generation, transaction_id, sanitize_log_value(&format!("{error:#}")));
+        return Ok(false);
+    }
     if !already_suspended {
-        enter_proxy_fallback(current, child, netd, transition)
-            .context("enter Candy Proxy fallback for hot reload")?;
+        if let Err(error) = enter_proxy_fallback(current, child, netd, transition) {
+            abort_core_preparation(replacement, child, &transaction_id);
+            return Err(error.context("enter Candy Proxy fallback for hot reload"));
+        }
     }
     eprintln!(
         "level=info event=sdwan_hot_reload_fallback generation={} source=candy_proxy",
@@ -1951,9 +2079,11 @@ fn hot_replace_activation(
         replacement.generation,
         replacement_deadline,
     ) {
+        abort_core_preparation(replacement, child, &transaction_id);
         if !already_suspended {
             leave_proxy_fallback(current, child, netd, transition)
-                .context("restore last-good SD-WAN after rejected reconfigure")?;
+                .context("restore last-good SD-WAN after rejected reconfigure")
+                .map_err(|error| anyhow::Error::new(HotReloadRecoveryRequired(error)))?;
         }
         let error_code = netd_reconfigure_error_code(&error);
         write_failed_activation_receipt(replacement, error_code)?;
@@ -1965,23 +2095,67 @@ fn hot_replace_activation(
         );
         return Ok(false);
     }
-    if let Err(error) = remove_stale_status(&replacement.status)
-        .and_then(|_| request_core_reload(replacement, child))
-    {
-        restore_last_good_activation(current, child, netd, previous_declaration, transition)?;
-        write_failed_activation_receipt(replacement, "core_hot_reload_failed")?;
-        eprintln!(
-            "level=error event=sdwan_hot_reload_rejected generation={} error_code=core_hot_reload_failed error={}",
-            replacement.generation,
-            sanitize_log_value(&format!("{error:#}"))
-        );
+    // Recheck after netd work as well; Cloud may have withdrawn/superseded
+    // the candidate while the kernel transaction was running.
+    if !activation_binding_unchanged(replacement).unwrap_or(false) || shutdown_requested() {
+        abort_core_preparation(replacement, child, &transaction_id);
+        restore_uncommitted_netd_activation(
+            current,
+            child,
+            netd,
+            previous_declaration,
+            transition,
+            !already_suspended,
+        )
+        .map_err(|error| anyhow::Error::new(HotReloadRecoveryRequired(error)))?;
         return Ok(false);
+    }
+    if let Err(error) = remove_stale_status(&replacement.status) {
+        abort_core_preparation(replacement, child, &transaction_id);
+        restore_uncommitted_netd_activation(
+            current,
+            child,
+            netd,
+            previous_declaration,
+            transition,
+            !already_suspended,
+        )
+        .map_err(|error| anyhow::Error::new(HotReloadRecoveryRequired(error)))?;
+        eprintln!("level=error event=sdwan_policy_prepare_failed generation={} error_code=core_policy_prepare_failed error={}",
+            replacement.generation, sanitize_log_value(&format!("{error:#}")));
+        return Ok(false);
+    }
+    let mut commit = request_core_transaction(
+        replacement,
+        child,
+        CoreReloadAction::Commit,
+        Some(&transaction_id),
+        || renew_transition_lease(replacement, netd, &mut next_renewal),
+    );
+    if commit.is_err() {
+        // Core caches the outcome. Retry the same ID to recover a lost reply;
+        // never issue Replace or a lower generation as a guessed rollback.
+        commit = request_core_transaction(
+            replacement,
+            child,
+            CoreReloadAction::Commit,
+            Some(&transaction_id),
+            || renew_transition_lease(replacement, netd, &mut next_renewal),
+        );
+    }
+    if let Err(error) = commit {
+        eprintln!("level=error event=sdwan_policy_commit_unresolved generation={} transaction_id={} error_code=core_policy_commit_unresolved fallback=candy_proxy error={}",
+            replacement.generation, transaction_id, sanitize_log_value(&format!("{error:#}")));
+        return Err(anyhow::Error::new(AppliedHotReloadPending(error)));
     }
 
     let deadline = Instant::now()
         .checked_add(Duration::from_millis(replacement.readiness_timeout_ms))
         .context("hot reload readiness deadline overflow")?;
     let readiness_failure = loop {
+        if let Err(error) = renew_transition_lease(replacement, netd, &mut next_renewal) {
+            break Some(("netd_lease_renewal_failed", error));
+        }
         match child.try_wait() {
             Ok(Some(status)) => {
                 break Some((
@@ -2031,6 +2205,13 @@ fn hot_replace_activation(
         );
         return Err(anyhow::Error::new(AppliedHotReloadPending(error)));
     }
+    if !activation_binding_unchanged(replacement).unwrap_or(false) || shutdown_requested() {
+        return Err(anyhow::Error::new(AppliedHotReloadPending(
+            anyhow::anyhow!(
+                "candidate withdrawn or superseded after Core commit; steering stays suspended"
+            ),
+        )));
+    }
     if let Err(error) = leave_proxy_fallback(replacement, child, netd, transition) {
         return Err(anyhow::Error::new(AppliedHotReloadPending(error)));
     }
@@ -2048,11 +2229,26 @@ fn hot_replace_activation(
 #[derive(Debug)]
 struct AppliedHotReloadPending(anyhow::Error);
 
+#[derive(Debug)]
+struct HotReloadRecoveryRequired(anyhow::Error);
+
+impl std::fmt::Display for HotReloadRecoveryRequired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "hot reload rollback incomplete; network recovery required: {:#}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for HotReloadRecoveryRequired {}
+
 impl std::fmt::Display for AppliedHotReloadPending {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "Core accepted the policy; activation recovery pending: {:#}",
+            "Core commit dispatched; activation confirmation/recovery pending: {:#}",
             self.0
         )
     }
@@ -2321,6 +2517,18 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     let mut readiness_lost_since = None::<Instant>;
     let mut rejected_activation = None::<PathBuf>;
     loop {
+        // All recovery and candidate-inspection branches below may continue
+        // early. Renew first so repeated transient states cannot starve netd.
+        if let Err(error) = renew_transition_lease(&args, &mut netd, &mut next_renewal) {
+            return retry_after_rollback(
+                &args,
+                &mut child,
+                &mut netd,
+                "netd lease renewal failed",
+                "netd_lease_failed",
+                error,
+            );
+        }
         match activation_pointer_state(&args) {
             Ok(ActivationPointerState::Unchanged) => {}
             Ok(ActivationPointerState::Superseded) => {
@@ -2363,6 +2571,21 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                             rejected_activation = None;
                             next_renewal = Instant::now();
                             eprintln!("level=warn event=sdwan_activation_recovery_pending generation={} error={}", args.generation, sanitize_log_value(&format!("{error:#}")));
+                        }
+                        Err(error)
+                            if error.downcast_ref::<HotReloadRecoveryRequired>().is_some() =>
+                        {
+                            // A poisoned netd transaction cannot Resume. Clean
+                            // it and retry the desired activation, rather than
+                            // rejecting it and remaining stuck in fallback.
+                            return retry_after_rollback(
+                                &replacement,
+                                &mut child,
+                                &mut netd,
+                                "hot reload rollback incomplete",
+                                "hot_transition_failed",
+                                error,
+                            );
                         }
                         Err(error) => {
                             if !transition.complete() {
@@ -2719,41 +2942,11 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 }
             }
         }
-        if Instant::now() < next_renewal {
-            thread::sleep(Duration::from_millis(100));
-            continue;
-        }
-        let next_deadline = match monotonic_ms().and_then(|now| {
-            now.checked_add(args.lease_ms)
-                .context("lease deadline overflow")
-        }) {
-            Ok(deadline) => deadline,
-            Err(error) => {
-                return retry_after_rollback(
-                    &args,
-                    &mut child,
-                    &mut netd,
-                    "netd lease clock failed",
-                    "lease_clock_failed",
-                    error,
-                )
-            }
-        };
-        if let Err(error) = netd.renew_lease(next_deadline) {
-            return retry_after_rollback(
-                &args,
-                &mut child,
-                &mut netd,
-                "netd lease renewal failed",
-                "netd_lease_failed",
-                anyhow::Error::from(error).context("netd lease renewal"),
-            );
-        }
-        next_renewal = Instant::now() + renew_every;
+        thread::sleep(Duration::from_millis(100));
     }
 }
 
-fn run(args: RuntimeArgs) -> Result<()> {
+fn run(mut args: RuntimeArgs) -> Result<()> {
     // The signal latch and child lifecycle are process-wide. Keep the test
     // fixture lock across every retry and reset the latch only after taking it.
     #[cfg(test)]
@@ -2770,10 +2963,11 @@ fn run(args: RuntimeArgs) -> Result<()> {
         let attempt_started = Instant::now();
         match run_once(args.clone(), recovery_attempt) {
             Err(error) if error.downcast_ref::<RetryableFailure>().is_some() => {
-                let error_code = error
+                let failure = error
                     .downcast_ref::<RetryableFailure>()
-                    .expect("retryable failure downcast changed")
-                    .error_code;
+                    .expect("retryable failure downcast changed");
+                let error_code = failure.error_code;
+                args = (*failure.activation).clone();
                 if args.activation_link.is_none() {
                     return Err(error);
                 }
@@ -2844,6 +3038,383 @@ mod tests {
     fn write_private(path: &Path, bytes: &[u8]) {
         fs::write(path, bytes).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum ReloadFault {
+        PrepareRejected,
+        CandidateChanged,
+        LostCommitReply,
+        CommitUnresolved,
+        NetdRollbackIncomplete,
+    }
+
+    fn exercise_prepared_hot_reload(fault: ReloadFault) {
+        use std::sync::{Arc, Mutex};
+        let _guard = RUN_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+        let (_root, mut current) = server_runtime_fixture();
+        current.core_role = CoreRole::ClientSdwan;
+        current.generation = 6;
+        let (_candidate_root, candidate, _) = activation_fixture();
+        write_private(
+            &candidate.join("declaration.json"),
+            &fs::read(&current.declaration).unwrap(),
+        );
+        let (descriptor, target, config, declaration) = resolve_activation(&candidate).unwrap();
+        let mut replacement = current.clone();
+        replacement.generation = descriptor.projection_generation;
+        replacement.activation_link = Some(candidate);
+        replacement.activation_target = Some(target);
+        replacement.activation_descriptor = Some(descriptor);
+        replacement.activation_config_sha256 = Some(sha256_file(&config).unwrap());
+        replacement.activation_declaration_sha256 = Some(sha256_file(&declaration).unwrap());
+        replacement.config = config;
+        replacement.declaration = declaration;
+        struct TestChild(Child);
+        impl Drop for TestChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = TestChild(Command::new("/bin/sleep").arg("60").spawn().unwrap());
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let finished = Arc::new(AtomicBool::new(false));
+        let netd_listener = UnixListener::bind(&current.socket).unwrap();
+        netd_listener.set_nonblocking(true).unwrap();
+        let netd_events = events.clone();
+        let netd_finished = finished.clone();
+        let netd_task = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let stream = match netd_listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if netd_finished.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        assert!(Instant::now() < deadline, "netd mock timed out");
+                        thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(error) => panic!("{error}"),
+                };
+                let request = recv_request(&stream).unwrap();
+                let generation = request.owner.generation;
+                let tun = File::open("/dev/null").unwrap();
+                let mut fd = None;
+                let (name, body) = match request.operation {
+                    NetdOperation::Prepare(_) => {
+                        fd = Some(tun.as_raw_fd());
+                        (
+                            "prepare",
+                            ResponseBody::Prepared {
+                                generation,
+                                tun_fd_attached: true,
+                            },
+                        )
+                    }
+                    NetdOperation::Commit => ("commit", ResponseBody::Committed { generation }),
+                    NetdOperation::LeaseRenew => {
+                        ("lease", ResponseBody::LeaseRenewed { generation })
+                    }
+                    NetdOperation::Suspend => ("suspend", ResponseBody::Suspended { generation }),
+                    NetdOperation::Reconfigure(_) => (
+                        "reconfigure",
+                        if fault == ReloadFault::NetdRollbackIncomplete {
+                            ResponseBody::Error(ErrorCode::SystemFailure)
+                        } else {
+                            ResponseBody::Reconfigured { generation }
+                        },
+                    ),
+                    NetdOperation::Resume => (
+                        "resume",
+                        if fault == ReloadFault::NetdRollbackIncomplete {
+                            ResponseBody::Error(ErrorCode::SystemFailure)
+                        } else {
+                            ResponseBody::Resumed { generation }
+                        },
+                    ),
+                    NetdOperation::Status => (
+                        "status",
+                        ResponseBody::Status {
+                            phase: candy_netd_proto::SessionPhase::Suspended,
+                            generation: 6,
+                        },
+                    ),
+                    NetdOperation::Rollback => {
+                        ("rollback", ResponseBody::RolledBack { generation })
+                    }
+                    other => panic!("unexpected netd operation {other:?}"),
+                };
+                netd_events.lock().unwrap().push(format!("netd:{name}"));
+                send_response(
+                    &stream,
+                    &NetdResponse {
+                        request_id: request.request_id,
+                        body,
+                    },
+                    fd,
+                )
+                .unwrap();
+            }
+        });
+        let core_listener = UnixListener::bind(core_reload_socket(&replacement).unwrap()).unwrap();
+        core_listener.set_nonblocking(true).unwrap();
+        let core_events = events.clone();
+        let core_finished = finished.clone();
+        let candidate_config = replacement.config.clone();
+        let status_path = replacement.status.clone();
+        let pid = child.0.id();
+        let core_task = thread::spawn(move || {
+            let mut id = None;
+            let mut commits = 0;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let mut stream = match core_listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if core_finished.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        assert!(Instant::now() < deadline, "Core mock timed out");
+                        thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(error) => panic!("{error}"),
+                };
+                // macOS can reject SO_RCVTIMEO after Abort's sender has
+                // closed. Its buffered request is still readable.
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut bytes = Vec::new();
+                stream.read_to_end(&mut bytes).unwrap();
+                let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                let action = request["action"].as_str().unwrap();
+                core_events.lock().unwrap().push(format!("core:{action}"));
+                if action == "prepare" {
+                    let transaction = request["transaction_id"].as_str().unwrap();
+                    assert_eq!(transaction.len(), 64);
+                    id = Some(transaction.to_owned());
+                    if fault == ReloadFault::CandidateChanged {
+                        write_private(&candidate_config, b"changed while preparing");
+                    }
+                }
+                if matches!(action, "commit" | "abort") {
+                    assert_eq!(request["transaction_id"].as_str(), id.as_deref());
+                }
+                if action == "commit" {
+                    commits += 1;
+                    if fault == ReloadFault::LostCommitReply {
+                        write_private(&status_path, serde_json::json!({
+                            "schema_version":3,"generation":7,"pid":pid,"readiness_token":"test-token",
+                            "lifecycle":"active","configured_peers":1,"active_peers":1,
+                            "required_route_owners":1,"ready_route_owners":1,"fail_open_required":false,
+                            "last_error_code":null,"paths":[{"rtt_sample_count":1,"rx_bytes":0,"rx_idle_ms":0}]
+                        }).to_string().as_bytes());
+                        if commits == 1 {
+                            continue;
+                        }
+                    }
+                }
+                let ok = !(action == "prepare" && fault == ReloadFault::PrepareRejected
+                    || action == "commit" && fault == ReloadFault::CommitUnresolved);
+                let response = serde_json::json!({"schema_version":1,"ok":ok,
+                    "generation": if matches!(action, "prepare" | "commit") { Some(7) } else { None },
+                    "error": if ok { None } else { Some("injected failure") }});
+                let _ = stream.write_all(&serde_json::to_vec(&response).unwrap());
+            }
+        });
+        let mut netd = NetdClient::new(
+            &current.socket,
+            LeaseOwner {
+                instance_id: [1; 16],
+                pid: std::process::id(),
+                generation: 6,
+                lease_deadline_mono_ms: monotonic_ms().unwrap() + current.lease_ms,
+            },
+        );
+        let _prepared = netd
+            .prepare(parse_declaration(&current.declaration).unwrap())
+            .unwrap();
+        netd.commit().unwrap();
+        events.lock().unwrap().clear();
+        let mut transition = HotTransitionState::default();
+        let result = hot_replace_activation(
+            &current,
+            &replacement,
+            &mut child.0,
+            &mut netd,
+            "test-token",
+            &mut transition,
+        );
+        if matches!(
+            fault,
+            ReloadFault::CommitUnresolved | ReloadFault::NetdRollbackIncomplete
+        ) {
+            let retry = retry_after_rollback(
+                &replacement,
+                &mut child.0,
+                &mut netd,
+                "test unresolved commit recovery",
+                "core_policy_commit_unresolved",
+                anyhow::anyhow!("injected missing acknowledgement"),
+            )
+            .unwrap_err();
+            let failure = retry.downcast_ref::<RetryableFailure>().unwrap();
+            assert_eq!(failure.activation.generation, 7);
+            assert_eq!(
+                failure.activation.activation_target,
+                replacement.activation_target
+            );
+            assert_eq!(
+                wait_before_retry(&failure.activation, Duration::ZERO).unwrap(),
+                RetryWait::Retry
+            );
+            assert!(
+                !activation_retry_eligible(&current).unwrap_or(false),
+                "launch snapshot should be superseded in this regression"
+            );
+        }
+        drop(netd); // teardown while the mock can acknowledge rollback
+        finished.store(true, Ordering::SeqCst);
+        core_task.join().unwrap();
+        netd_task.join().unwrap();
+        let events = events.lock().unwrap();
+        assert!(
+            events.iter().any(|event| event == "netd:lease"),
+            "preparation must renew the old lease"
+        );
+        let operations: Vec<_> = events
+            .iter()
+            .filter(|event| !matches!(event.as_str(), "netd:lease" | "netd:rollback"))
+            .map(String::as_str)
+            .collect();
+        match fault {
+            ReloadFault::PrepareRejected | ReloadFault::CandidateChanged => {
+                assert!(!result.unwrap());
+                assert_eq!(operations, ["core:prepare", "core:abort"]);
+                assert!(!transition.core_suspended && !transition.steering_suspended);
+            }
+            ReloadFault::LostCommitReply => {
+                assert!(result.unwrap());
+                assert_eq!(
+                    operations,
+                    [
+                        "core:prepare",
+                        "netd:suspend",
+                        "core:suspend",
+                        "netd:reconfigure",
+                        "core:commit",
+                        "core:commit",
+                        "core:resume",
+                        "netd:resume"
+                    ]
+                );
+                let receipt: serde_json::Value = serde_json::from_slice(
+                    &fs::read(replacement.activation_ready.unwrap()).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(receipt["state"], "committed");
+            }
+            ReloadFault::CommitUnresolved => {
+                assert!(result
+                    .unwrap_err()
+                    .downcast_ref::<AppliedHotReloadPending>()
+                    .is_some());
+                assert_eq!(
+                    operations,
+                    [
+                        "core:prepare",
+                        "netd:suspend",
+                        "core:suspend",
+                        "netd:reconfigure",
+                        "core:commit",
+                        "core:commit"
+                    ]
+                );
+                assert!(transition.complete());
+                assert!(
+                    !replacement.activation_ready.unwrap().exists(),
+                    "uncertain commit must not publish rejection"
+                );
+            }
+            ReloadFault::NetdRollbackIncomplete => {
+                assert!(result
+                    .unwrap_err()
+                    .downcast_ref::<HotReloadRecoveryRequired>()
+                    .is_some());
+                assert!(!operations.contains(&"core:commit"));
+                assert!(transition.complete());
+                assert!(
+                    !replacement.activation_ready.unwrap().exists(),
+                    "incomplete rollback needs cleanup/retry, not a permanent rejection"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn failed_preparation_preserves_live_steering() {
+        exercise_prepared_hot_reload(ReloadFault::PrepareRejected);
+    }
+
+    #[test]
+    fn superseded_preparation_aborts_before_netd_mutation() {
+        exercise_prepared_hot_reload(ReloadFault::CandidateChanged);
+    }
+
+    #[test]
+    fn lost_commit_reply_retries_same_transaction_before_resuming() {
+        exercise_prepared_hot_reload(ReloadFault::LostCommitReply);
+    }
+
+    #[test]
+    fn unresolved_commit_preserves_candidate_for_recovery() {
+        exercise_prepared_hot_reload(ReloadFault::CommitUnresolved);
+    }
+
+    #[test]
+    fn incomplete_netd_rollback_retries_desired_activation_instead_of_stalling() {
+        exercise_prepared_hot_reload(ReloadFault::NetdRollbackIncomplete);
+    }
+
+    #[test]
+    fn core_reply_wait_keeps_progress_alive_across_partial_reads() {
+        let (_root, args) = server_runtime_fixture();
+        let listener = UnixListener::bind(core_reload_socket(&args).unwrap()).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            stream
+                .write_all(br#"{"schema_version":1,"ok":true,"#)
+                .unwrap();
+            thread::sleep(Duration::from_millis(600));
+            stream
+                .write_all(br#""generation":7,"error":null}"#)
+                .unwrap();
+        });
+        let mut child = Command::new("/bin/sleep").arg("10").spawn().unwrap();
+        let mut progress_calls = 0;
+        let result = request_core_transaction(
+            &args,
+            &mut child,
+            CoreReloadAction::Prepare,
+            Some(&"a".repeat(64)),
+            || {
+                progress_calls += 1;
+                Ok(())
+            },
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        server.join().unwrap();
+        result.unwrap();
+        assert!(
+            progress_calls >= 3,
+            "waiting for a split reply must continue lease heartbeats"
+        );
     }
 
     fn activation_fixture() -> (tempfile::TempDir, PathBuf, String) {

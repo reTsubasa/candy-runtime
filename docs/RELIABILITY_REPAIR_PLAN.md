@@ -19,7 +19,7 @@ Items are checked only after the corresponding focused regression passes.
 | --- | --- | --- | --- |
 | R01 | P0 | Core fail-open latch survives partial route-owner recovery | **Done:** failed-owner coverage is tracked; regression covers healthy alternate owner, recovery and re-failure. |
 | R02 | P0 | Policy replacement closes old Peer streams before new streams are usable | **Partially implemented:** production inbound/outbound handoff now completes both packet-stream halves before registration/replacement. Failed or cancelled preparation closes the candidate. Core regression proves old-lane traffic during preparation and usable new lane at commit. Cross-node commit coordination and old-lane drain remain open. |
-| R03 | P0 | Runtime suspends old forwarding before policy replacement | Coordinate Core prepare/commit and netd transaction ordering; test candidate failure, rollback, process identity and unchanged Proxy. Do not equate a Proxy fallback with preserving existing NAT/TCP flows. |
+| R03 | P0 | Runtime suspends old forwarding before policy replacement | **Locally staged:** Core Prepare/Commit/Abort now separates candidate negotiation from local cutover. Runtime keeps local steering during preparation, renews leases while waiting, rechecks immutable candidate binding and reconciles lost Commit replies. Fault injection passes. Cross-node commit, dual-generation netd steering and existing NAT/TCP flow migration remain open. |
 | R04 | P1 | Partial route readiness can trigger global Runtime fallback | **Improved:** committed all-peer loss is now recoverable even while Core reports `lifecycle=active`; Runtime suspends SD-WAN steering, preserves Core dialers, records counters/error detail, and retries reconnect. Per-route partial coverage and fatal Core/TUN errors still require separate handling tests. |
 | R05 | P1 | Cloud status reader rejects persisted `PREPARED` receipt | **Done:** API accepts all three persisted states; DB-backed regression is present (requires `DATABASE_URL`). |
 | R06 | P1 | Segment aggregate failure/update colors unrelated links | **Done:** link state uses peer endpoints/attachments; three-site isolation tests pass. |
@@ -29,7 +29,7 @@ Items are checked only after the corresponding focused regression passes.
 | R10 | P2 | Runtime clears all path diagnostics while steering is suspended | **Done:** path evidence is preserved with explicit `forwarding_active`; Cloud distinguishes inactive forwarding. |
 | R11 | P2 | Runtime preflight greps private Core source and fails on valid formatting | **Done:** structured manifest contract and isolated checkout/malformed JSON tests integrated into verification. |
 | R12 | P2 | Core manifest test hardcodes an obsolete package version | **Done:** compile-time package version assertion passes. |
-| R13 | P2 | Local DB tests may silently skip and socket tests fail under sandbox | Report skipped prerequisites honestly; run actual MySQL tests when available and loopback tests with scoped permissions. Never treat permission errors as product failures. Current Runtime unit suite has 20/33 passing here; 13 integration tests require loopback socket permission and are environment-gated. |
+| R13 | P2 | Local DB tests may silently skip and socket tests fail under sandbox | **Socket suite verified:** Runtime agent tests pass 39/39 and Core SD-WAN real loopback tests pass 22/22 with scoped socket permission. Actual MySQL-backed receipt validation remains open; do not treat an omitted database test as passed. |
 | R14 | P2 | Runtime test fixture writes into real `/etc/candy` | **Done:** lifecycle fixture paths are redirected into temporary state roots. |
 | R15 | P2 | Core Action can build production Core; Cloud release pins duplicate versions | **Done:** Core build workflow removed; Cloud x86/ARM64 inputs reference published `core-v0.3.42`. |
 | R16 | P3 | Release/platform docs contradict actual targets and signing ownership | **Done:** Core/Cloud docs and matrix describe current five-target and signing boundary. |
@@ -163,3 +163,65 @@ removed while any verification or packaging process is using them.
   old queued packet drain and established NAT/TCP flow handling are not completed
   by this patch. Reconfiguration rollback failure itself still needs durable
   recovery intent to prevent a premature resume. No release or node update.
+
+## Local two-phase Core policy transaction
+
+- Core accepts `prepare`, `commit` and `abort` with a random 32-byte hex
+  transaction ID. Preparation is bounded to 20 seconds and the prepared
+  candidate expires after 30 seconds. An unrelated ID cannot consume or abort
+  another candidate; a changed base generation or expired candidate cannot
+  commit. Both successful and failed commit outcomes are cached until the next
+  commit, so a lost reply cannot apply a policy twice.
+- Runtime negotiates the candidate before suspending local steering. Candidate
+  files, descriptor hashes and publication pointer are checked after preparation,
+  after netd reconfiguration and before resuming traffic. Preparation failure
+  does not suspend or reconfigure netd. Pre-commit rollback restores only netd;
+  it does not redial the still-installed old Core policy. An unresolved Commit
+  keeps the candidate eligible for confirmation/recovery rather than publishing
+  a false rejection or attempting a lower-generation Core reload.
+- IPC response reads are bounded and preserve partial replies while allowing
+  lease-renewal callbacks. Preparation, commit, suspend/resume and readiness
+  waits renew netd ownership. The agent's main recovery loop renews before any
+  early-continue branch, avoiding lease starvation during transient failures.
+  Abandoned preparation is cancelled best-effort without another blocking wait.
+- Cloud describes `core_policy_prepare_failed`, `core_policy_commit_unresolved`
+  and `netd_lease_renewal_failed` explicitly. Core transaction events carry the
+  transaction ID and preparation/commit result; Runtime logs the local steering
+  state and concrete failure detail.
+- Verification: Core process tests 22/22, real QUIC SD-WAN tests 22/22, Runtime
+  agent tests 39/39 and Cloud error descriptor tests 5/5 pass. Core/Runtime
+  workspace checks and Cloud TypeScript checking pass. The new fault tests
+  cover preparation failure, changed candidate, lost/unknown commit reply,
+  partial response reads, wrong transaction IDs and expired candidates.
+- **Boundary:** preparation is local, not a two-node commit protocol. Remote
+  inbound registration may still replace its old lane before the caller commits;
+  signed inbound expectations may still need post-commit convergence. Old-lane
+  drain, dual-generation routing and existing-flow NAT ownership are unfinished.
+  These remain P0 work. New Runtime requires a Core with this API for hot updates;
+  older Core rejects Prepare safely rather than silently reverting to destructive
+  Replace. No release upload, remote push or node update was performed here.
+
+## Durable netd recovery and latest-activation retry
+
+- Before mutating kernel rules, netd persists a `RollingBack` record with both
+  the old declaration and the candidate requiring cleanup. Only a fully restored
+  old configuration may return to `Suspended`. An incomplete rollback cannot
+  Resume and is recovered even while its former owner is alive.
+- Crash recovery removes both sets of routes/firewall rules. Candidate cleanup
+  failure retains its journal intent even when every old cleanup step is already
+  complete. Existing v1 journals remain readable; transient recovery records use
+  v2. A downgrade must complete recovery with the new netd first, since an older
+  binary cannot decode the new recovery record.
+- Reconfiguration rejects changes to table ID, overlay address, MTU or firewall
+  ownership parameters whose link effects cannot be undone by this in-place
+  transaction. These require a fresh network session; this is not support for
+  hot migration of link identity.
+- Runtime treats an incomplete netd rollback as cleanup/retry of the desired
+  activation, not a permanent rejection. Retryable failures now carry the latest
+  activation from `run_once`; the outer loop previously used its original launch
+  configuration and could stop retrying after a successful hot update.
+- Validation: the full netd suite passes 27/27, including 14 transaction, 2
+  file-journal, 3 service and 4 socket-security tests. Tests verify poisoned
+  session rejection, crash recovery of both declarations, repeated cleanup
+  failure and successful restoration. Linux-only backend tests run zero cases
+  on this macOS host; actual nft/netlink fault injection remains unverified.
