@@ -1,11 +1,12 @@
 use candy_netd::{
     restore_sysctl_value, NetworkBackend, NetworkController, NetworkError, NetworkJournal,
-    NetworkTransaction, TransactionRecord,
+    NetworkTransaction, TransactionPhase, TransactionRecord,
 };
 use candy_netd_proto::{
     FirewallPolicy, Ipv4Prefix, LeaseOwner, PrepareDeclaration, RouteDeclaration, RouteKind,
     UnderlayExclusion, UnderlayKind, CANDY_TABLE_MIN,
 };
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -26,6 +27,97 @@ struct FailingBackend {
 struct CleanupFailingBackend {
     inner: RecordingBackend,
     fail_at: &'static str,
+}
+
+struct ReconfigureRecoveryFailingBackend {
+    inner: RecordingBackend,
+    armed: Rc<Cell<bool>>,
+    fail_restore: bool,
+}
+
+fn is_replacement(declaration: &PrepareDeclaration) -> bool {
+    declaration
+        .routes
+        .iter()
+        .any(|route| route.prefix == Ipv4Prefix::new([10, 3, 0, 0], 16).expect("valid test prefix"))
+}
+
+impl NetworkBackend for ReconfigureRecoveryFailingBackend {
+    fn preflight(
+        &mut self,
+        declaration: &PrepareDeclaration,
+    ) -> Result<Vec<candy_netd::SysctlChange>, NetworkError> {
+        self.inner.preflight(declaration)
+    }
+
+    fn prepare_link(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.prepare_link(declaration)
+    }
+
+    fn prepare_routes(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.event("prepare_routes");
+        if self.armed.get() && self.fail_restore && !is_replacement(declaration) {
+            Err(NetworkError::Backend)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn prepare_firewall(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.event("prepare_firewall");
+        if self.armed.get() && is_replacement(declaration) {
+            Err(NetworkError::Backend)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn prepare_sysctls(
+        &mut self,
+        declaration: &PrepareDeclaration,
+        changes: &[candy_netd::SysctlChange],
+    ) -> Result<(), NetworkError> {
+        self.inner.prepare_sysctls(declaration, changes)
+    }
+
+    fn activate_link(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.activate_link(declaration)
+    }
+
+    fn install_policy_rule(
+        &mut self,
+        declaration: &PrepareDeclaration,
+    ) -> Result<(), NetworkError> {
+        self.inner.install_policy_rule(declaration)
+    }
+
+    fn remove_policy_rule(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.remove_policy_rule(declaration)
+    }
+
+    fn deactivate_link(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.deactivate_link(declaration)
+    }
+
+    fn remove_firewall(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.remove_firewall(declaration)
+    }
+
+    fn remove_routes(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.remove_routes(declaration)
+    }
+
+    fn remove_link(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.remove_link(declaration)
+    }
+
+    fn restore_sysctls(
+        &mut self,
+        declaration: &PrepareDeclaration,
+        changes: &[candy_netd::SysctlChange],
+    ) -> Result<(), NetworkError> {
+        self.inner.restore_sysctls(declaration, changes)
+    }
 }
 
 impl CleanupFailingBackend {
@@ -371,7 +463,7 @@ fn hot_reconfigure_keeps_steering_suspended_until_replacement_is_ready() {
 }
 
 #[test]
-fn hot_reconfigure_cleanup_failure_restores_previous_policy_and_owner() {
+fn hot_reconfigure_cleanup_failure_poisoned_session_cannot_resume() {
     for fail_at in ["remove_firewall", "remove_routes"] {
         let events = Rc::new(RefCell::new(Vec::new()));
         let journal = MemoryJournal::default();
@@ -403,13 +495,136 @@ fn hot_reconfigure_cleanup_failure_restores_previous_policy_and_owner() {
             )
             .is_err());
         assert_eq!(transaction.retained_owner(), Some(owner()));
-        assert_eq!(retained.load().unwrap(), before);
+        assert_eq!(
+            retained.load().unwrap().unwrap().phase,
+            TransactionPhase::RollingBack
+        );
+        assert_eq!(before.unwrap().phase, TransactionPhase::Suspended);
         // Restore is mandatory even when removal itself is the failed step.
         assert!(events
             .borrow()
             .ends_with(&["prepare_link", "prepare_routes", "prepare_firewall"]));
-        transaction.resume(owner()).unwrap();
+        assert!(matches!(
+            transaction.resume(owner()),
+            Err(NetworkError::InvalidTransition)
+        ));
+        assert!(transaction.recover_orphan(true, 0).is_err());
+        let pending = retained.load().unwrap().unwrap();
+        assert_eq!(pending.phase, TransactionPhase::RollingBack);
+        assert!(
+            pending.recovery_candidate.is_some(),
+            "failed candidate cleanup intent was discarded"
+        );
     }
+}
+
+#[test]
+fn failed_reconfigure_recovery_poisoned_session_cannot_resume() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let armed = Rc::new(Cell::new(false));
+    let journal = MemoryJournal::default();
+    let retained = journal.clone();
+    let mut transaction = NetworkTransaction::new(
+        ReconfigureRecoveryFailingBackend {
+            inner: RecordingBackend(events.clone()),
+            armed: armed.clone(),
+            fail_restore: true,
+        },
+        journal,
+    )
+    .unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+    transaction.suspend(owner()).unwrap();
+
+    let mut replacement = declaration();
+    replacement.routes[1] = RouteDeclaration {
+        prefix: Ipv4Prefix::new([10, 3, 0, 0], 16).unwrap(),
+        kind: RouteKind::Remote,
+    };
+    armed.set(true);
+    assert!(transaction
+        .reconfigure(
+            LeaseOwner {
+                generation: 8,
+                ..owner()
+            },
+            replacement,
+        )
+        .is_err());
+
+    let poisoned = retained.load().unwrap().unwrap();
+    assert_eq!(poisoned.phase, TransactionPhase::RollingBack);
+    assert!(
+        poisoned.recovery_candidate.is_some(),
+        "candidate cleanup intent was not persisted"
+    );
+    events.borrow_mut().clear();
+    assert!(matches!(
+        transaction.resume(owner()),
+        Err(NetworkError::InvalidTransition)
+    ));
+    assert!(events.borrow().is_empty(), "resume touched poisoned state");
+
+    drop(transaction);
+    let mut recovered =
+        NetworkTransaction::new(RecordingBackend(events.clone()), retained.clone()).unwrap();
+    assert!(
+        recovered.recover_orphan(true, 0).unwrap(),
+        "poisoned session waited for a live owner's lease to expire"
+    );
+    assert!(retained.load().unwrap().is_none());
+    assert!(!events.borrow().contains(&"install_policy_rule"));
+    assert_eq!(
+        events
+            .borrow()
+            .iter()
+            .filter(|event| **event == "remove_routes")
+            .count(),
+        2,
+        "crash recovery did not remove both candidate and last-good routes"
+    );
+}
+
+#[test]
+fn failed_candidate_with_complete_recovery_can_resume_last_good() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let armed = Rc::new(Cell::new(false));
+    let journal = MemoryJournal::default();
+    let retained = journal.clone();
+    let mut transaction = NetworkTransaction::new(
+        ReconfigureRecoveryFailingBackend {
+            inner: RecordingBackend(events),
+            armed: armed.clone(),
+            fail_restore: false,
+        },
+        journal,
+    )
+    .unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+    transaction.suspend(owner()).unwrap();
+
+    let mut replacement = declaration();
+    replacement.routes[1] = RouteDeclaration {
+        prefix: Ipv4Prefix::new([10, 3, 0, 0], 16).unwrap(),
+        kind: RouteKind::Remote,
+    };
+    armed.set(true);
+    assert!(transaction
+        .reconfigure(
+            LeaseOwner {
+                generation: 8,
+                ..owner()
+            },
+            replacement,
+        )
+        .is_err());
+    let restored = retained.load().unwrap().unwrap();
+    assert_eq!(restored.phase, TransactionPhase::Suspended);
+    assert_eq!(restored.owner, owner());
+    assert_eq!(restored.declaration, declaration());
+    transaction.resume(owner()).unwrap();
 }
 
 #[test]
@@ -429,6 +644,95 @@ fn hot_reconfigure_rejects_a_different_process() {
         transaction.reconfigure(replacement_owner, declaration()),
         Err(NetworkError::Conflict)
     ));
+}
+
+#[test]
+fn candidate_cleanup_failure_survives_after_all_old_steps_are_cleared() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut journal = MemoryJournal::default();
+    let retained = journal.clone();
+    let mut candidate = declaration();
+    candidate.routes[1] = RouteDeclaration {
+        prefix: Ipv4Prefix::new([10, 3, 0, 0], 16).unwrap(),
+        kind: RouteKind::Remote,
+    };
+    journal
+        .store(&TransactionRecord {
+            owner: owner(),
+            declaration: declaration(),
+            recovery_candidate: Some(candidate),
+            phase: TransactionPhase::RollingBack,
+            completed_steps: 0,
+            sysctls: Vec::new(),
+        })
+        .unwrap();
+    let mut transaction = NetworkTransaction::new(
+        CleanupFailingBackend {
+            inner: RecordingBackend(events.clone()),
+            fail_at: "remove_routes",
+        },
+        journal,
+    )
+    .unwrap();
+    assert!(transaction.recover_orphan(false, 0).is_err());
+    assert!(
+        retained
+            .load()
+            .unwrap()
+            .unwrap()
+            .recovery_candidate
+            .is_some(),
+        "failed candidate cleanup must retain its durable retry intent"
+    );
+    drop(transaction);
+    let mut restarted =
+        NetworkTransaction::new(RecordingBackend(events.clone()), retained.clone()).unwrap();
+    assert!(restarted.recover_orphan(false, 0).unwrap());
+    assert!(retained.load().unwrap().is_none());
+    assert!(!events.borrow().contains(&"install_policy_rule"));
+}
+
+#[test]
+fn hot_reconfigure_rejects_non_reversible_link_identity_changes() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let journal = MemoryJournal::default();
+    let mut transaction =
+        NetworkTransaction::new(RecordingBackend(events.clone()), journal).unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+    transaction.suspend(owner()).unwrap();
+    events.borrow_mut().clear();
+
+    for candidate in [
+        {
+            let mut candidate = declaration();
+            candidate.overlay_router_ipv4 = [100, 64, 0, 11];
+            candidate
+        },
+        {
+            let mut candidate = declaration();
+            candidate.effective_mtu = 1179;
+            candidate
+        },
+        {
+            let mut candidate = declaration();
+            candidate.table_id += 1;
+            candidate
+        },
+    ] {
+        assert!(matches!(
+            transaction.reconfigure(
+                LeaseOwner {
+                    generation: 8,
+                    ..owner()
+                },
+                candidate,
+            ),
+            Err(NetworkError::InvalidTransition)
+        ));
+    }
+    assert!(events.borrow().is_empty());
+    transaction.resume(owner()).unwrap();
 }
 
 #[test]

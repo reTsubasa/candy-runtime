@@ -38,6 +38,7 @@ fn record() -> TransactionRecord {
             },
         },
         phase: TransactionPhase::Prepared,
+        recovery_candidate: None,
         completed_steps: 15,
         sysctls: Vec::new(),
     }
@@ -52,11 +53,27 @@ fn journal_round_trips_privately_and_clear_is_durable() {
     let path = directory.join("state.journal");
     let mut journal = FileNetworkJournal::new(path.clone()).unwrap();
     journal.store(&record()).unwrap();
+    assert_eq!(&fs::read(&path).unwrap()[..8], b"CNDJNL01");
     assert_eq!(
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o600
     );
     assert_eq!(journal.load().unwrap(), Some(record()));
+    let mut recovery_intent = record();
+    recovery_intent.phase = TransactionPhase::RollingBack;
+    let mut candidate = recovery_intent.declaration.clone();
+    candidate.routes[0] = RouteDeclaration {
+        prefix: Ipv4Prefix::new([10, 3, 0, 0], 16).unwrap(),
+        kind: RouteKind::Remote,
+    };
+    recovery_intent.recovery_candidate = Some(candidate);
+    journal.store(&recovery_intent).unwrap();
+    assert_eq!(&fs::read(&path).unwrap()[..8], b"CNDJNL02");
+    assert_eq!(
+        journal.load().unwrap(),
+        Some(recovery_intent),
+        "poisoned reconfigure recovery intent was not durable"
+    );
     journal.clear().unwrap();
     assert!(journal.load().unwrap().is_none());
     fs::remove_dir_all(directory).unwrap();

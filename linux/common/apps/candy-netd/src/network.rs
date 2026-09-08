@@ -21,6 +21,7 @@ pub enum TransactionPhase {
 pub struct TransactionRecord {
     pub owner: LeaseOwner,
     pub declaration: PrepareDeclaration,
+    pub recovery_candidate: Option<PrepareDeclaration>,
     pub phase: TransactionPhase,
     pub completed_steps: u16,
     pub sysctls: Vec<SysctlChange>,
@@ -176,6 +177,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         let record = TransactionRecord {
             owner,
             declaration,
+            recovery_candidate: None,
             phase: TransactionPhase::Preparing,
             completed_steps: 0,
             sysctls: Vec::new(),
@@ -264,7 +266,14 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         let Some(record) = &self.record else {
             return Ok(false);
         };
-        if owner_is_alive && record.owner.lease_deadline_mono_ms > now_mono_ms {
+        // RollingBack is a poisoned reconfigure session, not a healthy lease.
+        // Recover it immediately even when the former owner process is still
+        // alive; waiting for lease expiry would leave candidate routes behind
+        // and the owner cannot safely resume this transaction.
+        if record.phase != TransactionPhase::RollingBack
+            && owner_is_alive
+            && record.owner.lease_deadline_mono_ms > now_mono_ms
+        {
             return Ok(false);
         }
         self.cleanup_record()?;
@@ -355,10 +364,30 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             self.record = Some(replacement_record);
             return Ok(());
         }
-        if previous.firewall != declaration.firewall {
+        // In-place reconfigure owns routes/firewall only. Changing link
+        // identity would add a second TUN address or move tables without a
+        // reversible backend operation, so require a fresh Prepare instead.
+        if previous.firewall != declaration.firewall
+            || previous.table_id != declaration.table_id
+            || previous.overlay_router_ipv4 != declaration.overlay_router_ipv4
+            || previous.effective_mtu != declaration.effective_mtu
+        {
             return Err(NetworkError::InvalidTransition);
         }
 
+        // Persist recovery intent before touching either declaration. A crash
+        // or a failed restoration must never leave a durable `Suspended`
+        // record that a later Resume request could activate. RollingBack is a
+        // poisoned session: only rollback/orphan recovery may operate on it.
+        {
+            let record = self
+                .record
+                .as_mut()
+                .ok_or(NetworkError::InvalidTransition)?;
+            record.phase = TransactionPhase::RollingBack;
+            record.recovery_candidate = Some(declaration.clone());
+            self.journal.store(record)?;
+        }
         let applied = (|| {
             // Cleanup may mutate part of the old rules before returning an
             // error. It belongs to the rollback transaction just as much as
@@ -370,14 +399,10 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             self.backend.prepare_firewall(&declaration)
         })();
         if let Err(error) = applied {
-            let _ = self.backend.remove_firewall(&declaration);
-            let _ = self.backend.remove_routes(&declaration);
-            let restored = self
-                .backend
-                .prepare_link(&previous)
-                .and_then(|_| self.backend.prepare_routes(&previous))
-                .and_then(|_| self.backend.prepare_firewall(&previous));
-            return restored.and(Err(error));
+            return match self.restore_suspended_after_reconfigure(&previous_record, &declaration) {
+                Ok(()) => Err(error),
+                Err(recovery_error) => Err(recovery_error),
+            };
         }
         let mut replacement_record = previous_record.clone();
         replacement_record.owner = owner;
@@ -386,21 +411,42 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             // Keep the in-memory record and durable journal aligned with the
             // network state. A journal failure must not leave a new owner
             // generation pointing at a declaration that cannot be recovered.
-            let _ = self
-                .backend
-                .remove_firewall(&replacement_record.declaration);
-            let _ = self.backend.remove_routes(&replacement_record.declaration);
-            let restored = self
-                .backend
-                .prepare_link(&previous_record.declaration)
-                .and_then(|_| self.backend.prepare_routes(&previous_record.declaration))
-                .and_then(|_| self.backend.prepare_firewall(&previous_record.declaration));
-            if restored.is_ok() {
-                let _ = self.journal.store(&previous_record);
-            }
-            return Err(error);
+            return match self.restore_suspended_after_reconfigure(
+                &previous_record,
+                &replacement_record.declaration,
+            ) {
+                Ok(()) => Err(error),
+                Err(recovery_error) => Err(recovery_error),
+            };
         }
         self.record = Some(replacement_record);
+        Ok(())
+    }
+
+    fn restore_suspended_after_reconfigure(
+        &mut self,
+        previous_record: &TransactionRecord,
+        candidate: &PrepareDeclaration,
+    ) -> Result<(), NetworkError> {
+        let mut first_error = None;
+        for result in [
+            self.backend.remove_firewall(candidate),
+            self.backend.remove_routes(candidate),
+            self.backend.prepare_link(&previous_record.declaration),
+            self.backend.prepare_routes(&previous_record.declaration),
+            self.backend.prepare_firewall(&previous_record.declaration),
+        ] {
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = first_error {
+            // Keep the in-memory and durable RollingBack phase. In particular,
+            // do not install a policy rule over partially restored routes.
+            return Err(error);
+        }
+        self.journal.store(previous_record)?;
+        self.record = Some(previous_record.clone());
         Ok(())
     }
 
@@ -433,6 +479,29 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         let steps = record.completed_steps;
 
         let mut first_error = None;
+        if let Some(candidate) = record.recovery_candidate.as_ref() {
+            let mut candidate_error = None;
+            for result in [
+                self.backend.remove_firewall(candidate),
+                self.backend.remove_routes(candidate),
+            ] {
+                if let Err(error) = result {
+                    candidate_error.get_or_insert(error);
+                }
+            }
+            if let Some(error) = candidate_error {
+                first_error.get_or_insert(error);
+            } else {
+                let current = self
+                    .record
+                    .as_mut()
+                    .ok_or(NetworkError::InvalidTransition)?;
+                current.recovery_candidate = None;
+                if let Err(error) = self.journal.store(current) {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
         macro_rules! cleanup_step {
             ($needed:expr, $operation:expr, $step:expr) => {
                 if $needed {
@@ -481,11 +550,9 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             STEP_LINK
         );
 
-        if self
-            .record
-            .as_ref()
-            .is_some_and(|record| record.completed_steps == 0)
-        {
+        if self.record.as_ref().is_some_and(|record| {
+            record.completed_steps == 0 && record.recovery_candidate.is_none()
+        }) {
             match self.journal.clear() {
                 Ok(()) => self.record = None,
                 Err(error) => {

@@ -9,10 +9,12 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const MAGIC: &[u8; 8] = b"CNDJNL01";
+const MAGIC_V1: &[u8; 8] = b"CNDJNL01";
+const MAGIC_V2: &[u8; 8] = b"CNDJNL02";
 const HEADER_LEN: usize = 8 + 1 + 2 + 1 + 4;
 const CHECKSUM_LEN: usize = 32;
-const MAX_JOURNAL_LEN: usize = HEADER_LEN + MAX_NETD_FRAME_LEN + CHECKSUM_LEN;
+const MAX_JOURNAL_LEN: usize =
+    HEADER_LEN + 3 * 3 + MAX_NETD_FRAME_LEN + 4 + MAX_NETD_FRAME_LEN + CHECKSUM_LEN;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub struct FileNetworkJournal {
@@ -96,14 +98,39 @@ fn encode_record(record: &TransactionRecord) -> Result<Vec<u8>, NetworkError> {
     {
         return Err(NetworkError::Journal);
     }
+    if record.recovery_candidate.is_some() && record.phase != TransactionPhase::RollingBack {
+        return Err(NetworkError::Journal);
+    }
     let request = NetdRequest {
         request_id: 1,
         owner: record.owner,
         operation: NetdOperation::Prepare(record.declaration.clone()),
     };
     let request = request.encode().map_err(|_| NetworkError::Journal)?;
-    let mut bytes = Vec::with_capacity(HEADER_LEN + request.len() + CHECKSUM_LEN);
-    bytes.extend_from_slice(MAGIC);
+    let recovery_request = record
+        .recovery_candidate
+        .as_ref()
+        .map(|declaration| {
+            NetdRequest {
+                request_id: 1,
+                owner: record.owner,
+                operation: NetdOperation::Prepare(declaration.clone()),
+            }
+            .encode()
+            .map_err(|_| NetworkError::Journal)
+        })
+        .transpose()?;
+    let mut bytes = Vec::with_capacity(
+        HEADER_LEN
+            + request.len()
+            + recovery_request.as_ref().map_or(0, |value| 4 + value.len())
+            + CHECKSUM_LEN,
+    );
+    bytes.extend_from_slice(if recovery_request.is_some() {
+        MAGIC_V2
+    } else {
+        MAGIC_V1
+    });
     bytes.push(match record.phase {
         TransactionPhase::Preparing => 1,
         TransactionPhase::Prepared => 2,
@@ -122,15 +149,26 @@ fn encode_record(record: &TransactionRecord) -> Result<Vec<u8>, NetworkError> {
             .to_be_bytes(),
     );
     bytes.extend_from_slice(&request);
+    if let Some(recovery_request) = recovery_request {
+        bytes.extend_from_slice(
+            &u32::try_from(recovery_request.len())
+                .map_err(|_| NetworkError::Journal)?
+                .to_be_bytes(),
+        );
+        bytes.extend_from_slice(&recovery_request);
+    }
     let checksum = Sha256::digest(&bytes);
     bytes.extend_from_slice(&checksum);
     Ok(bytes)
 }
 
 fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
-    if bytes.len() < HEADER_LEN + CHECKSUM_LEN || &bytes[..8] != MAGIC {
+    if bytes.len() < HEADER_LEN + CHECKSUM_LEN
+        || (&bytes[..8] != MAGIC_V1 && &bytes[..8] != MAGIC_V2)
+    {
         return Err(NetworkError::Journal);
     }
+    let version = &bytes[..8];
     let content_len = bytes.len() - CHECKSUM_LEN;
     if Sha256::digest(&bytes[..content_len]).as_slice() != &bytes[content_len..] {
         return Err(NetworkError::Journal);
@@ -182,20 +220,56 @@ fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
             .map_err(|_| NetworkError::Journal)?,
     ))
     .map_err(|_| NetworkError::Journal)?;
-    if request_len == 0
-        || request_len > MAX_NETD_FRAME_LEN
-        || request_header_end + request_len != content_len
-    {
+    if request_len == 0 || request_len > MAX_NETD_FRAME_LEN {
         return Err(NetworkError::Journal);
     }
-    let request = NetdRequest::decode(&bytes[request_header_end..content_len])
+    let request_end = request_header_end
+        .checked_add(request_len)
+        .ok_or(NetworkError::Journal)?;
+    if request_end > content_len {
+        return Err(NetworkError::Journal);
+    }
+    let request = NetdRequest::decode(&bytes[request_header_end..request_end])
         .map_err(|_| NetworkError::Journal)?;
     let NetdOperation::Prepare(declaration) = request.operation else {
         return Err(NetworkError::Journal);
     };
+    let recovery_candidate = if version == MAGIC_V1 {
+        if request_end != content_len {
+            return Err(NetworkError::Journal);
+        }
+        None
+    } else {
+        let recovery_header_end = request_end.checked_add(4).ok_or(NetworkError::Journal)?;
+        if recovery_header_end > content_len {
+            return Err(NetworkError::Journal);
+        }
+        let recovery_len = usize::try_from(u32::from_be_bytes(
+            bytes[request_end..recovery_header_end]
+                .try_into()
+                .map_err(|_| NetworkError::Journal)?,
+        ))
+        .map_err(|_| NetworkError::Journal)?;
+        let recovery_end = recovery_header_end
+            .checked_add(recovery_len)
+            .ok_or(NetworkError::Journal)?;
+        if recovery_len == 0 || recovery_len > MAX_NETD_FRAME_LEN || recovery_end != content_len {
+            return Err(NetworkError::Journal);
+        }
+        let recovery = NetdRequest::decode(&bytes[recovery_header_end..recovery_end])
+            .map_err(|_| NetworkError::Journal)?;
+        if recovery.owner != request.owner || phase != TransactionPhase::RollingBack {
+            return Err(NetworkError::Journal);
+        }
+        let NetdOperation::Prepare(candidate) = recovery.operation else {
+            return Err(NetworkError::Journal);
+        };
+        Some(candidate)
+    };
     Ok(TransactionRecord {
         owner: request.owner,
         declaration,
+        recovery_candidate,
         phase,
         completed_steps,
         sysctls,
