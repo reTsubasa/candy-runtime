@@ -28,7 +28,6 @@ const MAX_STATUS_BYTES: u64 = 256 * 1024;
 // reconnecting.  Once netd has committed SD-WAN, keep the Core and its dialers
 // alive during that hand-off instead of tearing down the whole data plane.
 const CORE_READINESS_RECOVERY_GRACE: Duration = Duration::from_secs(20);
-const PARTIAL_ROUTE_RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_ACTIVATION_BYTES: u64 = 64 * 1024;
 const CORE_TERMINATION_GRACE: Duration = Duration::from_secs(15);
 const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -2320,7 +2319,6 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     // failure.
     let mut committed_ready = true;
     let mut readiness_lost_since = None::<Instant>;
-    let mut last_partial_route_log = None::<Instant>;
     let mut rejected_activation = None::<PathBuf>;
     loop {
         match activation_pointer_state(&args) {
@@ -2492,7 +2490,6 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 {
                     committed_ready = true;
                     readiness_lost_since = None;
-                    last_partial_route_log = None;
                     if peer_loss_fallback {
                         match leave_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
                             .and_then(|_| {
@@ -2534,32 +2531,42 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     }
                 }
                 Ok(Some(ReadinessState::Degraded)) => {
-                    // Partial route loss is scoped to the unavailable route.
-                    // Keep netd steering and healthy route owners active so a
-                    // single peer cannot force a site-wide Proxy fallback.
-                    let should_log = last_partial_route_log
-                        .is_none_or(|logged| logged.elapsed() >= PARTIAL_ROUTE_RETRY_LOG_INTERVAL);
-                    if should_log {
-                        last_partial_route_log = Some(Instant::now());
-                        let evidence = read_core_status(
-                            &args.status,
-                            args.generation,
-                            child.id(),
-                            &readiness_token,
-                        )
-                        .ok()
-                        .flatten();
-                        eprintln!(
-                            "level=warn event=sdwan_partial_route_degraded generation={} action=preserve_healthy_routes_and_retry ready_routes={} required_routes={} active_peers={} configured_peers={}",
-                            args.generation,
-                            evidence.as_ref().map_or(0, |status| status.ready_route_owners),
-                            evidence.as_ref().map_or(0, |status| status.required_route_owners),
-                            evidence.as_ref().map_or(0, |status| status.active_peers),
-                            evidence.as_ref().map_or(0, |status| status.configured_peers),
-                        );
+                    // Until netd can withdraw individual failed prefixes, keeping
+                    // all steering active would blackhole their traffic in TUN.
+                    if committed_ready {
+                        let lost_since = readiness_lost_since.get_or_insert_with(Instant::now);
+                        if !peer_loss_fallback {
+                            if let Err(error) =
+                                enter_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
+                            {
+                                return retry_after_rollback(
+                                    &args,
+                                    &mut child,
+                                    &mut netd,
+                                    "SD-WAN degraded fallback failed",
+                                    "peer_loss_fallback_failed",
+                                    error,
+                                );
+                            }
+                            peer_loss_fallback = true;
+                            eprintln!(
+                                "level=warn event=sdwan_peer_loss_fallback generation={} source=candy_proxy reason=route_readiness_degraded error_code=peer_readiness_transient action=preserve_core_and_retry",
+                                args.generation
+                            );
+                        }
+                        if lost_since.elapsed() < CORE_READINESS_RECOVERY_GRACE {
+                            thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
                     }
-                    thread::sleep(Duration::from_millis(100));
-                    continue;
+                    return retry_after_rollback(
+                        &args,
+                        &mut child,
+                        &mut netd,
+                        "Candy Core lost full SD-WAN route readiness",
+                        "core_route_readiness_lost",
+                        anyhow::anyhow!("Candy Core has only partial route readiness"),
+                    );
                 }
                 Ok(Some(ReadinessState::ListenerReady)) => {
                     if committed_ready {
