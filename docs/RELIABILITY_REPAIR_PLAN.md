@@ -225,3 +225,43 @@ removed while any verification or packaging process is using them.
   session rejection, crash recovery of both declarations, repeated cleanup
   failure and successful restoration. Linux-only backend tests run zero cases
   on this macOS host; actual nft/netlink fault injection remains unverified.
+
+## Isolated candidate preparation follow-up
+
+- Both client and server reload paths now check signed route-owner coverage
+  before opening candidates. The server also rejects an inbound-listener
+  topology change before opening outbound connections. Previously a static
+  rejection could happen only after remote peers had accepted replacements.
+- Independent Peer groups prepare concurrently with at most eight workers and
+  a shared 15-second budget, leaving room within the 20-second outer request
+  limit for cancellation and the reply. A failed, stuck or panicked worker
+  does not discard already prepared candidates from unrelated groups. All
+  outstanding workers are aborted and joined before returning.
+- Alternatives within a Peer retain signed priority order. Each attempt gets
+  a share of the remaining budget so an unresponsive primary cannot prevent
+  attempting a working alternative. Candidate results include Peer context,
+  candidate index and explicit `peer_prepare_failed`/`peer_prepare_timeout`
+  events; Cloud has descriptions for both codes.
+- Before returning a prepared policy, every outbound route must have a prepared,
+  not-yet-closed owner (one healthy alternate is sufficient). Server inbound
+  expectations remain a distinct post-commit convergence case. Missing outbound
+  coverage returns `peer_preparation_pending`; Runtime keeps local steering and
+  ownership unchanged and retries the same publication after one second rather
+  than writing a permanent rejection. A newly published candidate bypasses that
+  retry delay. This prevents a partial preparation result from being mistaken
+  for readiness of all outbound routes.
+- Validation: Core process tests pass 26/26, covering failed/hung/healthy Peer
+  isolation, the concurrency cap, child cancellation and resource release,
+  task panic isolation, ordered alternatives, silent-primary fallback and route
+  coverage. Runtime agent tests pass 40/40, including a temporary preparation
+  failure that neither suspends steering nor writes a rejection. Core/Runtime
+  workspace checks, Cloud TypeScript checking and Cloud error-display tests
+  (5/5) pass.
+- **Still open:** this isolates preparation work, not forwarding failure
+  domains. Runtime still needs per-prefix fallback. Remote replacement commit
+  coordination and old-lane drain are unfinished. In addition, Core's current
+  application layer still aborts all old outbound dial tasks at policy commit;
+  those tasks own control connections, including lanes the packet actor might
+  retain. Per-Peer owner transfer must update future dial credentials and fence
+  late old-generation handoffs; simply keeping old tasks would reuse stale
+  authorization. These remain P0/P1 work. No remote push or node update.

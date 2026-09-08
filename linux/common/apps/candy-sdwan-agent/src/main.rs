@@ -861,6 +861,17 @@ fn request_core_transaction(
     let generation_matches =
         !matches!(action, CoreReloadAction::Prepare | CoreReloadAction::Commit)
             || response.generation == Some(args.generation);
+    if matches!(action, CoreReloadAction::Prepare) && !response.ok {
+        if let Some(detail) = response
+            .error
+            .as_deref()
+            .and_then(|error| error.strip_prefix("peer_preparation_pending:"))
+        {
+            return Err(anyhow::Error::new(CorePreparationPending(
+                detail.trim().to_owned(),
+            )));
+        }
+    }
     anyhow::ensure!(
         response.ok && generation_matches,
         "Candy Core rejected hot reload: {}",
@@ -2047,6 +2058,11 @@ fn hot_replace_activation(
     });
     if let Err(error) = prepared {
         abort_core_preparation(replacement, child, &transaction_id);
+        if error.downcast_ref::<CorePreparationPending>().is_some() {
+            eprintln!("level=warn event=sdwan_policy_prepare_retry generation={} transaction_id={} error_code=peer_preparation_pending steering=unchanged error={}",
+                replacement.generation, transaction_id, sanitize_log_value(&format!("{error:#}")));
+            return Err(error);
+        }
         // A receipt write failure must not turn a preparation rejection into
         // the caller's destructive transition-failure path.
         if let Err(receipt_error) =
@@ -2228,6 +2244,17 @@ fn hot_replace_activation(
 
 #[derive(Debug)]
 struct AppliedHotReloadPending(anyhow::Error);
+
+#[derive(Debug)]
+struct CorePreparationPending(String);
+
+impl std::fmt::Display for CorePreparationPending {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "candidate preparation pending: {}", self.0)
+    }
+}
+
+impl std::error::Error for CorePreparationPending {}
 
 #[derive(Debug)]
 struct HotReloadRecoveryRequired(anyhow::Error);
@@ -2516,6 +2543,8 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     let mut committed_ready = true;
     let mut readiness_lost_since = None::<Instant>;
     let mut rejected_activation = None::<PathBuf>;
+    let mut preparation_retry_target = None::<PathBuf>;
+    let mut next_preparation_retry = Instant::now();
     loop {
         // All recovery and candidate-inspection branches below may continue
         // early. Renew first so repeated transient states cannot starve netd.
@@ -2544,7 +2573,10 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                         continue;
                     }
                 };
-                if rejected_activation.as_ref() != replacement.activation_target.as_ref() {
+                if rejected_activation.as_ref() != replacement.activation_target.as_ref()
+                    && (preparation_retry_target != replacement.activation_target
+                        || Instant::now() >= next_preparation_retry)
+                {
                     match hot_replace_activation(
                         &args,
                         &replacement,
@@ -2561,6 +2593,13 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                         }
                         Ok(false) => {
                             rejected_activation = replacement.activation_target.clone();
+                        }
+                        Err(error) if error.downcast_ref::<CorePreparationPending>().is_some() => {
+                            // Keep old ownership/readiness and retry this
+                            // publication after backoff. A new candidate need
+                            // not wait for the previous candidate's deadline.
+                            preparation_retry_target = replacement.activation_target.clone();
+                            next_preparation_retry = Instant::now() + RETRY_INITIAL_DELAY;
                         }
                         Err(error) if error.downcast_ref::<AppliedHotReloadPending>().is_some() => {
                             // Core has crossed its commit point. Keep ownership
@@ -3043,6 +3082,7 @@ mod tests {
     #[derive(Clone, Copy, PartialEq)]
     enum ReloadFault {
         PrepareRejected,
+        PreparePending,
         CandidateChanged,
         LostCommitReply,
         CommitUnresolved,
@@ -3217,11 +3257,17 @@ mod tests {
                         }
                     }
                 }
-                let ok = !(action == "prepare" && fault == ReloadFault::PrepareRejected
+                let ok = !(action == "prepare"
+                    && matches!(
+                        fault,
+                        ReloadFault::PrepareRejected | ReloadFault::PreparePending
+                    )
                     || action == "commit" && fault == ReloadFault::CommitUnresolved);
                 let response = serde_json::json!({"schema_version":1,"ok":ok,
                     "generation": if matches!(action, "prepare" | "commit") { Some(7) } else { None },
-                    "error": if ok { None } else { Some("injected failure") }});
+                    "error": if ok { None } else if fault == ReloadFault::PreparePending {
+                        Some("peer_preparation_pending: required route owner is unreachable")
+                    } else { Some("injected failure") }});
                 let _ = stream.write_all(&serde_json::to_vec(&response).unwrap());
             }
         });
@@ -3291,6 +3337,18 @@ mod tests {
             .map(String::as_str)
             .collect();
         match fault {
+            ReloadFault::PreparePending => {
+                assert!(result
+                    .unwrap_err()
+                    .downcast_ref::<CorePreparationPending>()
+                    .is_some());
+                assert_eq!(operations, ["core:prepare", "core:abort"]);
+                assert!(!transition.core_suspended && !transition.steering_suspended);
+                assert!(
+                    !replacement.activation_ready.unwrap().exists(),
+                    "temporarily unreachable candidate must not publish a permanent rejection"
+                );
+            }
             ReloadFault::PrepareRejected | ReloadFault::CandidateChanged => {
                 assert!(!result.unwrap());
                 assert_eq!(operations, ["core:prepare", "core:abort"]);
@@ -3357,6 +3415,11 @@ mod tests {
     #[test]
     fn failed_preparation_preserves_live_steering() {
         exercise_prepared_hot_reload(ReloadFault::PrepareRejected);
+    }
+
+    #[test]
+    fn unavailable_prepared_route_is_retryable_without_mutating_live_steering() {
+        exercise_prepared_hot_reload(ReloadFault::PreparePending);
     }
 
     #[test]
