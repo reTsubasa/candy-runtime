@@ -11,6 +11,7 @@ unset CANDY_CORE_BINARY
 
 scripts/runtime_version_test.sh
 scripts/runtime_layout_test.sh
+scripts/runtime_preflight_test.sh
 linux/client/tests/candy_sdwan_runtime_test.sh
 linux/server/tests/candy_server_launcher_test.sh
 linux/server/tests/candy_server_product_command_test.sh

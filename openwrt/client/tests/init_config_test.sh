@@ -318,6 +318,20 @@ health_check_stub=$runtime_dir/health-check
 printf '%s\n' '#!/bin/sh' 'exit 0' > "$health_check_stub"
 chmod +x "$health_check_stub"
 CANDY_RUNTIME_HEALTH_CHECK=$health_check_stub
+# Inherited by every sourced-init subshell below. Never let a new lifecycle
+# branch persist its fault or activation state in the host's /etc or /var/lib.
+CANDY_FAULT_STATE_FILE=$runtime_dir/runtime-fault.json
+CANDY_SDWAN_STATE_DIR=$runtime_dir/sdwan
+CANDY_SDWAN_INSTANCE_ID_FILE=$CANDY_SDWAN_STATE_DIR/instance-id
+CANDY_SDWAN_GENERATION_FILE=$CANDY_SDWAN_STATE_DIR/generation
+CANDY_NETD_RUNTIME_DIR=$runtime_dir/netd
+CANDY_NETD_JOURNAL=$runtime_dir/netd.journal
+CANDY_EPOCH_DIRECTORY=$runtime_dir/epochs
+CANDY_PROVIDER_ACTIVATION_PENDING=$runtime_dir/provider-activation.pending
+CANDY_SERVICE_LOCK_DIR=$runtime_dir/service.lock
+CANDY_LIFECYCLE_FILE=$runtime_dir/candy.lifecycle
+CANDY_READY_FILE=$runtime_dir/client.ready
+CANDY_TRAFFIC_PATH_FILE=$runtime_dir/traffic-path-v1.json
 . "$repo_root/candy-client/candy.init"
 reload_ack='{"ok":true,"generation":2,"mode":"hot-policy","duration_ms":20,"error_code":null,"message":null}'
 parsed_reload_ack=$(printf '%s\n' \

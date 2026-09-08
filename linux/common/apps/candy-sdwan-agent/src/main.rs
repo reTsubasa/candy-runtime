@@ -2472,13 +2472,18 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     readiness_lost_since = None;
                     if peer_loss_fallback {
                         match leave_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
-                            .and_then(|_| write_runtime_activation_receipt(&args, "committed", None))
-                        {
+                            .and_then(|_| {
+                                write_runtime_activation_receipt(&args, "committed", None)
+                            }) {
                             Ok(()) => {
                                 peer_loss_fallback = false;
                                 eprintln!("level=info event=sdwan_recovered generation={} source=peer_reconnect", args.generation);
                             }
-                            Err(error) => eprintln!("level=warn event=sdwan_recovery_pending generation={} error={}", args.generation, sanitize_log_value(&format!("{error:#}"))),
+                            Err(error) => eprintln!(
+                                "level=warn event=sdwan_recovery_pending generation={} error={}",
+                                args.generation,
+                                sanitize_log_value(&format!("{error:#}"))
+                            ),
                         }
                     }
                 }
@@ -2488,7 +2493,9 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     if peer_loss_fallback {
                         if let Err(error) =
                             leave_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
-                                .and_then(|_| write_runtime_activation_receipt(&args, "committed", None))
+                                .and_then(|_| {
+                                    write_runtime_activation_receipt(&args, "committed", None)
+                                })
                         {
                             eprintln!(
                                 "level=warn event=sdwan_recovery_pending error_code=steering_resume_failed error={}",

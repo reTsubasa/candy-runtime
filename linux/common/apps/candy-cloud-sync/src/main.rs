@@ -654,6 +654,7 @@ struct LocalRuntimePerformance<'a> {
     schema_version: u8,
     observed_at_unix: u64,
     lifecycle: &'a str,
+    forwarding_active: bool,
     performance: &'a DerivedRuntimePerformance,
     paths: &'a [RuntimePathTelemetry],
 }
@@ -2350,13 +2351,6 @@ fn report_runtime_telemetry(
         previous_sample.as_ref(),
         current_sample.as_ref(),
     ) {
-        Ok(_)
-            if core_status
-                .as_ref()
-                .is_some_and(|status| status.steering_suspended) =>
-        {
-            Vec::new()
-        }
         Ok(paths) => paths,
         Err(error) => {
             eprintln!(
@@ -2381,6 +2375,7 @@ fn report_runtime_telemetry(
             schema_version: 1,
             observed_at_unix: unix_now()?,
             lifecycle: local_lifecycle,
+            forwarding_active: core_status.as_ref().is_some_and(core_data_plane_ready),
             performance: &performance,
             paths: &path_performance,
         },
@@ -3259,7 +3254,6 @@ fn validate_core_path_status(status: &CoreRuntimeStatus) -> Result<()> {
             || path.lost_packets > path.sent_packets
             || path.rtt_micros > 60_000_000
             || path.rtt_variance_micros > 60_000_000
-            || path.rtt_sample_count == 0
             || path.path_mtu < 1_200
             || path.congestion_window_bytes == 0
             || path.reconnects > status.reconnects
