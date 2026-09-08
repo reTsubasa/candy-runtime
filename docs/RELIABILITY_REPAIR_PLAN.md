@@ -92,9 +92,45 @@ removed while any verification or packaging process is using them.
 | --- | --- | --- |
 | P0 | Make-before-break policy cutover with old/new stream overlap and bounded drain | Core staged lane transaction, netd dual-generation owner, fault-injection test proving old lane remains usable until replacement `stream_ready`; then real two-node traffic test |
 | P0 | Preserve established TCP/NAT state across egress switch | netd connection/NAT ownership design and packet-flow test; cannot be inferred from process hot reload |
-| P1 | Handle clean EOF, task panic and cancellation as typed peer events | Core event contract test for EOF/reset/panic/cancel, Runtime reconnect without process restart, Cloud event projection |
+| P1 | Handle clean EOF, task panic and cancellation as typed peer events | Core loopback EOF/dialer-wakeup and task identity/panic/cancel tests pass; events retire only the matching connection. Live Cloud/Runtime fault-injection remains separate. |
 | P1 | Scope partial route loss to affected prefix/peer | per-route readiness and fallback tests with one healthy unrelated route |
 | P1 | End-to-end Cloud/Core/Runtime event convergence | signed generation plus event-id/sequence contract and integration test |
 | P2 | Multiple independently recoverable Streams per Peer | stream slot lifecycle contract, bounded scheduler, per-stream telemetry and backpressure tests |
 | P2 | Actual MySQL receipt regression and loopback QUIC suite | CI database job and permissioned network runner; local skip must remain visible |
 | P2 | OpenWrt helper/netd restart race | device reproduction with netd restart during reconfigure; verify retry code and no stale owner |
+
+## Follow-up verification and corrections
+
+- **P0 fixed in source:** policy replacement recreated the packet pump with TX
+  sequence 1 even when the authenticated QUIC connection remained installed.
+  An unchanged receiver could therefore reject fresh traffic as replay. The new
+  pump inherits TX sequence (including exhaustion) for the same local attachment
+  epoch. Retained connections keep RX replay windows; newly authenticated
+  connections get fresh RX windows. Changed identity or incompatible replay
+  limits reject the replacement before mutating the live supervisor.
+- **P1 fixed in source:** duplicate delivery of the same Peer connection no
+  longer closes that connection or resets its replay state.
+- **P1 corrected:** the previous `peer_stream_task_failed` implementation set a
+  transient global status without retiring the failed connection. JoinSet now
+  carries attachment and stable connection identity into the existing failure
+  handler, which records path evidence and closes only the matching connection
+  to wake the dialer. Shutdown cancellation is explicitly drained. EOF uses a
+  typed `UnexpectedEof` error, including partial-frame context.
+- **Validation:** 21 SD-WAN tests passed with real local QUIC sockets, including
+  4096 frames in each direction, backpressure, final-peer reconnection, EOF and
+  panic/cancellation, same-generation reuse and unready candidate rejection.
+  The transport truncated-frame regression and the complete
+  `candy-tun` suite passed; its 15 routing tests include reload sequence/replay
+  continuity and failed-replacement isolation. Cloud error/audit/topology tests
+  passed 30/30. Core and Runtime workspace checks passed.
+- Earlier sandbox failures were environment restrictions; once socket access
+  was allowed, several old fixtures also needed correction: they waited for
+  readiness before negotiating streams, or treated `stream_ready` as data.
+  The corrected tests pass; they were not merely waived as environment failures.
+- Runtime commit `21edaa2` did **not** implement per-prefix fallback: retaining
+  netd steering without withdrawing failed prefixes could blackhole traffic.
+  `368df06` restored safe existing fallback. R04's per-prefix work stays open.
+- **Still open:** R02/R03 make-before-break, bounded old-lane drain and netd
+  staged ownership; established flow handling across different public egress
+  addresses; end-to-end live fault-event convergence. None of these is proven
+  by the local replay fix or a successful compile. No node update was performed.
