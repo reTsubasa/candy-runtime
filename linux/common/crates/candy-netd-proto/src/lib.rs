@@ -249,6 +249,7 @@ pub enum NetdOperation {
     Reconfigure(PrepareDeclaration),
     Resume,
     Drain { now_mono_ms: u64 },
+    WithdrawPrefixes { prefixes: Vec<Ipv4Prefix> },
 }
 
 impl NetdOperation {
@@ -264,6 +265,7 @@ impl NetdOperation {
             Self::Reconfigure(_) => 8,
             Self::Resume => 9,
             Self::Drain { .. } => 10,
+            Self::WithdrawPrefixes { .. } => 11,
         }
     }
 }
@@ -311,6 +313,15 @@ impl NetdRequest {
         if let NetdOperation::Drain { now_mono_ms } = &self.operation {
             varint(*now_mono_ms, &mut out);
         }
+        if let NetdOperation::WithdrawPrefixes { prefixes } = &self.operation {
+            if prefixes.is_empty() || prefixes.len() > MAX_ROUTES {
+                return Err(NetdProtocolError::InvalidRequest);
+            }
+            varint(prefixes.len() as u64, &mut out);
+            for prefix in prefixes {
+                encode_prefix(*prefix, &mut out);
+            }
+        }
         ensure_frame(&out)?;
         Ok(out)
     }
@@ -345,6 +356,18 @@ impl NetdRequest {
             10 => NetdOperation::Drain {
                 now_mono_ms: reader.varint()?,
             },
+            11 => {
+                let count = usize::try_from(reader.varint()?)
+                    .map_err(|_| NetdProtocolError::InvalidRequest)?;
+                if count == 0 || count > MAX_ROUTES {
+                    return Err(NetdProtocolError::InvalidRequest);
+                }
+                let mut prefixes = Vec::with_capacity(count);
+                for _ in 0..count {
+                    prefixes.push(reader.prefix()?);
+                }
+                NetdOperation::WithdrawPrefixes { prefixes }
+            }
             _ => return Err(NetdProtocolError::UnknownEnum),
         };
         reader.finish()?;
@@ -512,6 +535,10 @@ pub enum ResponseBody {
     Drained {
         generation: u64,
     },
+    PrefixesWithdrawn {
+        generation: u64,
+        count: u64,
+    },
     Error(ErrorCode),
 }
 
@@ -540,6 +567,7 @@ impl NetdResponse {
             ResponseBody::Reconfigured { .. } => 9,
             ResponseBody::Resumed { .. } => 10,
             ResponseBody::Drained { .. } => 11,
+            ResponseBody::PrefixesWithdrawn { .. } => 12,
         };
         varint(tag, &mut out);
         varint(self.request_id, &mut out);
@@ -564,6 +592,11 @@ impl NetdResponse {
             ResponseBody::Drained { generation } => {
                 valid_generation(generation)?;
                 varint(generation, &mut out);
+            }
+            ResponseBody::PrefixesWithdrawn { generation, count } => {
+                valid_generation(generation)?;
+                varint(generation, &mut out);
+                varint(count, &mut out);
             }
             ResponseBody::Status { phase, generation } => {
                 if phase != SessionPhase::Stopped {
@@ -632,6 +665,10 @@ impl NetdResponse {
             },
             11 => ResponseBody::Drained {
                 generation: reader.varint()?,
+            },
+            12 => ResponseBody::PrefixesWithdrawn {
+                generation: reader.varint()?,
+                count: reader.varint()?,
             },
             _ => return Err(NetdProtocolError::UnknownEnum),
         };
@@ -870,6 +907,12 @@ impl NetdSession {
                 }
                 self.phase = SessionPhase::Active;
                 self.replacement_pending = false;
+                Ok(())
+            }
+            NetdOperation::WithdrawPrefixes { .. } => {
+                if self.phase != SessionPhase::Active {
+                    return Err(NetdSessionError::InvalidTransition);
+                }
                 Ok(())
             }
         }

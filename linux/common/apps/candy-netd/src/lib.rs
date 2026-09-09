@@ -353,6 +353,7 @@ impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
             NetdOperation::Reconfigure(_) => "reconfigure",
             NetdOperation::Resume => "resume",
             NetdOperation::Drain { .. } => "drain",
+            NetdOperation::WithdrawPrefixes { .. } => "withdraw_prefixes",
         };
         let (response, descriptor) = self.process(request, peer)?;
         match &response.body {
@@ -539,6 +540,18 @@ impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
                 }
                 ResponseBody::Drained {
                     generation: request.owner.generation,
+                }
+            }
+            NetdOperation::WithdrawPrefixes { prefixes } => {
+                if let Err(error) = self.network.withdraw_prefixes(request.owner, &prefixes) {
+                    return Ok((
+                        error_response(request.request_id, network_error_code(error)),
+                        None,
+                    ));
+                }
+                ResponseBody::PrefixesWithdrawn {
+                    generation: request.owner.generation,
+                    count: prefixes.len() as u64,
                 }
             }
         };

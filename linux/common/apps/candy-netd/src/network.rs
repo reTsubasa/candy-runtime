@@ -1,4 +1,4 @@
-use candy_netd_proto::{LeaseOwner, PrepareDeclaration};
+use candy_netd_proto::{Ipv4Prefix, LeaseOwner, PrepareDeclaration};
 use thiserror::Error;
 
 const STEP_LINK: u16 = 1 << 0;
@@ -103,6 +103,20 @@ pub trait NetworkBackend {
     fn deactivate_link(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError>;
     fn remove_firewall(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError>;
     fn remove_routes(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError>;
+    fn withdraw_prefixes(
+        &mut self,
+        declaration: &PrepareDeclaration,
+        prefixes: &[Ipv4Prefix],
+    ) -> Result<(), NetworkError> {
+        let mut scoped = declaration.clone();
+        scoped
+            .routes
+            .retain(|route| prefixes.contains(&route.prefix));
+        if scoped.routes.is_empty() {
+            return Ok(());
+        }
+        self.remove_routes(&scoped)
+    }
     fn remove_link(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError>;
     fn restore_sysctls(
         &mut self,
@@ -135,6 +149,14 @@ pub trait NetworkController {
         self.commit(owner)
     }
     fn drain_old(&mut self, _owner: LeaseOwner, _now_mono_ms: u64) -> Result<(), NetworkError> {
+        Err(NetworkError::InvalidTransition)
+    }
+    fn withdraw_prefixes(
+        &mut self,
+        owner: LeaseOwner,
+        prefixes: &[candy_netd_proto::Ipv4Prefix],
+    ) -> Result<u64, NetworkError> {
+        let _ = (owner, prefixes);
         Err(NetworkError::InvalidTransition)
     }
     fn rollback(&mut self, owner: LeaseOwner) -> Result<(), NetworkError>;
@@ -395,6 +417,26 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         }
         ensure_owner(record.owner, owner)?;
         self.cleanup_record()
+    }
+
+    pub fn withdraw_prefixes(
+        &mut self,
+        owner: LeaseOwner,
+        prefixes: &[Ipv4Prefix],
+    ) -> Result<(), NetworkError> {
+        if prefixes.is_empty() {
+            return Err(NetworkError::InvalidTransition);
+        }
+        let record = self
+            .record
+            .as_ref()
+            .ok_or(NetworkError::InvalidTransition)?;
+        ensure_owner(record.owner, owner)?;
+        if record.phase != TransactionPhase::Active {
+            return Err(NetworkError::InvalidTransition);
+        }
+        let declaration = record.declaration.clone();
+        self.backend.withdraw_prefixes(&declaration, prefixes)
     }
 
     pub fn recover_orphan(
@@ -880,6 +922,27 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkController for NetworkTransact
 
     fn drain_old(&mut self, owner: LeaseOwner, now_mono_ms: u64) -> Result<(), NetworkError> {
         Self::drain_old(self, owner, now_mono_ms)
+    }
+
+    fn withdraw_prefixes(
+        &mut self,
+        owner: LeaseOwner,
+        prefixes: &[candy_netd_proto::Ipv4Prefix],
+    ) -> Result<u64, NetworkError> {
+        let record = self
+            .record
+            .as_ref()
+            .ok_or(NetworkError::InvalidTransition)?;
+        ensure_owner(record.owner, owner)?;
+        if record.phase != TransactionPhase::Active || prefixes.is_empty() {
+            return Err(NetworkError::InvalidTransition);
+        }
+        let declaration = record.declaration.scoped_to_prefixes(prefixes);
+        if declaration.routes.is_empty() {
+            return Err(NetworkError::InvalidTransition);
+        }
+        self.backend.remove_routes(&declaration)?;
+        Ok(declaration.routes.len() as u64)
     }
 
     fn rollback(&mut self, owner: LeaseOwner) -> Result<(), NetworkError> {
