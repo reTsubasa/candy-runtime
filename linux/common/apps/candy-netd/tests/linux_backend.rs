@@ -271,18 +271,6 @@ fn real_linux_backend_prepares_commits_and_rolls_back() {
         .all(|line| line.contains("from 172.31.254.0/24")));
     assert!(owned.iter().all(|line| !line.contains(" none ")));
     for destination in ["10.255.253.1", "10.255.254.1"] {
-        for (command, args) in [
-            ("ip", vec!["-4", "rule", "show"]),
-            ("ip", vec!["-4", "route", "show", "table", "20999"]),
-            ("ip", vec!["-4", "addr", "show", "dev", "candy0"]),
-        ] {
-            let output = Command::new(command).args(&args).output().unwrap();
-            eprintln!(
-                "$ {command} {}\n{}",
-                args.join(" "),
-                String::from_utf8_lossy(&output.stdout)
-            );
-        }
         let output = Command::new("ip")
             .args(["-4", "route", "get", destination, "from", "172.31.254.2"])
             .output()
