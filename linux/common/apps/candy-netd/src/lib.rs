@@ -611,5 +611,6 @@ fn network_error_code(error: NetworkError) -> ErrorCode {
         NetworkError::InvalidTransition => ErrorCode::InvalidRequest,
         NetworkError::Backend => ErrorCode::PreflightFailed,
         NetworkError::Journal => ErrorCode::SystemFailure,
+        NetworkError::DrainPending => ErrorCode::GenerationConflict,
     }
 }

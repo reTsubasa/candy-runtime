@@ -15,6 +15,7 @@ pub enum TransactionPhase {
     Active,
     Suspended,
     RollingBack,
+    Draining,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -25,6 +26,9 @@ pub struct TransactionRecord {
     pub phase: TransactionPhase,
     pub completed_steps: u16,
     pub sysctls: Vec<SysctlChange>,
+    /// Monotonic deadline after which an old declaration may be retired.
+    /// Zero means the caller must explicitly drain without a time gate.
+    pub drain_deadline_mono_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -65,6 +69,8 @@ pub enum NetworkError {
     Backend,
     #[error("network transaction journal operation failed")]
     Journal,
+    #[error("network transaction is still draining the previous declaration")]
+    DrainPending,
 }
 
 pub trait NetworkBackend {
@@ -115,6 +121,19 @@ pub trait NetworkController {
         declaration: PrepareDeclaration,
     ) -> Result<(), NetworkError>;
     fn commit(&mut self, owner: LeaseOwner) -> Result<(), NetworkError>;
+    /// Commit a prepared replacement while retaining the old declaration.
+    /// The default keeps older controllers source-compatible.
+    fn commit_with_drain(
+        &mut self,
+        owner: LeaseOwner,
+        _now_mono_ms: u64,
+        _drain_timeout_ms: u64,
+    ) -> Result<(), NetworkError> {
+        self.commit(owner)
+    }
+    fn drain_old(&mut self, _owner: LeaseOwner, _now_mono_ms: u64) -> Result<(), NetworkError> {
+        Err(NetworkError::InvalidTransition)
+    }
     fn rollback(&mut self, owner: LeaseOwner) -> Result<(), NetworkError>;
     fn renew_lease(&mut self, owner: LeaseOwner) -> Result<(), NetworkError>;
     fn update_mtu(&mut self, owner: LeaseOwner, effective_mtu: u16) -> Result<(), NetworkError>;
@@ -169,7 +188,8 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
                 TransactionPhase::Prepared | TransactionPhase::Active => Ok(()),
                 TransactionPhase::Preparing
                 | TransactionPhase::Suspended
-                | TransactionPhase::RollingBack => Err(NetworkError::InvalidTransition),
+                | TransactionPhase::RollingBack
+                | TransactionPhase::Draining => Err(NetworkError::InvalidTransition),
             };
         }
 
@@ -181,6 +201,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             phase: TransactionPhase::Preparing,
             completed_steps: 0,
             sysctls: Vec::new(),
+            drain_deadline_mono_ms: 0,
         };
         self.journal.store(&record)?;
         self.record = Some(record);
@@ -224,11 +245,44 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
     }
 
     pub fn commit(&mut self, owner: LeaseOwner) -> Result<(), NetworkError> {
+        self.commit_with_drain(owner, 0, 0)
+    }
+
+    pub fn commit_with_drain(
+        &mut self,
+        owner: LeaseOwner,
+        now_mono_ms: u64,
+        drain_timeout_ms: u64,
+    ) -> Result<(), NetworkError> {
         let record = self
             .record
             .as_ref()
             .ok_or(NetworkError::InvalidTransition)?;
         ensure_owner(record.owner, owner)?;
+        if record.phase == TransactionPhase::Draining {
+            return Ok(());
+        }
+        if record.phase == TransactionPhase::Prepared {
+            if let Some(candidate) = record.recovery_candidate.clone() {
+                let result = (|| {
+                    self.backend.activate_link(&candidate)?;
+                    self.backend.install_policy_rule(&candidate)?;
+                    let record = self
+                        .record
+                        .as_mut()
+                        .ok_or(NetworkError::InvalidTransition)?;
+                    record.phase = TransactionPhase::Draining;
+                    record.drain_deadline_mono_ms = now_mono_ms.saturating_add(drain_timeout_ms);
+                    self.journal.store(record)
+                })();
+                if result.is_err() {
+                    let _ = self.backend.remove_policy_rule(&candidate);
+                    let _ = self.backend.remove_firewall(&candidate);
+                    let _ = self.backend.remove_routes(&candidate);
+                }
+                return result;
+            }
+        }
         if record.phase == TransactionPhase::Active {
             return Ok(());
         }
@@ -247,6 +301,40 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             let _ = self.cleanup_record();
         }
         result
+    }
+
+    pub fn drain_old(&mut self, owner: LeaseOwner, now_mono_ms: u64) -> Result<(), NetworkError> {
+        let record = self
+            .record
+            .as_ref()
+            .ok_or(NetworkError::InvalidTransition)?;
+        ensure_owner(record.owner, owner)?;
+        if record.phase != TransactionPhase::Draining {
+            return Err(NetworkError::InvalidTransition);
+        }
+        if record.drain_deadline_mono_ms != 0 && now_mono_ms < record.drain_deadline_mono_ms {
+            return Err(NetworkError::DrainPending);
+        }
+        let candidate = record
+            .recovery_candidate
+            .clone()
+            .ok_or(NetworkError::InvalidTransition)?;
+        let previous = record.declaration.clone();
+        // The candidate rule is installed first. Removing the old declaration
+        // therefore cannot create a forwarding gap; different table IDs keep
+        // route/rule deletion scoped to the old generation.
+        self.backend.remove_policy_rule(&previous)?;
+        self.backend.remove_firewall(&previous)?;
+        self.backend.remove_routes(&previous)?;
+        let record = self
+            .record
+            .as_mut()
+            .ok_or(NetworkError::InvalidTransition)?;
+        record.declaration = candidate;
+        record.recovery_candidate = None;
+        record.phase = TransactionPhase::Active;
+        record.drain_deadline_mono_ms = 0;
+        self.journal.store(record)
     }
 
     pub fn rollback(&mut self, owner: LeaseOwner) -> Result<(), NetworkError> {
@@ -352,6 +440,9 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         // the immutable generation. The owner is committed below only after
         // the replacement network state has been prepared successfully.
         ensure_reconfigure_owner(record.owner, owner)?;
+        if record.phase == TransactionPhase::Active {
+            return self.prepare_replacement(owner, declaration);
+        }
         if record.phase != TransactionPhase::Suspended {
             return Err(NetworkError::InvalidTransition);
         }
@@ -407,6 +498,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         let mut replacement_record = previous_record.clone();
         replacement_record.owner = owner;
         replacement_record.declaration = declaration;
+        replacement_record.drain_deadline_mono_ms = 0;
         if let Err(error) = self.journal.store(&replacement_record) {
             // Keep the in-memory record and durable journal aligned with the
             // network state. A journal failure must not leave a new owner
@@ -421,6 +513,73 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         }
         self.record = Some(replacement_record);
         Ok(())
+    }
+
+    /// Prepare a replacement while retaining the current active declaration.
+    /// A distinct policy table is mandatory because the Linux backend cannot
+    /// tag two generations that share the same route/rule key.
+    fn prepare_replacement(
+        &mut self,
+        owner: LeaseOwner,
+        declaration: PrepareDeclaration,
+    ) -> Result<(), NetworkError> {
+        let record = self
+            .record
+            .as_ref()
+            .ok_or(NetworkError::InvalidTransition)?;
+        ensure_reconfigure_owner(record.owner, owner)?;
+        if record.declaration == declaration {
+            return Ok(());
+        }
+        if record.declaration.table_id == declaration.table_id
+            || record.declaration.firewall != declaration.firewall
+            || record.declaration.overlay_router_ipv4 != declaration.overlay_router_ipv4
+            || record.declaration.effective_mtu != declaration.effective_mtu
+        {
+            return Err(NetworkError::InvalidTransition);
+        }
+        if let Some(candidate) = &record.recovery_candidate {
+            return if candidate == &declaration {
+                Ok(())
+            } else {
+                Err(NetworkError::Conflict)
+            };
+        }
+        {
+            let record = self
+                .record
+                .as_mut()
+                .ok_or(NetworkError::InvalidTransition)?;
+            record.recovery_candidate = Some(declaration.clone());
+            record.phase = TransactionPhase::Preparing;
+            record.drain_deadline_mono_ms = 0;
+            self.journal.store(record)?;
+        }
+        let prepared = (|| {
+            declaration.validate().map_err(|_| NetworkError::Backend)?;
+            self.backend.preflight(&declaration)?;
+            self.backend.prepare_link(&declaration)?;
+            self.backend.prepare_routes(&declaration)?;
+            self.backend.prepare_firewall(&declaration)
+        })();
+        if let Err(error) = prepared {
+            let _ = self.backend.remove_firewall(&declaration);
+            let _ = self.backend.remove_routes(&declaration);
+            let record = self
+                .record
+                .as_mut()
+                .ok_or(NetworkError::InvalidTransition)?;
+            record.recovery_candidate = None;
+            record.phase = TransactionPhase::Active;
+            let _ = self.journal.store(record);
+            return Err(error);
+        }
+        let record = self
+            .record
+            .as_mut()
+            .ok_or(NetworkError::InvalidTransition)?;
+        record.phase = TransactionPhase::Prepared;
+        self.journal.store(record)
     }
 
     fn restore_suspended_after_reconfigure(
@@ -602,6 +761,19 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkController for NetworkTransact
 
     fn commit(&mut self, owner: LeaseOwner) -> Result<(), NetworkError> {
         Self::commit(self, owner)
+    }
+
+    fn commit_with_drain(
+        &mut self,
+        owner: LeaseOwner,
+        now_mono_ms: u64,
+        drain_timeout_ms: u64,
+    ) -> Result<(), NetworkError> {
+        Self::commit_with_drain(self, owner, now_mono_ms, drain_timeout_ms)
+    }
+
+    fn drain_old(&mut self, owner: LeaseOwner, now_mono_ms: u64) -> Result<(), NetworkError> {
+        Self::drain_old(self, owner, now_mono_ms)
     }
 
     fn rollback(&mut self, owner: LeaseOwner) -> Result<(), NetworkError> {

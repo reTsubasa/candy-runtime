@@ -41,6 +41,7 @@ fn record() -> TransactionRecord {
         recovery_candidate: None,
         completed_steps: 15,
         sysctls: Vec::new(),
+        drain_deadline_mono_ms: 0,
     }
 }
 
@@ -68,7 +69,7 @@ fn journal_round_trips_privately_and_clear_is_durable() {
     };
     recovery_intent.recovery_candidate = Some(candidate);
     journal.store(&recovery_intent).unwrap();
-    assert_eq!(&fs::read(&path).unwrap()[..8], b"CNDJNL02");
+    assert_eq!(&fs::read(&path).unwrap()[..8], b"CNDJNL03");
     assert_eq!(
         journal.load().unwrap(),
         Some(recovery_intent),
