@@ -339,6 +339,7 @@ impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
         stream: &UnixStream,
         peer: PeerCredentials,
     ) -> Result<(), ServiceError> {
+        let started = std::time::Instant::now();
         let request = recv_request(stream)?;
         let request_id = request.request_id;
         let generation = request.owner.generation;
@@ -356,12 +357,16 @@ impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
             NetdOperation::WithdrawPrefixes { .. } => "withdraw_prefixes",
         };
         let (response, descriptor) = self.process(request, peer)?;
+        let duration_ms = started.elapsed().as_millis();
         match &response.body {
             ResponseBody::Error(code) => eprintln!(
-                "level=warn component=candy-netd event=request_rejected request_id={request_id} generation={generation} operation={operation} code={code:?}"
+                "level=warn component=candy-netd event=request_rejected request_id={request_id} generation={generation} operation={operation} duration_ms={duration_ms} code={code:?}"
+            ),
+            ResponseBody::PrefixesWithdrawn { count, .. } => eprintln!(
+                "level=info component=candy-netd event=request_completed request_id={request_id} generation={generation} operation={operation} duration_ms={duration_ms} withdrawn_prefix_count={count}"
             ),
             _ if !matches!(operation, "status" | "lease_renew") => eprintln!(
-                "level=info component=candy-netd event=request_completed request_id={request_id} generation={generation} operation={operation}"
+                "level=info component=candy-netd event=request_completed request_id={request_id} generation={generation} operation={operation} duration_ms={duration_ms}"
             ),
             _ => {}
         }
