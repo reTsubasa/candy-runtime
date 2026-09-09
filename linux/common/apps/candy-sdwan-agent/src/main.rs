@@ -2258,7 +2258,8 @@ fn hot_replace_activation(
                     sanitize_log_value(&format!("{drain_error:#}"))
                 );
                 return Err(anyhow::Error::new(AppliedHotReloadPending(
-                    anyhow::Error::from(drain_error).context("drain committed replacement before fallback"),
+                    anyhow::Error::from(drain_error)
+                        .context("drain committed replacement before fallback"),
                 )));
             }
         }
@@ -2275,7 +2276,8 @@ fn hot_replace_activation(
             let now = monotonic_ms().context("read monotonic clock before fallback drain")?;
             if let Err(drain_error) = netd.drain_old(now) {
                 return Err(anyhow::Error::new(AppliedHotReloadPending(
-                    anyhow::Error::from(drain_error).context("drain superseded replacement before fallback"),
+                    anyhow::Error::from(drain_error)
+                        .context("drain superseded replacement before fallback"),
                 )));
             }
         }
