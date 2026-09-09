@@ -429,7 +429,8 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             {
                 return Ok(false);
             }
-            return self.drain_old(record.owner, now_mono_ms).map(|_| true);
+            let candidate_owner = record.recovery_candidate_owner.unwrap_or(record.owner);
+            return self.drain_old(candidate_owner, now_mono_ms).map(|_| true);
         }
         // RollingBack is a poisoned reconfigure session, not a healthy lease.
         // Recover it immediately even when the former owner process is still
@@ -641,6 +642,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
                 .as_mut()
                 .ok_or(NetworkError::InvalidTransition)?;
             record.recovery_candidate = Some(declaration.clone());
+            record.recovery_candidate_owner = Some(owner);
             record.phase = TransactionPhase::Preparing;
             record.drain_deadline_mono_ms = 0;
             self.journal.store(record)?;

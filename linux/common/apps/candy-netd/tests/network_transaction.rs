@@ -551,6 +551,35 @@ fn orphaned_prepared_replacement_discards_candidate_and_keeps_old_active() {
 }
 
 #[test]
+fn orphaned_draining_replacement_promotes_candidate_owner() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let journal = MemoryJournal::default();
+    let retained = journal.clone();
+    let mut transaction =
+        NetworkTransaction::new(RecordingBackend(events.clone()), journal).unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+    let mut replacement = declaration();
+    replacement.table_id += 1;
+    let replacement_owner = LeaseOwner {
+        generation: 8,
+        lease_deadline_mono_ms: 60_000,
+        ..owner()
+    };
+    transaction
+        .reconfigure(replacement_owner, replacement)
+        .unwrap();
+    transaction
+        .commit_with_drain(replacement_owner, 1_000, 5_000)
+        .unwrap();
+    drop(transaction);
+
+    let mut recovered = NetworkTransaction::new(RecordingBackend(events), retained).unwrap();
+    assert!(recovered.recover_orphan(false, 6_000).unwrap());
+    assert_eq!(recovered.retained_owner(), Some(replacement_owner));
+}
+
+#[test]
 fn hot_reconfigure_cleanup_failure_poisoned_session_cannot_resume() {
     for fail_at in ["remove_firewall", "remove_routes"] {
         let events = Rc::new(RefCell::new(Vec::new()));
