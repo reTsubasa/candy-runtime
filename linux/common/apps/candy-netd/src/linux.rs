@@ -494,7 +494,11 @@ mod backend {
                         .protocol(RouteProtocol::Static)
                         .kind(RouteType::Throw)
                         .build();
-                    let _ = handle.route().add(route).execute().await;
+                    if let Err(error) = handle.route().add(route).execute().await {
+                        if !route_add_is_idempotent(&error) {
+                            return Err(NetworkError::Backend);
+                        }
+                    }
                 }
                 Ok(())
             })
