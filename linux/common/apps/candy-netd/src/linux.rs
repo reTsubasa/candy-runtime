@@ -464,6 +464,28 @@ mod backend {
             self.with_async(async move { Self::delete_routes(&handle, &plan).await })
         }
 
+        fn withdraw_prefixes(&mut self, declaration: &PrepareDeclaration, prefixes: &[Ipv4Prefix]) -> Result<(), NetworkError> {
+            let mut scoped = declaration.clone();
+            scoped.routes.retain(|route| prefixes.contains(&route.prefix));
+            if scoped.routes.is_empty() { return Ok(()); }
+            let plan = Self::plan(&scoped)?;
+            let failed = prefixes.to_vec();
+            let handle = self.handle.clone();
+            self.with_async(async move {
+                Self::delete_routes(&handle, &plan).await?;
+                for prefix in failed {
+                    let route = RouteMessageBuilder::<Ipv4Addr>::new()
+                        .destination_prefix(Ipv4Addr::from(prefix.network), prefix.prefix_len)
+                        .table_id(plan.route_table)
+                        .protocol(RouteProtocol::Static)
+                        .kind(RouteType::Throw)
+                        .build();
+                    let _ = handle.route().add(route).execute().await;
+                }
+                Ok(())
+            })
+        }
+
         fn remove_link(&mut self, _declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
             let handle = self.handle.clone();
             self.with_async(async move {
