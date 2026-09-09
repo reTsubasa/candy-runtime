@@ -457,12 +457,16 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         }
         let declaration = record.declaration.clone();
         self.backend.prepare_routes(&declaration)?;
-        let record = self.record.as_mut().ok_or(NetworkError::InvalidTransition)?;
+        let record = self
+            .record
+            .as_mut()
+            .ok_or(NetworkError::InvalidTransition)?;
         record.failed_prefixes = prefixes.to_vec();
         record.failed_prefixes.sort();
         record.failed_prefixes.dedup();
         if !record.failed_prefixes.is_empty() {
-            self.backend.withdraw_prefixes(&declaration, &record.failed_prefixes)?;
+            self.backend
+                .withdraw_prefixes(&declaration, &record.failed_prefixes)?;
         }
         self.journal.store(record)
     }

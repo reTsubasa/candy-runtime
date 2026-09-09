@@ -108,3 +108,22 @@ fn journal_rejects_corruption_symlinks_and_unsafe_parents() {
     assert!(FileNetworkJournal::new(path).is_err());
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn journal_round_trips_failed_prefixes_v4() {
+    let directory = test_directory().with_extension("failed-prefixes");
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = directory.join("state.journal");
+    let mut journal = FileNetworkJournal::new(path.clone()).unwrap();
+    let mut value = record();
+    value.failed_prefixes = vec![
+        Ipv4Prefix::new([10, 2, 0, 0], 16).unwrap(),
+        Ipv4Prefix::new([10, 4, 0, 0], 16).unwrap(),
+    ];
+    journal.store(&value).unwrap();
+    assert_eq!(&fs::read(&path).unwrap()[..8], b"CNDJNL04");
+    assert_eq!(journal.load().unwrap(), Some(value));
+    fs::remove_dir_all(directory).unwrap();
+}

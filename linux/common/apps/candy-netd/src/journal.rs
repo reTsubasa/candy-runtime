@@ -12,10 +12,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const MAGIC_V1: &[u8; 8] = b"CNDJNL01";
 const MAGIC_V2: &[u8; 8] = b"CNDJNL02";
 const MAGIC_V3: &[u8; 8] = b"CNDJNL03";
+const MAGIC_V4: &[u8; 8] = b"CNDJNL04";
 const HEADER_LEN: usize = 8 + 1 + 2 + 1 + 4;
 const CHECKSUM_LEN: usize = 32;
-const MAX_JOURNAL_LEN: usize =
-    HEADER_LEN + 3 * 3 + 8 + MAX_NETD_FRAME_LEN + 4 + MAX_NETD_FRAME_LEN + CHECKSUM_LEN;
+const MAX_JOURNAL_LEN: usize = HEADER_LEN
+    + 3 * 3
+    + 8
+    + MAX_NETD_FRAME_LEN
+    + 4
+    + MAX_NETD_FRAME_LEN
+    + 4
+    + 2
+    + 5 * 1024
+    + CHECKSUM_LEN;
+const MAX_FAILED_PREFIXES: usize = 1024;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub struct FileNetworkJournal {
@@ -88,6 +98,18 @@ impl NetworkJournal for FileNetworkJournal {
 }
 
 fn encode_record(record: &TransactionRecord) -> Result<Vec<u8>, NetworkError> {
+    if record.failed_prefixes.len() > MAX_FAILED_PREFIXES
+        || record
+            .failed_prefixes
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        || record
+            .failed_prefixes
+            .iter()
+            .any(|prefix| !canonical_prefix(prefix))
+    {
+        return Err(NetworkError::Journal);
+    }
     if record.sysctls.len() > 3
         || !record
             .sysctls
@@ -147,7 +169,9 @@ fn encode_record(record: &TransactionRecord) -> Result<Vec<u8>, NetworkError> {
             + recovery_request.as_ref().map_or(0, |value| 4 + value.len())
             + CHECKSUM_LEN,
     );
-    bytes.extend_from_slice(if recovery_request.is_some() {
+    bytes.extend_from_slice(if !record.failed_prefixes.is_empty() {
+        MAGIC_V4
+    } else if recovery_request.is_some() {
         MAGIC_V3
     } else {
         MAGIC_V1
@@ -181,6 +205,15 @@ fn encode_record(record: &TransactionRecord) -> Result<Vec<u8>, NetworkError> {
                 .to_be_bytes(),
         );
         bytes.extend_from_slice(&recovery_request);
+    } else if !record.failed_prefixes.is_empty() {
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+    }
+    if !record.failed_prefixes.is_empty() {
+        bytes.extend_from_slice(&(record.failed_prefixes.len() as u16).to_be_bytes());
+        for prefix in &record.failed_prefixes {
+            bytes.extend_from_slice(&prefix.network);
+            bytes.push(prefix.prefix_len);
+        }
     }
     let checksum = Sha256::digest(&bytes);
     bytes.extend_from_slice(&checksum);
@@ -189,7 +222,10 @@ fn encode_record(record: &TransactionRecord) -> Result<Vec<u8>, NetworkError> {
 
 fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
     if bytes.len() < HEADER_LEN + CHECKSUM_LEN
-        || (&bytes[..8] != MAGIC_V1 && &bytes[..8] != MAGIC_V2 && &bytes[..8] != MAGIC_V3)
+        || (&bytes[..8] != MAGIC_V1
+            && &bytes[..8] != MAGIC_V2
+            && &bytes[..8] != MAGIC_V3
+            && &bytes[..8] != MAGIC_V4)
     {
         return Err(NetworkError::Journal);
     }
@@ -294,34 +330,101 @@ fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
         let recovery_end = recovery_header_end
             .checked_add(recovery_len)
             .ok_or(NetworkError::Journal)?;
-        if recovery_len == 0 || recovery_len > MAX_NETD_FRAME_LEN || recovery_end != content_len {
-            return Err(NetworkError::Journal);
-        }
-        let recovery = NetdRequest::decode(&bytes[recovery_header_end..recovery_end])
-            .map_err(|_| NetworkError::Journal)?;
-        if (recovery.owner.instance_id != request.owner.instance_id
-            || recovery.owner.pid != request.owner.pid
-            || recovery.owner.generation < request.owner.generation)
-            || !matches!(
-                phase,
-                TransactionPhase::Preparing
-                    | TransactionPhase::Prepared
-                    | TransactionPhase::Draining
-                    | TransactionPhase::RollingBack
-            )
-        {
-            return Err(NetworkError::Journal);
-        }
-        let NetdOperation::Prepare(candidate) = recovery.operation else {
-            return Err(NetworkError::Journal);
-        };
-        if recovery.owner != request.owner {
+        if recovery_len == 0 {
+            if version != MAGIC_V4 {
+                return Err(NetworkError::Journal);
+            }
+            None
+        } else {
+            if recovery_len > MAX_NETD_FRAME_LEN || recovery_end > content_len {
+                return Err(NetworkError::Journal);
+            }
+            let recovery = NetdRequest::decode(&bytes[recovery_header_end..recovery_end])
+                .map_err(|_| NetworkError::Journal)?;
+            if (recovery.owner.instance_id != request.owner.instance_id
+                || recovery.owner.pid != request.owner.pid
+                || recovery.owner.generation < request.owner.generation)
+                || !matches!(
+                    phase,
+                    TransactionPhase::Preparing
+                        | TransactionPhase::Prepared
+                        | TransactionPhase::Draining
+                        | TransactionPhase::RollingBack
+                )
+            {
+                return Err(NetworkError::Journal);
+            }
+            let NetdOperation::Prepare(candidate) = recovery.operation else {
+                return Err(NetworkError::Journal);
+            };
             if recovery.owner != request.owner {
-                recovery_candidate_owner = Some(recovery.owner);
+                if recovery.owner != request.owner {
+                    recovery_candidate_owner = Some(recovery.owner);
+                }
+            }
+            Some(candidate)
+        }
+    };
+    let mut failed_prefixes = Vec::new();
+    if version == MAGIC_V4 {
+        if recovery_candidate.is_none() && request_end > content_len {
+            return Err(NetworkError::Journal);
+        }
+        let offset = if recovery_candidate.is_some() {
+            let recovery_header_end = request_end + 4;
+            let recovery_len = usize::try_from(u32::from_be_bytes(
+                bytes[request_end..recovery_header_end]
+                    .try_into()
+                    .map_err(|_| NetworkError::Journal)?,
+            ))
+            .map_err(|_| NetworkError::Journal)?;
+            recovery_header_end + recovery_len
+        } else {
+            request_end + 4
+        };
+        if recovery_candidate.is_none() {
+            // The zero-length recovery marker is followed immediately by the extension.
+            if offset > content_len {
+                return Err(NetworkError::Journal);
             }
         }
-        Some(candidate)
-    };
+        if offset + 2 > content_len {
+            return Err(NetworkError::Journal);
+        }
+        let count = usize::from(u16::from_be_bytes(
+            bytes[offset..offset + 2]
+                .try_into()
+                .map_err(|_| NetworkError::Journal)?,
+        ));
+        if count == 0 || count > MAX_FAILED_PREFIXES || offset + 2 + count * 5 != content_len {
+            return Err(NetworkError::Journal);
+        }
+        for chunk in bytes[offset + 2..].chunks_exact(5) {
+            let prefix = candy_netd_proto::Ipv4Prefix {
+                network: chunk[..4].try_into().map_err(|_| NetworkError::Journal)?,
+                prefix_len: chunk[4],
+            };
+            if !canonical_prefix(&prefix)
+                || failed_prefixes
+                    .last()
+                    .is_some_and(|p: &candy_netd_proto::Ipv4Prefix| p >= &prefix)
+            {
+                return Err(NetworkError::Journal);
+            }
+            failed_prefixes.push(prefix);
+        }
+    } else if recovery_candidate.is_some() && {
+        let recovery_header_end = request_end + 4;
+        let recovery_len = usize::try_from(u32::from_be_bytes(
+            bytes[request_end..recovery_header_end]
+                .try_into()
+                .map_err(|_| NetworkError::Journal)?,
+        ))
+        .map_err(|_| NetworkError::Journal)?;
+        recovery_header_end + recovery_len != content_len
+    } {
+        return Err(NetworkError::Journal);
+    }
     Ok(TransactionRecord {
         owner: request.owner,
         declaration,
@@ -331,8 +434,20 @@ fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
         completed_steps,
         sysctls,
         drain_deadline_mono_ms,
-        failed_prefixes: Vec::new(),
+        failed_prefixes,
     })
+}
+
+fn canonical_prefix(prefix: &candy_netd_proto::Ipv4Prefix) -> bool {
+    if prefix.prefix_len > 32 {
+        return false;
+    }
+    let host_mask = if prefix.prefix_len == 0 {
+        u32::MAX
+    } else {
+        (1u32 << (32 - prefix.prefix_len)) - 1
+    };
+    u32::from_be_bytes(prefix.network) & host_mask == 0
 }
 
 fn validate_parent(path: &Path) -> Result<(), NetworkError> {
