@@ -39,6 +39,7 @@ fn record() -> TransactionRecord {
         },
         phase: TransactionPhase::Prepared,
         recovery_candidate: None,
+        recovery_candidate_owner: None,
         completed_steps: 15,
         sysctls: Vec::new(),
         drain_deadline_mono_ms: 0,

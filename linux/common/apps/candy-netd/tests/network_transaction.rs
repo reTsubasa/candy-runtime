@@ -749,6 +749,7 @@ fn candidate_cleanup_failure_survives_after_all_old_steps_are_cleared() {
             owner: owner(),
             declaration: declaration(),
             recovery_candidate: Some(candidate),
+            recovery_candidate_owner: Some(owner()),
             phase: TransactionPhase::RollingBack,
             completed_steps: 0,
             sysctls: Vec::new(),

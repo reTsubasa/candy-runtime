@@ -110,6 +110,15 @@ fn encode_record(record: &TransactionRecord) -> Result<Vec<u8>, NetworkError> {
     {
         return Err(NetworkError::Journal);
     }
+    if let Some(candidate_owner) = record.recovery_candidate_owner {
+        if record.recovery_candidate.is_none()
+            || candidate_owner.instance_id != record.owner.instance_id
+            || candidate_owner.pid != record.owner.pid
+            || candidate_owner.generation < record.owner.generation
+        {
+            return Err(NetworkError::Journal);
+        }
+    }
     let request = NetdRequest {
         request_id: 1,
         owner: record.owner,
@@ -122,7 +131,10 @@ fn encode_record(record: &TransactionRecord) -> Result<Vec<u8>, NetworkError> {
         .map(|declaration| {
             NetdRequest {
                 request_id: 1,
-                owner: record.owner,
+                // Carry the candidate owner in the self-describing request.
+                // Older V3 journals used the active owner here; decode keeps
+                // accepting those and falls back to the active owner.
+                owner: record.recovery_candidate_owner.unwrap_or(record.owner),
                 operation: NetdOperation::Prepare(declaration.clone()),
             }
             .encode()
@@ -262,6 +274,7 @@ fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
     let NetdOperation::Prepare(declaration) = request.operation else {
         return Err(NetworkError::Journal);
     };
+    let mut recovery_candidate_owner = None;
     let recovery_candidate = if version == MAGIC_V1 {
         if request_end != content_len {
             return Err(NetworkError::Journal);
@@ -286,7 +299,9 @@ fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
         }
         let recovery = NetdRequest::decode(&bytes[recovery_header_end..recovery_end])
             .map_err(|_| NetworkError::Journal)?;
-        if recovery.owner != request.owner
+        if (recovery.owner.instance_id != request.owner.instance_id
+            || recovery.owner.pid != request.owner.pid
+            || recovery.owner.generation < request.owner.generation)
             || !matches!(
                 phase,
                 TransactionPhase::Preparing
@@ -300,12 +315,18 @@ fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
         let NetdOperation::Prepare(candidate) = recovery.operation else {
             return Err(NetworkError::Journal);
         };
+        if recovery.owner != request.owner {
+            if recovery.owner != request.owner {
+                recovery_candidate_owner = Some(recovery.owner);
+            }
+        }
         Some(candidate)
     };
     Ok(TransactionRecord {
         owner: request.owner,
         declaration,
         recovery_candidate,
+        recovery_candidate_owner,
         phase,
         completed_steps,
         sysctls,

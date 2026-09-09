@@ -969,14 +969,31 @@ mod scoped_prefix_tests {
             overlay_router_ipv4: [100, 64, 0, 2],
             effective_mtu: 1200,
             routes: vec![
-                RouteDeclaration { prefix: first, kind: RouteKind::Remote },
-                RouteDeclaration { prefix: second, kind: RouteKind::Remote },
+                RouteDeclaration {
+                    prefix: first,
+                    kind: RouteKind::Remote,
+                },
+                RouteDeclaration {
+                    prefix: second,
+                    kind: RouteKind::Remote,
+                },
             ],
             exclusions: vec![
-                UnderlayExclusion { prefix: first, kind: UnderlayKind::CloudApi },
-                UnderlayExclusion { prefix: second, kind: UnderlayKind::HubEndpoint },
+                UnderlayExclusion {
+                    prefix: first,
+                    kind: UnderlayKind::CloudApi,
+                },
+                UnderlayExclusion {
+                    prefix: second,
+                    kind: UnderlayKind::HubEndpoint,
+                },
             ],
-            firewall: FirewallPolicy { allow_forward: true, clamp_tcp_mss: true, require_ipv4_forwarding: true, manage_rp_filter: true },
+            firewall: FirewallPolicy {
+                allow_forward: true,
+                clamp_tcp_mss: true,
+                require_ipv4_forwarding: true,
+                manage_rp_filter: true,
+            },
         };
         let scoped = declaration.scoped_to_prefixes(&[second]);
         assert_eq!(scoped.routes.len(), 1);

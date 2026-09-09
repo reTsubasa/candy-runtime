@@ -23,6 +23,9 @@ pub struct TransactionRecord {
     pub owner: LeaseOwner,
     pub declaration: PrepareDeclaration,
     pub recovery_candidate: Option<PrepareDeclaration>,
+    /// Owner for the candidate declaration. The active owner remains in
+    /// `owner` until drain completes, but recovery must promote this owner.
+    pub recovery_candidate_owner: Option<LeaseOwner>,
     pub phase: TransactionPhase,
     pub completed_steps: u16,
     pub sysctls: Vec<SysctlChange>,
@@ -198,6 +201,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             owner,
             declaration,
             recovery_candidate: None,
+            recovery_candidate_owner: None,
             phase: TransactionPhase::Preparing,
             completed_steps: 0,
             sysctls: Vec::new(),
@@ -327,6 +331,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             .recovery_candidate
             .clone()
             .ok_or(NetworkError::InvalidTransition)?;
+        let candidate_owner = record.recovery_candidate_owner.unwrap_or(owner);
         let previous = record.declaration.clone();
         // The candidate rule is installed first. Removing the old declaration
         // therefore cannot create a forwarding gap; different table IDs keep
@@ -338,9 +343,10 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             .record
             .as_mut()
             .ok_or(NetworkError::InvalidTransition)?;
-        record.owner = owner;
+        record.owner = candidate_owner;
         record.declaration = candidate;
         record.recovery_candidate = None;
+        record.recovery_candidate_owner = None;
         record.phase = TransactionPhase::Active;
         record.drain_deadline_mono_ms = 0;
         self.journal.store(record)
@@ -369,6 +375,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
                 .as_mut()
                 .ok_or(NetworkError::InvalidTransition)?;
             record.recovery_candidate = None;
+            record.recovery_candidate_owner = None;
             record.phase = TransactionPhase::Active;
             record.drain_deadline_mono_ms = 0;
             self.journal.store(record)?;
@@ -409,6 +416,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
                 .as_mut()
                 .ok_or(NetworkError::InvalidTransition)?;
             record.recovery_candidate = None;
+            record.recovery_candidate_owner = None;
             record.phase = TransactionPhase::Active;
             record.drain_deadline_mono_ms = 0;
             self.journal.store(record)?;
@@ -550,6 +558,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
                 .ok_or(NetworkError::InvalidTransition)?;
             record.phase = TransactionPhase::RollingBack;
             record.recovery_candidate = Some(declaration.clone());
+            record.recovery_candidate_owner = Some(owner);
             self.journal.store(record)?;
         }
         let applied = (|| {
@@ -651,6 +660,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
                 .as_mut()
                 .ok_or(NetworkError::InvalidTransition)?;
             record.recovery_candidate = None;
+            record.recovery_candidate_owner = None;
             record.phase = TransactionPhase::Active;
             let _ = self.journal.store(record);
             return Err(error);
@@ -737,6 +747,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
                     .as_mut()
                     .ok_or(NetworkError::InvalidTransition)?;
                 current.recovery_candidate = None;
+                current.recovery_candidate_owner = None;
                 if let Err(error) = self.journal.store(current) {
                     first_error.get_or_insert(error);
                 }
