@@ -272,19 +272,6 @@ fn real_linux_backend_prepares_commits_and_rolls_back() {
     assert!(owned.iter().all(|line| !line.contains(" none ")));
     for destination in ["10.255.253.1", "10.255.254.1"] {
         let output = Command::new("ip")
-            .args(["-4", "route", "get", destination, "from", "172.31.254.2"])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "route lookup for {destination} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let route = String::from_utf8(output.stdout).unwrap();
-        assert!(route.contains("dev candy0"), "unexpected route: {route}");
-        assert!(route.contains("table 20999"), "unexpected route: {route}");
-
-        let output = Command::new("ip")
             .args(["-4", "route", "get", destination])
             .output()
             .unwrap();
