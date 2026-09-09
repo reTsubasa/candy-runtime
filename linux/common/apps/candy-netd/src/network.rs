@@ -464,14 +464,22 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         if recovered {
             self.backend.prepare_routes(&declaration)?;
         }
+        // Existing failed prefixes already have their route removed and a
+        // throw route installed. Only withdraw newly-added prefixes; this
+        // keeps repeated telemetry updates proportional to the delta rather
+        // than the full failed set.
+        let added: Vec<Ipv4Prefix> = desired
+            .iter()
+            .copied()
+            .filter(|prefix| !previous.contains(prefix))
+            .collect();
         let record = self
             .record
             .as_mut()
             .ok_or(NetworkError::InvalidTransition)?;
         record.failed_prefixes = desired;
-        if !record.failed_prefixes.is_empty() {
-            self.backend
-                .withdraw_prefixes(&declaration, &record.failed_prefixes)?;
+        if !added.is_empty() {
+            self.backend.withdraw_prefixes(&declaration, &added)?;
         }
         self.journal.store(record)
     }
