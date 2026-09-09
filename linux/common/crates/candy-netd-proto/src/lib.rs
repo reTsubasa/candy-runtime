@@ -291,6 +291,11 @@ impl NetdRequest {
                 return Err(NetdProtocolError::InvalidDeclaration);
             }
         }
+        if let NetdOperation::WithdrawPrefixes { prefixes } = &self.operation {
+            if prefixes.windows(2).any(|pair| pair[0] >= pair[1]) || prefixes.iter().any(|p| p.prefix_len > 32) {
+                return Err(NetdProtocolError::InvalidRequest);
+            }
+        }
         Ok(())
     }
 
@@ -314,7 +319,7 @@ impl NetdRequest {
             varint(*now_mono_ms, &mut out);
         }
         if let NetdOperation::WithdrawPrefixes { prefixes } = &self.operation {
-            if prefixes.is_empty() || prefixes.len() > MAX_ROUTES {
+            if prefixes.len() > MAX_ROUTES {
                 return Err(NetdProtocolError::InvalidRequest);
             }
             varint(prefixes.len() as u64, &mut out);
@@ -359,7 +364,7 @@ impl NetdRequest {
             11 => {
                 let count = usize::try_from(reader.varint()?)
                     .map_err(|_| NetdProtocolError::InvalidRequest)?;
-                if count == 0 || count > MAX_ROUTES {
+                if count > MAX_ROUTES {
                     return Err(NetdProtocolError::InvalidRequest);
                 }
                 let mut prefixes = Vec::with_capacity(count);

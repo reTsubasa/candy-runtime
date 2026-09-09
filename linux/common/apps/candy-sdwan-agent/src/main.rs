@@ -273,6 +273,10 @@ struct CoreReadinessStatus {
     active_peers: usize,
     required_route_owners: usize,
     ready_route_owners: usize,
+    /// Exact route prefixes whose authenticated owner is currently missing.
+    /// `None` means an older Core that cannot safely support scoped recovery.
+    #[serde(default)]
+    failed_prefixes: Option<Vec<String>>,
     #[serde(default)]
     inbound_listener_configured: bool,
     #[serde(default)]
@@ -286,6 +290,31 @@ struct CoreReadinessStatus {
     last_error_detail: Option<String>,
     #[serde(default)]
     paths: Option<Vec<CoreReadinessPath>>,
+}
+
+fn parse_failed_prefixes(
+    status: &CoreReadinessStatus,
+    declaration: &PrepareDeclaration,
+) -> Result<Option<Vec<Ipv4Prefix>>> {
+    let Some(values) = &status.failed_prefixes else {
+        return Ok(None);
+    };
+    let mut prefixes = Vec::with_capacity(values.len());
+    for value in values {
+        let prefix = parse_prefix(value)
+            .with_context(|| format!("Core reported invalid failed prefix {value}"))?;
+        if !declaration
+            .routes
+            .iter()
+            .any(|route| route.prefix == prefix)
+        {
+            bail!("Core reported failed prefix {value} outside netd declaration")
+        }
+        if !prefixes.contains(&prefix) {
+            prefixes.push(prefix);
+        }
+    }
+    Ok(Some(prefixes))
 }
 
 #[derive(Debug, Deserialize)]

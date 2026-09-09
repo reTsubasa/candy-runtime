@@ -543,7 +543,7 @@ impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
                 }
             }
             NetdOperation::WithdrawPrefixes { prefixes } => {
-                if let Err(error) = self.network.withdraw_prefixes(request.owner, &prefixes) {
+                if let Err(error) = self.network.set_failed_prefixes(request.owner, &prefixes) {
                     return Ok((
                         error_response(request.request_id, network_error_code(error)),
                         None,
