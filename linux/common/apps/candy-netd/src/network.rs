@@ -287,6 +287,18 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
                     let _ = self.backend.remove_policy_rule(&candidate);
                     let _ = self.backend.remove_firewall(&candidate);
                     let _ = self.backend.remove_routes(&candidate);
+                    // Candidate activation is pre-commit from netd's point
+                    // of view.  Restore the durable record to the old Active
+                    // owner so Runtime can enter its independent Proxy
+                    // fallback; leaving Prepared+candidate here makes the
+                    // subsequent Suspend request fail and strands recovery.
+                    if let Some(record) = self.record.as_mut() {
+                        record.recovery_candidate = None;
+                        record.recovery_candidate_owner = None;
+                        record.phase = TransactionPhase::Active;
+                        record.drain_deadline_mono_ms = 0;
+                        let _ = self.journal.store(record);
+                    }
                 }
                 return result;
             }
