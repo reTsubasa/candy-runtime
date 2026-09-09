@@ -2244,6 +2244,24 @@ fn hot_replace_activation(
         // Core has already committed. A REJECTED receipt makes cloud-sync
         // remove this candidate, which disables recovery and strands steering
         // in fallback. Only terminal pre-commit failures may reject a candidate.
+        if !already_suspended {
+            // The candidate commit leaves netd in Draining while the old
+            // declaration is retained.  Before the outer loop enters Candy
+            // Proxy fallback, finish that transaction so Suspend can operate
+            // on the promoted candidate instead of being rejected as an
+            // invalid Draining transition.
+            let now = monotonic_ms().context("read monotonic clock before fallback drain")?;
+            if let Err(drain_error) = netd.drain_old(now) {
+                eprintln!(
+                    "level=error event=sdwan_hot_reload_drain_failed generation={} error_code=netd_drain_failed error={}",
+                    replacement.generation,
+                    sanitize_log_value(&format!("{drain_error:#}"))
+                );
+                return Err(anyhow::Error::new(AppliedHotReloadPending(
+                    anyhow::Error::from(drain_error).context("drain committed replacement before fallback"),
+                )));
+            }
+        }
         eprintln!(
             "level=error event=sdwan_hot_reload_recovering generation={} error_code={} fallback=candy_proxy error={}",
             replacement.generation,
@@ -2253,6 +2271,14 @@ fn hot_replace_activation(
         return Err(anyhow::Error::new(AppliedHotReloadPending(error)));
     }
     if !activation_binding_unchanged(replacement).unwrap_or(false) || shutdown_requested() {
+        if !already_suspended {
+            let now = monotonic_ms().context("read monotonic clock before fallback drain")?;
+            if let Err(drain_error) = netd.drain_old(now) {
+                return Err(anyhow::Error::new(AppliedHotReloadPending(
+                    anyhow::Error::from(drain_error).context("drain superseded replacement before fallback"),
+                )));
+            }
+        }
         return Err(anyhow::Error::new(AppliedHotReloadPending(
             anyhow::anyhow!(
                 "candidate withdrawn or superseded after Core commit; steering stays suspended"
