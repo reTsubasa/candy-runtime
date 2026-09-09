@@ -388,9 +388,6 @@ fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
                 return Err(NetworkError::Journal);
             }
         }
-        if offset + 2 > content_len {
-            return Err(NetworkError::Journal);
-        }
         let count = usize::from(u16::from_be_bytes(
             bytes[offset..offset + 2]
                 .try_into()
@@ -399,7 +396,7 @@ fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
         if count == 0 || count > MAX_FAILED_PREFIXES || offset + 2 + count * 5 != content_len {
             return Err(NetworkError::Journal);
         }
-        for chunk in bytes[offset + 2..].chunks_exact(5) {
+        for chunk in bytes[offset + 2..content_len].chunks_exact(5) {
             let prefix = candy_netd_proto::Ipv4Prefix {
                 network: chunk[..4].try_into().map_err(|_| NetworkError::Journal)?,
                 prefix_len: chunk[4],
