@@ -783,6 +783,7 @@ fn candidate_cleanup_failure_survives_after_all_old_steps_are_cleared() {
             completed_steps: 0,
             sysctls: Vec::new(),
             drain_deadline_mono_ms: 0,
+            failed_prefixes: Vec::new(),
         })
         .unwrap();
     let mut transaction = NetworkTransaction::new(

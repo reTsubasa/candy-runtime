@@ -43,6 +43,7 @@ fn record() -> TransactionRecord {
         completed_steps: 15,
         sysctls: Vec::new(),
         drain_deadline_mono_ms: 0,
+        failed_prefixes: Vec::new(),
     }
 }
 

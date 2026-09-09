@@ -331,6 +331,7 @@ fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
         completed_steps,
         sysctls,
         drain_deadline_mono_ms,
+        failed_prefixes: Vec::new(),
     })
 }
 

@@ -40,6 +40,14 @@ mod backend {
         )
     }
 
+    fn route_add_is_idempotent(error: &rtnetlink::Error) -> bool {
+        matches!(
+            error,
+            rtnetlink::Error::NetlinkError(message)
+                if message.to_io().raw_os_error() == Some(nix::libc::EEXIST)
+        )
+    }
+
     pub struct LinuxNetworkBackend {
         runtime: tokio::runtime::Runtime,
         handle: Handle,
@@ -167,12 +175,11 @@ mod backend {
                     RouteMetric::Mtu(u32::from(plan.route_mtu)),
                     RouteMetric::Advmss(u32::from(plan.tcp_advmss)),
                 ]));
-                handle
-                    .route()
-                    .add(route)
-                    .execute()
-                    .await
-                    .map_err(|_| NetworkError::Backend)?;
+                if let Err(error) = handle.route().add(route).execute().await {
+                    if !route_add_is_idempotent(&error) {
+                        return Err(NetworkError::Backend);
+                    }
+                }
             }
             for prefix in plan.throw_prefixes() {
                 let route = RouteMessageBuilder::<Ipv4Addr>::new()
@@ -181,12 +188,11 @@ mod backend {
                     .protocol(RouteProtocol::Static)
                     .kind(RouteType::Throw)
                     .build();
-                handle
-                    .route()
-                    .add(route)
-                    .execute()
-                    .await
-                    .map_err(|_| NetworkError::Backend)?;
+                if let Err(error) = handle.route().add(route).execute().await {
+                    if !route_add_is_idempotent(&error) {
+                        return Err(NetworkError::Backend);
+                    }
+                }
             }
             Ok(())
         }

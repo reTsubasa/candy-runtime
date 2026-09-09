@@ -32,6 +32,8 @@ pub struct TransactionRecord {
     /// Monotonic deadline after which an old declaration may be retired.
     /// Zero means the caller must explicitly drain without a time gate.
     pub drain_deadline_mono_ms: u64,
+    /// Prefixes currently withdrawn from the active declaration.
+    pub failed_prefixes: Vec<Ipv4Prefix>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -228,6 +230,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             completed_steps: 0,
             sysctls: Vec::new(),
             drain_deadline_mono_ms: 0,
+            failed_prefixes: Vec::new(),
         };
         self.journal.store(&record)?;
         self.record = Some(record);
@@ -453,10 +456,15 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             return Err(NetworkError::InvalidTransition);
         }
         let declaration = record.declaration.clone();
-        if prefixes.is_empty() {
-            return self.backend.prepare_routes(&declaration);
+        self.backend.prepare_routes(&declaration)?;
+        let record = self.record.as_mut().ok_or(NetworkError::InvalidTransition)?;
+        record.failed_prefixes = prefixes.to_vec();
+        record.failed_prefixes.sort();
+        record.failed_prefixes.dedup();
+        if !record.failed_prefixes.is_empty() {
+            self.backend.withdraw_prefixes(&declaration, &record.failed_prefixes)?;
         }
-        self.backend.withdraw_prefixes(&declaration, prefixes)
+        self.journal.store(record)
     }
 
     pub fn recover_orphan(
@@ -655,6 +663,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         let mut replacement_record = previous_record.clone();
         replacement_record.owner = owner;
         replacement_record.declaration = declaration;
+        replacement_record.failed_prefixes.clear();
         replacement_record.drain_deadline_mono_ms = 0;
         if let Err(error) = self.journal.store(&replacement_record) {
             // Keep the in-memory record and durable journal aligned with the
