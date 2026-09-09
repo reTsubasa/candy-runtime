@@ -502,3 +502,45 @@ fn sync_directory(path: &Path) -> Result<(), NetworkError> {
 fn journal_error(_error: std::io::Error) -> NetworkError {
     NetworkError::Journal
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn decode_v4_truncation_is_always_fail_closed() {
+        let mut encoded = vec![0u8; HEADER_LEN + CHECKSUM_LEN + 64];
+        encoded[..8].copy_from_slice(MAGIC_V4);
+        let digest = Sha256::digest(&encoded[..encoded.len() - CHECKSUM_LEN]);
+        let checksum_start = encoded.len() - CHECKSUM_LEN;
+        encoded[checksum_start..].copy_from_slice(&digest);
+        for end in 0..encoded.len() {
+            let result = std::panic::catch_unwind(|| decode_record(&encoded[..end]));
+            assert!(result.is_ok(), "decode panicked at truncation {end}");
+            assert!(
+                result.unwrap().is_err(),
+                "truncation {end} unexpectedly decoded"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_arbitrary_bytes_never_panics() {
+        let mut state = 0x9e3779b97f4a7c15u64;
+        for len in 0..512usize {
+            for _ in 0..8 {
+                let mut bytes = vec![0u8; len];
+                for byte in &mut bytes {
+                    state ^= state << 7;
+                    state ^= state >> 9;
+                    state ^= state << 8;
+                    *byte = state as u8;
+                }
+                let result = std::panic::catch_unwind(|| decode_record(&bytes));
+                assert!(
+                    result.is_ok(),
+                    "decode panicked for random input length {len}"
+                );
+            }
+        }
+    }
+}
