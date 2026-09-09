@@ -292,7 +292,9 @@ impl NetdRequest {
             }
         }
         if let NetdOperation::WithdrawPrefixes { prefixes } = &self.operation {
-            if prefixes.windows(2).any(|pair| pair[0] >= pair[1]) || prefixes.iter().any(|p| p.prefix_len > 32) {
+            if prefixes.windows(2).any(|pair| pair[0] >= pair[1])
+                || prefixes.iter().any(|p| p.prefix_len > 32)
+            {
                 return Err(NetdProtocolError::InvalidRequest);
             }
         }

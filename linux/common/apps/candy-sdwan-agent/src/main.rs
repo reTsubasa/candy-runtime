@@ -3075,7 +3075,15 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 // replaces it.  Readiness handling above already put traffic
                 // on the independent Candy Proxy fallback in that case.
                 Ok(None) if peer_loss_fallback => {}
-                Ok(_) => {}
+                Ok(Some(status)) => {
+                    let declaration = parse_declaration(&args.declaration)
+                        .context("parse declaration for failed-prefix recovery")?;
+                    if let Some(prefixes) = parse_failed_prefixes(&status, &declaration)? {
+                        netd.set_failed_prefixes(prefixes)
+                            .context("apply Core failed-prefix route set")?;
+                    }
+                }
+                Ok(None) => {}
                 Err(error) => {
                     return retry_after_rollback(
                         &args,

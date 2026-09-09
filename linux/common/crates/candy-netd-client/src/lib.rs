@@ -118,12 +118,20 @@ impl NetdClient {
 
     /// Set the exact failed destination prefixes. An empty set restores all
     /// routes from the active declaration.
-    pub fn set_failed_prefixes(&mut self, prefixes: Vec<candy_netd_proto::Ipv4Prefix>) -> Result<u64, IpcError> {
-        if self.phase != ClientPhase::Active { return Err(IpcError::InvalidTransition); }
-        self.exchange_generation(NetdOperation::WithdrawPrefixes { prefixes }, |body| match body {
-            ResponseBody::PrefixesWithdrawn { generation, .. } => Some(generation),
-            _ => None,
-        })
+    pub fn set_failed_prefixes(
+        &mut self,
+        prefixes: Vec<candy_netd_proto::Ipv4Prefix>,
+    ) -> Result<u64, IpcError> {
+        if self.phase != ClientPhase::Active {
+            return Err(IpcError::InvalidTransition);
+        }
+        self.exchange_generation(
+            NetdOperation::WithdrawPrefixes { prefixes },
+            |body| match body {
+                ResponseBody::PrefixesWithdrawn { generation, .. } => Some(generation),
+                _ => None,
+            },
+        )
     }
 
     pub fn renew_lease(&mut self, lease_deadline_mono_ms: u64) -> Result<u64, IpcError> {

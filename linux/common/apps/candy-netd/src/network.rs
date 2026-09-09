@@ -439,12 +439,23 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         self.backend.withdraw_prefixes(&declaration, prefixes)
     }
 
-    pub fn set_failed_prefixes(&mut self, owner: LeaseOwner, prefixes: &[Ipv4Prefix]) -> Result<(), NetworkError> {
-        let record = self.record.as_ref().ok_or(NetworkError::InvalidTransition)?;
+    pub fn set_failed_prefixes(
+        &mut self,
+        owner: LeaseOwner,
+        prefixes: &[Ipv4Prefix],
+    ) -> Result<(), NetworkError> {
+        let record = self
+            .record
+            .as_ref()
+            .ok_or(NetworkError::InvalidTransition)?;
         ensure_owner(record.owner, owner)?;
-        if record.phase != TransactionPhase::Active { return Err(NetworkError::InvalidTransition); }
+        if record.phase != TransactionPhase::Active {
+            return Err(NetworkError::InvalidTransition);
+        }
         let declaration = record.declaration.clone();
-        if prefixes.is_empty() { return self.backend.prepare_routes(&declaration); }
+        if prefixes.is_empty() {
+            return self.backend.prepare_routes(&declaration);
+        }
         self.backend.withdraw_prefixes(&declaration, prefixes)
     }
 
@@ -947,8 +958,11 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkController for NetworkTransact
             return Err(NetworkError::InvalidTransition);
         }
         let declaration = record.declaration.clone();
-        if prefixes.is_empty() { self.backend.prepare_routes(&declaration)?; }
-        else { self.backend.withdraw_prefixes(&declaration, prefixes)?; }
+        if prefixes.is_empty() {
+            self.backend.prepare_routes(&declaration)?;
+        } else {
+            self.backend.withdraw_prefixes(&declaration, prefixes)?;
+        }
         Ok(())
     }
 
