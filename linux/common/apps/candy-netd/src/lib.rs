@@ -352,6 +352,7 @@ impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
             NetdOperation::Suspend => "suspend",
             NetdOperation::Reconfigure(_) => "reconfigure",
             NetdOperation::Resume => "resume",
+            NetdOperation::Drain { .. } => "drain",
         };
         let (response, descriptor) = self.process(request, peer)?;
         match &response.body {
@@ -526,6 +527,17 @@ impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
                     ));
                 }
                 ResponseBody::Resumed {
+                    generation: request.owner.generation,
+                }
+            }
+            NetdOperation::Drain { now_mono_ms } => {
+                if let Err(error) = self.network.drain_old(request.owner, *now_mono_ms) {
+                    return Ok((
+                        error_response(request.request_id, network_error_code(error)),
+                        None,
+                    ));
+                }
+                ResponseBody::Drained {
                     generation: request.owner.generation,
                 }
             }

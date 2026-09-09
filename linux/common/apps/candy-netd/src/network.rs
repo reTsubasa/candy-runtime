@@ -258,7 +258,11 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             .record
             .as_ref()
             .ok_or(NetworkError::InvalidTransition)?;
-        ensure_owner(record.owner, owner)?;
+        if record.recovery_candidate.is_some() {
+            ensure_reconfigure_owner(record.owner, owner)?;
+        } else {
+            ensure_owner(record.owner, owner)?;
+        }
         if record.phase == TransactionPhase::Draining {
             return Ok(());
         }
@@ -308,7 +312,11 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             .record
             .as_ref()
             .ok_or(NetworkError::InvalidTransition)?;
-        ensure_owner(record.owner, owner)?;
+        if record.recovery_candidate.is_some() {
+            ensure_reconfigure_owner(record.owner, owner)?;
+        } else {
+            ensure_owner(record.owner, owner)?;
+        }
         if record.phase != TransactionPhase::Draining {
             return Err(NetworkError::InvalidTransition);
         }
@@ -330,6 +338,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             .record
             .as_mut()
             .ok_or(NetworkError::InvalidTransition)?;
+        record.owner = owner;
         record.declaration = candidate;
         record.recovery_candidate = None;
         record.phase = TransactionPhase::Active;
@@ -342,6 +351,29 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             .record
             .as_ref()
             .ok_or(NetworkError::InvalidTransition)?;
+        if record.recovery_candidate.is_some()
+            && matches!(
+                record.phase,
+                TransactionPhase::Preparing | TransactionPhase::Prepared
+            )
+        {
+            ensure_reconfigure_owner(record.owner, owner)?;
+            let candidate = record
+                .recovery_candidate
+                .clone()
+                .ok_or(NetworkError::InvalidTransition)?;
+            self.backend.remove_firewall(&candidate)?;
+            self.backend.remove_routes(&candidate)?;
+            let record = self
+                .record
+                .as_mut()
+                .ok_or(NetworkError::InvalidTransition)?;
+            record.recovery_candidate = None;
+            record.phase = TransactionPhase::Active;
+            record.drain_deadline_mono_ms = 0;
+            self.journal.store(record)?;
+            return Ok(());
+        }
         ensure_owner(record.owner, owner)?;
         self.cleanup_record()
     }
@@ -354,6 +386,43 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         let Some(record) = &self.record else {
             return Ok(false);
         };
+        // A replacement candidate is staged beside the last-good declaration.
+        // If the process disappears before commit, discard only the candidate
+        // and leave the old owner active; do not run the normal full cleanup.
+        if record.recovery_candidate.is_some()
+            && matches!(
+                record.phase,
+                TransactionPhase::Preparing | TransactionPhase::Prepared
+            )
+        {
+            if owner_is_alive && record.owner.lease_deadline_mono_ms > now_mono_ms {
+                return Ok(false);
+            }
+            let candidate = record
+                .recovery_candidate
+                .clone()
+                .ok_or(NetworkError::InvalidTransition)?;
+            self.backend.remove_firewall(&candidate)?;
+            self.backend.remove_routes(&candidate)?;
+            let record = self
+                .record
+                .as_mut()
+                .ok_or(NetworkError::InvalidTransition)?;
+            record.recovery_candidate = None;
+            record.phase = TransactionPhase::Active;
+            record.drain_deadline_mono_ms = 0;
+            self.journal.store(record)?;
+            return Ok(true);
+        }
+        if record.phase == TransactionPhase::Draining {
+            if owner_is_alive
+                && (record.drain_deadline_mono_ms == 0
+                    || now_mono_ms < record.drain_deadline_mono_ms)
+            {
+                return Ok(false);
+            }
+            return self.drain_old(record.owner, now_mono_ms).map(|_| true);
+        }
         // RollingBack is a poisoned reconfigure session, not a healthy lease.
         // Recover it immediately even when the former owner process is still
         // alive; waiting for lease expiry would leave candidate routes behind
@@ -373,7 +442,11 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             .record
             .as_mut()
             .ok_or(NetworkError::InvalidTransition)?;
-        ensure_owner(record.owner, owner)?;
+        if record.recovery_candidate.is_some() {
+            ensure_reconfigure_owner(record.owner, owner)?;
+        } else {
+            ensure_owner(record.owner, owner)?;
+        }
         record.owner.lease_deadline_mono_ms = owner.lease_deadline_mono_ms;
         self.journal.store(record)
     }
@@ -529,6 +602,14 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             .ok_or(NetworkError::InvalidTransition)?;
         ensure_reconfigure_owner(record.owner, owner)?;
         if record.declaration == declaration {
+            // A generation-only retry still transfers lease ownership.  The
+            // declaration is already active, so no replacement candidate is
+            // needed, but retaining the old owner would make the following
+            // Commit/LeaseRenew fail with a generation conflict.
+            let mut record = record.clone();
+            record.owner = owner;
+            self.journal.store(&record)?;
+            self.record = Some(record);
             return Ok(());
         }
         if record.declaration.table_id == declaration.table_id

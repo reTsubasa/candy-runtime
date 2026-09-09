@@ -309,6 +309,65 @@ fn suspended_hot_reconfigure_switches_generation_atomically() {
 }
 
 #[test]
+fn active_reconfigure_reports_draining_until_explicit_drain() {
+    let owner = owner();
+    let mut session = NetdSession::new();
+    session
+        .apply(&NetdRequest {
+            request_id: 1,
+            owner,
+            operation: NetdOperation::Prepare(declaration()),
+        })
+        .unwrap();
+    session
+        .apply(&NetdRequest {
+            request_id: 2,
+            owner,
+            operation: NetdOperation::Commit,
+        })
+        .unwrap();
+
+    let mut replacement_owner = owner;
+    replacement_owner.generation += 1;
+    let mut candidate = declaration();
+    candidate.table_id += 1;
+    session
+        .apply(&NetdRequest {
+            request_id: 3,
+            owner: replacement_owner,
+            operation: NetdOperation::Reconfigure(candidate.clone()),
+        })
+        .unwrap();
+    assert_eq!(session.phase(), candy_netd_proto::SessionPhase::Prepared);
+    session
+        .apply(&NetdRequest {
+            request_id: 4,
+            owner: replacement_owner,
+            operation: NetdOperation::Commit,
+        })
+        .unwrap();
+    assert_eq!(session.phase(), candy_netd_proto::SessionPhase::Draining);
+
+    // A lost Commit response can be retried while the network transaction is
+    // already draining; it must remain idempotent.
+    session
+        .apply(&NetdRequest {
+            request_id: 5,
+            owner: replacement_owner,
+            operation: NetdOperation::Commit,
+        })
+        .unwrap();
+    session
+        .apply(&NetdRequest {
+            request_id: 6,
+            owner: replacement_owner,
+            operation: NetdOperation::Drain { now_mono_ms: 0 },
+        })
+        .unwrap();
+    assert_eq!(session.phase(), candy_netd_proto::SessionPhase::Active);
+}
+
+#[test]
 fn error_codes_are_stable() {
     assert_eq!(ErrorCode::InvalidRequest as u64, 1);
     assert_eq!(ErrorCode::UnauthorizedPeer as u64, 2);

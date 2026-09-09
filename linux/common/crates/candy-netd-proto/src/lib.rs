@@ -236,6 +236,7 @@ pub enum NetdOperation {
     Suspend,
     Reconfigure(PrepareDeclaration),
     Resume,
+    Drain { now_mono_ms: u64 },
 }
 
 impl NetdOperation {
@@ -250,6 +251,7 @@ impl NetdOperation {
             Self::Suspend => 7,
             Self::Reconfigure(_) => 8,
             Self::Resume => 9,
+            Self::Drain { .. } => 10,
         }
     }
 }
@@ -294,6 +296,9 @@ impl NetdRequest {
         if let NetdOperation::MtuUpdate { effective_mtu } = &self.operation {
             varint(u64::from(*effective_mtu), &mut out);
         }
+        if let NetdOperation::Drain { now_mono_ms } = &self.operation {
+            varint(*now_mono_ms, &mut out);
+        }
         ensure_frame(&out)?;
         Ok(out)
     }
@@ -325,6 +330,9 @@ impl NetdRequest {
             7 => NetdOperation::Suspend,
             8 => NetdOperation::Reconfigure(decode_declaration(&mut reader)?),
             9 => NetdOperation::Resume,
+            10 => NetdOperation::Drain {
+                now_mono_ms: reader.varint()?,
+            },
             _ => return Err(NetdProtocolError::UnknownEnum),
         };
         reader.finish()?;
@@ -439,6 +447,7 @@ pub enum SessionPhase {
     Prepared = 2,
     Active = 3,
     Suspended = 4,
+    Draining = 5,
 }
 
 impl TryFrom<u64> for SessionPhase {
@@ -450,6 +459,7 @@ impl TryFrom<u64> for SessionPhase {
             2 => Ok(Self::Prepared),
             3 => Ok(Self::Active),
             4 => Ok(Self::Suspended),
+            5 => Ok(Self::Draining),
             _ => Err(NetdProtocolError::UnknownEnum),
         }
     }
@@ -487,6 +497,9 @@ pub enum ResponseBody {
     Resumed {
         generation: u64,
     },
+    Drained {
+        generation: u64,
+    },
     Error(ErrorCode),
 }
 
@@ -514,6 +527,7 @@ impl NetdResponse {
             ResponseBody::Suspended { .. } => 8,
             ResponseBody::Reconfigured { .. } => 9,
             ResponseBody::Resumed { .. } => 10,
+            ResponseBody::Drained { .. } => 11,
         };
         varint(tag, &mut out);
         varint(self.request_id, &mut out);
@@ -532,6 +546,10 @@ impl NetdResponse {
             | ResponseBody::Suspended { generation }
             | ResponseBody::Reconfigured { generation }
             | ResponseBody::Resumed { generation } => {
+                valid_generation(generation)?;
+                varint(generation, &mut out);
+            }
+            ResponseBody::Drained { generation } => {
                 valid_generation(generation)?;
                 varint(generation, &mut out);
             }
@@ -600,6 +618,9 @@ impl NetdResponse {
             10 => ResponseBody::Resumed {
                 generation: reader.varint()?,
             },
+            11 => ResponseBody::Drained {
+                generation: reader.varint()?,
+            },
             _ => return Err(NetdProtocolError::UnknownEnum),
         };
         reader.finish()?;
@@ -634,6 +655,10 @@ pub struct NetdSession {
     phase: SessionPhase,
     owner: Option<LeaseOwner>,
     declaration: Option<PrepareDeclaration>,
+    // An active reconfigure stages a second declaration.  Keep this bit
+    // separate from `phase`: both the initial prepare and a replacement use
+    // Prepared, but only a replacement commit must enter Draining.
+    replacement_pending: bool,
 }
 
 impl NetdSession {
@@ -642,6 +667,7 @@ impl NetdSession {
             phase: SessionPhase::Stopped,
             owner: None,
             declaration: None,
+            replacement_pending: false,
         }
     }
 
@@ -670,6 +696,30 @@ impl NetdSession {
                 // allowed to switch generation. It retains the session phase
                 // while moving the lease owner atomically with the declaration;
                 // rollback may legitimately move back to the previous generation.
+                reconfigure_generation = true;
+            } else if self.phase == SessionPhase::Active
+                && matches!(request.operation, NetdOperation::Reconfigure(_))
+                && request.owner.instance_id == owner.instance_id
+                && request.owner.pid == owner.pid
+                && request.owner.generation != owner.generation
+            {
+                // Active make-before-break replacement advances the owner while
+                // retaining the old declaration until an explicit Drain.
+                reconfigure_generation = true;
+            } else if self.phase == SessionPhase::Active
+                && matches!(
+                    request.operation,
+                    NetdOperation::Commit | NetdOperation::LeaseRenew
+                )
+                && request.owner.instance_id == owner.instance_id
+                && request.owner.pid == owner.pid
+                && request.owner.generation != owner.generation
+            {
+                // The network transaction is authoritative for whether an
+                // active replacement candidate exists. Allow its new owner
+                // through this session fence so Commit and lease renewal can
+                // complete after Reconfigure; a normal active session still
+                // rejects the generation at the network layer.
                 reconfigure_generation = true;
             } else if stopped_prepare && owner.generation == request.owner.generation {
                 // A completed rollback owns no network state. A replacement
@@ -720,10 +770,14 @@ impl NetdSession {
             }
             NetdOperation::Commit => match self.phase {
                 SessionPhase::Prepared => {
-                    self.phase = SessionPhase::Active;
+                    self.phase = if self.replacement_pending {
+                        SessionPhase::Draining
+                    } else {
+                        SessionPhase::Active
+                    };
                     Ok(())
                 }
-                SessionPhase::Active => Ok(()),
+                SessionPhase::Active | SessionPhase::Draining => Ok(()),
                 SessionPhase::Stopped | SessionPhase::Suspended => {
                     Err(NetdSessionError::InvalidTransition)
                 }
@@ -733,6 +787,7 @@ impl NetdSession {
                     return Err(NetdSessionError::InvalidTransition);
                 }
                 self.phase = SessionPhase::Stopped;
+                self.replacement_pending = false;
                 Ok(())
             }
             NetdOperation::Status => Ok(()),
@@ -768,10 +823,26 @@ impl NetdSession {
                 Ok(())
             }
             NetdOperation::Reconfigure(declaration) => {
-                if self.phase != SessionPhase::Suspended {
+                if self.phase == SessionPhase::Prepared && self.replacement_pending {
+                    return if self.declaration.as_ref() == Some(declaration) {
+                        Ok(())
+                    } else {
+                        Err(NetdSessionError::GenerationConflict)
+                    };
+                }
+                if self.phase != SessionPhase::Suspended && self.phase != SessionPhase::Active {
                     return Err(NetdSessionError::InvalidTransition);
                 }
-                self.declaration = Some(declaration.clone());
+                if self.phase == SessionPhase::Suspended {
+                    self.declaration = Some(declaration.clone());
+                } else if self.declaration.as_ref() != Some(declaration) {
+                    // Keep the candidate declaration so duplicate IPC retries
+                    // are idempotent, while retaining the replacement marker
+                    // needed to distinguish commit semantics.
+                    self.declaration = Some(declaration.clone());
+                    self.replacement_pending = true;
+                    self.phase = SessionPhase::Prepared;
+                }
                 Ok(())
             }
             NetdOperation::Resume => {
@@ -779,6 +850,14 @@ impl NetdSession {
                     return Err(NetdSessionError::InvalidTransition);
                 }
                 self.phase = SessionPhase::Active;
+                Ok(())
+            }
+            NetdOperation::Drain { .. } => {
+                if self.phase != SessionPhase::Draining {
+                    return Err(NetdSessionError::InvalidTransition);
+                }
+                self.phase = SessionPhase::Active;
+                self.replacement_pending = false;
                 Ok(())
             }
         }

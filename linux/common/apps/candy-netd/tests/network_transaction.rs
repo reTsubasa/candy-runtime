@@ -463,6 +463,94 @@ fn hot_reconfigure_keeps_steering_suspended_until_replacement_is_ready() {
 }
 
 #[test]
+fn active_replacement_keeps_old_owner_until_drain_timeout() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let journal = MemoryJournal::default();
+    let mut transaction =
+        NetworkTransaction::new(RecordingBackend(events.clone()), journal).unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+    events.borrow_mut().clear();
+
+    let mut replacement = declaration();
+    replacement.table_id += 1;
+    replacement.routes[1] = RouteDeclaration {
+        prefix: Ipv4Prefix::new([10, 3, 0, 0], 16).unwrap(),
+        kind: RouteKind::Remote,
+    };
+    let replacement_owner = LeaseOwner {
+        generation: 8,
+        lease_deadline_mono_ms: 60_000,
+        ..owner()
+    };
+    transaction
+        .reconfigure(replacement_owner, replacement.clone())
+        .unwrap();
+    assert_eq!(transaction.retained_owner(), Some(owner()));
+    transaction
+        .commit_with_drain(replacement_owner, 1_000, 5_000)
+        .unwrap();
+    assert!(matches!(
+        transaction.drain_old(replacement_owner, 5_999),
+        Err(NetworkError::DrainPending)
+    ));
+    assert_eq!(transaction.retained_owner(), Some(owner()));
+    transaction.drain_old(replacement_owner, 6_000).unwrap();
+    assert_eq!(transaction.retained_owner(), Some(replacement_owner));
+    assert_eq!(
+        *events.borrow(),
+        [
+            "preflight",
+            "prepare_link",
+            "prepare_routes",
+            "prepare_firewall",
+            "activate_link",
+            "install_policy_rule",
+            "remove_policy_rule",
+            "remove_firewall",
+            "remove_routes",
+        ]
+    );
+}
+
+#[test]
+fn orphaned_prepared_replacement_discards_candidate_and_keeps_old_active() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let journal = MemoryJournal::default();
+    let retained = journal.clone();
+    let mut transaction =
+        NetworkTransaction::new(RecordingBackend(events.clone()), journal).unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+    let mut replacement = declaration();
+    replacement.table_id += 1;
+    transaction
+        .reconfigure(
+            LeaseOwner {
+                generation: 8,
+                ..owner()
+            },
+            replacement,
+        )
+        .unwrap();
+    drop(transaction);
+    let mut recovered =
+        NetworkTransaction::new(RecordingBackend(events.clone()), retained.clone()).unwrap();
+    assert!(recovered.recover_orphan(false, 60_000).unwrap());
+    assert_eq!(recovered.retained_owner(), Some(owner()));
+    assert_eq!(
+        retained.load().unwrap().unwrap().phase,
+        TransactionPhase::Active
+    );
+    assert!(retained
+        .load()
+        .unwrap()
+        .unwrap()
+        .recovery_candidate
+        .is_none());
+}
+
+#[test]
 fn hot_reconfigure_cleanup_failure_poisoned_session_cannot_resume() {
     for fail_at in ["remove_firewall", "remove_routes"] {
         let events = Rc::new(RefCell::new(Vec::new()));

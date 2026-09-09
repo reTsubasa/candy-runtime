@@ -241,8 +241,9 @@ fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
     } else {
         0
     };
+    let request_len_offset = sysctl_end + deadline_len;
     let request_len = usize::try_from(u32::from_be_bytes(
-        bytes[sysctl_end..request_header_end]
+        bytes[request_len_offset..request_len_offset + 4]
             .try_into()
             .map_err(|_| NetworkError::Journal)?,
     ))

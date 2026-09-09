@@ -2095,26 +2095,25 @@ fn hot_replace_activation(
             replacement.generation, transaction_id, sanitize_log_value(&format!("{error:#}")));
         return Ok(false);
     }
-    if !already_suspended {
-        if let Err(error) = enter_proxy_fallback(current, child, netd, transition) {
-            abort_core_preparation(replacement, child, &transaction_id);
-            return Err(error.context("enter Candy Proxy fallback for hot reload"));
-        }
-    }
-    eprintln!(
-        "level=info event=sdwan_hot_reload_fallback generation={} source=candy_proxy",
-        replacement.generation
-    );
     let replacement_deadline = monotonic_ms()?
         .checked_add(replacement.lease_ms)
         .context("hot reload lease deadline overflow")?;
-    if let Err(error) = netd.reconfigure_with_owner(
-        replacement_declaration,
-        replacement.generation,
-        replacement_deadline,
-    ) {
+    let netd_result = if already_suspended {
+        netd.reconfigure_with_owner(
+            replacement_declaration,
+            replacement.generation,
+            replacement_deadline,
+        )
+    } else {
+        netd.prepare_replacement_with_owner(
+            replacement_declaration,
+            replacement.generation,
+            replacement_deadline,
+        )
+    };
+    if let Err(error) = netd_result {
         abort_core_preparation(replacement, child, &transaction_id);
-        if !already_suspended {
+        if already_suspended {
             leave_proxy_fallback(current, child, netd, transition)
                 .context("restore last-good SD-WAN after rejected reconfigure")
                 .map_err(|error| anyhow::Error::new(HotReloadRecoveryRequired(error)))?;
@@ -2133,28 +2132,38 @@ fn hot_replace_activation(
     // the candidate while the kernel transaction was running.
     if !activation_binding_unchanged(replacement).unwrap_or(false) || shutdown_requested() {
         abort_core_preparation(replacement, child, &transaction_id);
-        restore_uncommitted_netd_activation(
-            current,
-            child,
-            netd,
-            previous_declaration,
-            transition,
-            !already_suspended,
-        )
-        .map_err(|error| anyhow::Error::new(HotReloadRecoveryRequired(error)))?;
+        if already_suspended {
+            restore_uncommitted_netd_activation(
+                current,
+                child,
+                netd,
+                previous_declaration,
+                transition,
+                true,
+            )
+            .map_err(|error| anyhow::Error::new(HotReloadRecoveryRequired(error)))?;
+        } else {
+            netd.rollback()
+                .context("discard prepared netd replacement")?;
+        }
         return Ok(false);
     }
     if let Err(error) = remove_stale_status(&replacement.status) {
         abort_core_preparation(replacement, child, &transaction_id);
-        restore_uncommitted_netd_activation(
-            current,
-            child,
-            netd,
-            previous_declaration,
-            transition,
-            !already_suspended,
-        )
-        .map_err(|error| anyhow::Error::new(HotReloadRecoveryRequired(error)))?;
+        if already_suspended {
+            restore_uncommitted_netd_activation(
+                current,
+                child,
+                netd,
+                previous_declaration,
+                transition,
+                true,
+            )
+            .map_err(|error| anyhow::Error::new(HotReloadRecoveryRequired(error)))?;
+        } else {
+            netd.rollback()
+                .context("discard prepared netd replacement")?;
+        }
         eprintln!("level=error event=sdwan_policy_prepare_failed generation={} error_code=core_policy_prepare_failed error={}",
             replacement.generation, sanitize_log_value(&format!("{error:#}")));
         return Ok(false);
@@ -2181,6 +2190,10 @@ fn hot_replace_activation(
         eprintln!("level=error event=sdwan_policy_commit_unresolved generation={} transaction_id={} error_code=core_policy_commit_unresolved fallback=candy_proxy error={}",
             replacement.generation, transaction_id, sanitize_log_value(&format!("{error:#}")));
         return Err(anyhow::Error::new(AppliedHotReloadPending(error)));
+    }
+    if !already_suspended {
+        netd.commit_replacement()
+            .context("commit prepared netd replacement")?;
     }
 
     let deadline = Instant::now()
@@ -2246,7 +2259,14 @@ fn hot_replace_activation(
             ),
         )));
     }
-    if let Err(error) = leave_proxy_fallback(replacement, child, netd, transition) {
+    if !already_suspended {
+        let now = monotonic_ms().context("read monotonic clock before netd drain")?;
+        if let Err(error) = netd.drain_old(now) {
+            return Err(anyhow::Error::new(AppliedHotReloadPending(
+                anyhow::Error::from(error).context("drain old netd owner"),
+            )));
+        }
+    } else if let Err(error) = leave_proxy_fallback(replacement, child, netd, transition) {
         return Err(anyhow::Error::new(AppliedHotReloadPending(error)));
     }
     write_runtime_activation_receipt(replacement, "committed", None)

@@ -182,7 +182,7 @@ impl NetdClient {
         generation: u64,
         lease_deadline_mono_ms: u64,
     ) -> Result<u64, IpcError> {
-        if self.phase != ClientPhase::Suspended {
+        if self.phase != ClientPhase::Suspended && self.phase != ClientPhase::Active {
             return Err(IpcError::InvalidTransition);
         }
         if generation == 0 || lease_deadline_mono_ms == 0 {
@@ -220,6 +220,53 @@ impl NetdClient {
             self.owner.lease_deadline_mono_ms = previous_deadline;
         }
         result
+    }
+
+    /// Stage a new declaration while the current generation remains active.
+    /// Netd retains the old owner until `commit_replacement` and `drain_old`.
+    pub fn prepare_replacement_with_owner(
+        &mut self,
+        declaration: PrepareDeclaration,
+        generation: u64,
+        lease_deadline_mono_ms: u64,
+    ) -> Result<u64, IpcError> {
+        if self.phase != ClientPhase::Active {
+            return Err(IpcError::InvalidTransition);
+        }
+        let previous_generation = self.owner.generation;
+        let previous_deadline = self.owner.lease_deadline_mono_ms;
+        self.owner.generation = generation;
+        self.owner.lease_deadline_mono_ms = lease_deadline_mono_ms;
+        let result =
+            self.exchange_generation(NetdOperation::Reconfigure(declaration), |body| match body {
+                ResponseBody::Reconfigured { generation } => Some(generation),
+                _ => None,
+            });
+        if result.is_err() {
+            self.owner.generation = previous_generation;
+            self.owner.lease_deadline_mono_ms = previous_deadline;
+        }
+        result
+    }
+
+    pub fn commit_replacement(&mut self) -> Result<u64, IpcError> {
+        if self.phase != ClientPhase::Active {
+            return Err(IpcError::InvalidTransition);
+        }
+        self.exchange_generation(NetdOperation::Commit, |body| match body {
+            ResponseBody::Committed { generation } => Some(generation),
+            _ => None,
+        })
+    }
+
+    pub fn drain_old(&mut self, now_mono_ms: u64) -> Result<u64, IpcError> {
+        if self.phase != ClientPhase::Active {
+            return Err(IpcError::InvalidTransition);
+        }
+        self.exchange_generation(NetdOperation::Drain { now_mono_ms }, |body| match body {
+            ResponseBody::Drained { generation } => Some(generation),
+            _ => None,
+        })
     }
 
     pub fn resume(&mut self) -> Result<u64, IpcError> {
