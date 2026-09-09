@@ -372,6 +372,9 @@ fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
         }
         let offset = if recovery_candidate.is_some() {
             let recovery_header_end = request_end + 4;
+            if recovery_header_end > content_len {
+                return Err(NetworkError::Journal);
+            }
             let recovery_len = usize::try_from(u32::from_be_bytes(
                 bytes[request_end..recovery_header_end]
                     .try_into()
@@ -388,15 +391,23 @@ fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
                 return Err(NetworkError::Journal);
             }
         }
+        let count_end = offset.checked_add(2).ok_or(NetworkError::Journal)?;
+        if count_end > content_len {
+            return Err(NetworkError::Journal);
+        }
         let count = usize::from(u16::from_be_bytes(
-            bytes[offset..offset + 2]
+            bytes[offset..count_end]
                 .try_into()
                 .map_err(|_| NetworkError::Journal)?,
         ));
-        if count == 0 || count > MAX_FAILED_PREFIXES || offset + 2 + count * 5 != content_len {
+        let payload_len = count.checked_mul(5).ok_or(NetworkError::Journal)?;
+        let payload_end = count_end
+            .checked_add(payload_len)
+            .ok_or(NetworkError::Journal)?;
+        if count == 0 || count > MAX_FAILED_PREFIXES || payload_end != content_len {
             return Err(NetworkError::Journal);
         }
-        for chunk in bytes[offset + 2..content_len].chunks_exact(5) {
+        for chunk in bytes[count_end..payload_end].chunks_exact(5) {
             let prefix = candy_netd_proto::Ipv4Prefix {
                 network: chunk[..4].try_into().map_err(|_| NetworkError::Journal)?,
                 prefix_len: chunk[4],
