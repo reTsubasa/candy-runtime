@@ -174,24 +174,19 @@ impl NetworkBackend for FailingBackend {
         self.check("install_policy_rule")
     }
     fn remove_policy_rule(&mut self, _: &PrepareDeclaration) -> Result<(), NetworkError> {
-        self.inner.event("remove_policy_rule");
-        Ok(())
+        self.check("remove_policy_rule")
     }
     fn deactivate_link(&mut self, _: &PrepareDeclaration) -> Result<(), NetworkError> {
-        self.inner.event("deactivate_link");
-        Ok(())
+        self.check("deactivate_link")
     }
     fn remove_firewall(&mut self, _: &PrepareDeclaration) -> Result<(), NetworkError> {
-        self.inner.event("remove_firewall");
-        Ok(())
+        self.check("remove_firewall")
     }
     fn remove_routes(&mut self, _: &PrepareDeclaration) -> Result<(), NetworkError> {
-        self.inner.event("remove_routes");
-        Ok(())
+        self.check("remove_routes")
     }
     fn remove_link(&mut self, _: &PrepareDeclaration) -> Result<(), NetworkError> {
-        self.inner.event("remove_link");
-        Ok(())
+        self.check("remove_link")
     }
     fn restore_sysctls(
         &mut self,
@@ -511,6 +506,44 @@ fn active_replacement_keeps_old_owner_until_drain_timeout() {
             "remove_routes",
         ]
     );
+}
+
+#[test]
+fn drain_netlink_failure_keeps_draining_record_for_retry_or_recovery() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let journal = MemoryJournal::default();
+    let mut transaction = NetworkTransaction::new(
+        FailingBackend {
+            inner: RecordingBackend(events.clone()),
+            fail_at: "remove_policy_rule",
+        },
+        journal.clone(),
+    )
+    .unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+    let mut replacement = declaration();
+    replacement.table_id += 1;
+    let replacement_owner = LeaseOwner {
+        generation: 8,
+        lease_deadline_mono_ms: 60_000,
+        ..owner()
+    };
+    transaction.reconfigure(replacement_owner, replacement).unwrap();
+    transaction
+        .commit_with_drain(replacement_owner, 1_000, 1)
+        .unwrap();
+
+    // A failed netlink delete must not promote the candidate or clear the
+    // durable record: a restarted netd can retry the drain safely.
+    assert!(matches!(
+        transaction.drain_old(replacement_owner, 1_001),
+        Err(NetworkError::Backend)
+    ));
+    let record = journal.load().unwrap().unwrap();
+    assert_eq!(record.phase, TransactionPhase::Draining);
+    assert!(record.recovery_candidate.is_some());
+    assert_eq!(transaction.retained_owner(), Some(owner()));
 }
 
 #[test]
