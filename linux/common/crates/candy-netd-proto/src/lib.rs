@@ -143,6 +143,18 @@ pub struct PrepareDeclaration {
 }
 
 impl PrepareDeclaration {
+    /// Return the resource declaration scoped to the exact destination
+    /// prefixes supplied by the caller.  This is used by partial degradation
+    /// cleanup so a failed route owner cannot remove healthy routes that share
+    /// the same netd transaction.
+    pub fn scoped_to_prefixes(&self, prefixes: &[Ipv4Prefix]) -> Self {
+        let matches = |prefix: Ipv4Prefix| prefixes.contains(&prefix);
+        let mut scoped = self.clone();
+        scoped.routes.retain(|route| matches(route.prefix));
+        scoped.exclusions.retain(|value| matches(value.prefix));
+        scoped
+    }
+
     pub fn validate(&self) -> Result<(), NetdProtocolError> {
         if !(CANDY_TABLE_MIN..=CANDY_TABLE_MAX).contains(&self.table_id)
             || !(576..=1400).contains(&self.effective_mtu)
@@ -942,6 +954,37 @@ fn decode_varint(input: &[u8]) -> Result<(u64, usize), ()> {
         }
     }
     Err(())
+}
+
+#[cfg(test)]
+mod scoped_prefix_tests {
+    use super::*;
+
+    #[test]
+    fn scopes_routes_and_exclusions_by_exact_prefix() {
+        let first = Ipv4Prefix::new([10, 0, 0, 0], 24).unwrap();
+        let second = Ipv4Prefix::new([10, 0, 1, 0], 24).unwrap();
+        let declaration = PrepareDeclaration {
+            table_id: CANDY_TABLE_MIN,
+            overlay_router_ipv4: [100, 64, 0, 2],
+            effective_mtu: 1200,
+            routes: vec![
+                RouteDeclaration { prefix: first, kind: RouteKind::Remote },
+                RouteDeclaration { prefix: second, kind: RouteKind::Remote },
+            ],
+            exclusions: vec![
+                UnderlayExclusion { prefix: first, kind: UnderlayKind::CloudApi },
+                UnderlayExclusion { prefix: second, kind: UnderlayKind::HubEndpoint },
+            ],
+            firewall: FirewallPolicy { allow_forward: true, clamp_tcp_mss: true, require_ipv4_forwarding: true, manage_rp_filter: true },
+        };
+        let scoped = declaration.scoped_to_prefixes(&[second]);
+        assert_eq!(scoped.routes.len(), 1);
+        assert_eq!(scoped.routes[0].prefix, second);
+        assert_eq!(scoped.exclusions.len(), 1);
+        assert_eq!(scoped.exclusions[0].prefix, second);
+        assert_eq!(scoped.table_id, declaration.table_id);
+    }
 }
 
 struct Reader<'a> {
