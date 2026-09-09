@@ -529,7 +529,9 @@ fn drain_netlink_failure_keeps_draining_record_for_retry_or_recovery() {
         lease_deadline_mono_ms: 60_000,
         ..owner()
     };
-    transaction.reconfigure(replacement_owner, replacement).unwrap();
+    transaction
+        .reconfigure(replacement_owner, replacement)
+        .unwrap();
     transaction
         .commit_with_drain(replacement_owner, 1_000, 1)
         .unwrap();
