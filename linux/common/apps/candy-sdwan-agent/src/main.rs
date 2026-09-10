@@ -1440,6 +1440,21 @@ fn classify_core_readiness(
             && has_authenticated_path_evidence
             && (!status.fail_open_required || recoverable_peer_loss_code);
     let state = match status.lifecycle.as_str() {
+        // Core can authenticate the peer before its packet stream finishes
+        // opening. Keep the authenticated listener alive, but do not admit
+        // routes until the stream contributes a ready route owner.
+        "active" | "starting"
+            if !status.fail_open_required
+                && status.required_route_owners > 0
+                && status.ready_route_owners == 0
+                && status.last_error_code.as_deref() == Some("stream_not_ready") =>
+        {
+            if listener_ready {
+                ReadinessState::ListenerReady
+            } else {
+                ReadinessState::Waiting
+            }
+        }
         "starting" if !status.fail_open_required && listener_ready => ReadinessState::ListenerReady,
         "starting" if !status.fail_open_required => ReadinessState::Waiting,
         "active"
@@ -3301,9 +3316,7 @@ mod tests {
                     NetdOperation::Rollback => {
                         ("rollback", ResponseBody::RolledBack { generation })
                     }
-                    NetdOperation::Drain { .. } => {
-                        ("drain", ResponseBody::Drained { generation })
-                    }
+                    NetdOperation::Drain { .. } => ("drain", ResponseBody::Drained { generation }),
                     other => panic!("unexpected netd operation {other:?}"),
                 };
                 netd_events.lock().unwrap().push(format!("netd:{name}"));
@@ -4459,6 +4472,47 @@ exit 17
             "paths": if lifecycle == "active" { serde_json::json!([{"rtt_sample_count": 1, "rx_bytes": 1, "rx_idle_ms": 0}]) } else { serde_json::json!([]) }
         })
         .to_string()
+    }
+
+    #[test]
+    fn opening_packet_stream_preserves_listener_without_admitting_routes() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&status(9, "active", 1, 0)).unwrap();
+        value["last_error_code"] = serde_json::json!("stream_not_ready");
+        for lifecycle in ["active", "starting"] {
+            value["lifecycle"] = serde_json::json!(lifecycle);
+            for listener in [false, true] {
+                value["inbound_listener_configured"] = serde_json::json!(listener);
+                value["inbound_listener_ready"] = serde_json::json!(listener);
+                value["inbound_listener_endpoints"] = if listener {
+                    serde_json::json!(["127.0.0.1:8443"])
+                } else {
+                    serde_json::json!([])
+                };
+                let parsed: CoreReadinessStatus = serde_json::from_value(value.clone()).unwrap();
+                for policy in [
+                    ReadinessPolicy::Strict,
+                    ReadinessPolicy::Committed,
+                    ReadinessPolicy::CommittedServer,
+                ] {
+                    assert_eq!(
+                        classify_core_readiness(&parsed, policy).unwrap(),
+                        if listener {
+                            ReadinessState::ListenerReady
+                        } else {
+                            ReadinessState::Waiting
+                        }
+                    );
+                }
+            }
+        }
+        value["lifecycle"] = serde_json::json!("active");
+        value["fail_open_required"] = serde_json::json!(true);
+        let parsed = serde_json::from_value(value.clone()).unwrap();
+        assert!(classify_core_readiness(&parsed, ReadinessPolicy::Strict).is_err());
+        value["last_error_code"] = serde_json::json!("tun_read_failed");
+        let parsed = serde_json::from_value(value).unwrap();
+        assert!(classify_core_readiness(&parsed, ReadinessPolicy::CommittedServer).is_err());
     }
 
     #[test]
