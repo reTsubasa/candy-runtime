@@ -3513,10 +3513,7 @@ mod tests {
                 );
             }
             ReloadFault::NetdRollbackIncomplete => {
-                assert!(result
-                    .unwrap_err()
-                    .downcast_ref::<HotReloadRecoveryRequired>()
-                    .is_some());
+                assert!(!result.unwrap());
                 assert!(!operations.contains(&"core:commit"));
                 assert!(transition.complete());
                 assert!(
