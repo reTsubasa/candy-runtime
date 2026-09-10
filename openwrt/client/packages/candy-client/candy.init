@@ -553,19 +553,32 @@ wait_for_netd_exit() {
 
 current_readiness() {
 	local ready_pid
-	[ -s "$CANDY_READY_FILE" ] || return 1
+	if [ ! -s "$CANDY_READY_FILE" ]; then
+		log_event warn readiness_check "stage=receipt_read error_code=readiness_receipt_missing file=$CANDY_READY_FILE"
+		return 1
+	fi
 	ready_pid=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$CANDY_READY_FILE" | head -1)
 	case "$ready_pid" in
-		''|*[!0-9]*) return 1 ;;
+		''|*[!0-9]*) log_event warn readiness_check "stage=receipt_decode error_code=readiness_receipt_pid_invalid file=$CANDY_READY_FILE"; return 1 ;;
 	esac
-	kill -0 "$ready_pid" 2>/dev/null || return 1
-	[ -x "$CANDY_RUNTIME_HEALTH_CHECK" ] || return 1
+	if ! kill -0 "$ready_pid" 2>/dev/null; then
+		log_event warn readiness_check "stage=process_liveness error_code=readiness_receipt_process_missing pid=$ready_pid"
+		return 1
+	fi
+	if [ ! -x "$CANDY_RUNTIME_HEALTH_CHECK" ]; then
+		log_event error readiness_check "stage=health_check error_code=runtime_health_check_missing path=$CANDY_RUNTIME_HEALTH_CHECK"
+		return 1
+	fi
 	CANDY_READY_FILE="$CANDY_READY_FILE" \
 	CANDY_RUNTIME_CONFIG="$RUNTIME_CONFIG" \
 	CANDY_PASSIVE_STATUS_FILE="$CANDY_PASSIVE_STATUS_FILE" \
 	CANDY_CONTROL_SOCKET="$CANDY_CONTROL_SOCKET" \
 	CANDY_SERVICE_INIT=/bin/true \
-		"$CANDY_RUNTIME_HEALTH_CHECK" client >/dev/null 2>&1
+		"$CANDY_RUNTIME_HEALTH_CHECK" client >/dev/null 2>&1 || {
+			log_event warn readiness_check "stage=health_check error_code=runtime_health_check_failed pid=$ready_pid"
+			return 1
+		}
+	return 0
 }
 
 wait_for_current_readiness() {
@@ -3917,7 +3930,7 @@ service_started() {
 			;;
 	esac
 	if ! wait_for_current_readiness "$CANDY_LISTENER_WAIT_SECONDS"; then
-		log_error "candy listener readiness timed out"
+		log_event error readiness_timeout "stage=listener_readiness error_code=listener_readiness_timeout wait_seconds=$CANDY_LISTENER_WAIT_SECONDS receipt=$CANDY_READY_FILE"
 		cleanup_failed_start down 1 || true
 		return 1
 	fi

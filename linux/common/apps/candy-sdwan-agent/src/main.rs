@@ -834,6 +834,15 @@ fn spawn_core(args: &RuntimeArgs, tun: &OwnedFd, readiness_token: &str) -> Resul
             command.arg("server");
         }
     }
+    eprintln!(
+        "level=info event=core_spawn stage=process_start error_code=none generation={} role={:?} status={} activation={}",
+        args.generation,
+        args.core_role,
+        args.status.display(),
+        args.activation_target
+            .as_deref()
+            .map_or("", |path| path.to_str().unwrap_or("<invalid>"))
+    );
     command
         .arg("--config")
         .arg(&args.config)
@@ -846,6 +855,13 @@ fn spawn_core(args: &RuntimeArgs, tun: &OwnedFd, readiness_token: &str) -> Resul
         .arg("--reload-socket")
         .arg(core_reload_socket(args)?)
         .spawn()
+        .map(|child| {
+            eprintln!(
+                "level=info event=core_spawned stage=process_start error_code=none pid={} generation={}",
+                child.id(), args.generation
+            );
+            child
+        })
         .with_context(|| format!("start Candy Core: {}", args.core.display()))
 }
 
@@ -1070,6 +1086,10 @@ fn remove_stale_status(path: &PathBuf) -> Result<()> {
                 bail!("SD-WAN Core status path must be a regular file")
             }
             fs::remove_file(path).context("remove stale SD-WAN Core status")?;
+            eprintln!(
+                "level=info event=core_readiness_cleanup stage=pre_spawn error_code=stale_status_removed status={}",
+                path.display()
+            );
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).context("inspect stale SD-WAN Core status"),
@@ -1464,6 +1484,15 @@ fn read_core_status(
             .context("parse SD-WAN Core readiness status")?;
     if status.schema_version != 3 || status.pid != pid || status.readiness_token != readiness_token
     {
+        eprintln!(
+            "level=warn event=core_readiness_mismatch stage=readiness_binding error_code=core_readiness_binding_mismatch expected_pid={} actual_pid={} expected_token_present=true actual_token_match={} expected_generation={} actual_generation={} status={}",
+            pid,
+            status.pid,
+            status.readiness_token == readiness_token,
+            generation,
+            status.generation,
+            path.display()
+        );
         bail!("SD-WAN Core readiness status does not match the candidate process")
     }
     if status.generation < generation {
@@ -1670,6 +1699,11 @@ fn wait_for_core_readiness(
         // complete; netd remains prepared but uncommitted until a route owner
         // is authenticated.
         if Instant::now() >= deadline && !server_listener_ready {
+            eprintln!(
+                "level=error event=core_readiness_timeout stage=readiness_wait error_code=core_readiness_timeout generation={} pid={} status={} activation={}",
+                args.generation, child.id(), args.status.display(),
+                args.activation_target.as_deref().map_or("", |path| path.to_str().unwrap_or("<invalid>"))
+            );
             return Err(anyhow::Error::new(TransientReadinessFailure(
                 "Candy Core SD-WAN readiness timed out".into(),
             )));
