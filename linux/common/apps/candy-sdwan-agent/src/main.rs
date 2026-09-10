@@ -3301,6 +3301,9 @@ mod tests {
                     NetdOperation::Rollback => {
                         ("rollback", ResponseBody::RolledBack { generation })
                     }
+                    NetdOperation::Drain { .. } => {
+                        ("drain", ResponseBody::Drained { generation })
+                    }
                     other => panic!("unexpected netd operation {other:?}"),
                 };
                 netd_events.lock().unwrap().push(format!("netd:{name}"));
