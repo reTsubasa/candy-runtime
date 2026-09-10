@@ -3530,8 +3530,22 @@ fn read_activation_ready_receipt(state_dir: &Path) -> Result<Option<ActivationOu
     if receipt.state == "committed" {
         use std::os::unix::fs::MetadataExt;
         let process = PathBuf::from(format!("/proc/{}", receipt.agent_pid));
-        let process_metadata = fs::metadata(&process)
-            .with_context(|| format!("inspect SD-WAN agent process {}", receipt.agent_pid))?;
+        let process_metadata = match fs::metadata(&process) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!(
+                    "level=info event=activation_receipt_stale stage=receipt_validation error_code=agent_process_missing agent_pid={} activation={}",
+                    receipt.agent_pid, receipt.activation_id
+                );
+                // Ignore this observation without deleting a concurrently
+                // published replacement receipt from the new agent.
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect SD-WAN agent process {}", receipt.agent_pid))
+            }
+        };
         let owner = fs::symlink_metadata(state_dir).context("inspect SD-WAN state owner")?;
         if process_metadata.uid() != owner.uid() {
             bail!("SD-WAN activation receipt process owner does not match the state owner")
@@ -3542,6 +3556,9 @@ fn read_activation_ready_receipt(state_dir: &Path) -> Result<Option<ActivationOu
         && unsafe { nix::libc::kill(receipt.agent_pid as nix::libc::pid_t, 0) } != 0
     {
         let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(nix::libc::ESRCH) {
+            return Ok(None);
+        }
         if error.raw_os_error() != Some(nix::libc::EPERM) {
             return Err(error).context("verify SD-WAN agent process is alive");
         }
@@ -7245,6 +7262,31 @@ default via 192.0.2.1 dev eth0 proto static
         assert!(directory.path().join("active").exists());
         assert!(proof.exists());
         assert!(directory.path().join("withdrawal-request-v1.json").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn exited_agent_receipt_does_not_block_cloud_reconciliation() {
+        let (directory, _) = activation_outcome_fixture("committed", None, 7);
+        let path = directory.path().join("activation-ready-v1.json");
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        let mut receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        receipt["agent_pid"] = serde_json::json!(pid);
+        atomic_json(&path, &receipt, 0o600).unwrap();
+        assert!(read_activation_ready_receipt(directory.path())
+            .unwrap()
+            .is_none());
+        assert!(directory.path().join("candidate").exists());
+        assert!(
+            path.exists(),
+            "do not delete a potentially replaced receipt"
+        );
     }
 
     #[test]

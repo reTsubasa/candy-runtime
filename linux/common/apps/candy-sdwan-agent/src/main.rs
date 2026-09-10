@@ -70,7 +70,20 @@ impl std::fmt::Display for CoreReadinessFailure {
 }
 impl std::error::Error for CoreReadinessFailure {}
 
+#[derive(Debug)]
+struct ReadinessBindingFailure(&'static str);
+
+impl std::fmt::Display for ReadinessBindingFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SD-WAN Core readiness binding rejected: {}", self.0)
+    }
+}
+impl std::error::Error for ReadinessBindingFailure {}
+
 fn runtime_cause_code(error: &anyhow::Error) -> &str {
+    if let Some(binding) = error.downcast_ref::<ReadinessBindingFailure>() {
+        return binding.0;
+    }
     if let Some(status) = error.downcast_ref::<CoreReadinessFailure>() {
         return &status.code;
     }
@@ -826,6 +839,7 @@ fn spawn_core(args: &RuntimeArgs, tun: &OwnedFd, readiness_token: &str) -> Resul
     clear_cloexec(tun)?;
     let fd = tun.as_raw_fd().to_string();
     let mut command = Command::new(&args.core);
+    protect_child_lifetime(&mut command);
     match args.core_role {
         CoreRole::ClientSdwan => {
             command.args(["client", "sdwan", "run"]);
@@ -863,6 +877,29 @@ fn spawn_core(args: &RuntimeArgs, tun: &OwnedFd, readiness_token: &str) -> Resul
             child
         })
         .with_context(|| format!("start Candy Core: {}", args.core.display()))
+}
+
+fn protect_child_lifetime(command: &mut Command) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        let parent = unsafe { nix::libc::getpid() };
+        // Only async-signal-safe calls between fork and exec. SIGKILL prevents
+        // an orphan status writer even when the agent is killed during stop.
+        unsafe {
+            command.pre_exec(move || {
+                if nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if nix::libc::getppid() != parent {
+                    return Err(std::io::Error::from_raw_os_error(nix::libc::ESRCH));
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = command;
 }
 
 fn core_reload_socket(args: &RuntimeArgs) -> Result<PathBuf> {
@@ -1468,32 +1505,55 @@ fn read_core_status(
     pid: u32,
     readiness_token: &str,
 ) -> Result<Option<CoreReadinessStatus>> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).context("inspect SD-WAN Core readiness status"),
     };
+    let metadata = file
+        .metadata()
+        .context("inspect open SD-WAN Core readiness status")?;
     if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > MAX_STATUS_BYTES {
         bail!("SD-WAN Core readiness status must be a bounded regular file")
     }
     if metadata.permissions().mode() & 0o777 != 0o600 {
         bail!("SD-WAN Core readiness status must have mode 0600")
     }
+    let mut bytes = Vec::new();
+    file.take(MAX_STATUS_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("read SD-WAN Core readiness status")?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_STATUS_BYTES,
+        "SD-WAN Core readiness status exceeds size limit"
+    );
     let status: CoreReadinessStatus =
-        serde_json::from_slice(&fs::read(path).context("read SD-WAN Core readiness status")?)
-            .context("parse SD-WAN Core readiness status")?;
+        serde_json::from_slice(&bytes).context("parse SD-WAN Core readiness status")?;
     if status.schema_version != 3 || status.pid != pid || status.readiness_token != readiness_token
     {
+        let code = if status.schema_version != 3 {
+            "readiness_schema_mismatch"
+        } else if status.pid != pid {
+            "readiness_pid_mismatch"
+        } else {
+            "readiness_token_mismatch"
+        };
         eprintln!(
-            "level=warn event=core_readiness_mismatch stage=readiness_binding error_code=core_readiness_binding_mismatch expected_pid={} actual_pid={} expected_token_present=true actual_token_match={} expected_generation={} actual_generation={} status={}",
+            "level=warn event=core_readiness_mismatch stage=readiness_binding error_code={} expected_pid={} actual_pid={} expected_schema=3 actual_schema={} actual_token_match={} expected_generation={} actual_generation={} status={}",
+            code,
             pid,
             status.pid,
+            status.schema_version,
             status.readiness_token == readiness_token,
             generation,
             status.generation,
             path.display()
         );
-        bail!("SD-WAN Core readiness status does not match the candidate process")
+        return Err(ReadinessBindingFailure(code).into());
     }
     if status.generation < generation {
         // The status writer follows the routing actor asynchronously. An
@@ -4645,6 +4705,101 @@ exit 17
         value["last_error_code"] = serde_json::json!("tun_read_failed");
         let parsed = serde_json::from_value(value).unwrap();
         assert!(classify_core_readiness(&parsed, ReadinessPolicy::CommittedServer).is_err());
+    }
+
+    #[test]
+    fn readiness_binding_errors_are_distinct_and_never_expose_tokens() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("status.json");
+        for (field, value, expected) in [
+            (
+                "schema_version",
+                serde_json::json!(2),
+                "readiness_schema_mismatch",
+            ),
+            ("pid", serde_json::json!(123), "readiness_pid_mismatch"),
+            (
+                "readiness_token",
+                serde_json::json!("secret-token"),
+                "readiness_token_mismatch",
+            ),
+        ] {
+            let mut report: serde_json::Value =
+                serde_json::from_str(&status(9, "active", 1, 1)).unwrap();
+            report[field] = value;
+            write_private(&path, &serde_json::to_vec(&report).unwrap());
+            let error =
+                read_core_status(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap_err();
+            assert_eq!(runtime_cause_code(&error), expected);
+            assert!(!transient_runtime_error(&error));
+            assert!(!format!("{error:#}").contains("secret-token"));
+        }
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(directory.path().join("missing"), &path).unwrap();
+        assert!(read_core_status(&path, 9, 42, "redacted").is_err());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn parent_lifetime_helper() {
+        let Some(path) = std::env::var_os("CANDY_TEST_CHILD_PID") else {
+            return;
+        };
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        protect_child_lifetime(&mut command);
+        let mut child = command.spawn().unwrap();
+        fs::write(path, child.id().to_string()).unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn killing_agent_cannot_leave_a_live_core_child() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("child-pid");
+        let mut parent = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::parent_lifetime_helper", "--nocapture"])
+            .env("CANDY_TEST_CHILD_PID", &path)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let child_pid = loop {
+            if let Ok(text) = fs::read_to_string(&path) {
+                if let Ok(pid) = text.parse::<u32>() {
+                    break pid;
+                }
+            }
+            if Instant::now() >= deadline {
+                let _ = parent.kill();
+                let _ = parent.wait();
+                panic!("child did not start");
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        parent.kill().unwrap();
+        parent.wait().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match fs::read_to_string(format!("/proc/{child_pid}/status")) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Ok(status)
+                    if status
+                        .lines()
+                        .any(|line| line.starts_with("State:") && line.contains("Z (zombie)")) =>
+                {
+                    break
+                }
+                _ => {}
+            }
+            if Instant::now() >= deadline {
+                unsafe {
+                    nix::libc::kill(child_pid as i32, nix::libc::SIGKILL);
+                }
+                panic!("Core child survived agent SIGKILL");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

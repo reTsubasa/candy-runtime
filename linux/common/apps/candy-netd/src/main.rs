@@ -55,6 +55,14 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+fn sanitize_log_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
 fn run_linux(args: Args) -> anyhow::Result<()> {
     if let Some(path) = args.probe_socket {
         std::os::unix::net::UnixStream::connect(path)?;
@@ -93,7 +101,8 @@ fn run_linux(args: Args) -> anyhow::Result<()> {
                     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
                     if let Err(error) = service.serve_once(&stream) {
                         eprintln!(
-                            "level=warn component=candy-netd event=request_failed error={error}"
+                            "level=warn component=candy-netd event=request_failed stage=request_service cause={}",
+                            sanitize_log_value(&format!("{:#}", anyhow::Error::new(error)))
                         );
                     }
                 }
@@ -147,7 +156,7 @@ extern "C" fn request_shutdown(_signal: nix::libc::c_int) {
 #[cfg(target_os = "linux")]
 fn install_shutdown_handlers() -> anyhow::Result<()> {
     let mut action: nix::libc::sigaction = unsafe { std::mem::zeroed() };
-    action.sa_sigaction = request_shutdown as usize;
+    action.sa_sigaction = request_shutdown as *const () as usize;
     action.sa_flags = 0;
     unsafe {
         nix::libc::sigemptyset(&mut action.sa_mask);

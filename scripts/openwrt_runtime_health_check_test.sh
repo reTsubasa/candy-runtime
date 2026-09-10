@@ -25,6 +25,8 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 case "$expression" in
+	'@.pid') sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$path" ;;
+	'@.listeners[0]') sed -n 's/.*"listeners":\["\([^"]*\)".*/\1/p' "$path" ;;
 	'@.updated_unix_ms') sed -n 's/.*"updated_unix_ms":\([0-9][0-9]*\).*/\1/p' "$path" ;;
 	'@.generation') sed -n 's/.*"generation":\([0-9][0-9]*\).*/\1/p' "$path" ;;
 	'@.config_sha256') sed -n 's/.*"config_sha256":"\([0-9a-f]*\)".*/\1/p' "$path" ;;
@@ -78,20 +80,22 @@ run_health() {
 }
 
 run_health || fail "valid local runtime health contract was rejected"
+expect_failure() {
+	if run_health > "$tmp/health.out" 2> "$tmp/health.err"; then
+		fail "accepted invalid health: $1"
+	fi
+	grep -F "error_code=$1" "$tmp/health.err" >/dev/null || fail "wrong failure cause: $1"
+}
 printf '{"schema_version":2,"generation":1,"config_sha256":"%064d","updated_unix_ms":%s}\n' 0 "$now_ms" > "$passive_status"
 run_health || fail "valid startup semantic fingerprint was rejected"
 printf '{"schema_version":2,"generation":7,"config_sha256":"%s","updated_unix_ms":%s}\n' "$runtime_sha" "$now_ms" > "$passive_status"
 printf '{"schema_version":2,"generation":7,"config_sha256":"%s","updated_unix_ms":1}\n' "$runtime_sha" > "$passive_status"
-if run_health; then
-	fail "stale Core heartbeat was accepted"
-fi
+expect_failure heartbeat_stale
 printf '{"schema_version":2,"generation":7,"config_sha256":"%064d","updated_unix_ms":%s}\n' 0 "$now_ms" > "$passive_status"
-if run_health; then
-	fail "passive status for a different runtime config was accepted"
-fi
+expect_failure config_fingerprint_mismatch
 printf '{"schema_version":2,"generation":0,"config_sha256":"%s","updated_unix_ms":%s}\n' "$runtime_sha" "$now_ms" > "$passive_status"
-if run_health; then
-	fail "zero runtime generation was accepted"
-fi
+expect_failure passive_status_invalid
+printf '%s\n' '{}' > "$passive_status"
+expect_failure passive_status_invalid
 
 printf '%s\n' "Candy OpenWrt semantic runtime health check passed"

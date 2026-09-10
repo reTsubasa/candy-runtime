@@ -496,8 +496,49 @@ sdwan_netd_pids() {
 }
 
 sdwan_agent_pids() {
-	candy_ps | grep -E "($CANDY_SDWAN_AGENT .*--socket $CANDY_NETD_SOCKET|$CANDY_CORE_BIN client sdwan|$CANDY_CORE_BIN server)" |
+	candy_ps | grep -F "$CANDY_SDWAN_AGENT --socket $CANDY_NETD_SOCKET" |
 		grep -v grep | awk '{print $1}' 2>/dev/null || true
+	sdwan_owned_core_pids
+}
+
+sdwan_owned_core_pids() {
+	local process pid
+	for process in "${CANDY_PROC_ROOT:-/proc}"/[0-9]*/cmdline; do
+		[ -r "$process" ] || continue
+		# /proc preserves complete argument boundaries; BusyBox ps truncates
+		# long activation paths. Never match unrelated Core server/verify jobs.
+		if tr '\000' '\n' < "$process" | awk -v binary="$CANDY_CORE_BIN" -v root="$CANDY_SDWAN_ACTIVATIONS_DIR/" '
+			{ args[NR]=$0 }
+			END {
+				if (args[1] != binary) exit 1
+				if (!((args[2] == "client" && args[3] == "sdwan" && args[4] == "run") || args[2] == "server")) exit 1
+				for (i=2; i<NR; i++) if (args[i] == "--config" && index(args[i+1],root) == 1) exit 0
+				exit 1
+			}' 2>/dev/null; then
+			pid=${process%/cmdline}; printf '%s\n' "${pid##*/}"
+		fi
+	done
+}
+
+clear_orphan_sdwan_cores() {
+	local pid parent
+	for pid in $(sdwan_owned_core_pids); do
+		parent=$(awk '/^PPid:/ { print $2 }' "${CANDY_PROC_ROOT:-/proc}/$pid/status" 2>/dev/null)
+		[ "$parent" = 1 ] || {
+			log_event error sdwan_start_conflict "stage=pre_spawn error_code=live_core_owner pid=$pid parent_pid=$parent"
+			return 1
+		}
+		log_event warn sdwan_orphan_recovery "stage=pre_spawn error_code=orphan_core_found pid=$pid"
+		kill -TERM "$pid" 2>/dev/null || true
+	done
+	if ! wait_for_sdwan_pid_query sdwan_owned_core_pids; then
+		for pid in $(sdwan_owned_core_pids); do
+			parent=$(awk '/^PPid:/ { print $2 }' "${CANDY_PROC_ROOT:-/proc}/$pid/status" 2>/dev/null)
+			[ "$parent" = 1 ] || return 1
+			kill -KILL "$pid" 2>/dev/null || true
+		done
+		wait_for_sdwan_pid_query sdwan_owned_core_pids 3 || return 1
+	fi
 }
 
 sdwan_netd_daemon_pids() {
@@ -552,38 +593,27 @@ wait_for_netd_exit() {
 }
 
 current_readiness() {
-	local ready_pid
-	if [ ! -s "$CANDY_READY_FILE" ]; then
-		log_event warn readiness_check "stage=receipt_read error_code=readiness_receipt_missing file=$CANDY_READY_FILE"
-		return 1
-	fi
-	ready_pid=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$CANDY_READY_FILE" | head -1)
-	case "$ready_pid" in
-		''|*[!0-9]*) log_event warn readiness_check "stage=receipt_decode error_code=readiness_receipt_pid_invalid file=$CANDY_READY_FILE"; return 1 ;;
-	esac
-	if ! kill -0 "$ready_pid" 2>/dev/null; then
-		log_event warn readiness_check "stage=process_liveness error_code=readiness_receipt_process_missing pid=$ready_pid"
-		return 1
-	fi
+	CANDY_READINESS_FAILURE=
 	if [ ! -x "$CANDY_RUNTIME_HEALTH_CHECK" ]; then
-		log_event error readiness_check "stage=health_check error_code=runtime_health_check_missing path=$CANDY_RUNTIME_HEALTH_CHECK"
+		CANDY_READINESS_FAILURE="stage=health_check error_code=runtime_health_check_missing"
 		return 1
 	fi
-	CANDY_READY_FILE="$CANDY_READY_FILE" \
+	CANDY_READINESS_FAILURE=$(CANDY_READY_FILE="$CANDY_READY_FILE" \
 	CANDY_RUNTIME_CONFIG="$RUNTIME_CONFIG" \
 	CANDY_PASSIVE_STATUS_FILE="$CANDY_PASSIVE_STATUS_FILE" \
 	CANDY_CONTROL_SOCKET="$CANDY_CONTROL_SOCKET" \
 	CANDY_SERVICE_INIT=/bin/true \
-		"$CANDY_RUNTIME_HEALTH_CHECK" client >/dev/null 2>&1 || {
-			log_event warn readiness_check "stage=health_check error_code=runtime_health_check_failed pid=$ready_pid"
-			return 1
-		}
+		"$CANDY_RUNTIME_HEALTH_CHECK" client 2>&1 >/dev/null) || return 1
 	return 0
 }
 
 wait_for_current_readiness() {
-	local waited=0 wait_seconds="${1:-$CANDY_LISTENER_WAIT_SECONDS}"
+	local waited=0 wait_seconds="${1:-$CANDY_LISTENER_WAIT_SECONDS}" previous_failure=
 	while ! current_readiness; do
+		if [ "$previous_failure" != "$CANDY_READINESS_FAILURE" ]; then
+			log_event info readiness_pending "$CANDY_READINESS_FAILURE elapsed_seconds=$waited"
+			previous_failure=$CANDY_READINESS_FAILURE
+		fi
 		[ "$waited" -lt "$wait_seconds" ] || return 1
 		waited=$((waited + 1))
 		sleep 1
@@ -664,6 +694,23 @@ migrate_reserved_dns_forward() {
 	log_msg "migrated reserved Candy DNS forward dns_remote_forward to dns_egress_resolver"
 }
 
+stop_supervised_child() {
+	local pid="$1" grace="$2" waited=0
+	trap '' TERM INT
+	kill -TERM "$pid" 2>/dev/null || true
+	# wait is interrupted by a trapped signal; do not leave the child behind.
+	while kill -0 "$pid" 2>/dev/null; do
+		if [ "$waited" -ge "$grace" ]; then
+			log_event warn child_stop_timeout "stage=process_stop error_code=child_term_timeout child_pid=$pid grace_seconds=$grace"
+			kill -KILL "$pid" 2>/dev/null || true
+			break
+		fi
+		sleep 1
+		waited=$((waited + 1))
+	done
+	wait "$pid" 2>/dev/null || true
+}
+
 run_client() {
 	local congestion candy_bbr_preset child rc stopping=0
 	if ! ensure_no_existing_candy_client_before_start; then
@@ -688,7 +735,7 @@ run_client() {
 	# an erroneous zero exit, is terminal and must remove steering before procd
 	# can leave the device in a half-running state. TERM/INT are normal stop
 	# paths and must not trigger fail-open a second time.
-	trap 'stopping=1; [ -z "${child:-}" ] || kill -TERM "$child" 2>/dev/null || true' TERM INT
+	trap 'stopping=1; [ -z "${child:-}" ] || stop_supervised_child "$child" "$CANDY_SERVICE_WAIT_SECONDS"' TERM INT
 	"$@" &
 	child=$!
 	wait "$child"
@@ -704,7 +751,7 @@ run_client() {
 run_sdwan() {
 	local attempted_hash core_status child rc next_rc next_hash fallback stopping=0
 	[ -x "$CANDY_SDWAN_AGENT" ] || { log_event error sdwan_agent_unavailable "reason=agent_missing"; return 1; }
-	trap 'stopping=1; [ -z "${child:-}" ] || kill -TERM "$child" 2>/dev/null || true' TERM INT
+	trap 'stopping=1; [ -z "${child:-}" ] || stop_supervised_child "$child" "$CANDY_SDWAN_STOP_WAIT_SECONDS"' TERM INT
 	while [ "$stopping" -eq 0 ]; do
 		wait_for_sdwan_candidate || continue
 		attempted_hash=$CANDY_SDWAN_CANDIDATE_HASH
@@ -1174,7 +1221,7 @@ run_netd() {
 	local attempted_hash child rc sdwan_uid sdwan_gid stopping=0
 	sdwan_uid=$(id -u candy-sdwan 2>/dev/null) || return 1
 	sdwan_gid=$(id -g candy-sdwan 2>/dev/null) || return 1
-	trap 'stopping=1; [ -z "${child:-}" ] || kill -TERM "$child" 2>/dev/null || true' TERM INT
+	trap 'stopping=1; [ -z "${child:-}" ] || stop_supervised_child "$child" "$CANDY_SDWAN_STOP_WAIT_SECONDS"' TERM INT
 	while [ "$stopping" -eq 0 ]; do
 		wait_for_sdwan_candidate || continue
 		attempted_hash=$CANDY_SDWAN_CANDIDATE_HASH
@@ -1219,6 +1266,7 @@ start_sdwan_netd() {
 	}
 	procd_open_instance sdwan-netd
 	procd_set_param command "$CANDY_INIT_SELF" run_netd
+	procd_set_param term_timeout "$((CANDY_SDWAN_STOP_WAIT_SECONDS + 5))"
 	procd_set_param user root
 	procd_set_param respawn 3600 10 5
 	procd_set_param stdout 1
@@ -1227,6 +1275,7 @@ start_sdwan_netd() {
 }
 
 start_sdwan_supervision() {
+	clear_orphan_sdwan_cores || return 1
 	# procd launches the data-plane supervisor as candy-sdwan. Migrate stale
 	# per-activation Core readiness files while this startup hook still has
 	# root authority; the stable Runtime/LuCI status is intentionally retained.
@@ -1245,6 +1294,7 @@ start_sdwan_supervision() {
 	start_sdwan_netd || return 1
 	procd_open_instance sdwan
 	procd_set_param command "$CANDY_INIT_SELF" run_sdwan
+	procd_set_param term_timeout "$((CANDY_SDWAN_STOP_WAIT_SECONDS + 5))"
 	procd_set_param user candy-sdwan
 	procd_set_param respawn 3600 10 5
 	procd_set_param stdout 1
@@ -3899,6 +3949,7 @@ start_service() {
 	procd_open_instance ordinary
 	rm -f "$CANDY_READY_FILE"
 	procd_set_param command "$CANDY_INIT_SELF" run_client
+	procd_set_param term_timeout "$((CANDY_SERVICE_WAIT_SECONDS + 5))"
 	# Root remains required for ordinary transparent proxy routing.
 	procd_set_param user root
 	procd_set_param env CANDY_TRAFFIC_LOG="$TRAFFIC_LOG_FILE" CANDY_READY_FILE="$CANDY_READY_FILE" CANDY_PASSIVE_STATUS_FILE="$CANDY_PASSIVE_STATUS_FILE"
@@ -3930,7 +3981,7 @@ service_started() {
 			;;
 	esac
 	if ! wait_for_current_readiness "$CANDY_LISTENER_WAIT_SECONDS"; then
-		log_event error readiness_timeout "stage=listener_readiness error_code=listener_readiness_timeout wait_seconds=$CANDY_LISTENER_WAIT_SECONDS receipt=$CANDY_READY_FILE"
+		log_event error readiness_timeout "stage=startup_health error_code=startup_health_timeout wait_seconds=$CANDY_LISTENER_WAIT_SECONDS receipt=$CANDY_READY_FILE cause=${CANDY_READINESS_FAILURE:-health_check_failed_without_diagnostic}"
 		cleanup_failed_start down 1 || true
 		return 1
 	fi

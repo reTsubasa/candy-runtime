@@ -1249,7 +1249,13 @@ end
 
 local function log_level(line)
 	local lower = line:lower()
-	local explicit = lower:match("level[=:]%s*([a-z]+)") or lower:match("%[([a-z]+)%]")
+	local explicit = lower:match('level[=:]%s*"?([a-z]+)') or lower:match("%[([a-z]+)%]")
+	-- procd marks stderr as daemon.err even for Rust INFO records.
+	if not explicit then
+		for _, candidate in ipairs({ "ERROR", "WARN", "INFO", "DEBUG", "TRACE" }) do
+			if line:match("%s" .. candidate .. "%s") then explicit = candidate:lower(); break end
+		end
+	end
 	if explicit == "err" then explicit = "error" end
 	if explicit == "warning" then explicit = "warn" end
 	if explicit == "error" or explicit == "warn" or explicit == "info" or explicit == "debug" then return explicit end
@@ -1259,17 +1265,33 @@ local function log_level(line)
 end
 
 local function log_timestamp(line)
+	local iso = line:match("(%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d)[%.%d]*Z")
+	if iso then return iso .. "Z" end
+	local weekday, month, day, time, year = line:match("^(%a%a%a) (%a%a%a)%s+(%d+) (%d%d:%d%d:%d%d) (%d%d%d%d)")
+	if weekday then
+		local months = { Jan=1, Feb=2, Mar=3, Apr=4, May=5, Jun=6, Jul=7, Aug=8, Sep=9, Oct=10, Nov=11, Dec=12 }
+		if months[month] then line = string.format("%s-%02d-%02d %s", year, months[month], tonumber(day), time) end
+	end
+	local y, m, d, h, minute, second = line:match("^(%d%d%d%d)%-(%d%d)%-(%d%d) (%d%d):(%d%d):(%d%d)")
+	if y then
+		local epoch = os.time({ year=tonumber(y), month=tonumber(m), day=tonumber(d), hour=tonumber(h), min=tonumber(minute), sec=tonumber(second) })
+		if epoch then return os.date("!%Y-%m-%dT%H:%M:%SZ", epoch) end
+	end
 	return line:match("^(%d%d%d%d%-%d%d%-%d%d[T ]%d%d:%d%d:%d%dZ?)")
 		or line:match("^(%a%a%a%s+%d+%s+%d%d:%d%d:%d%d)")
 		or ""
 end
 
 local function log_field(line, key)
-	return line:match("[%s,]" .. key .. "=([^%s,]+)") or line:match("^" .. key .. "=([^%s,]+)")
+	local text = " " .. line
+	return text:match('[%s,]' .. key .. '="([^"]*)"') or text:match("[%s,]" .. key .. "=([^%s,]+)")
 end
 
 local function append_log_entries(entries, source, text, system_only)
 	for line in (text or ""):gmatch("[^\r\n]+") do
+		-- Rust tracing may emit ANSI styling through procd; strip it before
+		-- parsing fields so the UI preserves the actual timestamp/level/event.
+		line = line:gsub("\27%[[0-9;]*m", "")
 		if not system_only or line:lower():find("candy", 1, true) then
 			local protocol = source == "traffic" and line:match("^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%dZ %[(%u+)%]") or nil
 			if source ~= "traffic" or protocol == "TCP" or protocol == "UDP" then
@@ -1313,7 +1335,7 @@ function action_logs_json()
 	append_log_entries(entries, "update", read_log_tail("/tmp/candy-update-manager.log"))
 	append_log_entries(entries, "sdwan", read_log_tail("/etc/candy/sdwan/events-v1.log"))
 	append_log_entries(entries, "traffic", read_log_history(TRAFFIC_LOG_FILE))
-	local _, system_log = process.capture({ "/sbin/logread", "-l", "250" }, { timeout = 3 })
+	local _, system_log = process.capture({ "/sbin/logread", "-e", "candy", "-l", "2000" }, { timeout = 3 })
 	append_log_entries(entries, "system", system_log or "", true)
 	for index, entry in ipairs(entries) do entry.sequence = index end
 	table.sort(entries, function(a, b)

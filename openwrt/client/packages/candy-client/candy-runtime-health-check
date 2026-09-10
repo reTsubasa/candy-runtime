@@ -13,46 +13,62 @@ max_heartbeat_age_ms=${CANDY_HEALTH_MAX_HEARTBEAT_AGE_MS:-15000}
 future_tolerance_ms=${CANDY_HEALTH_FUTURE_TOLERANCE_MS:-60000}
 expected_executable=${CANDY_CORE_EXECUTABLE_NAME:-candy-core}
 
-[ "$role" = client ] || exit 64
-case "$max_heartbeat_age_ms:$future_tolerance_ms" in
-	*[!0-9:]*|0:*|*:0) exit 64 ;;
-esac
-[ -x "$service_init" ] && "$service_init" running >/dev/null 2>&1 || exit 1
-[ -s "$runtime_config" ] && [ ! -L "$runtime_config" ] || exit 1
-[ -s "$ready_file" ] && [ ! -L "$ready_file" ] || exit 1
-[ -s "$passive_status" ] && [ ! -L "$passive_status" ] || exit 1
-[ -S "$control_socket" ] && [ ! -L "$control_socket" ] || exit 1
-[ "$(wc -c < "$passive_status" | tr -d ' ')" -le 1048576 ] || exit 1
-command -v jsonfilter >/dev/null 2>&1 || exit 1
+fail_check() {
+	printf 'stage=%s error_code=%s\n' "$1" "$2" >&2
+	exit "${3:-1}"
+}
 
-ready_pid=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$ready_file" | head -n 1)
-case "$ready_pid" in
-	''|*[!0-9]*) exit 1 ;;
+check_file() {
+	local path="$1" stage="$2" code="$3"
+	[ ! -L "$path" ] || fail_check "$stage" "${code}_symlink_rejected"
+	[ -e "$path" ] || fail_check "$stage" "${code}_missing"
+	[ -f "$path" ] || fail_check "$stage" "${code}_not_regular"
+	[ -s "$path" ] || fail_check "$stage" "${code}_empty"
+}
+
+[ "$role" = client ] || fail_check role role_unsupported 64
+case "$max_heartbeat_age_ms:$future_tolerance_ms" in
+	*[!0-9:]*|:*|*:|0:*|*:0) fail_check input health_window_invalid 64 ;;
 esac
-kill -0 "$ready_pid" 2>/dev/null || exit 1
-[ -r "$proc_root/$ready_pid/cmdline" ] && [ -L "$proc_root/$ready_pid/exe" ] || exit 1
+[ -x "$service_init" ] && "$service_init" running >/dev/null 2>&1 || fail_check service service_not_running
+check_file "$runtime_config" config runtime_config
+check_file "$ready_file" readiness readiness_receipt
+check_file "$passive_status" heartbeat passive_status
+[ ! -L "$control_socket" ] || fail_check control control_socket_symlink_rejected
+[ -e "$control_socket" ] || fail_check control control_socket_missing
+[ -S "$control_socket" ] || fail_check control control_socket_not_socket
+[ "$(wc -c < "$passive_status" | tr -d ' ')" -le 1048576 ] || fail_check heartbeat passive_status_too_large
+command -v jsonfilter >/dev/null 2>&1 || fail_check dependencies jsonfilter_missing
+
+ready_pid=$(jsonfilter -i "$ready_file" -e '@.pid' 2>/dev/null || true)
+case "$ready_pid" in
+	''|0|*[!0-9]*) fail_check readiness readiness_pid_invalid ;;
+esac
+kill -0 "$ready_pid" 2>/dev/null || fail_check process readiness_process_missing
+[ -r "$proc_root/$ready_pid/cmdline" ] && [ -L "$proc_root/$ready_pid/exe" ] || fail_check process process_metadata_missing
 executable=$(readlink "$proc_root/$ready_pid/exe" 2>/dev/null || true)
-[ "${executable##*/}" = "$expected_executable" ] || exit 1
+[ "${executable##*/}" = "$expected_executable" ] || fail_check process executable_mismatch
 cmdline=$(tr '\000' ' ' < "$proc_root/$ready_pid/cmdline")
-case " $cmdline " in *" client "*) ;; *) exit 1 ;; esac
-case " $cmdline " in *" --config $runtime_config "*) ;; *) exit 1 ;; esac
-grep -Eq '"listeners":[[:space:]]*\[[[:space:]]*"' "$ready_file" || exit 1
+case " $cmdline " in *" client "*) ;; *) fail_check process client_mode_missing ;; esac
+case " $cmdline " in *" --config $runtime_config "*) ;; *) fail_check process config_binding_mismatch ;; esac
+listener=$(jsonfilter -i "$ready_file" -e '@.listeners[0]' 2>/dev/null || true)
+[ -n "$listener" ] || fail_check readiness listeners_missing
 
 updated_unix_ms=$(jsonfilter -i "$passive_status" -e '@.updated_unix_ms' 2>/dev/null || true)
 generation=$(jsonfilter -i "$passive_status" -e '@.generation' 2>/dev/null || true)
 active_sha256=$(jsonfilter -i "$passive_status" -e '@.config_sha256' 2>/dev/null || true)
 case "$updated_unix_ms:$generation" in
-	*[!0-9:]*|0:*|*:0) exit 1 ;;
+	*[!0-9:]*|:*|*:|0:*|*:0) fail_check heartbeat passive_status_invalid ;;
 esac
-printf '%s' "$active_sha256" | grep -Eq '^[0-9a-f]{64}$' || exit 1
-command -v sha256sum >/dev/null 2>&1 || exit 1
+printf '%s' "$active_sha256" | grep -Eq '^[0-9a-f]{64}$' || fail_check heartbeat config_fingerprint_invalid
+command -v sha256sum >/dev/null 2>&1 || fail_check dependencies sha256sum_missing
 runtime_sha256=$(sha256sum "$runtime_config" | awk '{ print tolower($1) }')
 # Startup generation reports Core's semantic snapshot fingerprint. Reloaded
 # generations report the raw candidate file SHA-256 and can be bound exactly.
 if [ "$generation" -gt 1 ]; then
-	[ "$active_sha256" = "$runtime_sha256" ] || exit 1
+	[ "$active_sha256" = "$runtime_sha256" ] || fail_check heartbeat config_fingerprint_mismatch
 fi
 
 now_ms=$(( $(date +%s) * 1000 ))
-[ "$updated_unix_ms" -le $((now_ms + future_tolerance_ms)) ] || exit 1
-[ "$updated_unix_ms" -ge $((now_ms - max_heartbeat_age_ms)) ] || exit 1
+[ "$updated_unix_ms" -le $((now_ms + future_tolerance_ms)) ] || fail_check heartbeat timestamp_in_future
+[ "$updated_unix_ms" -ge $((now_ms - max_heartbeat_age_ms)) ] || fail_check heartbeat heartbeat_stale
