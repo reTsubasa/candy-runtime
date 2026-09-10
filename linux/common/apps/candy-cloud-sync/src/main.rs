@@ -333,6 +333,8 @@ struct DiscoveredInbound {
 #[serde(deny_unknown_fields)]
 struct SyncState {
     schema_version: u8,
+    #[serde(default)]
+    server_activation_revision: u8,
     etag: Option<String>,
     configuration_sha256: Option<String>,
     #[serde(default)]
@@ -351,6 +353,11 @@ struct SyncState {
     activation_rejected_etag: Option<String>,
     #[serde(default)]
     activation_rejected_at_unix: Option<u64>,
+}
+
+fn local_operation_unavailable(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<std::io::Error>().is_some()
+        || error.downcast_ref::<reqwest::Error>().is_some()
 }
 
 #[derive(Debug, Serialize)]
@@ -1846,6 +1853,13 @@ fn sync_once_with_retry(
     if state.schema_version != 1 {
         bail!("unsupported Cloud synchronization state schema")
     }
+    // Force a fresh publication after the auth-boundary migration, even when
+    // Cloud's signed policy/ETag is unchanged. Immutable v2 activations may
+    // still contain standalone users and must not be silently reused.
+    if args.server_config.is_some() && state.server_activation_revision != 3 {
+        state.etag = None;
+        state.configuration_sha256 = None;
+    }
 
     // The agent is the only component allowed to publish a committed receipt.
     // Promote that exact immutable candidate before making any Cloud status
@@ -2075,6 +2089,9 @@ fn sync_once_with_retry(
                 &segment,
                 &projection,
             ) {
+                if local_operation_unavailable(&error) {
+                    return Err(error);
+                }
                 report_configuration_status(
                     &client,
                     &cloud,
@@ -2093,6 +2110,9 @@ fn sync_once_with_retry(
                 &identity,
                 &compatibility_generations,
             ) {
+                if local_operation_unavailable(&error) {
+                    return Err(error);
+                }
                 report_configuration_status(
                     &client,
                     &cloud,
@@ -2114,6 +2134,9 @@ fn sync_once_with_retry(
             ) {
                 Ok(report) => report,
                 Err(error) => {
+                    if local_operation_unavailable(&error) {
+                        return Err(error);
+                    }
                     report_configuration_status(
                         &client,
                         &cloud,
@@ -2138,6 +2161,16 @@ fn sync_once_with_retry(
                 Ok(grants) => grants,
                 Err(error) => {
                     let error_code = grant::resolution_error_code(&error);
+                    let retryable = local_operation_unavailable(&error)
+                        || grant::resolution_is_retryable(&error);
+                    eprintln!(
+                        "level=error event=sdwan_grant_resolution_failed stage={} error_code={} retryable={} error={}",
+                        grant::resolution_error_stage(&error), error_code, retryable,
+                        sanitize_log_value(&format!("{error:#}"))
+                    );
+                    if retryable {
+                        return Err(error);
+                    }
                     report_configuration_status(
                         &client,
                         &cloud,
@@ -2146,9 +2179,6 @@ fn sync_once_with_retry(
                         "rejected",
                         Some(error_code),
                     )?;
-                    eprintln!(
-                        "level=error event=sdwan_grant_resolution_failed error_code={error_code} error={error:#}"
-                    );
                     return Err(error);
                 }
             };
@@ -2167,15 +2197,8 @@ fn sync_once_with_retry(
                 &discovery_bytes,
                 configuration.activation_phase == "commit",
             ) {
-                report_configuration_status(
-                    &client,
-                    &cloud,
-                    &configuration,
-                    &etag,
-                    "rejected",
-                    Some("local_publish_failed"),
-                )
-                .context("report rejected local publication to Cloud")?;
+                // Local publication failure is not evidence that the signed
+                // policy is invalid. Keep its ETag unacknowledged for retry.
                 return Err(error);
             }
             if configuration.activation_phase == "prepare" {
@@ -2251,14 +2274,6 @@ fn sync_once_with_retry(
             };
             if let Some(result) = activation_result {
                 if let Err(error) = result {
-                    report_configuration_status(
-                        &client,
-                        &cloud,
-                        &configuration,
-                        &etag,
-                        "rejected",
-                        Some("local_activation_failed"),
-                    )?;
                     return Err(error);
                 }
                 state.activation_required = true;
@@ -2272,6 +2287,7 @@ fn sync_once_with_retry(
             }
             state.etag = Some(etag);
             state.configuration_sha256 = Some(digest);
+            state.server_activation_revision = if args.server_config.is_some() { 3 } else { 0 };
             state.projection_publication_id = Some(configuration.projection_publication_id);
             state.projection_content_hash = Some(configuration.projection_content_hash.clone());
             state.activation_phase = Some(configuration.activation_phase.clone());
@@ -4919,6 +4935,9 @@ fn render_server_activation_config(
     if document.as_table().contains_key("sdwan") {
         bail!("ordinary Candy Server config already defines sdwan")
     }
+    // Only listener/TLS/transport settings are inherited. SD-WAN and its
+    // Cloud-authorized Proxy traffic must never inherit standalone PSK users.
+    document.as_table_mut().remove("users");
 
     let path = |value: &Path| -> Result<String> {
         Ok(value
@@ -5323,7 +5342,7 @@ fn publish_server_activation(
     let declaration_bytes = serde_json::to_vec(&declaration)?;
     let ordinary = read_bounded(ordinary_config, MAX_CONFIGURATION_BYTES)?;
     let mut activation_hash = Sha256::new();
-    activation_hash.update(b"candy/runtime-server-activation-v2\0");
+    activation_hash.update(b"candy/runtime-server-activation-v3\0");
     activation_hash.update(decode_hex_32(&activation_digest(
         delivery_digest,
         &grants,
@@ -8489,7 +8508,7 @@ default via 192.0.2.1 dev eth0 proto static
     }
 
     #[test]
-    fn server_config_merge_preserves_ordinary_service_and_adds_scoped_cloud_auth() {
+    fn server_config_merge_removes_psk_users_and_adds_scoped_cloud_auth() {
         let directory = tempfile::tempdir().unwrap();
         let ordinary = directory.path().join("server.toml");
         fs::write(
@@ -8524,10 +8543,8 @@ default via 192.0.2.1 dev eth0 proto static
         .unwrap();
         let document = rendered.parse::<toml_edit::DocumentMut>().unwrap();
         assert_eq!(document["listen"].as_str(), Some("0.0.0.0:8443"));
-        assert_eq!(
-            document["users"][0]["key_id"].as_str(),
-            Some("ordinary-user")
-        );
+        assert!(!document.as_table().contains_key("users"));
+        assert!(!rendered.contains("ordinary-secret"));
         assert_eq!(document["cloud_auth"]["enabled"].as_bool(), Some(true));
         assert_eq!(
             document["cloud_auth"]["verification_keys"][0]["key_id"].as_str(),

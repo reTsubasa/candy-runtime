@@ -289,34 +289,42 @@ elif [ "$#" -eq 1 ]; then
 	case "$1" in --config=*) ordinary_config=${1#--config=} ;; esac
 fi
 
-if [ -n "$ordinary_config" ] && [ -e "$sdwan_candidate" ]; then
+managed_sdwan=0
+# Enrollment remains authoritative even while Cloud withdraws a candidate or
+# replaces its pointer. A dangling/invalid pointer cannot enable PSK service.
+if [ -e "$sdwan_state_root/identity/device-identity-v1.json" ] ||
+   [ -L "$sdwan_state_root/identity/device-identity-v1.json" ] ||
+   [ -e "$sdwan_candidate" ] || [ -L "$sdwan_candidate" ] ||
+   [ -L "$sdwan_state_root/active" ]; then
+	managed_sdwan=1
+fi
+if [ -n "$ordinary_config" ] && [ "$managed_sdwan" = 1 ]; then
 	if activation=$(resolve_server_activation); then
 		if activation_was_rejected; then
-			warn "the current server SD-WAN activation was already rejected; starting ordinary Candy only"
+			fail 78 "SD-WAN activation rejected; standalone authentication is prohibited"
 		elif [ -x "$sdwan_agent" ]; then
 			if "$sdwan_agent" validate-activation \
 				--activation "$activation" \
-				--expected-core-role server \
-				--ordinary-config "$ordinary_config"
+				--expected-core-role server
 			then
 				exec "$sdwan_agent" \
 					--activation "$activation" \
 					--activation-ready "$activation_ready" \
 					--core "$core_binary" \
-					--ordinary-config "$ordinary_config" \
 					--socket "$netd_socket" \
 					run
 			fi
-			warn "rejected an invalid server SD-WAN activation; starting ordinary Candy only"
+			fail 78 "invalid SD-WAN activation; standalone authentication is prohibited"
 		else
-			warn "authenticated SD-WAN activation is present but the transaction agent is unavailable; starting ordinary Candy only"
+			fail 69 "SD-WAN transaction agent unavailable; standalone authentication is prohibited"
 		fi
 	else
-		warn "ignored an invalid SD-WAN activation pointer; starting ordinary Candy only"
+		fail 78 "SD-WAN candidate missing or invalid; standalone authentication is prohibited"
 	fi
 fi
+if [ "$managed_sdwan" = 1 ]; then
+	fail 78 "managed SD-WAN requires the authenticated activation launch path"
+fi
 
-# Ordinary Candy and optional SD-WAN are always owned by one Core server
-# process. After an SD-WAN activation failure the agent supervises an
-# ordinary-config child only after rolling back Candy-owned state.
+# Standalone PSK Proxy is permitted only for an unenrolled server.
 exec "$core_binary" server "$@"

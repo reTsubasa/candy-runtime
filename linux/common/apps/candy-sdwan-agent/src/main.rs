@@ -48,6 +48,85 @@ fn sanitize_log_value(value: &str) -> String {
         .collect()
 }
 
+#[derive(Debug)]
+struct CoreReadinessFailure {
+    code: String,
+    lifecycle: String,
+    detail: Option<String>,
+}
+
+impl std::fmt::Display for CoreReadinessFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Core reported failed readiness: lifecycle={} code={}",
+            self.lifecycle, self.code
+        )?;
+        if let Some(detail) = &self.detail {
+            write!(f, " detail={detail}")?;
+        }
+        Ok(())
+    }
+}
+impl std::error::Error for CoreReadinessFailure {}
+
+fn runtime_cause_code(error: &anyhow::Error) -> &str {
+    if let Some(status) = error.downcast_ref::<CoreReadinessFailure>() {
+        return &status.code;
+    }
+    if let Some(ipc) = error.downcast_ref::<IpcError>() {
+        return match ipc {
+            IpcError::Io(error) => io_cause_code(error),
+            IpcError::Socket(_) => "ipc_descriptor_transfer_failed",
+            IpcError::FrameLength => "ipc_frame_length_invalid",
+            IpcError::Protocol(_) => "ipc_frame_decode_failed",
+            IpcError::DescriptorMismatch => "ipc_descriptor_mismatch",
+            IpcError::RequestIdExhausted => "ipc_request_id_exhausted",
+            IpcError::UnexpectedResponse => "ipc_response_type_mismatch",
+            IpcError::InvalidTransition => "local_transaction_phase_invalid",
+            IpcError::Remote(code) => match code {
+                ErrorCode::UnauthorizedPeer => "netd_peer_unauthorized",
+                ErrorCode::InvalidRequest => "netd_request_invalid",
+                ErrorCode::GenerationConflict => "netd_generation_conflict",
+                ErrorCode::PreflightFailed => "netd_preflight_failed",
+                ErrorCode::SystemFailure => "netd_system_failure",
+            },
+        };
+    }
+    if let Some(error) = error.downcast_ref::<std::io::Error>() {
+        return io_cause_code(error);
+    }
+    "unclassified"
+}
+
+fn io_cause_code(error: &std::io::Error) -> &'static str {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => "io_not_found",
+        std::io::ErrorKind::PermissionDenied => "io_permission_denied",
+        std::io::ErrorKind::ConnectionRefused => "io_connection_refused",
+        std::io::ErrorKind::ConnectionReset => "io_connection_reset",
+        std::io::ErrorKind::ConnectionAborted => "io_connection_aborted",
+        std::io::ErrorKind::BrokenPipe => "io_broken_pipe",
+        std::io::ErrorKind::UnexpectedEof => "io_unexpected_eof",
+        std::io::ErrorKind::TimedOut => "io_timed_out",
+        std::io::ErrorKind::WouldBlock => "io_would_block",
+        std::io::ErrorKind::Interrupted => "io_interrupted",
+        _ => "io_unclassified",
+    }
+}
+
+fn log_runtime_failure(event: &str, stage: &str, error: &anyhow::Error) {
+    eprintln!(
+        "level=error event={} stage={} error_code={} cause_code={} retryable={} error={}",
+        event,
+        stage.strip_suffix("_failed").unwrap_or(stage),
+        stage,
+        sanitize_log_value(runtime_cause_code(error)),
+        transient_runtime_error(error),
+        sanitize_log_value(&format!("{error:#}"))
+    );
+}
+
 fn netd_reconfigure_error_code(error: &IpcError) -> &'static str {
     match error {
         IpcError::Remote(ErrorCode::InvalidRequest) | IpcError::InvalidTransition => {
@@ -615,10 +694,9 @@ fn resolve_runtime_args(args: Args) -> Result<RuntimeArgs> {
         let declaration_sha256 = sha256_file(&declaration)?;
         let ordinary_config = args.ordinary_config.clone();
         if descriptor.core_role == CoreRole::Server {
-            let ordinary = ordinary_config
-                .as_deref()
-                .context("server activation requires --ordinary-config")?;
-            validate_ordinary_config(ordinary)?;
+            if let Some(ordinary) = ordinary_config.as_deref() {
+                validate_ordinary_config(ordinary)?;
+            }
         } else if args.ordinary_config.is_some() {
             bail!("ordinary-config is only valid for the server Core role")
         }
@@ -837,14 +915,19 @@ fn request_core_transaction(
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
 
-    anyhow::ensure!(
-        child.try_wait()?.is_none(),
-        "Candy Core exited before hot reload"
-    );
+    if child.try_wait()?.is_some() {
+        return Err(anyhow::Error::new(TransientReadinessFailure(
+            "Candy Core exited before hot reload".into(),
+        )));
+    }
     let mut stream = UnixStream::connect(core_reload_socket(args)?)
         .context("connect Candy Core hot reload socket")?;
-    stream.set_read_timeout(Some(Duration::from_millis(250)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .context("configure Core reload response read timeout")?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .context("configure Core reload request write timeout")?;
     let request = CoreReloadRequest {
         schema_version: 1,
         action,
@@ -852,16 +935,22 @@ fn request_core_transaction(
         status: matches!(action, CoreReloadAction::Prepare).then_some(args.status.as_path()),
         transaction_id,
     };
-    stream.write_all(&serde_json::to_vec(&request)?)?;
-    stream.shutdown(Shutdown::Write)?;
+    let encoded = serde_json::to_vec(&request).context("encode Core reload request")?;
+    stream
+        .write_all(&encoded)
+        .context("write Core reload request")?;
+    stream
+        .shutdown(Shutdown::Write)
+        .context("finish Core reload request write")?;
     let mut response = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         progress()?;
-        anyhow::ensure!(
-            Instant::now() < deadline,
-            "Candy Core reload response timed out"
-        );
+        if Instant::now() >= deadline {
+            return Err(anyhow::Error::new(TransientReadinessFailure(
+                "Candy Core reload response timed out".into(),
+            )));
+        }
         let mut buffer = [0_u8; 4096];
         match stream.read(&mut buffer) {
             Ok(0) => break,
@@ -879,14 +968,19 @@ fn request_core_transaction(
                         | std::io::ErrorKind::TimedOut
                         | std::io::ErrorKind::Interrupted
                 ) => {}
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(error).context("read Core reload response"),
         }
+    }
+    if response.is_empty() {
+        return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+            .context("Core reload socket closed before response");
     }
     let response: CoreReloadResponse =
         serde_json::from_slice(&response).context("parse Candy Core reload response")?;
     anyhow::ensure!(
         response.schema_version == 1,
-        "unsupported Core reload response"
+        "Core reload response schema mismatch: expected=1 received={}",
+        response.schema_version
     );
     let generation_matches =
         !matches!(action, CoreReloadAction::Prepare | CoreReloadAction::Commit)
@@ -903,9 +997,15 @@ fn request_core_transaction(
         }
     }
     anyhow::ensure!(
-        response.ok && generation_matches,
+        response.ok,
         "Candy Core rejected hot reload: {}",
         response.error.as_deref().unwrap_or("unknown error")
+    );
+    anyhow::ensure!(
+        generation_matches,
+        "Core reload succeeded but response generation mismatched: expected={} received={:?}",
+        args.generation,
+        response.generation
     );
     Ok(())
 }
@@ -1306,7 +1406,7 @@ fn validate_activation_command(
     }
     match (expected_core_role, ordinary_config) {
         (CoreRole::Server, Some(path)) => validate_ordinary_config(path),
-        (CoreRole::Server, None) => bail!("server activation validation requires ordinary-config"),
+        (CoreRole::Server, None) => Ok(()),
         (CoreRole::ClientSdwan, Some(_)) => {
             bail!("ordinary-config is only valid for the server Core role")
         }
@@ -1490,6 +1590,16 @@ fn classify_core_readiness(
         "active" | "failed" | "starting" if recoverable_committed_peer_loss => {
             ReadinessState::RecoverablePeerLoss
         }
+        "active" | "failed" | "starting"
+            if policy == ReadinessPolicy::Strict
+                && recoverable_peer_loss_code
+                && status.configured_peers > 0
+                && status.required_route_owners > 0 =>
+        {
+            // Initial peer loss has no authority to reject a signed policy.
+            // Keep steering uncommitted and use the bounded readiness retry.
+            ReadinessState::Waiting
+        }
         "failed" | "stopping" | "stopped" => ReadinessState::Failed,
         "active"
             if status.fail_open_required
@@ -1501,11 +1611,15 @@ fn classify_core_readiness(
         _ => bail!("SD-WAN Core readiness status has an invalid lifecycle"),
     };
     if state == ReadinessState::Failed {
-        let code = status.last_error_code.as_deref().unwrap_or("not_ready");
-        if let Some(detail) = status.last_error_detail.as_deref() {
-            bail!("SD-WAN Core candidate failed readiness: {code}: {detail}")
+        return Err(CoreReadinessFailure {
+            code: status
+                .last_error_code
+                .clone()
+                .unwrap_or_else(|| "core_readiness_reason_missing".into()),
+            lifecycle: status.lifecycle.clone(),
+            detail: status.last_error_detail.clone(),
         }
-        bail!("SD-WAN Core candidate failed readiness: {code}")
+        .into());
     }
     Ok(state)
 }
@@ -1630,81 +1744,13 @@ fn rollback_or_report(netd: &mut NetdClient, cause: &str) -> Result<()> {
         .with_context(|| format!("{cause}; netd rollback failed"))
 }
 
-#[cfg(not(test))]
-fn spawn_ordinary_server(args: &RuntimeArgs) -> Result<Child> {
-    let ordinary_config = args
-        .ordinary_config
-        .as_deref()
-        .context("server fail-open requires the validated ordinary config")?;
-    Command::new(&args.core)
-        .args(["server", "--config"])
-        .arg(ordinary_config)
-        .spawn()
-        .with_context(|| {
-            format!(
-                "start ordinary Candy Server after SD-WAN rollback: {}",
-                args.core.display()
-            )
-        })
-}
-
-fn keep_server_fail_open(args: &RuntimeArgs, cause: &str) -> Result<()> {
-    if shutdown_requested() {
-        remove_activation_receipt(args.activation_ready.as_deref())?;
-        eprintln!(
-            "level=info event=sdwan_server_fail_open_skipped reason=shutdown_requested generation={}",
-            args.generation
-        );
-        return Ok(());
-    }
-    eprintln!("level=warn event=sdwan_server_fail_open reason={cause} mode=ordinary_only");
-    #[cfg(test)]
-    {
-        let ordinary_config = args
-            .ordinary_config
-            .as_deref()
-            .context("server fail-open requires the validated ordinary config")?;
-        bail!(
-            "ordinary Candy Server fallback requested: core={} config={}",
-            args.core.display(),
-            ordinary_config.display()
-        )
-    }
-    #[cfg(not(test))]
-    {
-        let mut child = spawn_ordinary_server(args)?;
-        loop {
-            if shutdown_requested() {
-                stop_core(&mut child);
-                remove_activation_receipt(args.activation_ready.as_deref())?;
-                eprintln!(
-                    "level=info event=sdwan_stopped generation={} phase=ordinary_fail_open rollback_ok=true",
-                    args.generation
-                );
-                return Ok(());
-            }
-            match child
-                .try_wait()
-                .context("wait for ordinary Candy Server after SD-WAN rollback")?
-            {
-                Some(status) if status.success() => return Ok(()),
-                Some(status) => bail!(
-                    "ordinary Candy Server exited after SD-WAN rollback with status {}",
-                    status.code().unwrap_or(1)
-                ),
-                None => thread::sleep(Duration::from_millis(50)),
-            }
-        }
-    }
-}
-
 fn finish_shutdown_after_rollback(
     args: &RuntimeArgs,
     rollback: Result<()>,
     phase: &str,
 ) -> Result<()> {
     if let Err(rollback_error) = &rollback {
-        eprintln!("level=error event=sdwan_rollback_failed error={rollback_error:#}");
+        log_runtime_failure("sdwan_rollback_failed", "netd_rollback", rollback_error);
     }
     rollback?;
     remove_activation_receipt(args.activation_ready.as_deref())?;
@@ -1743,6 +1789,51 @@ impl std::fmt::Display for TransientReadinessFailure {
 
 impl std::error::Error for TransientReadinessFailure {}
 
+// Retry operational unavailability, never malformed IPC or unauthorized peers.
+fn transient_runtime_error(error: &anyhow::Error) -> bool {
+    if error.downcast_ref::<TransientReadinessFailure>().is_some() {
+        return true;
+    }
+    if let Some(ipc) = error.downcast_ref::<IpcError>() {
+        return match ipc {
+            IpcError::Io(error) => transient_io_error(error),
+            IpcError::Remote(ErrorCode::SystemFailure | ErrorCode::GenerationConflict) => true,
+            _ => false,
+        };
+    }
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(transient_io_error)
+}
+
+fn transient_io_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::Interrupted
+    )
+}
+
+fn retryable_failure(
+    args: &RuntimeArgs,
+    error_code: &'static str,
+    error: anyhow::Error,
+) -> Result<()> {
+    remove_activation_receipt(args.activation_ready.as_deref())?;
+    Err(anyhow::Error::new(RetryableFailure {
+        error_code,
+        detail: format!("{error:#}"),
+        activation: Box::new(args.clone()),
+    }))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RetryWait {
     Retry,
@@ -1779,27 +1870,19 @@ fn retry_after_rollback(
     error_code: &'static str,
     error: anyhow::Error,
 ) -> Result<()> {
-    eprintln!(
-        "level=warn event=sdwan_runtime_interrupted error_code={} error={}",
-        error_code,
-        sanitize_log_value(&format!("{error:#}"))
-    );
+    log_runtime_failure("sdwan_runtime_interrupted", error_code, &error);
     stop_core(child);
     let rollback = rollback_or_report(netd, cause);
-    let reported_error_code = if rollback.is_err() {
-        "rollback_failed"
-    } else {
-        error_code
-    };
+    let rollback_ok = rollback.is_ok();
     if let Err(rollback_error) = &rollback {
-        eprintln!("level=error event=sdwan_rollback_failed error={rollback_error:#}");
+        log_runtime_failure("sdwan_rollback_failed", "netd_rollback", rollback_error);
     }
     remove_activation_receipt(args.activation_ready.as_deref())?;
-    if let Err(marker_error) = write_runtime_failure_marker(args, reported_error_code) {
-        eprintln!(
-            "level=error event=sdwan_runtime_failure_marker_failed error_code={} error={}",
-            reported_error_code,
-            sanitize_log_value(&format!("{marker_error:#}"))
+    if let Err(marker_error) = write_runtime_failure_marker(args, error_code) {
+        log_runtime_failure(
+            "sdwan_runtime_failure_marker_failed",
+            "runtime_failure_marker_write",
+            &marker_error,
         );
     }
     // A netd daemon restart can close the IPC socket after it has already
@@ -1808,11 +1891,7 @@ fn retry_after_rollback(
     // ECONNRESET here used to terminate the agent and made a peer outage
     // permanent until a service restart.
     if let Err(rollback_error) = rollback {
-        eprintln!(
-            "level=warn event=sdwan_rollback_deferred generation={} error_code=rollback_ipc_unavailable error={}",
-            args.generation,
-            sanitize_log_value(&format!("{rollback_error:#}"))
-        );
+        log_runtime_failure("sdwan_rollback_deferred", "netd_rollback", &rollback_error);
     }
     if let Err(status_error) = remove_stale_status(&args.status) {
         eprintln!(
@@ -1823,8 +1902,8 @@ fn retry_after_rollback(
     }
     if shutdown_requested() {
         eprintln!(
-            "level=info event=sdwan_stopped generation={} phase=runtime_failure rollback_ok=true",
-            args.generation
+            "level=info event=sdwan_stopped generation={} phase=runtime_failure rollback_ok={}",
+            args.generation, rollback_ok
         );
         return Ok(());
     }
@@ -1836,39 +1915,15 @@ fn retry_after_rollback(
 }
 
 fn wait_before_retry(args: &RuntimeArgs, delay: Duration) -> Result<RetryWait> {
-    let mut ordinary_child: Option<Child> = if args.core_role == CoreRole::Server {
-        #[cfg(not(test))]
-        {
-            Some(spawn_ordinary_server(args)?)
-        }
-        #[cfg(test)]
-        {
-            None
-        }
-    } else {
-        None
-    };
-    if ordinary_child.is_some() {
-        eprintln!(
-            "level=info event=sdwan_retry_fail_open generation={} mode=ordinary_only",
-            args.generation
-        );
-    }
     let deadline = Instant::now()
         .checked_add(delay)
         .context("SD-WAN retry deadline overflow")?;
     loop {
         if shutdown_requested() {
-            if let Some(child) = ordinary_child.as_mut() {
-                stop_core(child);
-            }
             remove_activation_receipt(args.activation_ready.as_deref())?;
             return Ok(RetryWait::Stop);
         }
         if !activation_pointer_unchanged(args)? {
-            if let Some(child) = ordinary_child.as_mut() {
-                stop_core(child);
-            }
             remove_activation_receipt(args.activation_ready.as_deref())?;
             eprintln!(
                 "level=info event=sdwan_retry_cancelled generation={} reason=candidate_changed",
@@ -1876,26 +1931,10 @@ fn wait_before_retry(args: &RuntimeArgs, delay: Duration) -> Result<RetryWait> {
             );
             return Ok(RetryWait::Stop);
         }
-        if let Some(child) = ordinary_child.as_mut() {
-            if let Some(status) = child
-                .try_wait()
-                .context("wait for ordinary Candy Server during SD-WAN retry")?
-            {
-                eprintln!(
-                    "level=warn event=sdwan_retry_fail_open_exit generation={} exit={}",
-                    args.generation,
-                    status.code().unwrap_or(1)
-                );
-                ordinary_child = None;
-            }
-        }
         if Instant::now() >= deadline {
             break;
         }
         thread::sleep(RETRY_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
-    }
-    if let Some(child) = ordinary_child.as_mut() {
-        stop_core(child);
     }
     if !activation_retry_eligible(args)? {
         remove_activation_receipt(args.activation_ready.as_deref())?;
@@ -1914,22 +1953,13 @@ fn fail_before_prepare(
     error_code: &'static str,
     error: anyhow::Error,
 ) -> Result<()> {
-    eprintln!(
-        "level=error event=sdwan_activation_rejected error_code={} error={}",
-        error_code,
-        sanitize_log_value(&format!("{error:#}"))
-    );
-    match args.core_role {
-        CoreRole::ClientSdwan => Err(error),
-        CoreRole::Server => {
-            if let Err(marker_error) = write_failed_activation_receipt(args, error_code) {
-                eprintln!(
-                    "level=error event=sdwan_rejection_receipt_failed error={marker_error:#}"
-                );
-            }
-            keep_server_fail_open(args, cause)
-        }
+    if transient_runtime_error(&error) {
+        log_runtime_failure("sdwan_activation_retry", error_code, &error);
+        return retryable_failure(args, error_code, error);
     }
+    log_runtime_failure("sdwan_activation_rejected", error_code, &error);
+    write_failed_activation_receipt(args, error_code)?;
+    Err(error.context(cause.to_owned()))
 }
 
 fn fail_after_rollback(
@@ -1940,36 +1970,25 @@ fn fail_after_rollback(
     error_code: &'static str,
     error: anyhow::Error,
 ) -> Result<()> {
-    eprintln!(
-        "level=error event=sdwan_activation_failed error_code={} error={}",
-        error_code,
-        sanitize_log_value(&format!("{error:#}"))
-    );
+    log_runtime_failure("sdwan_activation_failed", error_code, &error);
     stop_core(child);
+    if transient_runtime_error(&error) {
+        return retry_after_rollback(args, child, netd, cause, error_code, error);
+    }
     let rollback = rollback_or_report(netd, cause);
     if shutdown_requested() {
         return finish_shutdown_after_rollback(args, rollback, "activation_failure");
     }
-    let receipt_code = if rollback.is_err() {
-        "rollback_failed"
-    } else {
-        error_code
-    };
-    let marker = write_failed_activation_receipt(args, receipt_code);
+    let marker = write_failed_activation_receipt(args, error_code);
     if let Err(rollback_error) = &rollback {
-        eprintln!("level=error event=sdwan_rollback_failed error={rollback_error:#}");
+        log_runtime_failure("sdwan_rollback_failed", "netd_rollback", rollback_error);
     }
     if let Err(marker_error) = &marker {
         eprintln!("level=error event=sdwan_rejection_receipt_failed error={marker_error:#}");
     }
-    match args.core_role {
-        CoreRole::ClientSdwan => {
-            rollback?;
-            marker?;
-            Err(error)
-        }
-        CoreRole::Server => keep_server_fail_open(args, cause),
-    }
+    rollback?;
+    marker?;
+    Err(error)
 }
 
 #[derive(Default)]
@@ -2120,6 +2139,11 @@ fn hot_replace_activation(
     });
     if let Err(error) = prepared {
         abort_core_preparation(replacement, child, &transaction_id);
+        if transient_runtime_error(&error) {
+            return Err(anyhow::Error::new(CorePreparationPending(format!(
+                "{error:#}"
+            ))));
+        }
         if error.downcast_ref::<CorePreparationPending>().is_some() {
             eprintln!("level=warn event=sdwan_policy_prepare_retry generation={} transaction_id={} error_code=peer_preparation_pending steering=unchanged error={}",
                 replacement.generation, transaction_id, sanitize_log_value(&format!("{error:#}")));
@@ -2163,6 +2187,12 @@ fn hot_replace_activation(
                 .map_err(|error| anyhow::Error::new(HotReloadRecoveryRequired(error)))?;
         }
         let error_code = netd_reconfigure_error_code(&error);
+        let error = anyhow::Error::from(error);
+        if transient_runtime_error(&error) {
+            return Err(anyhow::Error::new(CorePreparationPending(format!(
+                "{error:#}"
+            ))));
+        }
         write_failed_activation_receipt(replacement, error_code)?;
         eprintln!(
             "level=error event=sdwan_hot_reload_rejected generation={} error_code={} error={}",
@@ -2193,6 +2223,11 @@ fn hot_replace_activation(
         return Ok(false);
     }
     if let Err(error) = remove_stale_status(&replacement.status) {
+        log_runtime_failure(
+            "sdwan_status_cleanup_failed",
+            "core_status_cleanup_failed",
+            &error,
+        );
         abort_core_preparation(replacement, child, &transaction_id);
         if already_suspended {
             restore_uncommitted_netd_activation(
@@ -2208,8 +2243,6 @@ fn hot_replace_activation(
             netd.rollback()
                 .context("discard prepared netd replacement")?;
         }
-        eprintln!("level=error event=sdwan_policy_prepare_failed generation={} error_code=core_policy_prepare_failed error={}",
-            replacement.generation, sanitize_log_value(&format!("{error:#}")));
         return Ok(false);
     }
     let mut commit = request_core_transaction(
@@ -2400,35 +2433,27 @@ fn fail_without_core(
     error_code: &'static str,
     error: anyhow::Error,
 ) -> Result<()> {
-    eprintln!(
-        "level=error event=sdwan_activation_failed error_code={} error={}",
-        error_code,
-        sanitize_log_value(&format!("{error:#}"))
-    );
+    log_runtime_failure("sdwan_activation_failed", error_code, &error);
     let rollback = rollback_or_report(netd, cause);
     if shutdown_requested() {
         return finish_shutdown_after_rollback(args, rollback, "activation_failure");
     }
-    let receipt_code = if rollback.is_err() {
-        "rollback_failed"
-    } else {
-        error_code
-    };
-    let marker = write_failed_activation_receipt(args, receipt_code);
+    if transient_runtime_error(&error) {
+        if let Err(rollback_error) = rollback {
+            log_runtime_failure("sdwan_rollback_deferred", "netd_rollback", &rollback_error);
+        }
+        return retryable_failure(args, error_code, error);
+    }
+    let marker = write_failed_activation_receipt(args, error_code);
     if let Err(rollback_error) = &rollback {
-        eprintln!("level=error event=sdwan_rollback_failed error={rollback_error:#}");
+        log_runtime_failure("sdwan_rollback_failed", "netd_rollback", rollback_error);
     }
     if let Err(marker_error) = &marker {
         eprintln!("level=error event=sdwan_rejection_receipt_failed error={marker_error:#}");
     }
-    match args.core_role {
-        CoreRole::ClientSdwan => {
-            rollback?;
-            marker?;
-            Err(error)
-        }
-        CoreRole::Server => keep_server_fail_open(args, cause),
-    }
+    rollback?;
+    marker?;
+    Err(error)
 }
 
 fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
@@ -3177,7 +3202,47 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    fn run_test_attempt(args: super::RuntimeArgs) -> anyhow::Result<()> {
+        let _guard = super::RUN_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        super::SHUTDOWN_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        super::run_once(args, false)
+    }
     use super::*;
+
+    #[test]
+    fn runtime_diagnostics_preserve_typed_causes_through_context() {
+        for (error, code) in [
+            (
+                anyhow::Error::from(IpcError::Remote(ErrorCode::SystemFailure)),
+                "netd_system_failure",
+            ),
+            (
+                anyhow::Error::from(IpcError::Remote(ErrorCode::UnauthorizedPeer)),
+                "netd_peer_unauthorized",
+            ),
+            (
+                anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+                "io_permission_denied",
+            ),
+            (
+                anyhow::Error::new(CoreReadinessFailure {
+                    code: "grant_expired".into(),
+                    lifecycle: "failed".into(),
+                    detail: None,
+                }),
+                "grant_expired",
+            ),
+            (
+                anyhow::anyhow!("netd permission denied timeout"),
+                "unclassified",
+            ),
+        ] {
+            assert_eq!(runtime_cause_code(&error.context("caller stage")), code);
+        }
+    }
 
     #[test]
     fn broken_netd_ipc_is_classified_as_retryable_peer_closed() {
@@ -3491,13 +3556,11 @@ mod tests {
                     operations,
                     [
                         "core:prepare",
-                        "netd:suspend",
-                        "core:suspend",
                         "netd:reconfigure",
                         "core:commit",
                         "core:commit",
-                        "core:resume",
-                        "netd:resume"
+                        "netd:commit",
+                        "netd:drain"
                     ]
                 );
                 let receipt: serde_json::Value = serde_json::from_slice(
@@ -3515,21 +3578,22 @@ mod tests {
                     operations,
                     [
                         "core:prepare",
-                        "netd:suspend",
-                        "core:suspend",
                         "netd:reconfigure",
                         "core:commit",
                         "core:commit"
                     ]
                 );
-                assert!(transition.complete());
+                assert!(!transition.complete());
                 assert!(
                     !replacement.activation_ready.unwrap().exists(),
                     "uncertain commit must not publish rejection"
                 );
             }
             ReloadFault::NetdRollbackIncomplete => {
-                assert!(!result.unwrap());
+                assert!(result
+                    .unwrap_err()
+                    .downcast_ref::<CorePreparationPending>()
+                    .is_some());
                 assert!(!operations.contains(&"core:commit"));
                 assert!(!transition.complete());
                 assert!(
@@ -3923,7 +3987,7 @@ exit 17
     }
 
     #[test]
-    fn server_activation_requires_a_readable_ordinary_config_for_fail_open() {
+    fn server_activation_does_not_require_standalone_config() {
         let (_root, candidate, _) = activation_fixture();
         let descriptor_path = candidate.join("activation-v1.json");
         let mut descriptor: serde_json::Value =
@@ -3942,53 +4006,51 @@ exit 17
             candidate.to_str().unwrap(),
         ])
         .unwrap();
-        let error = resolve_runtime_args(args).unwrap_err();
-        assert!(error.to_string().contains("ordinary-config"));
+        assert!(resolve_runtime_args(args)
+            .unwrap()
+            .ordinary_config
+            .is_none());
     }
 
     #[test]
-    fn server_invalid_declaration_falls_back_to_ordinary_core() {
+    fn server_invalid_declaration_fails_closed() {
         let (_root, args) = server_runtime_fixture();
         write_private(&args.declaration, b"{}");
         let error = run(args).unwrap_err();
         assert!(
-            format!("{error:#}").contains("ordinary Candy Server"),
+            format!("{error:#}").contains("invalid netd declaration"),
             "{error:#}"
         );
     }
 
     #[test]
-    fn server_netd_prepare_failure_falls_back_to_ordinary_core() {
+    fn server_netd_prepare_failure_retries_without_rejection() {
         let (_root, args) = server_runtime_fixture();
         let receipt = args.activation_ready.clone().unwrap();
-        let error = run(args).unwrap_err();
+        let error = run_test_attempt(args).unwrap_err();
         assert!(
-            format!("{error:#}").contains("ordinary Candy Server"),
+            error.downcast_ref::<RetryableFailure>().is_some(),
             "{error:#}"
         );
-        let value: serde_json::Value = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
-        assert_eq!(value["state"], "rejected");
-        assert_eq!(value["error_code"], "netd_prepare_failed");
+        assert!(!receipt.exists());
     }
 
     #[test]
-    fn server_merged_core_spawn_failure_rolls_back_then_falls_back() {
+    fn server_core_spawn_failure_rolls_back_then_retries() {
         let (_root, args) = server_runtime_fixture();
         let receipt = args.activation_ready.clone().unwrap();
         let netd = start_netd_mock(&args.socket, None);
-        let error = run(args).unwrap_err();
+        let error = run_test_attempt(args).unwrap_err();
         netd.join().unwrap();
         assert!(
-            format!("{error:#}").contains("ordinary Candy Server"),
+            error.downcast_ref::<RetryableFailure>().is_some(),
             "{error:#}"
         );
-        let value: serde_json::Value = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
-        assert_eq!(value["state"], "rejected");
-        assert_eq!(value["error_code"], "core_start_failed");
+        assert!(!receipt.exists());
     }
 
     #[test]
-    fn server_readiness_failure_rolls_back_then_falls_back() {
+    fn server_hard_readiness_failure_rolls_back_and_fails_closed() {
         let (_root, mut args) = server_runtime_fixture();
         install_fake_ready_core(&args.core, "failed");
         let receipt = args.activation_ready.clone().unwrap();
@@ -3997,7 +4059,7 @@ exit 17
         let error = run(args).unwrap_err();
         netd.join().unwrap();
         assert!(
-            format!("{error:#}").contains("ordinary Candy Server"),
+            format!("{error:#}").contains("failed readiness"),
             "{error:#}"
         );
         let value: serde_json::Value = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
@@ -4060,19 +4122,18 @@ exit 17
     }
 
     #[test]
-    fn server_commit_failure_stops_merged_core_rolls_back_and_falls_back() {
+    fn server_commit_failure_rolls_back_then_retries() {
         let (_root, args) = server_runtime_fixture();
         install_fake_ready_core(&args.core, "active");
         let receipt = args.activation_ready.clone().unwrap();
         let netd = start_netd_mock(&args.socket, Some(false));
-        let error = run(args).unwrap_err();
+        let error = run_test_attempt(args).unwrap_err();
         netd.join().unwrap();
         assert!(
-            format!("{error:#}").contains("ordinary Candy Server"),
+            error.downcast_ref::<RetryableFailure>().is_some(),
             "{error:#}"
         );
-        let value: serde_json::Value = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
-        assert_eq!(value["error_code"], "netd_commit_failed");
+        assert!(!receipt.exists());
     }
 
     #[test]
@@ -4097,7 +4158,7 @@ exit 17
     }
 
     #[test]
-    fn server_receipt_failure_rolls_back_and_falls_back() {
+    fn server_receipt_failure_rolls_back_and_fails_closed() {
         let (_root, mut args) = server_runtime_fixture();
         install_fake_ready_core(&args.core, "active");
         args.activation_ready = Some(args.socket.join("missing/receipt.json"));
@@ -4105,7 +4166,7 @@ exit 17
         let error = run(args).unwrap_err();
         netd.join().unwrap();
         assert!(
-            format!("{error:#}").contains("ordinary Candy Server"),
+            !format!("{error:#}").contains("ordinary Candy Server"),
             "{error:#}"
         );
     }
@@ -4442,6 +4503,43 @@ exit 17
         assert!(parse_prefix("10.0.0.1/8").is_err());
     }
     #[test]
+    fn operational_errors_retry_but_security_errors_do_not() {
+        for code in [ErrorCode::SystemFailure, ErrorCode::GenerationConflict] {
+            assert!(transient_runtime_error(&anyhow::Error::new(
+                IpcError::Remote(code)
+            )));
+        }
+        for code in [
+            ErrorCode::UnauthorizedPeer,
+            ErrorCode::InvalidRequest,
+            ErrorCode::PreflightFailed,
+        ] {
+            assert!(!transient_runtime_error(&anyhow::Error::new(
+                IpcError::Remote(code)
+            )));
+        }
+        for kind in [
+            std::io::ErrorKind::ConnectionRefused,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(transient_runtime_error(&anyhow::Error::new(
+                std::io::Error::from(kind)
+            )));
+        }
+        assert!(!transient_runtime_error(&anyhow::Error::new(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        )));
+        assert!(!transient_runtime_error(&anyhow::anyhow!(
+            "signature invalid"
+        )));
+        assert!(!transient_runtime_error(&anyhow::Error::new(
+            IpcError::FrameLength
+        )));
+    }
+
+    #[test]
     fn parses_instance_id() {
         assert_eq!(
             parse_instance_id("00112233445566778899aabbccddeeff").unwrap()[0],
@@ -4653,7 +4751,7 @@ exit 17
     }
 
     #[test]
-    fn recoverable_peer_loss_requires_a_committed_activation() {
+    fn initial_peer_loss_waits_without_permanent_rejection() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("status.json");
         let mut failed = serde_json::json!({
@@ -4675,7 +4773,10 @@ exit 17
         });
         write_private(&path, &serde_json::to_vec(&failed).unwrap());
 
-        assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Waiting)
+        );
         assert_eq!(
             read_core_readiness_with_policy(
                 &path,

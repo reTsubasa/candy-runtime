@@ -155,8 +155,6 @@ cat >"$tmp/expected.agent.args" <<EOF
 <$tmp/sdwan/activation-ready-v1.json>
 <--core>
 <$fake_core>
-<--ordinary-config>
-</tmp/server.toml>
 <--socket>
 </run/candy-netd/netd.sock>
 <run>
@@ -171,42 +169,47 @@ cmp "$tmp/expected.agent.args" "$agent_args" >/dev/null ||
 
 printf '%s\n' "{\"schema_version\":1,\"activation_id\":\"$activation_id\",\"candidate_target\":\"activations/$activation_id\",\"generation\":1,\"agent_pid\":1,\"state\":\"rejected\",\"error_code\":\"core_exit\"}" >"$tmp/sdwan/activation-ready-v1.json"
 : >"$args_file"
-CANDY_CORE_BINARY="$fake_core" CANDY_SDWAN_AGENT="$fake_agent" \
+if CANDY_CORE_BINARY="$fake_core" CANDY_SDWAN_AGENT="$fake_agent" \
 	CANDY_SDWAN_STATE_ROOT="$tmp/sdwan" \
 	CANDY_SDWAN_ACTIVATION_LINK="$tmp/sdwan/candidate" \
 	FAKE_AGENT_ARGS="$agent_args" FAKE_AGENT_CALLS="$agent_calls" \
 	FAKE_ARGS_FILE="$args_file" FAKE_PID_FILE="$pid_file" \
-	"$launcher" --config /tmp/server.toml 2>"$tmp/rejected-activation.err"
-grep -F 'already rejected; starting ordinary Candy only' "$tmp/rejected-activation.err" >/dev/null ||
+	"$launcher" --config /tmp/server.toml 2>"$tmp/rejected-activation.err"; then
+	fail "rejected activation started a server"
+fi
+grep -F 'standalone authentication is prohibited' "$tmp/rejected-activation.err" >/dev/null ||
 	fail "rejected activation did not produce an actionable warning"
-grep -Fx '</tmp/server.toml>' "$args_file" >/dev/null ||
-	fail "rejected activation did not preserve the ordinary server"
+[ ! -s "$args_file" ] || fail "rejected activation launched a PSK server"
 [ "$(grep -Fc '<run>' "$agent_calls")" -eq 1 ] ||
 	fail "rejected activation was submitted to the agent again"
 rm -f "$tmp/sdwan/activation-ready-v1.json"
 
 rm -f "$tmp/sdwan/candidate"
-CANDY_CORE_BINARY="$fake_core" CANDY_SDWAN_AGENT="$fake_agent" \
+mkdir -p "$tmp/sdwan/identity"
+printf '{}\n' >"$tmp/sdwan/identity/device-identity-v1.json"
+if CANDY_CORE_BINARY="$fake_core" CANDY_SDWAN_AGENT="$fake_agent" \
 	CANDY_SDWAN_STATE_ROOT="$tmp/sdwan" \
 	CANDY_SDWAN_ACTIVATION_LINK="$tmp/sdwan/candidate" \
 	FAKE_AGENT_ARGS="$agent_args" FAKE_AGENT_CALLS="$agent_calls" \
 	FAKE_ARGS_FILE="$args_file" FAKE_PID_FILE="$pid_file" \
-	"$launcher" --config /tmp/server.toml
-grep -Fx '</tmp/server.toml>' "$args_file" >/dev/null ||
-	fail "Cloud activation withdrawal did not preserve the ordinary server"
+	"$launcher" --config /tmp/server.toml; then
+	fail "withdrawn enrolled activation started a server"
+fi
+[ ! -s "$args_file" ] || fail "withdrawal launched a PSK server"
 
 ln -s "$tmp/outside-activation.json" "$tmp/sdwan/candidate"
 printf '%s\n' '{"schema_version":1,"core_role":"server"}' >"$tmp/outside-activation.json"
-CANDY_CORE_BINARY="$fake_core" CANDY_SDWAN_AGENT="$fake_agent" \
+if CANDY_CORE_BINARY="$fake_core" CANDY_SDWAN_AGENT="$fake_agent" \
 	CANDY_SDWAN_STATE_ROOT="$tmp/sdwan" \
 	CANDY_SDWAN_ACTIVATION_LINK="$tmp/sdwan/candidate" \
 	FAKE_AGENT_ARGS="$agent_args" FAKE_AGENT_CALLS="$agent_calls" \
 	FAKE_ARGS_FILE="$args_file" FAKE_PID_FILE="$pid_file" \
-	"$launcher" --config /tmp/server.toml 2>"$tmp/invalid-activation.err"
-grep -F 'ignored an invalid SD-WAN activation pointer' "$tmp/invalid-activation.err" >/dev/null ||
+	"$launcher" --config /tmp/server.toml 2>"$tmp/invalid-activation.err"; then
+	fail "invalid activation started a server"
+fi
+grep -F 'standalone authentication is prohibited' "$tmp/invalid-activation.err" >/dev/null ||
 	fail "invalid activation did not produce an actionable warning"
-grep -Fx '</tmp/server.toml>' "$args_file" >/dev/null ||
-	fail "invalid activation prevented ordinary server startup"
+[ ! -s "$args_file" ] || fail "invalid activation launched a PSK server"
 rm -f "$tmp/sdwan/candidate"
 
 history=$tmp/history

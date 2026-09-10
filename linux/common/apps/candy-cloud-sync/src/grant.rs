@@ -17,6 +17,23 @@ const GRANT_STATE_SCHEMA_VERSION: u8 = 2;
 const MAX_GRANT_ENVELOPE_BYTES: usize = 8 * 1024;
 const MAX_GRANT_STATE_BYTES: u64 = 64 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrantFailure {
+    pub stage: &'static str,
+    pub code: &'static str,
+}
+
+impl std::fmt::Display for GrantFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.stage, self.code)
+    }
+}
+impl std::error::Error for GrantFailure {}
+
+fn failure(stage: &'static str, code: &'static str) -> GrantFailure {
+    GrantFailure { stage, code }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantSubject {
     pub node_pool_id: Uuid,
@@ -336,29 +353,34 @@ pub fn fetch_from_cloud(
         .post(endpoint)
         .json(request)
         .send()
-        .map_err(|error| FetchFailure::Transient(error.into()))?;
+        .map_err(|error| {
+            FetchFailure::Transient(
+                anyhow::Error::from(error)
+                    .context(failure("grant_http_request", "grant_transport_failed")),
+            )
+        })?;
     let status = response.status();
     match classify_grant_http_status(status) {
         "success" => {}
         "transient" => {
-            let detail = response
-                .text()
-                .ok()
-                .filter(|body| !body.is_empty() && body.len() <= 4096)
-                .unwrap_or_default();
-            return Err(FetchFailure::Transient(anyhow::anyhow!(
-                "Cloud Grant issuance is temporarily unavailable with HTTP {status}{detail}"
-            )));
+            return Err(FetchFailure::Transient(
+                anyhow::anyhow!("Grant issuance returned HTTP {status}").context(failure(
+                    "grant_http_response",
+                    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                        "grant_rate_limited"
+                    } else {
+                        "grant_service_unavailable"
+                    },
+                )),
+            ));
         }
         _ => {
-            let detail = response
-                .text()
-                .ok()
-                .filter(|body| !body.is_empty() && body.len() <= 4096)
-                .unwrap_or_default();
-            return Err(FetchFailure::Denied(anyhow::anyhow!(
-                "Cloud rejected Grant issuance with HTTP {status}{detail}"
-            )));
+            return Err(FetchFailure::Denied(
+                anyhow::anyhow!("Grant issuance returned HTTP {status}").context(failure(
+                    "grant_http_response",
+                    "grant_http_request_rejected",
+                )),
+            ));
         }
     }
     let content_type = response
@@ -367,27 +389,40 @@ pub fn fetch_from_cloud(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
     if content_type.split(';').next().map(str::trim) != Some("application/json") {
-        return Err(FetchFailure::Transient(anyhow::anyhow!(
-            "Cloud Grant response has an unexpected media type"
-        )));
+        return Err(FetchFailure::Transient(
+            anyhow::anyhow!("Cloud Grant response has an unexpected media type").context(failure(
+                "grant_http_response",
+                "grant_response_media_type_invalid",
+            )),
+        ));
     }
     if response
         .content_length()
         .is_some_and(|length| length > MAX_GRANT_STATE_BYTES)
     {
-        return Err(FetchFailure::Transient(anyhow::anyhow!(
-            "Cloud Grant response exceeds the bounded size"
-        )));
+        return Err(FetchFailure::Transient(
+            anyhow::anyhow!("Cloud Grant response exceeds the bounded size")
+                .context(failure("grant_http_response", "grant_response_too_large")),
+        ));
     }
-    let bytes = response
-        .bytes()
-        .map_err(|error| FetchFailure::Transient(error.into()))?;
+    let bytes = response.bytes().map_err(|error| {
+        FetchFailure::Transient(
+            anyhow::Error::from(error)
+                .context(failure("grant_http_body", "grant_response_read_failed")),
+        )
+    })?;
     if bytes.is_empty() || bytes.len() as u64 > MAX_GRANT_STATE_BYTES {
-        return Err(FetchFailure::Transient(anyhow::anyhow!(
-            "Cloud Grant response has an invalid size"
-        )));
+        return Err(FetchFailure::Transient(
+            anyhow::anyhow!("Cloud Grant response has an invalid size")
+                .context(failure("grant_http_body", "grant_response_size_invalid")),
+        ));
     }
-    serde_json::from_slice(&bytes).map_err(|error| FetchFailure::Transient(error.into()))
+    serde_json::from_slice(&bytes).map_err(|error| {
+        FetchFailure::Transient(anyhow::Error::from(error).context(failure(
+            "grant_response_decode",
+            "grant_response_json_invalid",
+        )))
+    })
 }
 
 fn classify_grant_http_status(status: reqwest::StatusCode) -> &'static str {
@@ -453,12 +488,21 @@ impl GrantStore {
         V: FnOnce(&Path) -> Result<VerifiedGrantReport>,
         N: FnOnce() -> Result<u64>,
     {
-        subject.validate()?;
+        subject
+            .validate()
+            .context(failure("grant_subject_validation", "grant_subject_invalid"))?;
         let mut state = self
-            .load_state(subject)?
+            .load_state(subject)
+            .context(failure("grant_state_load", "grant_state_load_failed"))?
             .unwrap_or_else(|| GrantState::new(subject));
         if state.revoked_at_unix.is_some() {
-            bail!("Grant was definitively revoked for this signed authorization generation")
+            return Err(anyhow::anyhow!(
+                "Grant was definitively revoked for this signed authorization generation"
+            )
+            .context(failure(
+                "grant_cached_authorization",
+                "grant_authorization_revoked",
+            )));
         }
         if let Some(grant) = state
             .usable(now)
@@ -478,7 +522,10 @@ impl GrantStore {
                 request_id: subject.request_id(sequence)?,
                 created_at_unix: now.max(1),
             });
-            self.store_state(subject, &state)?;
+            self.store_state(subject, &state).context(failure(
+                "grant_pending_persist",
+                "grant_pending_persist_failed",
+            ))?;
         }
         let pending = state
             .pending
@@ -486,10 +533,21 @@ impl GrantStore {
             .context("missing pending Grant transaction")?;
         match fetch(&GrantIssueRequest::new(subject, &pending.request_id)) {
             Ok(response) => {
-                validate_cloud_grant_response(&response)?;
-                let staging = self.stage_unverified(&response.access_grant)?;
-                let verified = verify(&staging).context("Candy Core rejected the candidate Grant");
-                let cleanup = fs::remove_file(&staging).context("remove staged candidate Grant");
+                validate_cloud_grant_response(&response).context(failure(
+                    "grant_response_validation",
+                    "grant_response_invalid",
+                ))?;
+                let staging = self
+                    .stage_unverified(&response.access_grant)
+                    .context(failure("grant_stage", "grant_staging_failed"))?;
+                let verified = verify(&staging).context(failure(
+                    "grant_core_verification",
+                    "grant_core_verification_failed",
+                ));
+                let cleanup = fs::remove_file(&staging).context(failure(
+                    "grant_stage_cleanup",
+                    "grant_staging_cleanup_failed",
+                ));
                 let verification = match (verified, cleanup) {
                     (Ok(report), Ok(())) => report,
                     (Err(error), _) => return Err(error),
@@ -507,13 +565,21 @@ impl GrantStore {
                 state.pending = None;
                 state.revoked_at_unix = None;
                 state.active = Some(grant.clone());
-                self.store_state(subject, &state)?;
+                self.store_state(subject, &state).context(failure(
+                    "grant_active_persist",
+                    "grant_active_persist_failed",
+                ))?;
                 Ok(RefreshOutcome::Refreshed(grant))
             }
             Err(FetchFailure::Transient(error)) => {
                 let Some(grant) = state.usable(now).cloned() else {
+                    let error = if error.downcast_ref::<GrantFailure>().is_some() {
+                        error
+                    } else {
+                        error.context(failure("grant_fetch", "grant_fetch_transient_failed"))
+                    };
                     return Err(error)
-                        .context("Cloud is unavailable and no unexpired Grant exists");
+                        .context("Grant fetch failed and no unexpired cached Grant exists");
                 };
                 Ok(RefreshOutcome::RetainedAfterTransientFailure { grant, error })
             }
@@ -522,8 +588,16 @@ impl GrantStore {
                 state.completed_sequence = 0;
                 state.pending = None;
                 state.revoked_at_unix = Some(now.max(1));
-                self.store_state(subject, &state)?;
-                Err(error).context("Cloud revoked or denied the SD-WAN Grant")
+                self.store_state(subject, &state).context(failure(
+                    "grant_revocation_persist",
+                    "grant_revocation_persist_failed",
+                ))?;
+                let error = if error.downcast_ref::<GrantFailure>().is_some() {
+                    error
+                } else {
+                    error.context(failure("grant_http_response", "grant_authorization_denied"))
+                };
+                Err(error).context("Grant request rejected; cached credential invalidated")
             }
         }
     }
@@ -625,73 +699,142 @@ fn validate_verified_grant(
     now: u64,
 ) -> Result<()> {
     validate_verified_grant_binding(subject, report)?;
-    if report.grant_id != response.grant_id
-        || report.expires_at_unix != response.expires_at_unix
-        || report.refresh_after_unix != response.refresh_after_unix
-    {
-        bail!("Core-verified Grant response metadata does not match the authenticated envelope")
+    for (matches, code) in [
+        (
+            report.grant_id == response.grant_id,
+            "grant_response_id_mismatch",
+        ),
+        (
+            report.expires_at_unix == response.expires_at_unix,
+            "grant_response_expiry_mismatch",
+        ),
+        (
+            report.refresh_after_unix == response.refresh_after_unix,
+            "grant_response_refresh_mismatch",
+        ),
+    ] {
+        if !matches {
+            return Err(failure("grant_response_binding", code).into());
+        }
     }
     if report.not_before_unix > now {
-        bail!("Core-verified Grant is not yet valid")
+        return Err(failure("grant_validity", "grant_not_yet_valid").into());
     }
     if now >= report.expires_at_unix {
-        bail!("Core-verified Grant has expired")
+        return Err(failure("grant_validity", "grant_expired").into());
     }
     if report.refresh_after_unix < report.not_before_unix
         || report.refresh_after_unix >= report.expires_at_unix
     {
-        bail!("Core-verified Grant has an invalid validity window")
+        return Err(failure("grant_validity", "grant_validity_window_invalid").into());
     }
     Ok(())
 }
 
 pub fn resolution_error_code(error: &anyhow::Error) -> &'static str {
-    let messages = error.chain().map(ToString::to_string).collect::<Vec<_>>();
-    let contains = |needle: &str| messages.iter().any(|message| message.contains(needle));
-    if contains("Cloud revoked or denied") || contains("Cloud rejected Grant issuance") {
-        "grant_authorization_denied"
-    } else if contains("Cloud is unavailable")
-        || contains("temporarily unavailable")
-        || contains("request or decode Grant")
-    {
-        "grant_service_unavailable"
-    } else if contains("not yet valid") {
-        "grant_not_yet_valid"
-    } else if contains("has expired") {
-        "grant_expired"
-    } else if contains("response metadata") || contains("invalid validity window") {
-        "grant_response_mismatch"
-    } else if contains("not bound to the signed candidate") {
-        "grant_binding_mismatch"
-    } else if contains("Candy Core rejected the candidate Grant") {
-        "grant_core_verification_failed"
-    } else if contains("Grant state") || contains("cached Grant") {
-        "grant_state_invalid"
-    } else {
-        "grant_resolution_failed"
-    }
+    error
+        .downcast_ref::<GrantFailure>()
+        .map_or("grant_resolution_unclassified", |cause| cause.code)
+}
+
+pub fn resolution_error_stage(error: &anyhow::Error) -> &'static str {
+    error
+        .downcast_ref::<GrantFailure>()
+        .map_or("grant_resolution", |cause| cause.stage)
+}
+
+pub fn resolution_is_retryable(error: &anyhow::Error) -> bool {
+    matches!(
+        resolution_error_code(error),
+        "grant_transport_failed"
+            | "grant_rate_limited"
+            | "grant_service_unavailable"
+            | "grant_response_media_type_invalid"
+            | "grant_response_too_large"
+            | "grant_response_read_failed"
+            | "grant_response_size_invalid"
+            | "grant_response_json_invalid"
+            | "grant_fetch_transient_failed"
+            | "grant_expired"
+            | "grant_not_yet_valid"
+    )
 }
 
 fn validate_verified_grant_binding(
     subject: &GrantSubject,
     report: &VerifiedGrantReport,
 ) -> Result<()> {
-    if report.schema_version != 1
-        || !report.ok
-        || report.grant_id.is_nil()
-        || report.tenant_id != subject.tenant_id
-        || report.device_id != subject.device_id
-        || report.device_key_id != subject.device_key_id
-        || report.node_pool_id != subject.node_pool_id
-        || report.service_permission != "private.tun.connect"
-        || report.route_policy_id != subject.projection_id
-        || report.route_policy_generation != subject.projection_generation
-        || report.route_policy_content_hash != subject.projection_content_hash
-        || report.not_before_unix == 0
-        || report.not_before_unix > report.refresh_after_unix
-        || report.refresh_after_unix >= report.expires_at_unix
-    {
-        bail!("Core-verified Grant is not bound to the signed candidate and device identity")
+    for (valid, stage, code) in [
+        (
+            report.schema_version == 1,
+            "grant_core_report",
+            "grant_report_schema_unsupported",
+        ),
+        (report.ok, "grant_core_report", "grant_report_rejected"),
+        (
+            !report.grant_id.is_nil(),
+            "grant_core_report",
+            "grant_report_id_invalid",
+        ),
+        (
+            report.tenant_id == subject.tenant_id,
+            "grant_candidate_binding",
+            "grant_tenant_mismatch",
+        ),
+        (
+            report.device_id == subject.device_id,
+            "grant_candidate_binding",
+            "grant_device_mismatch",
+        ),
+        (
+            report.device_key_id == subject.device_key_id,
+            "grant_candidate_binding",
+            "grant_device_key_mismatch",
+        ),
+        (
+            report.node_pool_id == subject.node_pool_id,
+            "grant_candidate_binding",
+            "grant_node_pool_mismatch",
+        ),
+        (
+            report.service_permission == "private.tun.connect",
+            "grant_candidate_binding",
+            "grant_service_permission_mismatch",
+        ),
+        (
+            report.route_policy_id == subject.projection_id,
+            "grant_candidate_binding",
+            "grant_route_policy_id_mismatch",
+        ),
+        (
+            report.route_policy_generation == subject.projection_generation,
+            "grant_candidate_binding",
+            "grant_route_policy_generation_mismatch",
+        ),
+        (
+            report.route_policy_content_hash == subject.projection_content_hash,
+            "grant_candidate_binding",
+            "grant_route_policy_hash_mismatch",
+        ),
+        (
+            report.not_before_unix != 0,
+            "grant_validity",
+            "grant_not_before_invalid",
+        ),
+        (
+            report.not_before_unix <= report.refresh_after_unix,
+            "grant_validity",
+            "grant_refresh_before_validity",
+        ),
+        (
+            report.refresh_after_unix < report.expires_at_unix,
+            "grant_validity",
+            "grant_refresh_after_expiry",
+        ),
+    ] {
+        if !valid {
+            return Err(failure(stage, code).into());
+        }
     }
     Ok(())
 }
@@ -801,6 +944,89 @@ mod tests {
             not_before_unix: 900,
             refresh_after_unix: 1_500.min(expires_at_unix - 1),
             expires_at_unix,
+        }
+    }
+
+    #[test]
+    fn grant_binding_errors_identify_each_invalid_field() {
+        let cases: &[(fn(&mut VerifiedGrantReport), &str, &str)] = &[
+            (
+                |r| r.schema_version = 2,
+                "grant_core_report",
+                "grant_report_schema_unsupported",
+            ),
+            (
+                |r| r.ok = false,
+                "grant_core_report",
+                "grant_report_rejected",
+            ),
+            (
+                |r| r.grant_id = Uuid::nil(),
+                "grant_core_report",
+                "grant_report_id_invalid",
+            ),
+            (
+                |r| r.tenant_id = Uuid::nil(),
+                "grant_candidate_binding",
+                "grant_tenant_mismatch",
+            ),
+            (
+                |r| r.device_id = Uuid::nil(),
+                "grant_candidate_binding",
+                "grant_device_mismatch",
+            ),
+            (
+                |r| r.device_key_id = Uuid::nil(),
+                "grant_candidate_binding",
+                "grant_device_key_mismatch",
+            ),
+            (
+                |r| r.node_pool_id = Uuid::nil(),
+                "grant_candidate_binding",
+                "grant_node_pool_mismatch",
+            ),
+            (
+                |r| r.service_permission.clear(),
+                "grant_candidate_binding",
+                "grant_service_permission_mismatch",
+            ),
+            (
+                |r| r.route_policy_id = Uuid::nil(),
+                "grant_candidate_binding",
+                "grant_route_policy_id_mismatch",
+            ),
+            (
+                |r| r.route_policy_generation += 1,
+                "grant_candidate_binding",
+                "grant_route_policy_generation_mismatch",
+            ),
+            (
+                |r| r.route_policy_content_hash.clear(),
+                "grant_candidate_binding",
+                "grant_route_policy_hash_mismatch",
+            ),
+            (
+                |r| r.not_before_unix = 0,
+                "grant_validity",
+                "grant_not_before_invalid",
+            ),
+            (
+                |r| r.refresh_after_unix = 899,
+                "grant_validity",
+                "grant_refresh_before_validity",
+            ),
+            (
+                |r| r.refresh_after_unix = r.expires_at_unix,
+                "grant_validity",
+                "grant_refresh_after_expiry",
+            ),
+        ];
+        for (mutate, stage, code) in cases {
+            let mut report = verification(10_000);
+            mutate(&mut report);
+            let error = validate_verified_grant_binding(&subject(), &report).unwrap_err();
+            assert_eq!(resolution_error_stage(&error), *stage);
+            assert_eq!(resolution_error_code(&error), *code);
         }
     }
 
@@ -1107,35 +1333,34 @@ mod tests {
 
     #[test]
     fn grant_resolution_errors_have_actionable_codes() {
-        for (message, expected) in [
+        for (stage, code, retryable) in [
+            ("grant_http_request", "grant_transport_failed", true),
+            ("grant_http_response", "grant_rate_limited", true),
+            ("grant_http_response", "grant_service_unavailable", true),
+            ("grant_http_response", "grant_http_request_rejected", false),
+            ("grant_response_decode", "grant_response_json_invalid", true),
             (
-                "Cloud Grant issuance is temporarily unavailable with HTTP 503",
-                "grant_service_unavailable",
-            ),
-            (
-                "Cloud rejected Grant issuance with HTTP 403",
-                "grant_authorization_denied",
-            ),
-            (
-                "Candy Core rejected the candidate Grant",
+                "grant_core_verification",
                 "grant_core_verification_failed",
+                false,
             ),
-            (
-                "Core-verified Grant is not bound to the signed candidate and device identity",
-                "grant_binding_mismatch",
-            ),
-            (
-                "Core-verified Grant is not yet valid",
-                "grant_not_yet_valid",
-            ),
-            ("Core-verified Grant has expired", "grant_expired"),
-            (
-                "Core-verified Grant response metadata does not match the authenticated envelope",
-                "grant_response_mismatch",
-            ),
+            ("grant_candidate_binding", "grant_binding_mismatch", false),
+            ("grant_validity", "grant_not_yet_valid", true),
+            ("grant_validity", "grant_expired", true),
+            ("grant_response_binding", "grant_response_mismatch", false),
         ] {
-            assert_eq!(resolution_error_code(&anyhow::anyhow!(message)), expected);
+            let error = anyhow::anyhow!("arbitrary source wording")
+                .context(failure(stage, code))
+                .context("outer caller context");
+            assert_eq!(resolution_error_code(&error), code);
+            assert_eq!(resolution_error_stage(&error), stage);
+            assert_eq!(resolution_is_retryable(&error), retryable);
         }
+        // Text alone is never evidence for a specific failure category.
+        assert_eq!(
+            resolution_error_code(&anyhow::anyhow!("Cloud rejected Grant issuance")),
+            "grant_resolution_unclassified"
+        );
     }
 
     #[test]
