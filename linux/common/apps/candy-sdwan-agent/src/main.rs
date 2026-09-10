@@ -3515,7 +3515,7 @@ mod tests {
             ReloadFault::NetdRollbackIncomplete => {
                 assert!(!result.unwrap());
                 assert!(!operations.contains(&"core:commit"));
-                assert!(transition.complete());
+                assert!(!transition.complete());
                 assert!(
                     !replacement.activation_ready.unwrap().exists(),
                     "incomplete rollback needs cleanup/retry, not a permanent rejection"
