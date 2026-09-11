@@ -24,14 +24,21 @@ lifecycle tests (graceful TERM, forced timeout, owned/unrelated process
 matching, live-owner refusal); Lua log parser tests; LuCI static checks;
 productization and version checks; Linux x86_64-musl code and test compilation.
 
-Not a release acceptance: socket-dependent agent tests fail under this
-session's sandbox with `Operation not permitted`; permission escalation timed
-out. The existing init integration suite also requires `ps` visibility and
-failed its stale-client termination assertion when sandbox denied `ps`.
-Linux parent-death execution, full socket regression, and on-node startup
-verification must pass before rollout. The ordinary Proxy startup failure
-has not yet been reproduced with the new Core connection diagnostics, so its
-remote-side cause remains unconfirmed.
+## Follow-up evidence (2026-09-11)
 
-Runtime revision is r108 to avoid overwriting r107. Do not report a successful
-release or node upgrade on the basis of this source change alone.
+Runtime CI run `34545296701` passed full script verification, Rust workspace
+tests and Linux/OpenWrt builds. Cloud Sync passed 82 tests; the SD-WAN agent
+passed 47 tests, including Linux parent-death enforcement. Local Core socket
+regression also passed (243 carrier client and 28 process tests before the
+subsequent coexistence change).
+
+Release workflow `34545296406` succeeded. The central release repository
+published signed `runtime-v0.4.0-r108` at `2026-09-11T00:19:05Z`.
+
+Hong Kong server logs matching the OpenWrt failure window identify
+`stage=auth_method_selection error_code=psk_on_cloud_listener`: the ordinary
+Proxy was using its old PSK endpoint, which had become a Cloud Grant listener.
+This is separate from r108's process-lifetime fixes. User requirements confirm
+both services must coexist with independent authentication and endpoints.
+The r109/Core 0.3.45 coexistence changes need their own validation and rollout;
+r108 publication alone does not establish successful node acceptance.

@@ -173,6 +173,7 @@ usage:
   candy-server sdwan reconnect
   candy-server sdwan prune-history
   candy-server leave [--yes]
+  candy-server proxy --config PROXY_CONFIG --sdwan-config SDWAN_LISTENER_CONFIG
   candy-server [server options]
 EOF
 }
@@ -278,6 +279,15 @@ fi
 
 export CANDY_RUNTIME_PROCESS_API_VERSION=$readonly_runtime_api
 export CANDY_RUNTIME_ROLE=server
+
+# This explicit service has its own configuration and port reservation. It
+# never becomes the fallback launch path of the enrolled SD-WAN supervisor.
+if [ "${1:-}" = proxy ]; then
+	shift
+	[ "$#" -eq 4 ] && [ "$1" = --config ] && [ "$3" = --sdwan-config ] ||
+		fail 64 "proxy requires --config PROXY_CONFIG --sdwan-config SDWAN_LISTENER_CONFIG"
+	exec "$core_binary" server isolated-proxy "$@"
+fi
 
 # Only the service's canonical run shape may consume an authenticated
 # activation. Diagnostics and manually supplied server options always remain

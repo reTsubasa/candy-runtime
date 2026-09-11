@@ -48,6 +48,14 @@ set -eu
 command=$1
 shift
 printf '%s\n' "$command $*" >> "$FAKE_SERVICE_LOG"
+case "$*" in *candy-proxy*)
+	FAKE_SERVICE_STATE=${FAKE_PROXY_STATE:-/dev/null}
+	if [ "$command" = start ] && [ -f "${FAKE_PROXY_FAIL_START:-/nonexistent}" ]; then
+		rm -f "$FAKE_PROXY_FAIL_START"
+		exit 1
+	fi
+	;;
+esac
 case "$command" in
 	is-active) [ "$(cat "$FAKE_SERVICE_STATE")" = active ] ;;
 	stop) printf '%s\n' inactive > "$FAKE_SERVICE_STATE" ;;
@@ -65,6 +73,10 @@ chmod 0755 "$bin/systemctl"
 
 cat > "$bin/server-health-check" <<'EOF'
 #!/bin/sh
+if [ "${CANDY_SERVER_SERVICE:-}" = candy-proxy ]; then
+	[ "$(cat "$FAKE_PROXY_STATE")" = active ] && [ "$CANDY_SERVER_CONFIG" = "$CANDY_PROXY_CONFIG" ]
+	exit $?
+fi
 [ "$(cat "$FAKE_SERVICE_STATE")" = active ]
 EOF
 chmod 0755 "$bin/server-health-check"
@@ -282,5 +294,26 @@ fi
 status_json=$("$manager" status)
 printf '%s' "$status_json" | jq -e '.current_version == "1.0.0" and .previous_version == "1.0.1" and .required_core_process_api_version == 1' >/dev/null ||
 	fail "manager status is incomplete"
+
+# A failed Proxy start must roll back the shared Core and restore both units.
+export CANDY_PROXY_CONFIG="$tmp/proxy.toml"
+export FAKE_PROXY_STATE="$tmp/proxy.state"
+export FAKE_PROXY_FAIL_START="$tmp/proxy.fail-start"
+printf '%s\n' 'listen = "127.0.0.1:9443"' > "$CANDY_PROXY_CONFIG"
+printf '%s\n' active > "$FAKE_PROXY_STATE"
+: > "$FAKE_PROXY_FAIL_START"
+if "$manager" activate 1.0.1 >"$tmp/proxy-rollback.out" 2>&1; then
+	fail "Proxy startup failure did not reject activation"
+fi
+[ "$(readlink "$cores/current")" = 1.0.0 ] || fail "Proxy failure left replacement Core active"
+[ "$(cat "$FAKE_PROXY_STATE")" = active ] || fail "Proxy was not restored after rollback"
+[ "$(cat "$service_state")" = active ] || fail "SD-WAN was not restored after Proxy failure"
+"$manager" activate 1.0.1 >/dev/null
+[ "$(cat "$FAKE_PROXY_STATE")" = active ] || fail "successful activation stopped Proxy"
+grep -F -- "isolated-proxy --config $CANDY_PROXY_CONFIG --sdwan-config $config --check-config" "$role_log" >/dev/null || fail "Core update skipped endpoint isolation validation"
+printf '%s\n' inactive > "$FAKE_PROXY_STATE"
+: > "$service_log"
+"$manager" rollback >/dev/null
+! grep -Fx 'start candy-proxy' "$service_log" >/dev/null || fail "Core rollback started an inactive Proxy"
 
 printf '%s\n' "Candy Linux server Core bundle integration test passed"

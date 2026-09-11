@@ -135,6 +135,13 @@ cmp "$tmp/expected.args" "$args_file" >/dev/null || fail "server arguments chang
 [ "$(cat "$args_file.role")" = server ] || fail "Runtime role environment was not published"
 
 activation_id=$(printf 'ab%.0s' $(seq 1 32))
+CANDY_CORE_BINARY="$fake_core" FAKE_ARGS_FILE="$args_file" FAKE_PID_FILE="$pid_file" \
+	"$launcher" proxy --config '/tmp/proxy config.toml' --sdwan-config /tmp/sdwan.toml
+printf '%s\n' '<isolated-proxy>' '<--config>' '</tmp/proxy config.toml>' '<--sdwan-config>' '</tmp/sdwan.toml>' >"$tmp/expected.args"
+cmp "$tmp/expected.args" "$args_file" || fail "isolated Proxy was not dispatched independently"
+if CANDY_CORE_BINARY="$fake_core" "$launcher" proxy --config /tmp/proxy.toml >"$tmp/proxy-invalid.out" 2>&1; then
+	fail "Proxy without SD-WAN endpoint reservation was accepted"
+fi
 activation_dir=$tmp/sdwan/activations/$activation_id
 mkdir -p "$activation_dir"
 printf '%s\n' '{"schema_version":1,"core_role":"server"}' >"$activation_dir/activation-v1.json"

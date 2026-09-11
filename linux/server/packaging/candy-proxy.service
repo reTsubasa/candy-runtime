@@ -1,0 +1,27 @@
+[Unit]
+Description=Candy isolated ordinary Proxy
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/candy/proxy-server.toml
+
+[Service]
+Type=simple
+User=candy
+Group=candy
+UMask=0077
+WorkingDirectory=/var/lib/candy
+Environment=CANDY_CORE_CURRENT_LINK=/opt/candy/cores/current
+ExecStart=/opt/candy/current/candy-server proxy --config /etc/candy/proxy-server.toml --sdwan-config /etc/candy/server.toml
+Restart=on-failure
+RestartSec=2s
+LimitNOFILE=1048576
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/candy /run/candy
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

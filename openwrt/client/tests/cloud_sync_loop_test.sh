@@ -38,6 +38,7 @@ case "$expression" in
 	@.schema_version) printf '%s\n' "$input" | sed -n 's/.*"schema_version":\([0-9][0-9]*\).*/\1/p' ;;
 	@.state) printf '%s\n' "$input" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p' ;;
 	@.cleanup) printf '%s\n' "$input" | sed -n 's/.*"cleanup":"\([^"]*\)".*/\1/p' ;;
+	@.scope) printf '%s\n' "$input" | sed -n 's/.*"scope":"\([^"]*\)".*/\1/p' ;;
 	*) exit 1 ;;
 esac
 EOF
@@ -154,7 +155,7 @@ case "$1" in
 	enabled) exit 0 ;;
 	status) printf '%s\n' stopped ;;
 	start) printf '%s\n' "$*" >>"$CANDY_TEST_RECONCILE_LOG" ;;
-	sdwan_prune_history) printf '%s\n' "$*" >>"$CANDY_TEST_RECONCILE_LOG" ;;
+	sdwan_reconcile|sdwan_prune_history) printf '%s\n' "$*" >>"$CANDY_TEST_RECONCILE_LOG" ;;
 	*) exit 1 ;;
 esac
 EOF
@@ -180,7 +181,7 @@ grep -Fx sdwan_prune_history "$tmp/reconcile.log" >/dev/null || fail "successful
 # traffic after an observed runtime blackhole.
 mkdir -p "$tmp/state/identity"
 printf '%s\n' '{}' >"$tmp/state/identity/device-identity-v1.json"
-printf '%s\n' '{"schema_version":1,"state":"active","reason":"sdwan:core_traffic_blackhole","cleanup":"completed"}' >"$tmp/runtime-fault.json"
+printf '%s\n' '{"schema_version":1,"scope":"ordinary","state":"active","reason":"core_exit","cleanup":"completed"}' >"$tmp/runtime-fault.json"
 : >"$tmp/logger.log"
 : >"$tmp/reconcile.log"
 PATH="$tmp/bin:$PATH" \
@@ -194,10 +195,23 @@ PATH="$tmp/bin:$PATH" \
 	CANDY_CLOUD_SYNC_INTERVAL=1 \
 	"$sync_loop" >/dev/null 2>"$stderr_log" || fail "completed fault handling failed"
 ! grep -Fx start "$tmp/reconcile.log" >/dev/null || fail "Cloud sync restarted a service latched in fail-open"
-! grep -Fx sdwan_reconcile "$tmp/reconcile.log" >/dev/null || fail "Cloud sync reconciled a service latched in fail-open"
+grep -Fx sdwan_reconcile "$tmp/reconcile.log" >/dev/null || fail "ordinary fault blocked SD-WAN reconciliation"
 grep -Fx sdwan_prune_history "$tmp/reconcile.log" >/dev/null || fail "fail-open service history was left unbounded"
-grep -F 'event=cloud_sync_reconcile result=deferred reason=runtime_fault' "$tmp/logger.log" >/dev/null ||
-	fail "completed fail-open was not reported as deferred"
+grep -F 'event=cloud_sync_reconcile scope=ordinary reason=runtime_fault sdwan=reconciling' "$tmp/logger.log" >/dev/null ||
+	fail "ordinary fail-open scope was not reported"
+
+# Old records do not identify which data plane failed. Preserve their latch.
+mkdir -p "$tmp/state/identity"
+printf '%s\n' '{}' >"$tmp/state/identity/device-identity-v1.json"
+printf '%s\n' '{"schema_version":1,"state":"active","cleanup":"completed"}' >"$tmp/runtime-fault.json"
+: >"$tmp/reconcile.log"
+PATH="$tmp/bin:$PATH" CANDY_TEST_LOG="$tmp/logger.log" \
+	CANDY_TEST_RECONCILE_LOG="$tmp/reconcile.log" \
+	CANDY_TEST_IDENTITY_FILE="$tmp/state/identity/device-identity-v1.json" \
+	CANDY_CLOUD_SYNC_BIN="$tmp/sync" CANDY_SDWAN_STATE_DIR="$tmp/state" \
+	CANDY_FAULT_STATE_FILE="$tmp/runtime-fault.json" CANDY_INIT="$tmp/candy.init" \
+	"$sync_loop" >/dev/null 2>"$stderr_log" || fail "legacy fault handling failed"
+! grep -Fx sdwan_reconcile "$tmp/reconcile.log" >/dev/null || fail "legacy fault was incorrectly classified as ordinary"
 
 # Core readiness can make init status report running before the complete SD-WAN
 # startup has settled. A fresh lifecycle transition must win over that status.

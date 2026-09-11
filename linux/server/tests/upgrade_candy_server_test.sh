@@ -86,7 +86,7 @@ EOF
 chmod 0755 "$fake_bin"/*
 : >"$tmp/sysctl.log"
 
-services='candy-netd.service candy-server.service candy-cloud-sync.service candy-cloud-sync.timer'
+services='candy-netd.service candy-proxy.service candy-server.service candy-cloud-sync.service candy-cloud-sync.timer'
 reset_service_state() {
 	: >"$tmp/systemd.log"
 	for service in $services; do printf 0 >"$fake_state/$service.enabled"; printf 0 >"$fake_state/$service.active"; done
@@ -101,7 +101,7 @@ usr/local/libexec/candy-netd
 usr/local/libexec/candy-cloud-enroll
 usr/local/libexec/candy-cloud-sync
 usr/local/libexec/candy-server-health-check'
-units='candy-server.service candy-netd.service candy-cloud-sync.service candy-cloud-sync.timer'
+units='candy-server.service candy-proxy.service candy-netd.service candy-cloud-sync.service candy-cloud-sync.timer'
 
 write_host_generation() {
 	value=$1
@@ -249,6 +249,7 @@ for service in candy-netd.service candy-server.service candy-cloud-sync.timer; d
 	[ "$(cat "$fake_state/$service.enabled")" = 1 ] && [ "$(cat "$fake_state/$service.active")" = 1 ] || fail "$service state was not restored"
 done
 [ "$(cat "$fake_state/candy-cloud-sync.service.enabled")" = 0 ] && [ "$(cat "$fake_state/candy-cloud-sync.service.active")" = 0 ] || fail "inactive Cloud sync service was enabled"
+[ "$(cat "$fake_state/candy-proxy.service.active")" = 0 ] || fail "optional Proxy service started without operator configuration"
 grep -F 'start --no-block candy-cloud-sync.service' "$tmp/systemd.log" >/dev/null ||
 	fail "restored Cloud sync timer was not armed by a oneshot dispatch"
 
@@ -291,6 +292,8 @@ cp "$sysctl_policy" "$tmp/before-sysctl-policy"
 make_bundle "$tmp/rollback-candidate" x86_64 0.4.0-r62 broken
 rollback_sha=$(sha256 "$tmp/rollback-candidate.tar.gz")
 reset_service_state
+printf 1 >"$fake_state/candy-proxy.service.enabled"
+printf 1 >"$fake_state/candy-proxy.service.active"
 if FAKE_HEALTH_FAIL=1 run_upgrade --bundle-file "$tmp/rollback-candidate.tar.gz" --sha256 "$rollback_sha" --version 0.4.0-r62 >"$tmp/rollback.out" 2>&1; then fail "failed health verification was accepted"; fi
 cmp "$tmp/before-server" "$before_current/candy-server" >/dev/null || fail "Runtime executable rollback failed"
 [ "$(readlink "$host/opt/candy/current")" = "$before_current" ] || fail "current Runtime link rollback failed"
@@ -306,7 +309,7 @@ cmp "$tmp/before-sysctl-policy" "$sysctl_policy" >/dev/null || fail "kernel poli
 if grep -R broken "$host/usr/local/bin" "$host/usr/local/libexec" "$host/etc/systemd/system" "$host/usr/lib/tmpfiles.d" >/dev/null; then
 	fail "rollback left candidate Runtime content installed"
 fi
-for service in candy-netd.service candy-server.service candy-cloud-sync.timer; do
+for service in candy-netd.service candy-proxy.service candy-server.service candy-cloud-sync.timer; do
 	[ "$(cat "$fake_state/$service.enabled")" = 1 ] && [ "$(cat "$fake_state/$service.active")" = 1 ] || fail "$service rollback state is incorrect"
 done
 

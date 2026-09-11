@@ -126,10 +126,12 @@ usr/local/libexec/candy-server-health-check'
 # backups exist, and restore it on rollback.
 legacy_files='usr/local/sbin/candy-core-manager'
 unit_files='candy-server.service
+candy-proxy.service
 candy-netd.service
 candy-cloud-sync.service
 candy-cloud-sync.timer'
 services='candy-netd.service
+candy-proxy.service
 candy-server.service
 candy-cloud-sync.service
 candy-cloud-sync.timer'
@@ -143,7 +145,7 @@ record_service_state() {
 
 stop_services() {
 	stop_failed=0
-	for service in candy-cloud-sync.timer candy-cloud-sync.service candy-server.service candy-netd.service; do
+	for service in candy-cloud-sync.timer candy-cloud-sync.service candy-proxy.service candy-server.service candy-netd.service; do
 		"$SYSTEMCTL" stop "$service" >/dev/null 2>&1 || true
 		if "$SYSTEMCTL" is-active --quiet "$service" >/dev/null 2>&1; then
 			log "could not stop $service"
@@ -463,7 +465,7 @@ while IFS= read -r member; do
 	case "$member" in
 		usr/|usr/local/|usr/local/bin/|usr/local/libexec/|systemd/|install/|etc/|etc/candy/) ;;
 		usr/local/bin/candy-server|usr/local/bin/candy-core-manager|usr/local/libexec/serverd-linux|usr/local/libexec/candy-sdwan-runtime|usr/local/libexec/candy-sdwan-agent|usr/local/libexec/candy-netd|usr/local/libexec/candy-cloud-enroll|usr/local/libexec/candy-cloud-sync|usr/local/libexec/candy-server-health-check) ;;
-		systemd/candy-server.service|systemd/candy-netd.service|systemd/candy-cloud-sync.service|systemd/candy-cloud-sync.timer|systemd/candy.tmpfiles) ;;
+		systemd/candy-server.service|systemd/candy-proxy.service|systemd/candy-netd.service|systemd/candy-cloud-sync.service|systemd/candy-cloud-sync.timer|systemd/candy.tmpfiles) ;;
 		install/install-candy-server.sh|install/upgrade-candy-server.sh|etc/candy/server.toml.example|etc/candy/cloud-sync.env.example|README.md|VERSION|RUNTIME-RELEASE|RUNTIME-ARCH) ;;
 		*) die "unexpected archive member: $member" ;;
 	esac
@@ -602,6 +604,9 @@ if [ "$(cat "$state_dir/candy-netd.service.active")" = 1 ]; then "$SYSTEMCTL" is
 if [ "$(cat "$state_dir/candy-server.service.active")" = 1 ]; then
 	health=$(host_path "$HEALTH_CHECK")
 	CANDY_SERVER_HEALTH_WAIT_SECONDS=${CANDY_SERVER_HEALTH_WAIT_SECONDS:-15} "$health"
+fi
+if [ "$(cat "$state_dir/candy-proxy.service.active")" = 1 ]; then
+	CANDY_SERVER_SERVICE=candy-proxy CANDY_SERVER_CONFIG=$(host_path /etc/candy/proxy-server.toml) "$(host_path "$HEALTH_CHECK")"
 fi
 if [ "$(cat "$state_dir/candy-cloud-sync.timer.active")" = 1 ]; then "$SYSTEMCTL" is-active --quiet candy-cloud-sync.timer; fi
 

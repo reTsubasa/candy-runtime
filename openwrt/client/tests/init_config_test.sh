@@ -1820,10 +1820,18 @@ done
   network_cleanup() { return 0; }
   stop_network_policy_worker_for_fail_open() { return 0; }
   wait_for_netd_exit() { return 0; }
-  fail_open_locked sdwan sdwan_exit:1
-  test ! -e "$CANDY_TEST_DISABLE_MARKER" || fail "transient SD-WAN failure disabled recovery across reboot"
-  grep -Fq 'automatic recovery pending' "$CANDY_FAULT_STATE_FILE" ||
-    fail "transient SD-WAN failure did not persist recovery state"
+  procd_kill() {
+    case "$*" in 'candy ordinary'|'candy watchdog'|'candy provider-updater') return 0 ;; esac
+    fail "ordinary failure stopped unrelated instance: $*"
+  }
+  wait_for_netd_exit() { fail "ordinary failure waited for live SD-WAN netd"; }
+  sdwan_runtime_state() { fail "ordinary failure changed SD-WAN state"; }
+  printf '%s\n' live-sdwan-journal > "$CANDY_NETD_JOURNAL"
+  fail_open_locked core_exit 1
+  test ! -e "$CANDY_TEST_DISABLE_MARKER" || fail "ordinary failure disabled shared autostart"
+  grep -Fxq live-sdwan-journal "$CANDY_NETD_JOURNAL" || fail "ordinary failure changed live netd journal"
+  grep -Fq 'scope=ordinary; sdwan=preserved' "$CANDY_FAULT_STATE_FILE" ||
+    fail "ordinary failure did not persist isolated fault state"
 )
 
 (

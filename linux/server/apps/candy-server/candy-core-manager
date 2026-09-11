@@ -320,22 +320,70 @@ service_active() {
 	"$SYSTEMCTL" is-active --quiet "$SERVICE_NAME" >/dev/null 2>&1
 }
 
+# Both services use the same signed Core symlink, but retain independent
+# enablement and health. Capture the running set before mutating that link.
+record_core_services() {
+	CORE_ACTIVE_SERVICES=
+	service_active && CORE_ACTIVE_SERVICES="$SERVICE_NAME"
+	if [ "$SERVICE_NAME" != candy-proxy ] && "$SYSTEMCTL" is-active --quiet candy-proxy >/dev/null 2>&1; then
+		CORE_ACTIVE_SERVICES="$CORE_ACTIVE_SERVICES candy-proxy"
+	fi
+	return 0
+}
+
+stop_core_services() {
+	local service failed=0
+	for service in $CORE_ACTIVE_SERVICES; do
+		"$SYSTEMCTL" stop "$service" || failed=1
+		if "$SYSTEMCTL" is-active --quiet "$service" >/dev/null 2>&1; then failed=1; fi
+	done
+	[ "$failed" = 0 ]
+}
+
+start_core_services() {
+	local service failed=0
+	for service in $CORE_ACTIVE_SERVICES; do
+		"$SYSTEMCTL" start "$service" || failed=1
+	done
+	[ "$failed" = 0 ]
+}
+
+health_core_services() {
+	local service config
+	[ -x "$HEALTH_CHECK" ] || return 1
+	for service in $CORE_ACTIVE_SERVICES; do
+		config=$SERVER_CONFIG
+		[ "$service" != candy-proxy ] || config=${CANDY_PROXY_CONFIG:-/etc/candy/proxy-server.toml}
+		CANDY_SERVER_SERVICE="$service" CANDY_SERVER_CONFIG="$config" "$HEALTH_CHECK" || return 1
+	done
+}
+
 validate_server_config() {
 	local directory
 	directory=$1
 	[ -x "$LAUNCHER" ] || return 1
 	[ -f "$SERVER_CONFIG" ] || return 1
+	if [ -f "${CANDY_PROXY_CONFIG:-/etc/candy/proxy-server.toml}" ]; then
+		"$directory/candy-core" server isolated-proxy --config "${CANDY_PROXY_CONFIG:-/etc/candy/proxy-server.toml}" --sdwan-config "$SERVER_CONFIG" --check-config >/dev/null || return 1
+		"$directory/candy-core" server inspect-transport-identity --config "$SERVER_CONFIG" >/dev/null
+		return $?
+	fi
 	CANDY_CORE_BINARY="$directory/candy-core" "$LAUNCHER" --config "$SERVER_CONFIG" --check-config >/dev/null
 }
 
 preflight_server_role() {
 	local directory
 	directory=$1
+	if [ -f "${CANDY_PROXY_CONFIG:-/etc/candy/proxy-server.toml}" ]; then
+		"$directory/candy-core" server inspect-transport-identity --config "$SERVER_CONFIG" --preflight >/dev/null || return 1
+		CANDY_CORE_BINARY="$directory/candy-core" "$LAUNCHER" --config "${CANDY_PROXY_CONFIG:-/etc/candy/proxy-server.toml}" --preflight >/dev/null
+		return $?
+	fi
 	CANDY_CORE_BINARY="$directory/candy-core" "$LAUNCHER" --config "$SERVER_CONFIG" --preflight >/dev/null || return 1
 }
 
 replace_core_directory() {
-	local version candidate destination current previous backup was_active=0
+	local version candidate destination current previous backup was_active=0 CORE_ACTIVE_SERVICES=
 	version=$1
 	candidate=$2
 	destination=$3
@@ -350,39 +398,41 @@ replace_core_directory() {
 		fail "replacement Core $version failed server config validation"
 	}
 	if [ "$current" = "$version" ]; then
-		service_active && was_active=1
-		[ "$was_active" = 0 ] || "$SYSTEMCTL" stop "$SERVICE_NAME" || {
+		record_core_services
+		[ -z "$CORE_ACTIVE_SERVICES" ] || was_active=1
+		[ "$was_active" = 0 ] || stop_core_services || {
+			start_core_services >/dev/null 2>&1 || true
 			rm -rf "$candidate"
 			fail "cannot stop $SERVICE_NAME for Core replacement"
 		}
 		preflight_server_role "$candidate" || {
-			[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+			[ "$was_active" = 0 ] || start_core_services >/dev/null 2>&1 || true
 			rm -rf "$candidate"
 			fail "replacement Core $version failed server preflight"
 		}
 	fi
 	backup=$CORE_ROOT/.replace-$version-$$
 	[ ! -e "$backup" ] && [ ! -L "$backup" ] || {
-		[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		[ "$was_active" = 0 ] || start_core_services >/dev/null 2>&1 || true
 		rm -rf "$candidate"
 		fail "Core replacement backup path already exists"
 	}
 	mv "$destination" "$backup" || {
-		[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		[ "$was_active" = 0 ] || start_core_services >/dev/null 2>&1 || true
 		rm -rf "$candidate"
 		fail "cannot preserve installed Core $version"
 	}
 	if ! mv "$candidate" "$destination"; then
 		mv "$backup" "$destination" 2>/dev/null || true
-		[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		[ "$was_active" = 0 ] || start_core_services >/dev/null 2>&1 || true
 		fail "cannot publish replacement Core $version"
 	fi
 	if [ "$was_active" = 1 ] &&
-		{ ! "$SYSTEMCTL" start "$SERVICE_NAME" || ! service_active || [ ! -x "$HEALTH_CHECK" ] || ! "$HEALTH_CHECK"; }; then
-		"$SYSTEMCTL" stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+		{ ! start_core_services || ! health_core_services; }; then
+		stop_core_services >/dev/null 2>&1 || fail "replacement startup failed; could not stop services for rollback"
 		rm -rf "$destination"
 		mv "$backup" "$destination" || fail "replacement Core failed and the previous directory could not be restored"
-		"$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		start_core_services && health_core_services || fail "stage=core_rollback error_code=service_recovery_failed previous Core files restored but service health failed"
 		fail "replacement Core $version failed service startup; previous Core restored"
 	fi
 	rm -rf "$backup"
@@ -394,7 +444,7 @@ replace_core_directory() {
 }
 
 activate_core() {
-	local version directory old old_previous was_active
+	local version directory old old_previous was_active CORE_ACTIVE_SERVICES=
 	version=$1
 	directory=$(version_path "$version") || fail "invalid Core version"
 	[ -d "$directory" ] || fail "Core $version is not installed"
@@ -404,27 +454,31 @@ activate_core() {
 	old_previous=$(link_version "$PREVIOUS_LINK")
 	[ "$old" != "$version" ] || { printf '%s\n' "Core $version is already active"; return; }
 	was_active=0
-	service_active && was_active=1
-	[ "$was_active" = 0 ] || "$SYSTEMCTL" stop "$SERVICE_NAME" || fail "cannot stop $SERVICE_NAME"
+	record_core_services
+	[ -z "$CORE_ACTIVE_SERVICES" ] || was_active=1
+	if [ "$was_active" = 1 ] && ! stop_core_services; then
+		start_core_services >/dev/null 2>&1 || true
+		fail "cannot stop Core services"
+	fi
 	if ! preflight_server_role "$directory"; then
-		[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		[ "$was_active" = 0 ] || start_core_services >/dev/null 2>&1 || true
 		fail "Core $version failed server preflight; current Core preserved"
 	fi
 	if [ -n "$old" ] && ! atomic_link "$PREVIOUS_LINK" "$old"; then
-		[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		[ "$was_active" = 0 ] || start_core_services >/dev/null 2>&1 || true
 		fail "cannot preserve previous Core"
 	fi
 	atomic_link "$CURRENT_LINK" "$version" || {
 		restore_link "$PREVIOUS_LINK" "$old_previous" || true
-		[ "$was_active" = 0 ] || "$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		[ "$was_active" = 0 ] || start_core_services >/dev/null 2>&1 || true
 		fail "cannot activate Core $version"
 	}
 	if [ "$was_active" = 1 ]; then
-		if ! "$SYSTEMCTL" start "$SERVICE_NAME" || ! service_active || [ ! -x "$HEALTH_CHECK" ] || ! "$HEALTH_CHECK"; then
-			"$SYSTEMCTL" stop "$SERVICE_NAME" >/dev/null 2>&1 || true
-			restore_link "$CURRENT_LINK" "$old" || true
-			restore_link "$PREVIOUS_LINK" "$old_previous" || true
-			"$SYSTEMCTL" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+		if ! start_core_services || ! health_core_services; then
+			stop_core_services >/dev/null 2>&1 || fail "startup failed; could not stop Core services for rollback"
+			restore_link "$CURRENT_LINK" "$old" || fail "stage=core_rollback error_code=current_link_restore_failed"
+			restore_link "$PREVIOUS_LINK" "$old_previous" || fail "stage=core_rollback error_code=previous_link_restore_failed"
+			start_core_services && health_core_services || fail "stage=core_rollback error_code=service_recovery_failed previous Core restored but service health failed"
 			fail "Core $version failed service startup; previous Core restored"
 		fi
 	fi

@@ -49,6 +49,8 @@ PATH="$fake_bin:$PATH" CANDY_LINUX_DIST_DIR="$dist" CANDY_SDWAN_AGENT_BINARY="$a
 stage=$dist/server/x86_64
 edge_stage=$dist/client/x86_64
 [ -x "$stage/usr/local/bin/candy-server" ] || fail "public candy-server command was not staged"
+[ -f "$stage/systemd/candy-proxy.service" ] || fail "isolated Proxy unit was not staged"
+grep -F 'proxy --config /etc/candy/proxy-server.toml --sdwan-config /etc/candy/server.toml' "$stage/systemd/candy-proxy.service" >/dev/null || fail "Proxy unit does not reserve the independent SD-WAN endpoint"
 [ -x "$stage/usr/local/libexec/serverd-linux" ] || fail "internal compatibility launcher was not staged"
 [ -x "$stage/usr/local/libexec/candy-sdwan-runtime" ] || fail "SD-WAN Runtime helper was not staged"
 [ -x "$stage/usr/local/libexec/candy-sdwan-agent" ] || fail "server SD-WAN agent was not staged"

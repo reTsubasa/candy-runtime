@@ -171,3 +171,63 @@ The test skips when no Core or Docker daemon is available. CI release jobs can
 make either condition fatal with `CANDY_CORE_DOCKER_E2E_REQUIRED=1`. The Core
 artifact is copied only into a temporary test directory and is never packaged
 or committed by Runtime.
+
+## Ordinary Proxy and SD-WAN coexistence
+
+Coexistence requires Core 0.3.45 or later and Runtime r109 or later. Keep
+`candy-server.service` as the Cloud-managed SD-WAN service. The optional
+`candy-proxy.service` runs an ordinary PSK listener independently; it is not
+automatically enabled by install or upgrade and is never an authentication
+fallback for the SD-WAN service.
+
+Use two separate configuration files:
+
+| File | Authentication | Listener |
+| --- | --- | --- |
+| `/etc/candy/proxy-server.toml` | Ordinary `[[users]]`; no `cloud_auth` or `sdwan` section | Existing Proxy port |
+| `/etc/candy/server.toml` | Transport seed with no `[[users]]`; scoped Cloud Grant authentication comes from signed activation | Separate SD-WAN port |
+
+Each file must define its transport limits, certificate and private-key paths.
+Protect both files and private keys with root ownership and service-readable
+permissions (`root:candy`, mode `0640`). Existing TLS identities can be retained;
+PSK secrets never enter the SD-WAN seed or signed activation. Cloud-managed
+activation rejection remains fail-closed even while ordinary Proxy is enabled.
+The Core rejects overlapping primary or hopping ports, zero ports, missing
+Proxy users, and Cloud authentication or SD-WAN settings in the Proxy file.
+
+Before migration, back up both service states, the current signed Core and
+Runtime versions, configuration files and Cloud endpoint advertisement. Check
+host and provider firewall rules and pick an unused UDP port for SD-WAN. Keep
+the existing ordinary Proxy address and credentials in `proxy-server.toml`.
+Set the transport-only seed's new listen port and `CANDY_PUBLIC_ENDPOINT` in the
+Cloud synchronization environment. Let Cloud Sync publish and sign updated
+peer projections; never edit signed projections directly.
+
+Validate before starting either service:
+
+```sh
+/opt/candy/cores/current/candy-core server isolated-proxy \
+  --config /etc/candy/proxy-server.toml \
+  --sdwan-config /etc/candy/server.toml --check-config
+/opt/candy/cores/current/candy-core server inspect-transport-identity \
+  --config /etc/candy/server.toml
+systemctl enable --now candy-proxy.service
+```
+
+For an existing installation, the signed Runtime bundle upgrade installs the
+optional unit. The standalone legacy installer installs only its single
+server; use the Runtime bundle upgrade before enabling coexistence.
+
+Core activation records both running services, stops them before switching
+the signed Core symlink, and checks both after restarting. A failed startup
+restores the previous Core and running services. Inactive Proxy services remain
+inactive. Runtime upgrade also backs up/restores the optional unit and its
+enablement. Roll back a coexistence migration by restoring the previous
+endpoint advertisement and configuration along with compatible binaries;
+older Core versions cannot run the isolated Proxy command.
+
+Acceptance requires real PSK traffic through the ordinary endpoint, Cloud
+Grant traffic and committed routes through the SD-WAN endpoint, and independent
+stop/failure checks in both directions. A listening UDP port alone is not
+data-plane acceptance. Verify no `psk_on_cloud_listener` repeats for configured
+clients, and no SD-WAN journal or receipt changes when ordinary Proxy fails.

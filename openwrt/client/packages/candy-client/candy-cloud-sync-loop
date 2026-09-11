@@ -14,11 +14,14 @@ CANDY_LIFECYCLE_FILE=${CANDY_LIFECYCLE_FILE:-/tmp/candy.lifecycle}
 CANDY_LIFECYCLE_TTL_SECONDS=${CANDY_LIFECYCLE_TTL_SECONDS:-10}
 MAX_ERROR_BACKOFF=${CANDY_CLOUD_SYNC_MAX_ERROR_BACKOFF:-60}
 
-completed_runtime_fault() {
+active_runtime_fault() {
 	[ -s "$FAULT_STATE_FILE" ] && [ -f "$FAULT_STATE_FILE" ] && [ ! -L "$FAULT_STATE_FILE" ] || return 1
 	[ "$(jsonfilter -e '@.schema_version' <"$FAULT_STATE_FILE" 2>/dev/null)" = 1 ] || return 1
 	[ "$(jsonfilter -e '@.state' <"$FAULT_STATE_FILE" 2>/dev/null)" = active ] || return 1
-	[ "$(jsonfilter -e '@.cleanup' <"$FAULT_STATE_FILE" 2>/dev/null)" = completed ]
+	case "$(jsonfilter -e '@.cleanup' <"$FAULT_STATE_FILE" 2>/dev/null)" in
+		pending|failed|completed) return 0 ;;
+		*) return 1 ;;
+	esac
 }
 
 current_lifecycle_transition() {
@@ -47,16 +50,19 @@ reconcile_sdwan() {
 	service_state=$("$CANDY_INIT" status 2>/dev/null || true)
 	case "$service_state" in
 		stopped)
-			if completed_runtime_fault; then
-				logger -t candy -- "level=warn event=cloud_sync_reconcile result=deferred reason=runtime_fault"
-				return 0
-			fi
-			if "$CANDY_INIT" start >/dev/null 2>&1; then
+			if active_runtime_fault; then
+				if [ "$(jsonfilter -e '@.scope' <"$FAULT_STATE_FILE" 2>/dev/null)" != ordinary ]; then
+					logger -t candy -- "level=warn event=cloud_sync_reconcile result=deferred reason=runtime_fault"
+					return 0
+				fi
+				logger -t candy -- "level=warn event=cloud_sync_reconcile scope=ordinary reason=runtime_fault sdwan=reconciling"
+			elif "$CANDY_INIT" start >/dev/null 2>&1; then
 				logger -t candy -- "level=info event=cloud_sync_reconcile result=recovered reason=service_stopped"
 				return 0
+			else
+				logger -t candy -- "level=error event=cloud_sync_reconcile result=failed reason=service_restart_failed"
+				return 1
 			fi
-			logger -t candy -- "level=error event=cloud_sync_reconcile result=failed reason=service_restart_failed"
-			return 1
 			;;
 		starting|stopping)
 			logger -t candy -- "level=info event=cloud_sync_reconcile result=deferred reason=service_$service_state"

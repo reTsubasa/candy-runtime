@@ -88,6 +88,8 @@ install -m 0640 "$repo_root/linux/server/packaging/cloud-sync.env.example" \
 	"$stage/etc/candy/cloud-sync.env.example"
 install -m 0644 "$repo_root/linux/server/packaging/candy-server.service" \
 	"$stage/systemd/candy-server.service"
+install -m 0644 "$repo_root/linux/server/packaging/candy-proxy.service" \
+	"$stage/systemd/candy-proxy.service"
 install -m 0644 "$repo_root/linux/server/packaging/candy-netd.service" \
 	"$stage/systemd/candy-netd.service"
 install -m 0644 "$repo_root/linux/server/packaging/candy-cloud-sync.service" \

@@ -10,7 +10,7 @@ EXTRA_HELP="	provider_update_once	Run due provider auto updates once
 	network_cleanup	Clean firewall and DNS policy in background
 	reload_runtime	Validate and apply the current Candy configuration
 	restart_queued	Restart Candy with lifecycle serialization
-	fail_open	Stop Candy and remove owned network steering after a fatal failure
+	fail_open	Stop ordinary Proxy and remove its steering while preserving SD-WAN
 	sdwan_fail_open	Remove only SD-WAN-owned state after an SD-WAN failure
 	sdwan_reconcile	Apply the authenticated Candy Cloud SD-WAN activation
 	sdwan_prune_history	Prune superseded authenticated SD-WAN generations
@@ -407,7 +407,7 @@ write_lifecycle_state() {
 }
 
 write_fault_state() {
-	local reason="$1" cleanup="$2" detail="$3" temporary
+	local reason="$1" cleanup="$2" detail="$3" scope="${4:-service}" temporary
 	mkdir -p "$(dirname "$CANDY_FAULT_STATE_FILE")" || return 1
 	temporary=$(atomic_temp_path "$CANDY_FAULT_STATE_FILE") || return 1
 	{
@@ -417,6 +417,8 @@ write_fault_state() {
 		json_string "$cleanup"
 		printf ',"detail":'
 		json_string "$detail"
+		printf ',"scope":'
+		json_string "$scope"
 		printf ',"updated_at":%s}\n' "$(date +%s 2>/dev/null || printf 0)"
 	} > "$temporary" || {
 		rm -f "$temporary"
@@ -636,9 +638,7 @@ ensure_no_existing_candy_client_before_start() {
 	# Stop the registered supervisor first. Killing only its Core child makes the
 	# supervisor correctly interpret the exit as an unexpected crash and invoke
 	# fail-open while a replacement instance is starting.
-	if [ -f /lib/functions/procd.sh ]; then
-		. /lib/functions/procd.sh
-		procd_kill candy >/dev/null 2>&1 || true
+	if stop_ordinary_supervision; then
 		if wait_for_candy_client_exit 3; then
 			log_msg "stopped previous supervised candy-client before start"
 			return 0
@@ -827,19 +827,14 @@ health_watchdog() {
 	trap 'exit 0' TERM INT
 	sleep "$CANDY_HEALTH_CHECK_START_GRACE_SECONDS"
 	while :; do
-		if CANDY_READY_FILE="$CANDY_READY_FILE" \
-			CANDY_RUNTIME_CONFIG="$RUNTIME_CONFIG" \
-			CANDY_PASSIVE_STATUS_FILE="$CANDY_PASSIVE_STATUS_FILE" \
-			CANDY_CONTROL_SOCKET="$CANDY_CONTROL_SOCKET" \
-			CANDY_SERVICE_INIT="$CANDY_INIT_SELF" \
-			"$CANDY_RUNTIME_HEALTH_CHECK" client >/dev/null 2>&1; then
+		if current_readiness; then
 			if [ "$failures" -gt 0 ]; then
 				log_event info health_recovered "consecutive_failures=$failures"
 			fi
 			failures=0
 		else
 			failures=$((failures + 1))
-			log_event warn health_failed "consecutive_failures=$failures threshold=$CANDY_HEALTH_CHECK_FAILURE_THRESHOLD"
+			log_event warn health_failed "stage=runtime_health consecutive_failures=$failures threshold=$CANDY_HEALTH_CHECK_FAILURE_THRESHOLD cause=${CANDY_READINESS_FAILURE:-health_check_failed_without_diagnostic}"
 			if [ "$failures" -ge "$CANDY_HEALTH_CHECK_FAILURE_THRESHOLD" ]; then
 				log_event error health_terminal "reason=local-runtime-unresponsive; scheduling fail-open"
 				run_detached_direct_command fail_open local_runtime_unresponsive
@@ -3853,11 +3848,22 @@ clear_passive_status() {
 	rm -f "$CANDY_PASSIVE_STATUS_FILE"
 }
 
-abort_failed_start() {
+stop_ordinary_supervision() {
+	local instance rc=0
 	if [ -f /lib/functions/procd.sh ]; then
 		. /lib/functions/procd.sh
-		procd_kill candy >/dev/null 2>&1 || true
 	fi
+	if command -v procd_kill >/dev/null 2>&1; then
+		for instance in watchdog provider-updater ordinary; do
+			procd_kill candy "$instance" >/dev/null 2>&1 || rc=1
+		done
+	fi
+	return "$rc"
+}
+
+abort_failed_start() {
+	stop_ordinary_supervision || true
+	stop_candy_clients_for_fail_open || return 1
 	rm -f "$CANDY_READY_FILE"
 }
 
@@ -3865,7 +3871,7 @@ cleanup_failed_start() {
 	local cleanup_state="${1:-down}"
 	local abort_client="${2:-0}"
 	if [ "$abort_client" -eq 1 ]; then
-		abort_failed_start
+		abort_failed_start || return 1
 	else
 		rm -f "$CANDY_READY_FILE"
 	fi
@@ -3878,6 +3884,9 @@ cleanup_failed_start() {
 	fi
 	refresh_node_status_fast "down" || true
 	write_lifecycle_state start stopped
+	if [ "$cleanup_state" = down ]; then
+		write_fault_state ordinary_start_failed completed "scope=ordinary; sdwan=preserved" ordinary || return 1
+	fi
 }
 
 start_service() {
@@ -4084,23 +4093,15 @@ service_failed() {
 	esac
 	log_event error procd_failure "instance=$instance procd reported terminal service failure; scheduling fail-open"
 	write_lifecycle_state start failed || true
-	write_fault_state "procd_service_failed" pending "instance=$instance" || log_error "failed to persist procd failure state"
-	if ! "$CANDY_INIT_SELF" disable >/dev/null 2>&1; then
-		log_error "terminal failure handler could not disable Candy autostart"
-		write_fault_state "procd_service_failed" failed "instance=$instance; autostart disable failed" || true
-	fi
+	write_fault_state "procd_service_failed" pending "instance=$instance" ordinary || log_error "failed to persist procd failure state"
 	run_detached_direct_command fail_open "$instance"
 }
 
 fail_open_locked() {
-	local reason="${1:-runtime_failure}" instance="${2:-unknown}" pids cleanup=completed rc=0 netd_stopped=1 autostart_disabled=0 autostart_preserved=0 was_enabled=0 detail
-	"$CANDY_INIT_SELF" enabled >/dev/null 2>&1 && was_enabled=1
-	log_event warn fail_open "reason=$reason instance=$instance stopping service and removing owned steering"
+	local reason="${1:-runtime_failure}" instance="${2:-unknown}" cleanup=completed rc=0
+	log_event warn fail_open "reason=$reason instance=$instance scope=ordinary sdwan=preserved removing ordinary steering"
 	write_lifecycle_state fail_open stopping || rc=1
-	if [ -f /lib/functions/procd.sh ]; then
-		. /lib/functions/procd.sh
-		procd_kill candy >/dev/null 2>&1 || true
-	fi
+	stop_ordinary_supervision || rc=1
 	if ! stop_candy_clients_for_fail_open; then
 		log_error "fail-open could not stop Candy client processes"
 		cleanup=failed
@@ -4111,19 +4112,6 @@ fail_open_locked() {
 		cleanup=failed
 		rc=1
 	fi
-	if ! wait_for_netd_exit 3; then
-		log_error "fail-open could not confirm candy-netd exit before orphan recovery"
-		cleanup=failed
-		rc=1
-		netd_stopped=0
-	fi
-	if [ -s "$CANDY_NETD_JOURNAL" ]; then
-		if [ "$netd_stopped" -ne 1 ] || ! run_with_timeout 15 "$CANDY_NETD_BIN" --recover --journal "$CANDY_NETD_JOURNAL" >/dev/null 2>&1; then
-			log_error "netd retained an active network journal and orphan recovery failed"
-			cleanup=failed
-			rc=1
-		fi
-	fi
 	if ! stop_network_policy_worker_for_fail_open; then
 		cleanup=failed
 		rc=1
@@ -4133,52 +4121,12 @@ fail_open_locked() {
 		cleanup=failed
 		rc=1
 	fi
-	if [ -s "$CANDY_NETD_JOURNAL" ]; then
-		log_error "netd network journal is still present after fail-open orphan recovery"
-		cleanup=failed
-		rc=1
-	fi
-	case "$reason:$instance" in
-		sdwan:user_stop|sdwan:user_leave) ;;
-		sdwan:*) [ "$was_enabled" -eq 0 ] || autostart_preserved=1 ;;
-	esac
-	if [ "$autostart_preserved" -ne 1 ]; then
-		if "$CANDY_INIT_SELF" disable >/dev/null 2>&1 && ! "$CANDY_INIT_SELF" enabled >/dev/null 2>&1; then
-			autostart_disabled=1
-		else
-			log_error "fail-open could not disable Candy autostart"
-			rc=1
-		fi
-	fi
+	clear_passive_status
+	rm -f "$CANDY_READY_FILE"
 	[ "$rc" -eq 0 ] || cleanup=failed
-	if [ "$rc" -eq 0 ]; then
-		if [ "$autostart_preserved" -eq 1 ]; then
-			detail="instance=$instance; transient SD-WAN failure; automatic recovery pending"
-		else
-			detail="instance=$instance; service disabled"
-		fi
-		if ! write_lifecycle_state fail_open failed || ! write_fault_state "$reason" completed "$detail"; then
-			rc=1
-			cleanup=failed
-			write_fault_state "$reason" failed "instance=$instance; cleanup completed but persistent state write failed" || true
-			log_event error fail_open "reason=$reason instance=$instance cleanup=failed persistent fault state could not be completed"
-		else
-			if [ "$autostart_preserved" -eq 1 ]; then
-				log_event warn fail_open "reason=$reason instance=$instance cleanup=completed autostart=preserved recovery=pending"
-			else
-				log_event error fail_open "reason=$reason instance=$instance cleanup=completed service disabled after terminal failure"
-			fi
-		fi
-	else
-		if [ "$autostart_disabled" -eq 1 ]; then
-			detail="instance=$instance; service disabled; manual network cleanup required"
-		else
-			detail="instance=$instance; autostart disable failed; manual recovery required"
-		fi
-		write_fault_state "$reason" "$cleanup" "$detail" || true
-		log_event error fail_open "reason=$reason instance=$instance cleanup=$cleanup autostart_disabled=$autostart_disabled manual recovery required"
-	fi
-	sdwan_runtime_state fail-open "$reason" || true
+	write_lifecycle_state fail_open failed || rc=1
+	write_fault_state "$reason" "$cleanup" "instance=$instance; scope=ordinary; sdwan=preserved; ordinary recovery requires start" ordinary || rc=1
+	log_event error fail_open "reason=$reason instance=$instance scope=ordinary cleanup=$cleanup sdwan=preserved autostart=preserved"
 	return "$rc"
 }
 
@@ -4190,6 +4138,10 @@ fail_open() {
 	else
 		instance="$argument"
 		case "$argument" in
+			local_runtime_unresponsive)
+				reason=health_check_threshold
+				instance=ordinary
+				;;
 			*:* )
 				reason=${argument%%:*}
 				instance=${argument#*:}
