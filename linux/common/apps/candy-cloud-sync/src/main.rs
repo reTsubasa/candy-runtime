@@ -3271,7 +3271,15 @@ fn process_is_alive_and_owned_by_state(pid: u32, state_dir: &Path) -> Result<boo
 }
 
 fn validate_core_path_status(status: &CoreRuntimeStatus) -> Result<()> {
-    if status.paths.len() > status.active_peers as usize {
+    // `paths` intentionally contains bounded historical failures so Cloud can
+    // explain a recent disconnect. Only paths with a ready stream represent
+    // currently active peers and participate in the cardinality invariant.
+    let active_path_count = status
+        .paths
+        .iter()
+        .filter(|path| path.ready_streams.unwrap_or(0) > 0)
+        .count();
+    if active_path_count > status.active_peers as usize {
         bail!("active Core Runtime path count exceeds active peers")
     }
     let mut paths = BTreeMap::new();
