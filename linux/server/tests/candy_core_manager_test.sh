@@ -315,6 +315,7 @@ printf '%s' "$status_json" | jq -e '.current_version == "1.0.0" and .previous_ve
 
 # A failed Proxy start must roll back the shared Core and restore both units.
 export CANDY_PROXY_CONFIG="$tmp/proxy.toml"
+export CANDY_SDWAN_CONFIG="$config"
 export FAKE_PROXY_STATE="$tmp/proxy.state"
 export FAKE_PROXY_FAIL_START="$tmp/proxy.fail-start"
 printf '%s\n' 'listen = "127.0.0.1:9443"' > "$CANDY_PROXY_CONFIG"

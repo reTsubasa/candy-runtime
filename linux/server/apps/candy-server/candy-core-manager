@@ -11,6 +11,7 @@ EXPECTED_CORE_API=${CANDY_EXPECTED_CORE_API:-1}
 HOST_ARCH=${CANDY_CORE_TARGET_ARCH:-$(uname -m)}
 HOST_LIBC=${CANDY_CORE_TARGET_LIBC:-}
 SERVER_CONFIG=${CANDY_SERVER_CONFIG:-/etc/candy/server.toml}
+SDWAN_CONFIG=${CANDY_SDWAN_CONFIG:-/etc/candy/sdwan-listener.toml}
 SERVICE_NAME=${CANDY_SERVER_SERVICE:-candy-server}
 SYSTEMCTL=${CANDY_SYSTEMCTL:-systemctl}
 HEALTH_CHECK=${CANDY_SERVER_HEALTH_CHECK:-/usr/local/libexec/candy-server-health-check}
@@ -367,7 +368,7 @@ validate_server_config() {
 	directory=$1
 	[ -f "$SERVER_CONFIG" ] || return 1
 	if [ -f "${CANDY_PROXY_CONFIG:-/etc/candy/proxy-server.toml}" ]; then
-		"$directory/candy-core" server isolated-proxy --config "${CANDY_PROXY_CONFIG:-/etc/candy/proxy-server.toml}" --sdwan-config "$SERVER_CONFIG" --check-config >/dev/null || return 1
+		"$directory/candy-core" server isolated-proxy --config "${CANDY_PROXY_CONFIG:-/etc/candy/proxy-server.toml}" --sdwan-config "$SDWAN_CONFIG" --check-config >/dev/null || return 1
 		"$directory/candy-core" server inspect-transport-identity --config "$SERVER_CONFIG" >/dev/null
 		return $?
 	fi

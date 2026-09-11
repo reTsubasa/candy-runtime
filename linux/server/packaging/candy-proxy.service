@@ -11,7 +11,7 @@ Group=candy
 UMask=0077
 WorkingDirectory=/var/lib/candy
 Environment=CANDY_CORE_CURRENT_LINK=/opt/candy/cores/current
-ExecStart=/opt/candy/current/candy-server proxy --config /etc/candy/proxy-server.toml --sdwan-config /etc/candy/server.toml
+ExecStart=/opt/candy/current/candy-server proxy --config /etc/candy/proxy-server.toml --sdwan-config /etc/candy/sdwan-listener.toml
 Restart=on-failure
 RestartSec=2s
 LimitNOFILE=1048576
