@@ -72,7 +72,7 @@ struct Args {
     #[arg(long)]
     server_config: Option<PathBuf>,
     /// Explicit ordinary Proxy configuration for the shared server listener.
-    #[arg(long, default_value = "/etc/candy/proxy-server.toml")]
+    #[arg(long, requires = "server_config")]
     proxy_config: Option<PathBuf>,
     #[arg(long = "public-endpoint")]
     public_endpoints: Vec<SocketAddr>,
@@ -5070,9 +5070,6 @@ fn render_server_activation_config(
             .context("server activation path is not UTF-8")?
             .to_owned())
     };
-    if let Some(proxy) = proxy_config {
-        document["proxy_config"] = value(path(proxy)?);
-    }
 
     let mut cloud_auth = Table::new();
     cloud_auth.insert("enabled", value(true));
