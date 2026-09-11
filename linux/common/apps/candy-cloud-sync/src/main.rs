@@ -31,6 +31,7 @@ use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
 mod grant;
 mod transport_identity;
+mod upgrade;
 
 const MAX_PROFILE_BYTES: u64 = 64 * 1024;
 const MAX_CONFIGURATION_BYTES: u64 = 3 * 1024 * 1024;
@@ -79,6 +80,8 @@ struct Args {
 #[derive(Debug, Subcommand)]
 enum Command {
     SyncOnce,
+    UpgradeOnce,
+    UpgradeLoop,
     LocalRuntimeState,
     ProjectLocalRuntimeStatus,
 }
@@ -809,6 +812,7 @@ struct NetdFirewall {
 
 fn main() {
     let args = Args::parse();
+    let upgrade = matches!(args.command, Command::UpgradeOnce | Command::UpgradeLoop);
     let state_dir = args.state_dir.clone();
     if let Err(error) = run(args) {
         let error_text = format!("{error:#}");
@@ -819,7 +823,9 @@ fn main() {
         } else {
             "cloud_sync_failed"
         };
-        let _ = write_local_sync_status(&state_dir, "error", Some(error_code));
+        if !upgrade {
+            let _ = write_local_sync_status(&state_dir, "error", Some(error_code));
+        }
         eprintln!("candy-cloud-sync: {error:#}");
         std::process::exit(1);
     }
@@ -828,6 +834,16 @@ fn main() {
 fn run(args: Args) -> Result<()> {
     match args.command {
         Command::SyncOnce => sync_once(&args),
+        Command::UpgradeOnce => upgrade::run(&args),
+        Command::UpgradeLoop => loop {
+            if let Err(error) = upgrade::run(&args) {
+                eprintln!(
+                    "event=node_upgrade_poll_failed detail={}",
+                    sanitize_log_value(&format!("{error:#}"))
+                );
+            }
+            std::thread::sleep(Duration::from_secs(60));
+        },
         Command::LocalRuntimeState => {
             println!(
                 "{}",
