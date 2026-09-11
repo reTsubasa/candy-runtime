@@ -150,6 +150,17 @@ bundle_1=$tmp/core-1.0.0.tar.gz
 make_bundle 1.0.0 1 1 "$host_arch" 0 "$bundle_1"
 sha_1=$(sha256sum "$bundle_1" | awk '{ print $1 }')
 "$manager" install 1.0.0 "$bundle_1" "$sha_1" >/dev/null
+# Reproduce an enrolled production host: its public launcher correctly blocks
+# standalone invocations even with diagnostic flags. The manager must call
+# only fixed diagnostics on the validated Core binary, not that launch path.
+export CANDY_SERVER_LAUNCHER="$root/linux/server/apps/candy-server/candy-server"
+export CANDY_SDWAN_STATE_ROOT="$tmp/enrolled"
+mkdir -p "$CANDY_SDWAN_STATE_ROOT/identity"
+printf '{}\n' >"$CANDY_SDWAN_STATE_ROOT/identity/device-identity-v1.json"
+if CANDY_CORE_BINARY="$cores/1.0.0/candy-core" "$CANDY_SERVER_LAUNCHER" --config "$config" --check-config >"$tmp/enrolled-diagnostic.out" 2>&1; then
+	fail "enrolled public launcher allowed a standalone invocation"
+fi
+grep -F 'managed SD-WAN requires the authenticated activation launch path' "$tmp/enrolled-diagnostic.out" >/dev/null || fail "did not reproduce the enrolled launch guard"
 [ "$(file_mode "$cores/1.0.0")" = 755 ] || fail "installed Core directory is not service-readable"
 [ "$(file_mode "$cores/1.0.0/candy-core")" = 755 ] || fail "installed Core executable mode is invalid"
 "$manager" activate 1.0.0 >/dev/null

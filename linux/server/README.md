@@ -174,7 +174,7 @@ or committed by Runtime.
 
 ## Ordinary Proxy and SD-WAN coexistence
 
-Coexistence requires Core 0.3.45 or later and Runtime r109 or later. Keep
+Coexistence requires Core 0.3.45 or later and Runtime r110 or later. Keep
 `candy-server.service` as the Cloud-managed SD-WAN service. The optional
 `candy-proxy.service` runs an ordinary PSK listener independently; it is not
 automatically enabled by install or upgrade and is never an authentication
