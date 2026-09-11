@@ -96,7 +96,7 @@ make_bundle() {
 set -eu
 case "\${1:-}" in
 	runtime-api-version) printf '%s\n' $process_api ;;
-	core-info) printf '%s\n' '{"schema_version":1,"process_api_version":$process_api,"core_api_version":$core_api,"core_version":"$version","target_os":"linux","target_arch":"$arch","protocol_version":{"major":0,"minor":3},"features":[]}' ;;
+	core-info) [ "\$#" -eq 1 ] || exit 64; printf '%s\n' '{"schema_version":1,"process_api_version":$process_api,"core_api_version":$core_api,"core_version":"$version","target_os":"linux","target_arch":"$arch","protocol_version":{"major":0,"minor":3},"features":[]}' ;;
 	server)
 		shift
 		printf '%s\n' "\$*" >> "\$FAKE_ROLE_LOG"
@@ -237,6 +237,13 @@ fi
 grep -F 'current Core preserved' "$tmp/bad-role.out" >/dev/null || fail "failed activation error is not actionable"
 
 bundle_bad_api=$tmp/core-2.0.0.tar.gz
+bundle_wrong_arch=$tmp/core-1.9.0.tar.gz
+make_bundle 1.9.0 1 1 unsupported-architecture 0 "$bundle_wrong_arch"
+if "$manager" install 1.9.0 "$bundle_wrong_arch" "$(sha256sum "$bundle_wrong_arch" | awk '{ print $1 }')" >"$tmp/wrong-arch.out" 2>&1; then
+	fail "wrong-architecture Core was accepted"
+fi
+grep -F 'stage=manifest_target error_code=architecture_mismatch' "$tmp/wrong-arch.out" >/dev/null || fail "architecture rejection was not diagnosed"
+[ "$(readlink "$cores/current")" = 1.0.1 ] || fail "rejected bundle changed the active Core"
 make_bundle 2.0.0 2 1 "$host_arch" 0 "$bundle_bad_api"
 sha_bad_api=$(sha256sum "$bundle_bad_api" | awk '{ print $1 }')
 if "$manager" install 2.0.0 "$bundle_bad_api" "$sha_bad_api" >/dev/null 2>&1; then
