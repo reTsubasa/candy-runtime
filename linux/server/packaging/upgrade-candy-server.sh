@@ -568,8 +568,10 @@ mkdir -p "$(host_path /opt/candy/releases)"
 [ ! -e "$release_stage" ] && [ ! -L "$release_stage" ] || die "temporary Runtime release path already exists"
 mkdir -m 0755 "$release_stage"
 cp "$extract_dir/usr/local/bin/candy-server" "$release_stage/candy-server"
+cp "$extract_dir/RUNTIME-RELEASE" "$release_stage/RUNTIME-RELEASE"
+chmod 0644 "$release_stage/RUNTIME-RELEASE"
 chmod 0755 "$release_stage/candy-server"
-chown root:root "$release_stage" "$release_stage/candy-server"
+chown root:root "$release_stage" "$release_stage/candy-server" "$release_stage/RUNTIME-RELEASE"
 
 record_service_state
 for relative in $managed_files; do backup_one "/$relative"; done

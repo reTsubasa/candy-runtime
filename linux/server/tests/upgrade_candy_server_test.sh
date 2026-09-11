@@ -225,6 +225,7 @@ grep -F 'handing off transaction to the validated candidate upgrader' "$tmp/good
 active_release=$(readlink "$host/opt/candy/current")
 [ "$active_release" != "$original_current" ] || fail "current Runtime release was not switched"
 grep -F new "$active_release/candy-server" >/dev/null || fail "versioned Runtime launcher was not installed"
+[ "$(cat "$active_release/RUNTIME-RELEASE")" = 0.4.0-r62 ] || fail "installed Runtime release identity was not preserved"
 [ -f "$host/opt/candy/releases/old-runtime/candy-server" ] || fail "previous Runtime release was removed"
 [ ! -e "$host/usr/local/sbin/candy-core-manager" ] || fail "legacy Core manager still shadows the managed command"
 grep -F new-candy-server.service "$host/etc/systemd/system/candy-server.service" >/dev/null || fail "systemd unit was not installed"

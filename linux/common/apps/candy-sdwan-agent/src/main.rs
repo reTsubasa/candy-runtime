@@ -1606,6 +1606,8 @@ fn classify_core_readiness(
         status.last_error_code.as_deref(),
         Some("all_peer_reads_failed" | "all_peer_writes_failed" | "route_has_no_active_peer")
     );
+    let recoverable_stream_not_ready =
+        status.last_error_code.as_deref() == Some("stream_not_ready") && status.fail_open_required;
     let recoverable_committed_peer_loss =
         matches!(
             policy,
@@ -1616,7 +1618,7 @@ fn classify_core_readiness(
             && status.configured_peers > 0
             && status.required_route_owners > 0
             && status.ready_route_owners == 0
-            && recoverable_peer_loss_code;
+            && (recoverable_peer_loss_code || recoverable_stream_not_ready);
     let recoverable_committed_partial_loss =
         matches!(
             policy,
@@ -1627,7 +1629,9 @@ fn classify_core_readiness(
             && status.ready_route_owners > 0
             && status.ready_route_owners < status.required_route_owners
             && has_authenticated_path_evidence
-            && (!status.fail_open_required || recoverable_peer_loss_code);
+            && (!status.fail_open_required
+                || recoverable_peer_loss_code
+                || recoverable_stream_not_ready);
     let state = match status.lifecycle.as_str() {
         // Core can authenticate the peer before its packet stream finishes
         // opening. Keep the authenticated listener alive, but do not admit
@@ -1681,7 +1685,7 @@ fn classify_core_readiness(
         }
         "active" | "failed" | "starting"
             if policy == ReadinessPolicy::Strict
-                && recoverable_peer_loss_code
+                && (recoverable_peer_loss_code || recoverable_stream_not_ready)
                 && status.configured_peers > 0
                 && status.required_route_owners > 0 =>
         {
@@ -4667,6 +4671,35 @@ exit 17
     }
 
     #[test]
+    fn failed_opening_stream_waits_or_recovers_without_rejecting_policy() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&status(9, "failed", 1, 0)).unwrap();
+        value["last_error_code"] = serde_json::json!("stream_not_ready");
+        value["fail_open_required"] = serde_json::json!(true);
+        let parsed: CoreReadinessStatus = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            classify_core_readiness(&parsed, ReadinessPolicy::Strict).unwrap(),
+            ReadinessState::Waiting
+        );
+        assert_eq!(
+            classify_core_readiness(&parsed, ReadinessPolicy::Committed).unwrap(),
+            ReadinessState::RecoverablePeerLoss
+        );
+        assert!(classify_core_readiness(&parsed, ReadinessPolicy::CommittedServer).is_err());
+        value["inbound_listener_configured"] = serde_json::json!(true);
+        value["inbound_listener_ready"] = serde_json::json!(true);
+        value["inbound_listener_endpoints"] = serde_json::json!(["127.0.0.1:8443"]);
+        let parsed = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            classify_core_readiness(&parsed, ReadinessPolicy::CommittedServer).unwrap(),
+            ReadinessState::RecoverablePeerLoss
+        );
+        value["last_error_code"] = serde_json::json!("signature_invalid");
+        let parsed = serde_json::from_value(value).unwrap();
+        assert!(classify_core_readiness(&parsed, ReadinessPolicy::Strict).is_err());
+    }
+
+    #[test]
     fn opening_packet_stream_preserves_listener_without_admitting_routes() {
         let mut value: serde_json::Value =
             serde_json::from_str(&status(9, "active", 1, 0)).unwrap();
@@ -4701,7 +4734,10 @@ exit 17
         value["lifecycle"] = serde_json::json!("active");
         value["fail_open_required"] = serde_json::json!(true);
         let parsed = serde_json::from_value(value.clone()).unwrap();
-        assert!(classify_core_readiness(&parsed, ReadinessPolicy::Strict).is_err());
+        assert_eq!(
+            classify_core_readiness(&parsed, ReadinessPolicy::Strict).unwrap(),
+            ReadinessState::Waiting
+        );
         value["last_error_code"] = serde_json::json!("tun_read_failed");
         let parsed = serde_json::from_value(value).unwrap();
         assert!(classify_core_readiness(&parsed, ReadinessPolicy::CommittedServer).is_err());

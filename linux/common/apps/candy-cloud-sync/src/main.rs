@@ -3271,13 +3271,18 @@ fn process_is_alive_and_owned_by_state(pid: u32, state_dir: &Path) -> Result<boo
 }
 
 fn validate_core_path_status(status: &CoreRuntimeStatus) -> Result<()> {
+    if status.paths.len() > status.configured_peers as usize || status.paths.len() > 256 {
+        bail!("Core Runtime path count exceeds configured peer limit")
+    }
     // `paths` intentionally contains bounded historical failures so Cloud can
     // explain a recent disconnect. Only paths with a ready stream represent
     // currently active peers and participate in the cardinality invariant.
     let active_path_count = status
         .paths
         .iter()
-        .filter(|path| path.ready_streams.unwrap_or(0) > 0)
+        // Schema v2 has no stream counters: its paths retain the original
+        // active-only contract instead of silently becoming inactive.
+        .filter(|path| path.ready_streams.is_none_or(|ready| ready > 0))
         .count();
     if active_path_count > status.active_peers as usize {
         bail!("active Core Runtime path count exceeds active peers")
@@ -7599,6 +7604,41 @@ default via 192.0.2.1 dev eth0 proto static
             path_changes: 0,
             transport_mode: Some("stream_primary".into()),
         }
+    }
+
+    #[test]
+    fn historical_failed_paths_preserve_diagnostics_without_claiming_readiness() {
+        let mut status = product_core_status();
+        status.configured_peers = 2;
+        let mut failed = product_core_status().paths.remove(0);
+        failed.peer_attachment_id = "34".repeat(16);
+        failed.ready_streams = Some(0);
+        status.paths.push(failed);
+        assert!(valid_core_status_metadata(&status).unwrap());
+        status.lifecycle = "failed".into();
+        status.active_peers = 0;
+        status.ready_route_owners = 0;
+        status.fail_open_required = true;
+        status.paths[0].ready_streams = Some(0);
+        assert!(valid_core_status_metadata(&status).unwrap());
+        assert!(!core_data_plane_ready(&status));
+        status.paths[0].ready_streams = Some(1);
+        assert!(validate_core_path_status(&status).is_err());
+    }
+
+    #[test]
+    fn historical_path_validation_keeps_bounds_duplicates_and_legacy_contract() {
+        let mut status = product_core_status();
+        status.paths[0].ready_streams = None;
+        status.active_peers = 0;
+        assert!(validate_core_path_status(&status).is_err());
+        status.active_peers = 1;
+        assert!(validate_core_path_status(&status).is_ok());
+        status.paths.push(product_core_status().paths.remove(0));
+        assert!(validate_core_path_status(&status).is_err());
+        status.configured_peers = 2;
+        status.active_peers = 2;
+        assert!(validate_core_path_status(&status).is_err());
     }
 
     #[test]
