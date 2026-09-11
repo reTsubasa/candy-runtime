@@ -358,6 +358,13 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         } else {
             ensure_owner(record.owner, owner)?;
         }
+        // Drain is an idempotent completion step. Concurrent recovery paths
+        // may race after one actor has already promoted the candidate; report
+        // success for the already-active owner instead of surfacing a generic
+        // InvalidRequest and poisoning the activation state.
+        if record.phase == TransactionPhase::Active && record.recovery_candidate.is_none() {
+            return Ok(());
+        }
         if record.phase != TransactionPhase::Draining {
             return Err(NetworkError::InvalidTransition);
         }
