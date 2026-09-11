@@ -71,6 +71,9 @@ struct Args {
     core: Option<PathBuf>,
     #[arg(long)]
     server_config: Option<PathBuf>,
+    /// Explicit ordinary Proxy configuration for the shared server listener.
+    #[arg(long, default_value = "/etc/candy/proxy-server.toml")]
+    proxy_config: Option<PathBuf>,
     #[arg(long = "public-endpoint")]
     public_endpoints: Vec<SocketAddr>,
     #[command(subcommand)]
@@ -338,6 +341,8 @@ struct SyncState {
     schema_version: u8,
     #[serde(default)]
     server_activation_revision: u8,
+    #[serde(default)]
+    server_configuration_sha256: Option<String>,
     etag: Option<String>,
     configuration_sha256: Option<String>,
     #[serde(default)]
@@ -1872,7 +1877,11 @@ fn sync_once_with_retry(
     // Force a fresh publication after the auth-boundary migration, even when
     // Cloud's signed policy/ETag is unchanged. Immutable v2 activations may
     // still contain standalone users and must not be silently reused.
-    if args.server_config.is_some() && state.server_activation_revision != 3 {
+    let server_configuration_sha256 = server_configuration_digest(args)?;
+    if args.server_config.is_some()
+        && (state.server_activation_revision != 4
+            || state.server_configuration_sha256 != server_configuration_sha256)
+    {
         state.etag = None;
         state.configuration_sha256 = None;
     }
@@ -2256,6 +2265,7 @@ fn sync_once_with_retry(
                         &identity_dir,
                         &core,
                         server_config,
+                        args.proxy_config.as_deref(),
                         &cloud_endpoints,
                         &etag,
                         &digest,
@@ -2303,7 +2313,8 @@ fn sync_once_with_retry(
             }
             state.etag = Some(etag);
             state.configuration_sha256 = Some(digest);
-            state.server_activation_revision = if args.server_config.is_some() { 3 } else { 0 };
+            state.server_activation_revision = if args.server_config.is_some() { 4 } else { 0 };
+            state.server_configuration_sha256 = server_configuration_sha256;
             state.projection_publication_id = Some(configuration.projection_publication_id);
             state.projection_content_hash = Some(configuration.projection_content_hash.clone());
             state.activation_phase = Some(configuration.activation_phase.clone());
@@ -4957,8 +4968,71 @@ fn render_transport_config(
     ))
 }
 
+fn server_configuration_digest(args: &Args) -> Result<Option<String>> {
+    let Some(server) = args.server_config.as_deref() else {
+        return Ok(None);
+    };
+    let mut hash = Sha256::new();
+    hash.update(Sha256::digest(read_bounded(
+        server,
+        MAX_CONFIGURATION_BYTES,
+    )?));
+    if let Some(proxy) = args.proxy_config.as_deref() {
+        hash.update(Sha256::digest(read_bounded(
+            proxy,
+            MAX_CONFIGURATION_BYTES,
+        )?));
+    }
+    Ok(Some(format!("{:x}", hash.finalize())))
+}
+
+fn unified_proxy_users(seed: &toml_edit::DocumentMut, path: &Path) -> Result<toml_edit::Item> {
+    use std::os::unix::fs::MetadataExt;
+    use std::str::FromStr;
+    let metadata = fs::symlink_metadata(path)
+        .context("stage=proxy_config_open error_code=proxy_config_metadata_failed")?;
+    anyhow::ensure!(
+        metadata.is_file()
+            && metadata.mode() & 0o027 == 0
+            && (metadata.uid() == 0 || metadata.uid() == nix::unistd::geteuid().as_raw()),
+        "stage=proxy_config_permissions error_code=proxy_config_insecure_permissions"
+    );
+    let bytes = read_bounded(path, MAX_CONFIGURATION_BYTES)?;
+    let text = std::str::from_utf8(&bytes)
+        .context("stage=proxy_config_parse error_code=invalid_proxy_encoding")?;
+    let proxy = toml_edit::DocumentMut::from_str(text)
+        .map_err(|_| anyhow::anyhow!("stage=proxy_config_parse error_code=invalid_proxy_toml"))?;
+    anyhow::ensure!(
+        !proxy.contains_key("sdwan") && !proxy.contains_key("cloud_auth"),
+        "stage=proxy_isolation error_code=proxy_managed_auth_forbidden"
+    );
+    anyhow::ensure!(
+        proxy
+            .get("users")
+            .and_then(|v| v.as_array_of_tables())
+            .is_some_and(|v| !v.is_empty()),
+        "stage=proxy_isolation error_code=proxy_users_missing"
+    );
+    // One QUIC endpoint has one transport policy. Only users may differ.
+    let keys = seed
+        .iter()
+        .chain(proxy.iter())
+        .map(|(key, _)| key)
+        .collect::<std::collections::BTreeSet<_>>();
+    for key in keys {
+        if key == "users" {
+            continue;
+        }
+        anyhow::ensure!(seed.get(key).map(ToString::to_string) == proxy.get(key).map(ToString::to_string),
+            "stage=proxy_listener_validation error_code=unified_listener_config_mismatch field={key}");
+    }
+    Ok(proxy["users"].clone())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_server_activation_config(
     ordinary_config: &Path,
+    proxy_config: Option<&Path>,
     configuration: &RuntimeConfiguration,
     segment_path: &Path,
     local_projection_path: &Path,
@@ -4984,6 +5058,11 @@ fn render_server_activation_config(
     // Only listener/TLS/transport settings are inherited. SD-WAN and its
     // Cloud-authorized Proxy traffic must never inherit standalone PSK users.
     document.as_table_mut().remove("users");
+    // Only explicit operator opt-in enables ordinary auth on the shared
+    // listener. The local activation is private (0600), never Cloud input.
+    if let Some(proxy) = proxy_config {
+        document["users"] = unified_proxy_users(&document, proxy)?;
+    }
 
     let path = |value: &Path| -> Result<String> {
         Ok(value
@@ -4991,6 +5070,9 @@ fn render_server_activation_config(
             .context("server activation path is not UTF-8")?
             .to_owned())
     };
+    if let Some(proxy) = proxy_config {
+        document["proxy_config"] = value(path(proxy)?);
+    }
 
     let mut cloud_auth = Table::new();
     cloud_auth.insert("enabled", value(true));
@@ -5362,6 +5444,7 @@ fn publish_server_activation(
     identity_dir: &Path,
     core: &Path,
     ordinary_config: &Path,
+    proxy_config: Option<&Path>,
     cloud_endpoints: &[SocketAddr],
     etag: &str,
     delivery_digest: &str,
@@ -5388,13 +5471,19 @@ fn publish_server_activation(
     let declaration_bytes = serde_json::to_vec(&declaration)?;
     let ordinary = read_bounded(ordinary_config, MAX_CONFIGURATION_BYTES)?;
     let mut activation_hash = Sha256::new();
-    activation_hash.update(b"candy/runtime-server-activation-v3\0");
+    activation_hash.update(b"candy/runtime-server-activation-v4\0");
     activation_hash.update(decode_hex_32(&activation_digest(
         delivery_digest,
         &grants,
     )?)?);
     activation_hash.update(Sha256::digest(&declaration_bytes));
     activation_hash.update(Sha256::digest(&ordinary));
+    if let Some(proxy) = proxy_config {
+        activation_hash.update(Sha256::digest(read_bounded(
+            proxy,
+            MAX_CONFIGURATION_BYTES,
+        )?));
+    }
     let activation_id = format!("{:x}", activation_hash.finalize());
     let activations = state_dir.join("activations");
     ensure_private_directory(&activations)?;
@@ -5475,6 +5564,7 @@ fn publish_server_activation(
             let core_config_path = staging.join("core.toml");
             let staged_config = render_server_activation_config(
                 ordinary_config,
+                proxy_config,
                 configuration,
                 &staged_segment,
                 &staged_local,
@@ -5524,6 +5614,7 @@ fn publish_server_activation(
             }
             let final_config = render_server_activation_config(
                 ordinary_config,
+                proxy_config,
                 configuration,
                 &generation.join("segment.snapshot"),
                 &generation.join("site.projection"),
@@ -6543,6 +6634,7 @@ default via 192.0.2.1 dev eth0 proto static
             ca_certificate: None,
             core: None,
             server_config: server_mode.then(|| PathBuf::from("/etc/candy/server.toml")),
+            proxy_config: None,
             public_endpoints,
             command: Command::SyncOnce,
         }
@@ -8619,7 +8711,7 @@ default via 192.0.2.1 dev eth0 proto static
         let ordinary = directory.path().join("server.toml");
         fs::write(
             &ordinary,
-            "listen = \"0.0.0.0:8443\"\ndevelopment_ephemeral_certificate = true\n\n[[users]]\nkey_id = \"ordinary-user\"\nsecret = \"ordinary-secret\"\n",
+            "listen = \"0.0.0.0:18444\"\ndevelopment_ephemeral_certificate = true\n\n[[users]]\nkey_id = \"ordinary-user\"\nsecret = \"ordinary-secret\"\n",
         )
         .unwrap();
         let mut configuration = configuration();
@@ -8631,6 +8723,7 @@ default via 192.0.2.1 dev eth0 proto static
         }];
         let rendered = render_server_activation_config(
             &ordinary,
+            None,
             &configuration,
             Path::new("/secure/segment.snapshot"),
             Path::new("/secure/local.projection"),
@@ -8648,7 +8741,7 @@ default via 192.0.2.1 dev eth0 proto static
         )
         .unwrap();
         let document = rendered.parse::<toml_edit::DocumentMut>().unwrap();
-        assert_eq!(document["listen"].as_str(), Some("0.0.0.0:8443"));
+        assert_eq!(document["listen"].as_str(), Some("0.0.0.0:18444"));
         assert!(!document.as_table().contains_key("users"));
         assert!(!rendered.contains("ordinary-secret"));
         assert_eq!(document["cloud_auth"]["enabled"].as_bool(), Some(true));
@@ -8690,6 +8783,7 @@ default via 192.0.2.1 dev eth0 proto static
         .unwrap();
         assert!(render_server_activation_config(
             &ordinary,
+            None,
             &configuration(),
             Path::new("segment"),
             Path::new("local"),

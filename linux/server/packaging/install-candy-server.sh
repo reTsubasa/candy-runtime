@@ -11,7 +11,9 @@ SERVICE_PATH=/etc/systemd/system/candy-server.service
 CLOUD_SYNC_ENV=$CONFIG_DIR/cloud-sync.env
 SERVICE_NAME=candy-server
 SERVICE_USER=candy
-LISTEN_ADDR=0.0.0.0:8443
+# Proxy and SD-WAN share the unified QUIC listener. Authentication is
+# selected from the first protocol frame, so the public endpoint is 18444.
+LISTEN_ADDR=0.0.0.0:18444
 TLS_NAME=candy-server
 PUBLIC_HOST=
 PUBLIC_ENDPOINT=
@@ -39,7 +41,7 @@ Options:
   --artifact-url URL     Download this exact Candy server artifact.
   --version VERSION      Resolve the artifact URL for a release version.
   --core-binary PATH     Active private candy-core executable.
-  --listen ADDR          Server listen address, default 0.0.0.0:8443.
+  --listen ADDR          Server listen address, default 0.0.0.0:18444.
   --tls-name NAME        Self-signed certificate name, default candy-server.
   --public-host HOST     Override the auto-detected public server address.
   --public-endpoint ADDR Explicit SD-WAN endpoint advertised to Cloud (HOST:PORT).

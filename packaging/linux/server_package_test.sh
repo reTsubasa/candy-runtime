@@ -171,7 +171,7 @@ grep -F -- '--state-dir /var/lib/candy/sdwan' "$stage/systemd/candy-cloud-sync.s
 	fail "server Cloud sync does not pass the canonical state root"
 grep -F 'EnvironmentFile=-/etc/candy/cloud-sync.env' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||
 	fail "server Cloud sync does not load the persisted public endpoint"
-grep -F 'CANDY_PUBLIC_ENDPOINT=203.0.113.10:8443' "$stage/etc/candy/cloud-sync.env.example" >/dev/null ||
+grep -F 'CANDY_PUBLIC_ENDPOINT=203.0.113.10:18444' "$stage/etc/candy/cloud-sync.env.example" >/dev/null ||
 	fail "server package has no valid public endpoint example"
 grep -F 'ExecStartPost=+/usr/local/libexec/candy-sdwan-runtime reconcile candy-server.service' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||
 	fail "server Cloud sync does not reconcile candidate lifecycle changes"
