@@ -5014,10 +5014,14 @@ fn unified_proxy_users(seed: &toml_edit::DocumentMut, path: &Path) -> Result<tom
         "stage=proxy_isolation error_code=proxy_users_missing"
     );
     // One QUIC endpoint has one transport policy. Only users may differ.
-    let seed_values: std::collections::BTreeMap<String, serde_json::Value> = toml_edit::de::from_str(&seed.to_string())
-        .map_err(|_| anyhow::anyhow!("stage=server_config_parse error_code=invalid_server_toml"))?;
-    let proxy_values: std::collections::BTreeMap<String, serde_json::Value> = toml_edit::de::from_str(text)
-        .map_err(|_| anyhow::anyhow!("stage=proxy_config_parse error_code=invalid_proxy_toml"))?;
+    let seed_values: std::collections::BTreeMap<String, serde_json::Value> =
+        toml_edit::de::from_str(&seed.to_string()).map_err(|_| {
+            anyhow::anyhow!("stage=server_config_parse error_code=invalid_server_toml")
+        })?;
+    let proxy_values: std::collections::BTreeMap<String, serde_json::Value> =
+        toml_edit::de::from_str(text).map_err(|_| {
+            anyhow::anyhow!("stage=proxy_config_parse error_code=invalid_proxy_toml")
+        })?;
     let keys = seed
         .iter()
         .chain(proxy.iter())
