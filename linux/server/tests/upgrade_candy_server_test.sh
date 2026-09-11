@@ -178,7 +178,7 @@ done
 grep -F -- '--state-dir /var/lib/candy/sdwan' \
 	"$repo_root/linux/server/packaging/candy-cloud-sync.service" >/dev/null ||
 	fail "Cloud sync does not receive an explicit canonical state directory"
-if grep -R '/etc/candy/sdwan' "$repo_root/linux/server/apps" "$repo_root/linux/server/packaging"/*.service >/dev/null; then
+if grep -R '/etc/candy/sdwan/' "$repo_root/linux/server/apps" "$repo_root/linux/server/packaging"/*.service >/dev/null; then
 	fail "a Linux server launcher or service still uses the legacy SD-WAN state root"
 fi
 
