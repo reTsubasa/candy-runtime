@@ -16,7 +16,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-toml_edit = "0.22"
+toml_edit = { version = "0.22", features = ["serde"] }
 url = "2"
 uuid.workspace = true
 x509-parser.workspace = true
