@@ -158,8 +158,8 @@ run_upgrade() {
 		sh "${CANDY_TEST_UPGRADER:-$upgrader}" "$@"
 }
 
-grep -F 'LAUNCHER=${CANDY_SERVER_LAUNCHER:-/opt/candy/current/candy-server}' \
-	"$repo_root/linux/server/apps/candy-server/candy-core-manager" >/dev/null || fail "fresh install Core manager launcher contract changed"
+# Core manager diagnostics are exercised with an enrolled installation by
+# candy_core_manager_test.sh. Only service startup uses the public launcher.
 grep -F 'ExecStart=/opt/candy/current/candy-server --config /etc/candy/server.toml' \
 	"$repo_root/linux/server/packaging/candy-server.service" >/dev/null || fail "fresh install service launcher contract changed"
 grep -F 'LimitMEMLOCK=64M' "$repo_root/linux/server/packaging/candy-server.service" >/dev/null ||

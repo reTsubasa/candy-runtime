@@ -58,9 +58,9 @@ grep -F 'proxy --config /etc/candy/proxy-server.toml --sdwan-config /etc/candy/s
 [ -x "$stage/usr/local/libexec/candy-cloud-enroll" ] || fail "server Cloud enrollment client was not staged"
 [ -x "$stage/usr/local/libexec/candy-cloud-sync" ] || fail "server Cloud Runtime synchronizer was not staged"
 [ -x "$stage/usr/local/bin/candy-core-manager" ] || fail "Core bundle manager was not staged"
-grep -F 'LAUNCHER=${CANDY_SERVER_LAUNCHER:-/opt/candy/current/candy-server}' \
+cmp "$root/linux/server/apps/candy-server/candy-core-manager" \
 	"$stage/usr/local/bin/candy-core-manager" >/dev/null ||
-	fail "Core manager does not use the stable current release launcher"
+	fail "staged Core manager differs from the verified source"
 grep -F 'ExecStart=/opt/candy/current/candy-server --config /etc/candy/server.toml' \
 	"$stage/systemd/candy-server.service" >/dev/null ||
 	fail "server unit does not use the stable current release launcher"
