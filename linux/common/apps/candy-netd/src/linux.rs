@@ -201,16 +201,20 @@ mod backend {
             handle: &Handle,
             plan: &LinuxNetworkPlan,
         ) -> Result<(), NetworkError> {
-            let Some(link) = Self::candy_link(handle).await? else {
-                return Ok(());
+            let link_index = match Self::candy_link(handle).await? {
+                Some(link) => {
+                    if !Self::link_is_tun(&link) {
+                        return Err(NetworkError::Backend);
+                    }
+                    Some(link.header.index)
+                }
+                None => None,
             };
-            if !Self::link_is_tun(&link) {
-                return Err(NetworkError::Backend);
-            }
-            for prefix in &plan.remote_routes {
+            let (link_routes, throw_routes) = plan.route_cleanup_targets(link_index);
+            for (prefix, index) in link_routes {
                 let route = RouteMessageBuilder::<Ipv4Addr>::new()
                     .destination_prefix(Ipv4Addr::from(prefix.network), prefix.prefix_len)
-                    .output_interface(link.header.index)
+                    .output_interface(index)
                     .table_id(plan.route_table)
                     .protocol(RouteProtocol::Static)
                     .scope(RouteScope::Link)
@@ -221,7 +225,11 @@ mod backend {
                     }
                 }
             }
-            for prefix in plan.throw_prefixes() {
+            // Throw routes are table-scoped and do not reference candy0. They
+            // must still be removed after a Core upgrade/crash has already
+            // destroyed the TUN interface, otherwise the next preflight sees
+            // the orphaned table as a conflict.
+            for prefix in throw_routes {
                 let route = RouteMessageBuilder::<Ipv4Addr>::new()
                     .destination_prefix(Ipv4Addr::from(prefix.network), prefix.prefix_len)
                     .table_id(plan.route_table)
@@ -761,6 +769,23 @@ impl LinuxNetworkPlan {
         prefixes.dedup();
         prefixes
     }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn route_cleanup_targets(
+        &self,
+        link_index: Option<u32>,
+    ) -> (Vec<(Ipv4Prefix, u32)>, Vec<Ipv4Prefix>) {
+        let link_routes = link_index
+            .map(|index| {
+                self.remote_routes
+                    .iter()
+                    .copied()
+                    .map(|prefix| (prefix, index))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (link_routes, self.throw_prefixes())
+    }
 }
 
 #[cfg(test)]
@@ -800,5 +825,23 @@ mod tests {
 
         let plan = LinuxNetworkPlan::compile(&declaration).unwrap();
         assert_eq!(plan.throw_prefixes(), vec![cloud, local]);
+
+        let (link_routes, throw_routes) = plan.route_cleanup_targets(None);
+        assert!(
+            link_routes.is_empty(),
+            "missing candy0 has no link routes to delete"
+        );
+        assert_eq!(
+            throw_routes,
+            vec![cloud, local],
+            "table-scoped throw routes must remain cleanup targets after candy0 disappears"
+        );
+
+        let (link_routes, throw_routes) = plan.route_cleanup_targets(Some(17));
+        assert_eq!(
+            link_routes,
+            vec![(Ipv4Prefix::new([0, 0, 0, 0], 0).unwrap(), 17)]
+        );
+        assert_eq!(throw_routes, vec![cloud, local]);
     }
 }
