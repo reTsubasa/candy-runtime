@@ -1,0 +1,20 @@
+[Unit]
+Description=Candy Cloud Runtime/Core upgrade worker
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/candy/sdwan/identity/device-identity-v1.json
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/libexec/candy-cloud-sync --state-dir /var/lib/candy/sdwan upgrade-loop
+Restart=always
+RestartSec=10s
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/candy/sdwan /run/candy /var/lib/candy/node-upgrades
+

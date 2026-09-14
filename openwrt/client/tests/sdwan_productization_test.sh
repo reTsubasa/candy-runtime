@@ -26,6 +26,8 @@ grep -F '$(INSTALL_BIN) ./candy-sdwan $(1)/usr/bin/candy-sdwan' "$makefile" >/de
 grep -F '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan-runtime $(1)/usr/libexec/candy-sdwan-runtime' "$makefile" >/dev/null || fail "Runtime SD-WAN V1 state helper is not packaged"
 grep -F '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-cloud-enroll $(1)/usr/libexec/candy-cloud-enroll' "$makefile" >/dev/null || fail "Cloud bootstrap exchange client is not packaged"
 grep -F '$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-cloud-sync $(1)/usr/libexec/candy-cloud-sync' "$makefile" >/dev/null || fail "Cloud Runtime synchronizer is not packaged"
+grep -F 'procd_open_instance upgrade' "$cloud_sync_init" >/dev/null || fail "Cloud Runtime upgrade worker is not started"
+grep -F 'upgrade-loop' "$cloud_sync_init" >/dev/null || fail "Cloud Runtime upgrade worker does not poll inventory"
 grep -F '$(INSTALL_BIN) ./candy-cloud-sync.init $(1)/etc/init.d/candy-cloud-sync' "$makefile" >/dev/null || fail "Cloud synchronization service is not packaged"
 grep -F '$(INSTALL_BIN) ./candy-cloud-sync-loop $(1)/usr/libexec/candy-cloud-sync-loop' "$makefile" >/dev/null || fail "Cloud synchronization supervisor is not packaged"
 grep -F 'procd_set_param command "$SYNC_LOOP"' "$cloud_sync_init" >/dev/null || fail "Cloud synchronization does not use the independent supervisor"

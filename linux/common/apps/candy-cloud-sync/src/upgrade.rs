@@ -177,6 +177,15 @@ fn manager(openwrt: bool) -> &'static str {
     }
 }
 
+fn openwrt_runtime_version(output: &str) -> Option<String> {
+    output
+        .lines()
+        .find_map(|line| line.split_ascii_whitespace().next())
+        .and_then(|package| package.strip_prefix("candy-client-"))
+        .filter(|version| token(version))
+        .map(ToOwned::to_owned)
+}
+
 fn current(component: &str, openwrt: bool) -> Result<String> {
     if component == "core" {
         let output = ProcessCommand::new(manager(openwrt))
@@ -193,15 +202,12 @@ fn current(component: &str, openwrt: bool) -> Result<String> {
     }
     if openwrt {
         let output = ProcessCommand::new("apk")
-            .args(["info", "-v", "candy-client"])
+            .args(["list", "--installed", "candy-client"])
             .output()?;
         if !output.status.success() {
             bail!("runtime_status_failed");
         }
-        return String::from_utf8(output.stdout)?
-            .lines()
-            .find_map(|s| s.strip_prefix("candy-client-"))
-            .map(str::to_owned)
+        return openwrt_runtime_version(&String::from_utf8(output.stdout)?)
             .context("runtime_version_missing");
     }
     Ok(fs::read_to_string("/opt/candy/current/RUNTIME-RELEASE")?
@@ -562,6 +568,18 @@ mod tests {
             target_key("core", false, "aarch64").unwrap(),
             "linux_musl_aarch64"
         );
+    }
+
+    #[test]
+    fn parses_apk_tools_v3_installed_runtime_version() {
+        assert_eq!(
+            openwrt_runtime_version(
+                "candy-client-0.4.0-r113 x86_64 {feeds/base/candy-client} () [installed]\n"
+            )
+            .as_deref(),
+            Some("0.4.0-r113")
+        );
+        assert!(openwrt_runtime_version("candy-client-$(id) x86_64 [installed]\n").is_none());
     }
 
     #[test]

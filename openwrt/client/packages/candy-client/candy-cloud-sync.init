@@ -18,6 +18,12 @@ start_service() {
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
+	procd_open_instance upgrade
+	procd_set_param command "$SYNC_BIN" --state-dir "$STATE_DIR" upgrade-loop
+	procd_set_param respawn 3600 10 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
 }
 
 service_triggers() {

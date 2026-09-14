@@ -77,6 +77,7 @@ fi
 [ -f "$stage/systemd/candy-server.service" ] || fail "systemd unit was not staged"
 [ -f "$stage/systemd/candy-netd.service" ] || fail "server netd unit was not staged"
 [ -f "$stage/systemd/candy-cloud-sync.service" ] || fail "server Cloud sync unit was not staged"
+[ -f "$stage/systemd/candy-cloud-upgrade.service" ] || fail "server Cloud upgrade unit was not staged"
 [ ! -e "$stage/systemd/candy-sdwan.service" ] || fail "server package must not stage a second SD-WAN service"
 [ -x "$stage/install/install-candy-server.sh" ] || fail "installer was not staged"
 [ -x "$stage/install/upgrade-candy-server.sh" ] || fail "full Runtime upgrader was not staged"
@@ -120,7 +121,9 @@ cmp "$root/linux/server/apps/candy-server/candy-server" \
 [ -f "$edge_stage/systemd/candy-netd.service" ] || fail "netd systemd unit was not staged"
 [ -f "$edge_stage/systemd/candy-sdwan.service" ] || fail "SD-WAN systemd unit was not staged"
 [ -f "$edge_stage/systemd/candy-cloud-sync.service" ] || fail "Cloud synchronization systemd unit was not staged"
+[ -f "$edge_stage/systemd/candy-cloud-upgrade.service" ] || fail "Cloud upgrade systemd unit was not staged"
 [ -f "$edge_stage/systemd/candy-cloud-sync.timer" ] || fail "Cloud synchronization timer was not staged"
+grep -F 'upgrade-loop' "$edge_stage/systemd/candy-cloud-upgrade.service" >/dev/null || fail "Linux Edge upgrade worker does not poll Cloud"
 grep -F 'ConditionPathExists=/var/lib/candy/sdwan/identity/device-identity-v1.json' "$edge_stage/systemd/candy-cloud-sync.service" >/dev/null ||
 	fail "Cloud synchronization does not wait for an enrolled identity"
 grep -F 'Environment=CANDY_SDWAN_STATE_DIR=/var/lib/candy/sdwan' "$edge_stage/systemd/candy-cloud-sync.service" >/dev/null ||
@@ -165,6 +168,7 @@ grep -F -- '--allowed-user candy --allowed-group candy' "$stage/systemd/candy-ne
 	fail "server netd socket is not bound to the Candy server identity"
 grep -F -- '--server-config /etc/candy/server.toml' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||
 	fail "server Cloud sync does not request a server activation"
+grep -F 'upgrade-loop' "$stage/systemd/candy-cloud-upgrade.service" >/dev/null || fail "server upgrade worker does not poll Cloud"
 grep -F 'Environment=CANDY_SDWAN_STATE_DIR=/var/lib/candy/sdwan' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||
 	fail "server Cloud sync does not export the canonical state root"
 grep -F -- '--state-dir /var/lib/candy/sdwan' "$stage/systemd/candy-cloud-sync.service" >/dev/null ||

@@ -129,11 +129,13 @@ unit_files='candy-server.service
 candy-proxy.service
 candy-netd.service
 candy-cloud-sync.service
+candy-cloud-upgrade.service
 candy-cloud-sync.timer'
 services='candy-netd.service
 candy-proxy.service
 candy-server.service
 candy-cloud-sync.service
+candy-cloud-upgrade.service
 candy-cloud-sync.timer'
 
 record_service_state() {
@@ -145,7 +147,7 @@ record_service_state() {
 
 stop_services() {
 	stop_failed=0
-	for service in candy-cloud-sync.timer candy-cloud-sync.service candy-proxy.service candy-server.service candy-netd.service; do
+	for service in candy-cloud-sync.timer candy-cloud-upgrade.service candy-cloud-sync.service candy-proxy.service candy-server.service candy-netd.service; do
 		"$SYSTEMCTL" stop "$service" >/dev/null 2>&1 || true
 		if "$SYSTEMCTL" is-active --quiet "$service" >/dev/null 2>&1; then
 			log "could not stop $service"
@@ -465,7 +467,7 @@ while IFS= read -r member; do
 	case "$member" in
 		usr/|usr/local/|usr/local/bin/|usr/local/libexec/|systemd/|install/|etc/|etc/candy/) ;;
 		usr/local/bin/candy-server|usr/local/bin/candy-core-manager|usr/local/libexec/serverd-linux|usr/local/libexec/candy-sdwan-runtime|usr/local/libexec/candy-sdwan-agent|usr/local/libexec/candy-netd|usr/local/libexec/candy-cloud-enroll|usr/local/libexec/candy-cloud-sync|usr/local/libexec/candy-server-health-check) ;;
-		systemd/candy-server.service|systemd/candy-proxy.service|systemd/candy-netd.service|systemd/candy-cloud-sync.service|systemd/candy-cloud-sync.timer|systemd/candy.tmpfiles) ;;
+		systemd/candy-server.service|systemd/candy-proxy.service|systemd/candy-netd.service|systemd/candy-cloud-sync.service|systemd/candy-cloud-upgrade.service|systemd/candy-cloud-sync.timer|systemd/candy.tmpfiles) ;;
 		install/install-candy-server.sh|install/upgrade-candy-server.sh|etc/candy/server.toml.example|etc/candy/cloud-sync.env.example|README.md|VERSION|RUNTIME-RELEASE|RUNTIME-ARCH) ;;
 		*) die "unexpected archive member: $member" ;;
 	esac
@@ -601,6 +603,11 @@ install_one "$extract_dir/systemd/candy.tmpfiles" /usr/lib/tmpfiles.d/candy.conf
 "$SYSTEMCTL" daemon-reload
 "$TMPFILES" --create "$(host_path /usr/lib/tmpfiles.d/candy.conf)"
 restore_service_state
+upgrade_identity=$(host_path /var/lib/candy/sdwan/identity/device-identity-v1.json)
+if [ -f "$upgrade_identity" ] && [ ! -L "$upgrade_identity" ]; then
+	"$SYSTEMCTL" enable candy-cloud-upgrade.service >/dev/null
+	"$SYSTEMCTL" start candy-cloud-upgrade.service >/dev/null
+fi
 
 if [ "$(cat "$state_dir/candy-netd.service.active")" = 1 ]; then "$SYSTEMCTL" is-active --quiet candy-netd.service; fi
 if [ "$(cat "$state_dir/candy-server.service.active")" = 1 ]; then
@@ -611,6 +618,7 @@ if [ "$(cat "$state_dir/candy-proxy.service.active")" = 1 ]; then
 	CANDY_SERVER_SERVICE=candy-proxy CANDY_SERVER_CONFIG=$(host_path /etc/candy/proxy-server.toml) "$(host_path "$HEALTH_CHECK")"
 fi
 if [ "$(cat "$state_dir/candy-cloud-sync.timer.active")" = 1 ]; then "$SYSTEMCTL" is-active --quiet candy-cloud-sync.timer; fi
+if [ -f "$upgrade_identity" ] && [ ! -L "$upgrade_identity" ]; then "$SYSTEMCTL" is-active --quiet candy-cloud-upgrade.service; fi
 
 finalize_legacy_sdwan_state || die "could not establish the legacy /etc/candy/sdwan compatibility link"
 transaction_finished=1

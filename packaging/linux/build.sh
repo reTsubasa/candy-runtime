@@ -94,6 +94,8 @@ install -m 0644 "$repo_root/linux/server/packaging/candy-netd.service" \
 	"$stage/systemd/candy-netd.service"
 install -m 0644 "$repo_root/linux/server/packaging/candy-cloud-sync.service" \
 	"$stage/systemd/candy-cloud-sync.service"
+install -m 0644 "$repo_root/linux/server/packaging/candy-cloud-upgrade.service" \
+	"$stage/systemd/candy-cloud-upgrade.service"
 install -m 0644 "$repo_root/linux/client/packaging/candy-cloud-sync.timer" \
 	"$stage/systemd/candy-cloud-sync.timer"
 install -m 0644 "$repo_root/linux/server/packaging/candy.tmpfiles" "$stage/systemd/candy.tmpfiles"
@@ -128,6 +130,7 @@ install -m 0644 "$repo_root/linux/client/packaging/candy-client.service" "$edge_
 install -m 0644 "$repo_root/linux/client/packaging/candy-netd.service" "$edge_stage/systemd/candy-netd.service"
 install -m 0644 "$repo_root/linux/client/packaging/candy-sdwan.service" "$edge_stage/systemd/candy-sdwan.service"
 install -m 0644 "$repo_root/linux/client/packaging/candy-cloud-sync.service" "$edge_stage/systemd/candy-cloud-sync.service"
+install -m 0644 "$repo_root/linux/client/packaging/candy-cloud-upgrade.service" "$edge_stage/systemd/candy-cloud-upgrade.service"
 install -m 0644 "$repo_root/linux/client/packaging/candy-cloud-sync.timer" "$edge_stage/systemd/candy-cloud-sync.timer"
 install -m 0644 "$repo_root/linux/client/packaging/sdwan-agent.env.example" "$edge_stage/etc/candy/sdwan-agent.env.example"
 install -m 0644 "$repo_root/linux/client/packaging/candy.sysusers" "$edge_stage/systemd/candy.sysusers"
