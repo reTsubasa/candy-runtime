@@ -466,28 +466,43 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         let mut desired = prefixes.to_vec();
         desired.sort();
         desired.dedup();
+        // Prefix withdrawal is scoped to the signed declaration.  Rejecting
+        // an out-of-scope prefix here prevents a compromised/stale Core status
+        // report from changing unrelated host routing state.
+        if desired.iter().any(|prefix| {
+            !declaration
+                .routes
+                .iter()
+                .any(|route| route.prefix == *prefix)
+        }) {
+            return Err(NetworkError::Conflict);
+        }
         let previous = record.failed_prefixes.clone();
         let recovered = previous.iter().any(|prefix| !desired.contains(prefix));
         if recovered {
             self.backend.prepare_routes(&declaration)?;
         }
-        // Existing failed prefixes already have their route removed and a
-        // throw route installed. Only withdraw newly-added prefixes; this
-        // keeps repeated telemetry updates proportional to the delta rather
-        // than the full failed set.
-        let added: Vec<Ipv4Prefix> = desired
-            .iter()
-            .copied()
-            .filter(|prefix| !previous.contains(prefix))
-            .collect();
+        // Re-installing routes above restores the whole declaration.  Reapply
+        // the complete desired failed set so a still-failed prefix never
+        // regains the SD-WAN route during recovery of a sibling prefix.  When
+        // no prefix recovered this remains an incremental operation.
+        let withdrawn = if recovered {
+            desired.clone()
+        } else {
+            desired
+                .iter()
+                .copied()
+                .filter(|prefix| !previous.contains(prefix))
+                .collect()
+        };
+        if !withdrawn.is_empty() {
+            self.backend.withdraw_prefixes(&declaration, &withdrawn)?;
+        }
         let record = self
             .record
             .as_mut()
             .ok_or(NetworkError::InvalidTransition)?;
         record.failed_prefixes = desired;
-        if !added.is_empty() {
-            self.backend.withdraw_prefixes(&declaration, &added)?;
-        }
         self.journal.store(record)
     }
 
@@ -982,21 +997,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkController for NetworkTransact
         owner: LeaseOwner,
         prefixes: &[candy_netd_proto::Ipv4Prefix],
     ) -> Result<(), NetworkError> {
-        let record = self
-            .record
-            .as_ref()
-            .ok_or(NetworkError::InvalidTransition)?;
-        ensure_owner(record.owner, owner)?;
-        if record.phase != TransactionPhase::Active {
-            return Err(NetworkError::InvalidTransition);
-        }
-        let declaration = record.declaration.clone();
-        if prefixes.is_empty() {
-            self.backend.prepare_routes(&declaration)?;
-        } else {
-            self.backend.withdraw_prefixes(&declaration, prefixes)?;
-        }
-        Ok(())
+        Self::set_failed_prefixes(self, owner, prefixes)
     }
 
     fn rollback(&mut self, owner: LeaseOwner) -> Result<(), NetworkError> {

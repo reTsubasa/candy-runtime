@@ -418,6 +418,48 @@ fn commit_installs_policy_rule_only_after_all_prepared_state() {
 }
 
 #[test]
+fn failed_prefix_updates_are_scoped_persisted_and_restore_only_healthy_routes() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let journal = MemoryJournal::default();
+    let mut transaction =
+        NetworkTransaction::new(RecordingBackend(events.clone()), journal.clone()).unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+    events.borrow_mut().clear();
+
+    let first = Ipv4Prefix::new([10, 1, 0, 0], 16).unwrap();
+    let second = Ipv4Prefix::new([10, 2, 0, 0], 16).unwrap();
+    transaction
+        .set_failed_prefixes(owner(), &[second, first, second])
+        .unwrap();
+    assert_eq!(
+        journal.load().unwrap().unwrap().failed_prefixes,
+        vec![first, second]
+    );
+    assert_eq!(*events.borrow(), ["remove_routes"]);
+
+    // Recovering one prefix must rebuild the route table and immediately
+    // withdraw the sibling that is still failed.
+    events.borrow_mut().clear();
+    transaction.set_failed_prefixes(owner(), &[second]).unwrap();
+    assert_eq!(*events.borrow(), ["prepare_routes", "remove_routes"]);
+    assert_eq!(
+        journal.load().unwrap().unwrap().failed_prefixes,
+        vec![second]
+    );
+
+    let out_of_scope = Ipv4Prefix::new([10, 3, 0, 0], 16).unwrap();
+    assert!(matches!(
+        transaction.set_failed_prefixes(owner(), &[out_of_scope]),
+        Err(NetworkError::Conflict)
+    ));
+    assert_eq!(
+        journal.load().unwrap().unwrap().failed_prefixes,
+        vec![second]
+    );
+}
+
+#[test]
 fn hot_reconfigure_keeps_steering_suspended_until_replacement_is_ready() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let backend = RecordingBackend(events.clone());
