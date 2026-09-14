@@ -35,6 +35,7 @@ const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 const RETRY_STABLE_RESET: Duration = Duration::from_secs(60);
 const RETRY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const NETD_DRAIN_RETRY_WINDOW: Duration = Duration::from_secs(5);
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn sanitize_log_value(value: &str) -> String {
@@ -103,6 +104,7 @@ fn runtime_cause_code(error: &anyhow::Error) -> &str {
                 ErrorCode::GenerationConflict => "netd_generation_conflict",
                 ErrorCode::PreflightFailed => "netd_preflight_failed",
                 ErrorCode::SystemFailure => "netd_system_failure",
+                ErrorCode::DrainPending => "netd_drain_pending",
             },
         };
     }
@@ -149,6 +151,7 @@ fn netd_reconfigure_error_code(error: &IpcError) -> &'static str {
         IpcError::Remote(ErrorCode::PreflightFailed) => "netd_reconfigure_platform_failed",
         IpcError::Remote(ErrorCode::UnauthorizedPeer) => "netd_reconfigure_unauthorized",
         IpcError::Remote(ErrorCode::SystemFailure) => "netd_reconfigure_system_failed",
+        IpcError::Remote(ErrorCode::DrainPending) => "netd_reconfigure_drain_pending",
         // netd closes the per-request Unix socket after a daemon restart or
         // transaction rollback.  Keep this distinct from a platform failure;
         // callers can safely retry the same generation after reconnecting.
@@ -1842,6 +1845,25 @@ fn rollback_or_report(netd: &mut NetdClient, cause: &str) -> Result<()> {
         .with_context(|| format!("{cause}; netd rollback failed"))
 }
 
+/// Complete a replacement drain without turning the intentional bounded
+/// window into a false hot-reload failure. netd returns a dedicated
+/// `DrainPending` code while the previous generation is retained; retries are
+/// idempotent and stop at a strict upper bound so a stuck kernel cannot stall
+/// Runtime forever.
+fn drain_old_bounded(netd: &mut NetdClient) -> Result<()> {
+    let deadline = Instant::now() + NETD_DRAIN_RETRY_WINDOW;
+    loop {
+        let now = monotonic_ms().context("read monotonic clock while draining")?;
+        match netd.drain_old(now) {
+            Ok(_) => return Ok(()),
+            Err(IpcError::Remote(ErrorCode::DrainPending)) if Instant::now() < deadline => {
+                thread::sleep(RETRY_POLL_INTERVAL);
+            }
+            Err(error) => return Err(anyhow::Error::from(error)),
+        }
+    }
+}
+
 fn finish_shutdown_after_rollback(
     args: &RuntimeArgs,
     rollback: Result<()>,
@@ -1895,7 +1917,9 @@ fn transient_runtime_error(error: &anyhow::Error) -> bool {
     if let Some(ipc) = error.downcast_ref::<IpcError>() {
         return match ipc {
             IpcError::Io(error) => transient_io_error(error),
-            IpcError::Remote(ErrorCode::SystemFailure | ErrorCode::GenerationConflict) => true,
+            IpcError::Remote(
+                ErrorCode::SystemFailure | ErrorCode::GenerationConflict | ErrorCode::DrainPending,
+            ) => true,
             _ => false,
         };
     }
@@ -2425,8 +2449,7 @@ fn hot_replace_activation(
             // Proxy fallback, finish that transaction so Suspend can operate
             // on the promoted candidate instead of being rejected as an
             // invalid Draining transition.
-            let now = monotonic_ms().context("read monotonic clock before fallback drain")?;
-            if let Err(drain_error) = netd.drain_old(now) {
+            if let Err(drain_error) = drain_old_bounded(netd) {
                 eprintln!(
                     "level=error event=sdwan_hot_reload_drain_failed generation={} error_code=netd_drain_failed error={}",
                     replacement.generation,
@@ -2448,8 +2471,7 @@ fn hot_replace_activation(
     }
     if !activation_binding_unchanged(replacement).unwrap_or(false) || shutdown_requested() {
         if !already_suspended {
-            let now = monotonic_ms().context("read monotonic clock before fallback drain")?;
-            if let Err(drain_error) = netd.drain_old(now) {
+            if let Err(drain_error) = drain_old_bounded(netd) {
                 return Err(anyhow::Error::new(AppliedHotReloadPending(
                     anyhow::Error::from(drain_error)
                         .context("drain superseded replacement before fallback"),
@@ -2463,8 +2485,7 @@ fn hot_replace_activation(
         )));
     }
     if !already_suspended {
-        let now = monotonic_ms().context("read monotonic clock before netd drain")?;
-        if let Err(error) = netd.drain_old(now) {
+        if let Err(error) = drain_old_bounded(netd) {
             return Err(anyhow::Error::new(AppliedHotReloadPending(
                 anyhow::Error::from(error).context("drain old netd owner"),
             )));
@@ -4602,7 +4623,11 @@ exit 17
     }
     #[test]
     fn operational_errors_retry_but_security_errors_do_not() {
-        for code in [ErrorCode::SystemFailure, ErrorCode::GenerationConflict] {
+        for code in [
+            ErrorCode::SystemFailure,
+            ErrorCode::GenerationConflict,
+            ErrorCode::DrainPending,
+        ] {
             assert!(transient_runtime_error(&anyhow::Error::new(
                 IpcError::Remote(code)
             )));

@@ -465,6 +465,9 @@ pub enum ErrorCode {
     GenerationConflict = 3,
     PreflightFailed = 4,
     SystemFailure = 5,
+    /// The replacement generation is active while the previous generation is
+    /// still within its bounded drain window. Callers may retry Drain.
+    DrainPending = 6,
 }
 
 impl TryFrom<u64> for ErrorCode {
@@ -477,6 +480,7 @@ impl TryFrom<u64> for ErrorCode {
             3 => Ok(Self::GenerationConflict),
             4 => Ok(Self::PreflightFailed),
             5 => Ok(Self::SystemFailure),
+            6 => Ok(Self::DrainPending),
             _ => Err(NetdProtocolError::UnknownEnum),
         }
     }

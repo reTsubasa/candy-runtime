@@ -374,4 +374,5 @@ fn error_codes_are_stable() {
     assert_eq!(ErrorCode::GenerationConflict as u64, 3);
     assert_eq!(ErrorCode::PreflightFailed as u64, 4);
     assert_eq!(ErrorCode::SystemFailure as u64, 5);
+    assert_eq!(ErrorCode::DrainPending as u64, 6);
 }

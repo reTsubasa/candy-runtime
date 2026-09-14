@@ -20,6 +20,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 use candy_netd_client::{recv_request, send_response, IpcError};
@@ -27,6 +28,42 @@ use candy_netd_proto::{
     ErrorCode, NetdOperation, NetdRequest, NetdResponse, NetdSession, NetdSessionError,
     ResponseBody,
 };
+
+/// Old forwarding state is retained long enough for in-flight packets, but
+/// never indefinitely. Runtime may explicitly drain sooner once Core reports
+/// readiness; this bound is the crash-recovery backstop.
+pub const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 2_000;
+pub const MAX_DRAIN_TIMEOUT_MS: u64 = 30_000;
+
+/// Read the host monotonic clock in milliseconds. The journal survives a
+/// netd restart, so deadlines must use the kernel clock rather than a process
+/// local `Instant`.
+#[cfg(target_os = "linux")]
+fn monotonic_ms() -> u64 {
+    let mut value = nix::libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `value` is valid writable storage and the kernel does not retain
+    // the pointer after returning.
+    let result = unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_MONOTONIC, &mut value) };
+    if result == 0 {
+        (value.tv_sec as u64)
+            .saturating_mul(1_000)
+            .saturating_add((value.tv_nsec as u64) / 1_000_000)
+    } else {
+        0
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn monotonic_ms() -> u64 {
+    // Only protocol tests run on non-Linux hosts; this path is not used for
+    // durable kernel transactions.
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
+}
 
 #[derive(Debug, Error)]
 pub enum SocketSecurityError {
@@ -449,7 +486,14 @@ impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
                 }
             }
             NetdOperation::Commit => {
-                if let Err(error) = self.network.commit(request.owner) {
+                // A replacement commit keeps the previous generation alive
+                // for a bounded drain window. Initial commits are unaffected;
+                // the transaction detects whether a candidate is staged.
+                let drain_timeout_ms = DEFAULT_DRAIN_TIMEOUT_MS.min(MAX_DRAIN_TIMEOUT_MS);
+                if let Err(error) =
+                    self.network
+                        .commit_with_drain(request.owner, monotonic_ms(), drain_timeout_ms)
+                {
                     self.tun = None;
                     return Ok((
                         error_response(request.request_id, network_error_code(error)),
@@ -641,6 +685,6 @@ fn network_error_code(error: NetworkError) -> ErrorCode {
         NetworkError::InvalidTransition => ErrorCode::InvalidRequest,
         NetworkError::Backend => ErrorCode::PreflightFailed,
         NetworkError::Journal => ErrorCode::SystemFailure,
-        NetworkError::DrainPending => ErrorCode::GenerationConflict,
+        NetworkError::DrainPending => ErrorCode::DrainPending,
     }
 }
