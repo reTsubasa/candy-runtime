@@ -34,7 +34,7 @@ grep -F 'procd_set_param command "$SYNC_LOOP"' "$cloud_sync_init" >/dev/null || 
 if grep -F 'procd_set_param command "$initscript"' "$cloud_sync_init" >/dev/null; then
 	fail "Cloud synchronization still executes rc.common as a procd worker"
 fi
-grep -F 'start-stop-daemon -S -c "$RUN_USER" -x "$SYNC_BIN"' "$cloud_sync_loop" >/dev/null || fail "Cloud synchronization is not dropped to the dedicated user"
+grep -F 'start-stop-daemon -S -u "$RUN_USER" -c "$RUN_USER" -x "$SYNC_BIN"' "$cloud_sync_loop" >/dev/null || fail "Cloud synchronization is not isolated from the root upgrade worker"
 grep -F '"$CANDY_INIT" sdwan_reconcile' "$cloud_sync_loop" >/dev/null || fail "root supervisor does not retain activation reconciliation"
 grep -F '"$(id -u 2>/dev/null || printf 1)" = 0' "$cloud_sync_loop" >/dev/null || fail "Cloud synchronization supervisor has no root boundary"
 grep -F 'activation=unchanged' "$cloud_sync_loop" >/dev/null || fail "failed Cloud synchronization can disturb the last-good activation"

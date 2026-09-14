@@ -101,7 +101,10 @@ backoff=0
 while identity_available; do
 	# stdout is the machine-readable result channel. stderr remains attached to
 	# procd so Runtime diagnostics stay visible without entering state parsing.
-	if output=$(start-stop-daemon -S -c "$RUN_USER" -x "$SYNC_BIN" -- --state-dir "$STATE_DIR" --core "$CANDY_CORE_BIN" sync-once); then
+	# Match an existing sync worker by executable and service account. The
+	# independent root upgrade-loop uses the same binary and must not suppress
+	# configuration or telemetry synchronization.
+	if output=$(start-stop-daemon -S -u "$RUN_USER" -c "$RUN_USER" -x "$SYNC_BIN" -- --state-dir "$STATE_DIR" --core "$CANDY_CORE_BIN" sync-once); then
 		backoff=0
 		state=$(sync_state_from_stdout "$output" || true)
 		case "$state" in
