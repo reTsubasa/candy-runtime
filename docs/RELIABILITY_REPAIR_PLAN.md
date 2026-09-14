@@ -18,9 +18,9 @@ Items are checked only after the corresponding focused regression passes.
 | ID | Priority | Observed problem / scope | Repair and acceptance |
 | --- | --- | --- | --- |
 | R01 | P0 | Core fail-open latch survives partial route-owner recovery | **Done:** failed-owner coverage is tracked; regression covers healthy alternate owner, recovery and re-failure. |
-| R02 | P0 | Policy replacement closes old Peer streams before new streams are usable | **Partially implemented:** production inbound/outbound handoff now completes both packet-stream halves before registration/replacement. Failed or cancelled preparation closes the candidate. Core regression proves old-lane traffic during preparation and usable new lane at commit. Cross-node commit coordination and old-lane drain remain open. |
-| R03 | P0 | Runtime suspends old forwarding before policy replacement | **Locally staged:** Core Prepare/Commit/Abort now separates candidate negotiation from local cutover. Runtime keeps local steering during preparation, renews leases while waiting, rechecks immutable candidate binding and reconciles lost Commit replies. Fault injection passes. Cross-node commit, dual-generation netd steering and existing NAT/TCP flow migration remain open. |
-| R04 | P1 | Partial route readiness can trigger global Runtime fallback | **Isolation implemented:** committed partial-owner loss preserves Core and healthy-route steering; zero ready owners alone enters global Proxy fallback. Fatal Core/TUN errors still roll back and restart. Per-prefix Proxy fallback remains blocked on an owner-prefix/netd contract. |
+| R02 | P0 | Policy replacement closes old Peer streams before new streams are usable | **Local implementation complete:** inbound/outbound handoff prepares both packet-stream halves, keeps the old lane during candidate activation, then drains it with a bounded queue/flow deadline. Cross-node commit coordination remains open. |
+| R03 | P0 | Runtime suspends old forwarding before policy replacement | **Local implementation complete:** Core Prepare/Commit/Abort, netd old/candidate/draining owners, Runtime DrainPending retries and durable recovery are integrated and regression-tested. Cross-node commit and existing NAT/TCP flow migration remain open. |
+| R04 | P1 | Partial route readiness can trigger global Runtime fallback | **Implemented:** Core reports failed prefixes and netd persists scoped prefix withdrawals; Runtime withdraws only failed prefixes while preserving healthy routes and restores them independently. |
 | R05 | P1 | Cloud status reader rejects persisted `PREPARED` receipt | **Done:** API accepts all three persisted states; DB-backed regression is present (requires `DATABASE_URL`). |
 | R06 | P1 | Segment aggregate failure/update colors unrelated links | **Done:** link state uses peer endpoints/attachments; three-site isolation tests pass. |
 | R07 | P1 | Offline rejected nodes/sites remain red | **Done:** freshness/online classification precedes faults; stale rejected node/site/link tests pass. |
@@ -90,10 +90,10 @@ removed while any verification or packaging process is using them.
 
 | Priority | Remaining work | Next implementation gate |
 | --- | --- | --- |
-| P0 | Make-before-break policy cutover with old/new stream overlap and bounded drain | Core staged lane transaction, netd dual-generation owner, fault-injection test proving old lane remains usable until replacement `stream_ready`; then real two-node traffic test |
+| P0 | Cross-node make-before-break commit barrier | Add peer-to-peer READY/COMMIT_ACK/DRAIN_COMPLETE protocol and real two-node traffic test; local Core/netd/Runtime overlap and drain are complete |
 | P0 | Preserve established TCP/NAT state across egress switch | netd connection/NAT ownership design and packet-flow test; cannot be inferred from process hot reload |
 | P1 | Handle clean EOF, task panic and cancellation as typed peer events | Core loopback EOF/dialer-wakeup and task identity/panic/cancel tests pass; events retire only the matching connection. Live Cloud/Runtime fault-injection remains separate. |
-| P1 | Route failed prefixes individually to Proxy | extend Core status with route-owner/prefix readiness and netd with per-prefix withdrawal; current Runtime preserves unrelated healthy routes but cannot re-inject a failed TUN packet into Proxy |
+| P1 | Route failed prefixes individually to Proxy | Core/netd scoped withdrawal is complete; validate policy-specific Proxy reinjection on real OpenWrt traffic |
 | P1 | End-to-end Cloud/Core/Runtime event convergence | signed generation plus event-id/sequence contract and integration test |
 | P2 | Multiple independently recoverable Streams per Peer | stream slot lifecycle contract, bounded scheduler, per-stream telemetry and backpressure tests |
 | P2 | Actual MySQL receipt regression and loopback QUIC suite | CI database job and permissioned network runner; local skip must remain visible |
