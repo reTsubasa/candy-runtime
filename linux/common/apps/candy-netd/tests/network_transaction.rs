@@ -657,6 +657,53 @@ fn orphaned_draining_replacement_promotes_candidate_owner() {
 }
 
 #[test]
+fn kill9_during_draining_recovers_after_deadline_without_losing_candidate() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let journal = MemoryJournal::default();
+    let retained = journal.clone();
+    let mut transaction =
+        NetworkTransaction::new(RecordingBackend(events.clone()), journal).unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+
+    let mut replacement = declaration();
+    replacement.table_id += 1;
+    let replacement_owner = LeaseOwner {
+        generation: 8,
+        ..owner()
+    };
+    transaction
+        .reconfigure(replacement_owner, replacement)
+        .unwrap();
+    transaction
+        .commit_with_drain(replacement_owner, 10_000, 250)
+        .unwrap();
+    assert_eq!(
+        retained.load().unwrap().unwrap().phase,
+        TransactionPhase::Draining
+    );
+
+    // Model SIGKILL: the transaction object disappears before it can issue
+    // Drain.  A fresh netd instance must use the durable deadline and promote
+    // the prepared candidate exactly once.
+    drop(transaction);
+    let mut recovered =
+        NetworkTransaction::new(RecordingBackend(events), retained.clone()).unwrap();
+    assert!(recovered.recover_orphan(false, 10_250).unwrap());
+    assert_eq!(recovered.retained_owner(), Some(replacement_owner));
+    assert_eq!(
+        retained.load().unwrap().unwrap().phase,
+        TransactionPhase::Active
+    );
+    assert!(retained
+        .load()
+        .unwrap()
+        .unwrap()
+        .recovery_candidate
+        .is_none());
+}
+
+#[test]
 fn hot_reconfigure_cleanup_failure_poisoned_session_cannot_resume() {
     for fail_at in ["remove_firewall", "remove_routes"] {
         let events = Rc::new(RefCell::new(Vec::new()));
