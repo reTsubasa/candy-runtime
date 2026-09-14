@@ -715,6 +715,11 @@ grep -q 'tcp dport 53 counter redirect to 53' "$FW4_INCLUDE"
 grep -q 'iifname "br-lan" fib daddr oifname "candy0" counter return' "$FW4_INCLUDE"
 grep -q 'ip daddr 104.243.28.153 counter return' "$FW4_INCLUDE"
 grep -q 'counter redirect to 12345' "$FW4_INCLUDE"
+# A Core-reported failed prefix must be emitted ahead of the candy0/private
+# bypass rules so the destination is handed to the ordinary Proxy path.
+write_fw4_include 1 1 0 1 12345 12346 '' '' 100 '10.20.0.0/16 '
+grep -q 'ip daddr 10.20.0.0/16 tcp counter redirect to :12345' "$FW4_INCLUDE"
+grep -q 'ip daddr 10.20.0.0/16 udp dport 443 counter tproxy to :12346 meta mark set 100 accept' "$FW4_INCLUDE"
 apply_dns
 grep -q 'no-resolv' "$runtime_dir/dnsmasq.test.d/candy.conf"
 grep -q 'server=127.0.0.1#15353' "$runtime_dir/dnsmasq.test.d/candy.conf"

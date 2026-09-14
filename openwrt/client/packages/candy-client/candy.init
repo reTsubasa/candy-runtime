@@ -823,10 +823,22 @@ cleanup_stale_sdwan_core_statuses() {
 }
 
 health_watchdog() {
-	local failures=0
+	local failures=0 failed_prefixes previous_failed_prefixes=
 	trap 'exit 0' TERM INT
 	sleep "$CANDY_HEALTH_CHECK_START_GRACE_SECONDS"
 	while :; do
+		# Core status carries an authenticated, declaration-scoped failed prefix
+		# set. Refresh only the matching Proxy interception rules; healthy
+		# SD-WAN prefixes and unrelated tenants remain untouched.
+		failed_prefixes=$(sdwan_failed_prefixes 2>/dev/null || true)
+		if [ "$failed_prefixes" != "$previous_failed_prefixes" ]; then
+			if apply_firewall; then
+				previous_failed_prefixes=$failed_prefixes
+				[ -z "$failed_prefixes" ] || log_event warn sdwan_prefix_proxy_reinject "prefixes=$failed_prefixes action=proxy_redirect"
+			else
+				log_event error sdwan_prefix_proxy_reinject "prefixes=$failed_prefixes error_code=firewall_refresh_failed action=preserve_existing_rules"
+			fi
+		fi
 		if current_readiness; then
 			if [ "$failures" -gt 0 ]; then
 				log_event info health_recovered "consecutive_failures=$failures"
@@ -843,6 +855,24 @@ health_watchdog() {
 		fi
 		sleep "$CANDY_HEALTH_CHECK_INTERVAL_SECONDS"
 	done
+}
+
+sdwan_failed_prefixes() {
+	local value
+	bounded_regular_file "$CANDY_SDWAN_STATUS_FILE" 262144 || return 0
+	command -v jsonfilter >/dev/null 2>&1 || return 0
+	# jsonfilter emits one value per line. Validate the shape before passing
+	# values into nft/iptables to prevent status-file injection.
+	jsonfilter -i "$CANDY_SDWAN_STATUS_FILE" -e '@.failed_prefixes[*]' 2>/dev/null |
+	awk -F/ '
+		function valid_octet(value) { return value ~ /^[0-9]+$/ && value + 0 <= 255 }
+		{
+			if (NF != 2 || $1 !~ /^[0-9.]+$/ || $2 !~ /^[0-9]+$/ || $2 + 0 > 32) next
+			count = split($1, octets, ".")
+			if (count != 4 || !valid_octet(octets[1]) || !valid_octet(octets[2]) || !valid_octet(octets[3]) || !valid_octet(octets[4])) next
+			printf "%s ", $0
+		}
+	'
 }
 
 bounded_regular_file() {
@@ -3219,7 +3249,8 @@ write_fw4_include() {
 	local bypass_ipv4_hosts="$7"
 	local bypass_ipv6_hosts="$8"
 	local tproxy_mark="$9"
-	local temporary bypass_host
+	local failed_prefixes="${10:-}"
+	local temporary bypass_host failed_prefix
 
 	mkdir -p "$FW4_INCLUDE_DIR"
 	temporary=$(atomic_temp_path "$FW4_INCLUDE") || return 1
@@ -3234,6 +3265,11 @@ write_fw4_include() {
 		if [ "$redirect_udp" -eq 1 ] && [ "$block_quic" -ne 1 ]; then
 			printf 'chain candy_tproxy {\n'
 			printf '  type filter hook prerouting priority mangle; policy accept;\n'
+			for failed_prefix in $failed_prefixes; do
+				# Failed SD-WAN destinations are deliberately handled before the
+				# candy0/private bypass rules so they re-enter the ordinary Proxy.
+				printf '  iifname "br-lan" ip daddr %s udp dport 443 counter tproxy to :%s meta mark set %s accept\n' "$failed_prefix" "$transparent_udp_port" "$tproxy_mark"
+			done
 			printf '  iifname "br-lan" fib daddr oifname "candy0" counter return\n'
 			for bypass_host in $bypass_ipv4_hosts; do
 				printf '  iifname "br-lan" ip daddr %s counter return\n' "$bypass_host"
@@ -3247,6 +3283,11 @@ write_fw4_include() {
 		fi
 		printf 'chain candy_prerouting {\n'
 		printf '  type nat hook prerouting priority -101; policy accept;\n'
+		for failed_prefix in $failed_prefixes; do
+			if [ "$redirect_tcp" -eq 1 ]; then
+				printf '  iifname "br-lan" ip daddr %s tcp counter redirect to :%s\n' "$failed_prefix" "$transparent_tcp_port"
+			fi
+		done
 		printf '  iifname "br-lan" fib daddr oifname "candy0" counter return\n'
 		for bypass_host in $bypass_ipv4_hosts; do
 			printf '  iifname "br-lan" ip daddr %s counter return\n' "$bypass_host"
@@ -3272,6 +3313,7 @@ write_fw4_include() {
 apply_firewall() {
 	config_load candy
 	local auto_firewall redirect_tcp redirect_udp dns_capture_lan block_quic transparent_tcp_port transparent_udp_port tproxy_mark previous_tproxy_mark bypass_ipv4_hosts bypass_ipv6_hosts bypass_host runtime_mode
+	local failed_prefixes
 	previous_tproxy_mark=
 	config_get_bool auto_firewall client auto_firewall 1
 	runtime_mode=$(runtime_mode_value)
@@ -3285,6 +3327,7 @@ apply_firewall() {
 	config_get tproxy_mark client tproxy_mark 100
 	bypass_ipv4_hosts=$(referenced_server_hosts 4)
 	bypass_ipv6_hosts=$(referenced_server_hosts 6)
+	failed_prefixes=$(sdwan_failed_prefixes 2>/dev/null || true)
 	if [ "$auto_firewall" -ne 1 ]; then
 		[ ! -f "$CANDY_FIREWALL_STATE_FILE" ] || cleanup_firewall
 		return $?
@@ -3299,6 +3342,11 @@ apply_firewall() {
 		iptables -t nat -F CANDY || return 1
 		for bypass_host in $bypass_ipv4_hosts; do
 			iptables -t nat -A CANDY -d "$bypass_host" -j RETURN || return 1
+		done
+		for failed_prefix in $failed_prefixes; do
+			if [ "$redirect_tcp" -eq 1 ]; then
+				iptables -t nat -A CANDY -d "$failed_prefix" -p tcp -j REDIRECT --to-ports "$transparent_tcp_port" || return 1
+			fi
 		done
 		for bypass_host in 0.0.0.0/8 10.0.0.0/8 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4; do
 			iptables -t nat -A CANDY -d "$bypass_host" -j RETURN || return 1
@@ -3337,7 +3385,7 @@ apply_firewall() {
 			persist_applied_firewall_state fw4 "$transparent_udp_port" "$tproxy_mark" || return 1
 			apply_tproxy_policy "$tproxy_mark" || return 1
 		fi
-		write_fw4_include "$redirect_tcp" "$dns_capture_lan" "$block_quic" "$redirect_udp" "$transparent_tcp_port" "$transparent_udp_port" "$bypass_ipv4_hosts" "$bypass_ipv6_hosts" "$tproxy_mark" || return 1
+		write_fw4_include "$redirect_tcp" "$dns_capture_lan" "$block_quic" "$redirect_udp" "$transparent_tcp_port" "$transparent_udp_port" "$bypass_ipv4_hosts" "$bypass_ipv6_hosts" "$tproxy_mark" "$failed_prefixes" || return 1
 		if run_with_timeout 8 fw4 check >/dev/null 2>&1; then
 			if run_with_timeout 12 fw4 reload >/dev/null 2>&1; then
 				log_msg "applied fw4 nftables firewall rules"
