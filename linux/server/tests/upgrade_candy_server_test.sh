@@ -86,7 +86,7 @@ EOF
 chmod 0755 "$fake_bin"/*
 : >"$tmp/sysctl.log"
 
-services='candy-netd.service candy-proxy.service candy-server.service candy-cloud-sync.service candy-cloud-sync.timer'
+services='candy-netd.service candy-proxy.service candy-server.service candy-cloud-sync.service candy-cloud-upgrade.service candy-cloud-sync.timer'
 reset_service_state() {
 	: >"$tmp/systemd.log"
 	for service in $services; do printf 0 >"$fake_state/$service.enabled"; printf 0 >"$fake_state/$service.active"; done
@@ -101,7 +101,7 @@ usr/local/libexec/candy-netd
 usr/local/libexec/candy-cloud-enroll
 usr/local/libexec/candy-cloud-sync
 usr/local/libexec/candy-server-health-check'
-units='candy-server.service candy-proxy.service candy-netd.service candy-cloud-sync.service candy-cloud-sync.timer'
+units='candy-server.service candy-proxy.service candy-netd.service candy-cloud-sync.service candy-cloud-upgrade.service candy-cloud-sync.timer'
 
 write_host_generation() {
 	value=$1
@@ -249,6 +249,7 @@ grep -Fx 'net.core.wmem_max = 16777216' "$sysctl_policy" >/dev/null || fail "per
 for service in candy-netd.service candy-server.service candy-cloud-sync.timer; do
 	[ "$(cat "$fake_state/$service.enabled")" = 1 ] && [ "$(cat "$fake_state/$service.active")" = 1 ] || fail "$service state was not restored"
 done
+[ "$(cat "$fake_state/candy-cloud-upgrade.service.enabled")" = 1 ] && [ "$(cat "$fake_state/candy-cloud-upgrade.service.active")" = 1 ] || fail "Cloud upgrade worker was not enabled for the enrolled node"
 [ "$(cat "$fake_state/candy-cloud-sync.service.enabled")" = 0 ] && [ "$(cat "$fake_state/candy-cloud-sync.service.active")" = 0 ] || fail "inactive Cloud sync service was enabled"
 [ "$(cat "$fake_state/candy-proxy.service.active")" = 0 ] || fail "optional Proxy service started without operator configuration"
 grep -F 'start --no-block candy-cloud-sync.service' "$tmp/systemd.log" >/dev/null ||

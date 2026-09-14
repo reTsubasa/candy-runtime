@@ -1,5 +1,6 @@
 d /var/lib/candy 0711 root root -
 d /var/lib/candy/sdwan 0700 candy-sdwan candy-sdwan -
 Z /var/lib/candy/sdwan - candy-sdwan candy-sdwan -
+d /var/lib/candy/node-upgrades 0700 root root -
 d /run/candy 0755 candy-sdwan candy-sdwan -
 d /run/candy-netd 0755 root candy-sdwan -

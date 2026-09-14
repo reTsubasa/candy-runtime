@@ -200,6 +200,8 @@ grep -F 'Z /var/lib/candy/sdwan - candy candy -' "$stage/systemd/candy.tmpfiles"
 	fail "server package does not migrate existing SD-WAN state to the candy service identity"
 grep -F 'd /var/lib/candy 0711 root root -' "$stage/systemd/candy.tmpfiles" >/dev/null ||
 	fail "server package exposes the root netd journal through a candy-owned state root"
+grep -F 'd /var/lib/candy/node-upgrades 0700 root root -' "$stage/systemd/candy.tmpfiles" >/dev/null ||
+	fail "server package does not create the private upgrade journal directory"
 grep -F 'chown root:root "$STATE_DIR"' "$stage/install/install-candy-server.sh" >/dev/null ||
 	fail "server installer does not protect the shared state root"
 if grep -F 'chown "$SERVICE_USER:$SERVICE_USER" "$STATE_DIR"' "$stage/install/install-candy-server.sh" >/dev/null; then
@@ -211,6 +213,8 @@ grep -F 'Z /var/lib/candy/sdwan - candy-sdwan candy-sdwan -' "$edge_stage/system
 	fail "Linux Edge package does not migrate existing SD-WAN state to its service identity"
 grep -F 'd /var/lib/candy 0711 root root -' "$edge_stage/systemd/candy.tmpfiles" >/dev/null ||
 	fail "Linux Edge package has an unsafe shared state root"
+grep -F 'd /var/lib/candy/node-upgrades 0700 root root -' "$edge_stage/systemd/candy.tmpfiles" >/dev/null ||
+	fail "Linux Edge package does not create the private upgrade journal directory"
 grep -F 'dd if=/dev/zero' "$stage/install/install-candy-server.sh" >/dev/null ||
 	fail "server installer does not generate congestion test data locally"
 
