@@ -11,7 +11,7 @@ mod backend {
     use futures_util::TryStreamExt;
     use netlink_packet_route::{
         link::{InfoKind, LinkAttribute, LinkInfo},
-        route::{RouteAttribute, RouteMetric, RouteProtocol, RouteScope, RouteType},
+        route::{RouteAddress, RouteAttribute, RouteMetric, RouteProtocol, RouteScope, RouteType},
         rule::{RuleAction, RuleAttribute},
     };
     use rtnetlink::{new_connection, Handle, LinkUnspec, RouteMessageBuilder};
@@ -229,16 +229,43 @@ mod backend {
             // must still be removed after a Core upgrade/crash has already
             // destroyed the TUN interface, otherwise the next preflight sees
             // the orphaned table as a conflict.
-            for prefix in throw_routes {
-                let route = RouteMessageBuilder::<Ipv4Addr>::new()
-                    .destination_prefix(Ipv4Addr::from(prefix.network), prefix.prefix_len)
-                    .table_id(plan.route_table)
-                    .protocol(RouteProtocol::Static)
-                    .kind(RouteType::Throw)
-                    .build();
-                if let Err(error) = handle.route().del(route).execute().await {
-                    if !route_delete_is_idempotent(&error) {
-                        return Err(NetworkError::Backend);
+            // Delete the kernel's exact route messages rather than relying on
+            // a reconstructed request.  Linux may attach implicit scope/type
+            // attributes to throw routes; a reconstructed DEL can fail with
+            // EINVAL and leave one sibling behind, poisoning the next
+            // preflight.  Enumerate only our table, protocol, kind and signed
+            // destinations so unrelated host routes remain untouched.
+            let throw_set = throw_routes
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>();
+            let query = RouteMessageBuilder::<Ipv4Addr>::new()
+                .table_id(plan.route_table)
+                .build();
+            let mut routes = handle.route().get(query).execute();
+            while let Some(route) = routes.try_next().await.map_err(|_| NetworkError::Backend)? {
+                let table = route.attributes.iter().find_map(|value| match value {
+                    RouteAttribute::Table(value) => Some(*value),
+                    _ => None,
+                });
+                let destination = route.attributes.iter().find_map(|value| match value {
+                    RouteAttribute::Destination(RouteAddress::Inet(value)) => Some(*value),
+                    _ => None,
+                });
+                let prefix = destination.and_then(|value| {
+                    Ipv4Prefix::new(value.octets(), route.header.destination_prefix_length).ok()
+                });
+                let in_table = table == Some(plan.route_table)
+                    || (plan.route_table <= u8::MAX.into()
+                        && u32::from(route.header.table) == plan.route_table);
+                if in_table
+                    && route.header.kind == RouteType::Throw
+                    && route.header.protocol == RouteProtocol::Static
+                    && prefix.is_some_and(|value| throw_set.contains(&value))
+                {
+                    if let Err(error) = handle.route().del(route).execute().await {
+                        if !route_delete_is_idempotent(&error) {
+                            return Err(NetworkError::Backend);
+                        }
                     }
                 }
             }

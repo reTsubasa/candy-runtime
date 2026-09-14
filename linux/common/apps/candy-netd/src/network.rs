@@ -1,4 +1,4 @@
-use candy_netd_proto::{Ipv4Prefix, LeaseOwner, PrepareDeclaration};
+use candy_netd_proto::{Ipv4Prefix, LeaseOwner, PrepareDeclaration, RouteKind};
 use thiserror::Error;
 
 const STEP_LINK: u16 = 1 << 0;
@@ -850,6 +850,16 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             .ok_or(NetworkError::InvalidTransition)?
             .clone();
         let declaration = &record.declaration;
+        let mut routes_for_cleanup = record.declaration.clone();
+        for route in &mut routes_for_cleanup.routes {
+            if record.failed_prefixes.contains(&route.prefix) {
+                // withdraw_prefixes replaces a failed remote route with a
+                // table-scoped throw route.  Preserve that runtime state in
+                // the cleanup plan instead of trying to delete the original
+                // link route that no longer exists.
+                route.kind = RouteKind::Local;
+            }
+        }
         let steps = record.completed_steps;
 
         let mut first_error = None;
@@ -916,7 +926,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         );
         cleanup_step!(
             steps & STEP_ROUTES != 0,
-            self.backend.remove_routes(declaration),
+            self.backend.remove_routes(&routes_for_cleanup),
             STEP_ROUTES
         );
         cleanup_step!(
