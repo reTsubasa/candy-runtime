@@ -26,6 +26,7 @@ struct Job {
     target: Target,
     state: String,
     error_code: Option<String>,
+    phase: Option<String>,
     // Cloud emits RFC3339 timestamps; the executor only persists/echoes them.
     // Keep them as strings so the wire contract does not depend on chrono's
     // optional serde feature in minimal runtime builds.
@@ -411,7 +412,7 @@ fn receipt(client: &Client, cloud: &Url, journal: &Journal, state: &str) -> Resu
     client
         .put(endpoint(cloud, "auth/v1/runtime/upgrades")?)
         .json(
-            &serde_json::json!({"id":journal.job.id,"state":state,"error_code":journal.error_code}),
+            &serde_json::json!({"id":journal.job.id,"state":state,"phase":journal.phase,"error_code":journal.error_code}),
         )
         .send()?
         .error_for_status()?;
