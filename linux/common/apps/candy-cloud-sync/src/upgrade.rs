@@ -359,6 +359,54 @@ fn install(
     Ok(())
 }
 
+fn upgrade_error_code(error: &anyhow::Error) -> &'static str {
+    let text = format!("{error:#}");
+    if text.contains("artifact_size_invalid") || text.contains("artifact_size_limit") {
+        return "upgrade_artifact_invalid_size";
+    }
+    if text.contains("artifact_integrity_mismatch") {
+        return "upgrade_checksum_mismatch";
+    }
+    if text.contains("untrusted_artifact_origin") {
+        return "upgrade_artifact_untrusted_origin";
+    }
+    if text.contains("runtime_installer_invalid") {
+        return "upgrade_installer_invalid";
+    }
+    if text.contains("unsupported_upgrade_platform")
+        || text.contains("target_not_in_signed_catalog")
+    {
+        return "upgrade_platform_mismatch";
+    }
+    if text.contains("catalog_target_changed")
+        || text.contains("catalog_or_installed_version_changed")
+    {
+        return "upgrade_catalog_changed";
+    }
+    if text.contains("installed_version_mismatch") {
+        return "upgrade_post_install_version_mismatch";
+    }
+    if text.contains("installer_timeout") {
+        return "upgrade_install_timeout";
+    }
+    if text.contains("core_status_failed") || text.contains("runtime_status_failed") {
+        return "upgrade_pre_install_status_failed";
+    }
+    if text.contains("signature") || text.contains("signature_verification_failed") {
+        return "upgrade_signature_invalid";
+    }
+    if text.contains("rollback") || text.contains("rollback_failed") {
+        return "upgrade_rollback_failed";
+    }
+    if text.contains("health") {
+        return "upgrade_health_check_failed";
+    }
+    if text.contains("command_exit_") {
+        return "upgrade_install_failed";
+    }
+    "upgrade_execution_failed"
+}
+
 fn receipt(client: &Client, cloud: &Url, journal: &Journal, state: &str) -> Result<()> {
     client
         .put(endpoint(cloud, "auth/v1/runtime/upgrades")?)
@@ -490,7 +538,7 @@ pub(super) fn run(args: &Args) -> Result<()> {
             journal.job.id,
             sanitize_log_value(&format!("{error:#}"))
         );
-        journal.error_code = Some("upgrade_install_or_health_check_failed".into());
+        journal.error_code = Some(upgrade_error_code(&error).into());
     }
     atomic_bytes(&journal_path, &serde_json::to_vec(&journal)?, 0o600)?;
     receipt(&client, &cloud, &journal, &journal.phase)?;
@@ -512,6 +560,30 @@ mod tests {
         assert_eq!(
             target_key("core", false, "aarch64").unwrap(),
             "linux_musl_aarch64"
+        );
+    }
+
+    #[test]
+    fn upgrade_failures_keep_their_stage() {
+        assert_eq!(
+            upgrade_error_code(&anyhow::anyhow!("artifact_integrity_mismatch")),
+            "upgrade_checksum_mismatch"
+        );
+        assert_eq!(
+            upgrade_error_code(&anyhow::anyhow!("installer_timeout")),
+            "upgrade_install_timeout"
+        );
+        assert_eq!(
+            upgrade_error_code(&anyhow::anyhow!("installed_version_mismatch")),
+            "upgrade_post_install_version_mismatch"
+        );
+        assert_eq!(
+            upgrade_error_code(&anyhow::anyhow!("rollback failed")),
+            "upgrade_rollback_failed"
+        );
+        assert_eq!(
+            upgrade_error_code(&anyhow::anyhow!("unexpected process failure")),
+            "upgrade_execution_failed"
         );
     }
 }
