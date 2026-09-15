@@ -472,7 +472,10 @@ fn failed_prefix_updates_are_reentrant_during_peer_loss_suspend() {
     transaction.suspend(owner()).unwrap();
     let failed = Ipv4Prefix::new([10, 1, 0, 0], 16).unwrap();
     transaction.set_failed_prefixes(owner(), &[failed]).unwrap();
-    assert_eq!(journal.load().unwrap().unwrap().failed_prefixes, vec![failed]);
+    assert_eq!(
+        journal.load().unwrap().unwrap().failed_prefixes,
+        vec![failed]
+    );
     transaction.resume(owner()).unwrap();
     assert!(events.borrow().contains(&"remove_routes"));
     assert!(events.borrow().contains(&"install_policy_rule"));

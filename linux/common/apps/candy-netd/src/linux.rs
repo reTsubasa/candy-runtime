@@ -141,14 +141,49 @@ mod backend {
                     RouteAttribute::Table(value) => Some(*value),
                     _ => None,
                 });
-                if table == Some(plan.route_table)
+                let in_table = table == Some(plan.route_table)
                     || (plan.route_table <= u8::MAX.into()
-                        && u32::from(route.header.table) == plan.route_table)
-                {
+                        && u32::from(route.header.table) == plan.route_table);
+                if in_table && !Self::is_owned_residual_route(&route, plan) {
                     return Ok(true);
                 }
             }
             Ok(false)
+        }
+
+        /// Return true only for routes that this declaration could have
+        /// installed and that the transaction cleanup path can remove. A
+        /// table match alone is insufficient: an operator's unrelated route
+        /// in a Candy table must continue to fail closed during preflight.
+        pub(crate) fn is_owned_residual_route(
+            route: &netlink_packet_route::route::RouteMessage,
+            plan: &LinuxNetworkPlan,
+        ) -> bool {
+            if route.header.protocol != RouteProtocol::Static {
+                return false;
+            }
+            let destination = route.attributes.iter().find_map(|value| match value {
+                RouteAttribute::Destination(RouteAddress::Inet(value)) => Some(*value),
+                _ => None,
+            });
+            let Some(destination) = destination else {
+                return false;
+            };
+            let Some(prefix) =
+                Ipv4Prefix::new(destination.octets(), route.header.destination_prefix_length).ok()
+            else {
+                return false;
+            };
+            if route.header.kind == RouteType::Throw {
+                return plan.throw_prefixes().contains(&prefix);
+            }
+            // Signed remote routes are unicast link routes with a destination
+            // present in the signed plan. The output interface is deliberately
+            // not checked here because the interface may have disappeared;
+            // link routes are removed idempotently when it is available.
+            route.header.kind == RouteType::Unicast
+                && route.header.scope == RouteScope::Link
+                && plan.remote_routes.contains(&prefix)
         }
 
         async fn link_index(handle: &Handle) -> Result<u32, NetworkError> {
@@ -870,5 +905,68 @@ mod tests {
             vec![(Ipv4Prefix::new([0, 0, 0, 0], 0).unwrap(), 17)]
         );
         assert_eq!(throw_routes, vec![cloud, local]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn preflight_owns_only_exact_candy_route_residuals() {
+        use super::backend::LinuxNetworkBackend;
+        let local = Ipv4Prefix::new([192, 168, 1, 0], 24).unwrap();
+        let remote = Ipv4Prefix::new([10, 10, 0, 0], 16).unwrap();
+        let declaration = PrepareDeclaration {
+            table_id: 20_000,
+            overlay_router_ipv4: [100, 64, 0, 2],
+            effective_mtu: 1300,
+            routes: vec![
+                RouteDeclaration {
+                    prefix: local,
+                    kind: RouteKind::Local,
+                },
+                RouteDeclaration {
+                    prefix: remote,
+                    kind: RouteKind::Remote,
+                },
+            ],
+            exclusions: vec![],
+            firewall: FirewallPolicy {
+                allow_forward: true,
+                clamp_tcp_mss: true,
+                require_ipv4_forwarding: true,
+                manage_rp_filter: true,
+            },
+        };
+        let plan = LinuxNetworkPlan::compile(&declaration).unwrap();
+        let own_throw = RouteMessageBuilder::<Ipv4Addr>::new()
+            .destination_prefix(Ipv4Addr::from(local.network), local.prefix_len)
+            .table_id(plan.route_table)
+            .protocol(RouteProtocol::Static)
+            .kind(RouteType::Throw)
+            .build();
+        assert!(LinuxNetworkBackend::is_owned_residual_route(
+            &own_throw, &plan
+        ));
+
+        let own_remote = RouteMessageBuilder::<Ipv4Addr>::new()
+            .destination_prefix(Ipv4Addr::from(remote.network), remote.prefix_len)
+            .table_id(plan.route_table)
+            .protocol(RouteProtocol::Static)
+            .scope(RouteScope::Link)
+            .kind(RouteType::Unicast)
+            .build();
+        assert!(LinuxNetworkBackend::is_owned_residual_route(
+            &own_remote,
+            &plan
+        ));
+
+        let unknown = Ipv4Prefix::new([172, 20, 0, 0], 16).unwrap();
+        let unrelated = RouteMessageBuilder::<Ipv4Addr>::new()
+            .destination_prefix(Ipv4Addr::from(unknown.network), unknown.prefix_len)
+            .table_id(plan.route_table)
+            .protocol(RouteProtocol::Static)
+            .kind(RouteType::Throw)
+            .build();
+        assert!(!LinuxNetworkBackend::is_owned_residual_route(
+            &unrelated, &plan
+        ));
     }
 }
