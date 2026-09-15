@@ -2809,6 +2809,10 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     let mut rejected_activation = None::<PathBuf>;
     let mut preparation_retry_target = None::<PathBuf>;
     let mut next_preparation_retry = Instant::now();
+    // Core status is sampled every 100ms. Keep the last applied failed-prefix
+    // set so an unchanged report does not generate a redundant netd IPC
+    // request (and route transaction) on every sample.
+    let mut last_failed_prefixes = None::<Vec<Ipv4Prefix>>;
     loop {
         // All recovery and candidate-inspection branches below may continue
         // early. Renew first so repeated transient states cannot starve netd.
@@ -3247,8 +3251,11 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     let declaration = parse_declaration(&args.declaration)
                         .context("parse declaration for failed-prefix recovery")?;
                     if let Some(prefixes) = parse_failed_prefixes(&status, &declaration)? {
-                        netd.set_failed_prefixes(prefixes)
-                            .context("apply Core failed-prefix route set")?;
+                        if last_failed_prefixes.as_ref() != Some(&prefixes) {
+                            netd.set_failed_prefixes(prefixes.clone())
+                                .context("apply Core failed-prefix route set")?;
+                            last_failed_prefixes = Some(prefixes);
+                        }
                     }
                 }
                 Ok(None) => {}
