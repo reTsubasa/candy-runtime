@@ -938,15 +938,18 @@ mod tests {
             effective_mtu: 1300,
             routes: vec![
                 RouteDeclaration {
-                    prefix: local,
-                    kind: RouteKind::Local,
-                },
-                RouteDeclaration {
                     prefix: remote,
                     kind: RouteKind::Remote,
                 },
+                RouteDeclaration {
+                    prefix: local,
+                    kind: RouteKind::Local,
+                },
             ],
-            exclusions: vec![],
+            exclusions: vec![UnderlayExclusion {
+                prefix: Ipv4Prefix::new([203, 0, 113, 1], 32).unwrap(),
+                kind: UnderlayKind::CloudApi,
+            }],
             firewall: FirewallPolicy {
                 allow_forward: true,
                 clamp_tcp_mss: true,
