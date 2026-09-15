@@ -929,6 +929,9 @@ mod tests {
         use super::backend::LinuxNetworkBackend;
         let local = Ipv4Prefix::new([192, 168, 1, 0], 24).unwrap();
         let remote = Ipv4Prefix::new([10, 10, 0, 0], 16).unwrap();
+        use netlink_packet_route::route::{RouteProtocol, RouteScope, RouteType};
+        use rtnetlink::RouteMessageBuilder;
+        use std::net::Ipv4Addr;
         let declaration = PrepareDeclaration {
             table_id: 20_000,
             overlay_router_ipv4: [100, 64, 0, 2],
