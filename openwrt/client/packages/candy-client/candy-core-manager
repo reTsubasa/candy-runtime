@@ -19,6 +19,7 @@ LOCK_DIR=${CANDY_CORE_LOCK_DIR:-/var/lock/candy-core-manager.lock}
 SERVICE_LOCK_DIR=${CANDY_SERVICE_LOCK_DIR:-/var/lib/candy/service.lock}
 PROC_ROOT=${CANDY_PROC_ROOT:-/proc}
 OPERATION_FILE=${CANDY_CORE_OPERATION_FILE:-/tmp/candy-core-operation.json}
+OPENWRT_RELEASE_FILE=${CANDY_OPENWRT_RELEASE_FILE:-/etc/openwrt_release}
 HEALTH_WAIT_SECONDS=${CANDY_CORE_HEALTH_WAIT_SECONDS:-15}
 OPERATION_ACTION=
 OPERATION_VERSION=
@@ -166,19 +167,33 @@ valid_version() {
 	printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+.-][0-9A-Za-z][0-9A-Za-z.+-]*)?$'
 }
 
+host_architecture_label() {
+	local distro_arch
+	distro_arch=$(sed -n "s/^DISTRIB_ARCH='\([^']*\)'/\1/p; s/^DISTRIB_ARCH=\"\([^\"]*\)\"/\1/p" "$OPENWRT_RELEASE_FILE" 2>/dev/null | head -1)
+	if [ -n "$distro_arch" ]; then
+		printf '%s' "$distro_arch"
+	else
+		uname -m 2>/dev/null || printf unknown
+	fi
+}
+
 host_arch_matches() {
 	local target_arch="$1" host_arch distro_arch
-	host_arch=$(uname -m 2>/dev/null || true)
-	case "$host_arch:$target_arch" in
-		x86_64:x86_64|amd64:x86_64|aarch64:aarch64|arm64:aarch64|arm*:arm|arm*:armv7|arm*:armv7l)
+	# DISTRIB_ARCH is OpenWrt's package ABI. Prefer it over uname, because
+	# uname only describes the broad kernel ISA and cannot prove hard-float,
+	# NEON or VFPv4 compatibility required by the IPQ40xx Core build.
+	distro_arch=$(sed -n "s/^DISTRIB_ARCH='\([^']*\)'/\1/p; s/^DISTRIB_ARCH=\"\([^\"]*\)\"/\1/p" "$OPENWRT_RELEASE_FILE" 2>/dev/null | head -1)
+	case "$distro_arch:$target_arch" in
+		x86_64:x86_64|arm_cortex-a7_neon-vfpv4:armv7|arm_cortex_a7_neon_vfpv4:armv7)
 			return 0
 		;;
 	esac
-	# On OpenWrt, DISTRIB_ARCH describes the package ABI and can be more
-	# specific than uname(1), e.g. arm_cortex-a7_neon-vfpv4 on IPQ40xx.
-	distro_arch=$(sed -n "s/^DISTRIB_ARCH='\([^']*\)'/\1/p; s/^DISTRIB_ARCH=\"\([^\"]*\)\"/\1/p" /etc/openwrt_release 2>/dev/null | head -1)
-	case "$distro_arch:$target_arch" in
-		x86_64:x86_64|aarch64:aarch64|arm_cortex-a7_neon-vfpv4:arm|arm_cortex-a7_neon-vfpv4:armv7|arm_cortex_a7_neon_vfpv4:arm|arm_cortex_a7_neon_vfpv4:armv7)
+	# A known but different OpenWrt package ABI is authoritative and must not
+	# be weakened by a generic uname result.
+	[ -z "$distro_arch" ] || { printf '%s' "$distro_arch" >&2; return 1; }
+	host_arch=$(uname -m 2>/dev/null || true)
+	case "$host_arch:$target_arch" in
+		x86_64:x86_64|amd64:x86_64|aarch64:aarch64|arm64:aarch64|armv7l:armv7|armv7*:armv7)
 			return 0
 		;;
 		*)
@@ -263,7 +278,7 @@ validate_manifest_file() {
 	[ "$libc" = musl ] || validation_error manifest libc_incompatible "Core libc ${libc:-missing} is not compatible with OpenWrt" || return 1
 	[ -n "$target_arch" ] || validation_error manifest arch_missing "Core target architecture is missing" || return 1
 	host_arch_matches "$target_arch" || {
-		validation_error manifest arch_incompatible "Core target architecture $target_arch does not match $(uname -m 2>/dev/null || printf unknown)" || return 1
+		validation_error manifest arch_incompatible "Core target architecture $target_arch does not match OpenWrt package ABI $(host_architecture_label)" || return 1
 	}
 	[ "$executable" = candy-core ] || validation_error manifest executable_path_invalid "Core executable path is invalid" || return 1
 	valid_sha256 "$executable_sha" || validation_error manifest executable_sha_invalid "Core executable SHA-256 is invalid" || return 1

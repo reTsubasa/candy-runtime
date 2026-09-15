@@ -177,6 +177,15 @@ export FAKE_FETCH_LOG="$tmp/fetch.log"
 export FAKE_TAR_LOG="$tmp/tar.log"
 mkdir -p "$CANDY_PROC_ROOT"
 
+cat > "$tmp/openwrt-ipq40xx-release" <<'EOF'
+DISTRIB_TARGET='ipq40xx/generic'
+DISTRIB_ARCH='arm_cortex-a7_neon-vfpv4'
+EOF
+cat > "$tmp/openwrt-other-arm-release" <<'EOF'
+DISTRIB_TARGET='ath79/generic'
+DISTRIB_ARCH='mips_24kc'
+EOF
+
 mkdir "$CANDY_CORE_LOCK_DIR"
 printf '%s\n' "$$" > "$CANDY_CORE_LOCK_DIR/pid"
 printf '%s\n' '{"state":"running","action":"install","version":"0.4.0","message":"busy","updated_at":1}' > "$CANDY_CORE_OPERATION_FILE"
@@ -347,6 +356,27 @@ make_bundle 0.4.5 1 "$tmp/core-0.4.5.tar.gz"
 [ -x "$cores/0.4.5/candy-core" ]
 grep -F '"action":"install-local"' "$CANDY_CORE_OPERATION_FILE" >/dev/null
 grep -F '"version":"0.4.5"' "$CANDY_CORE_OPERATION_FILE" >/dev/null
+
+# OpenWrt IPQ40xx is exactly arm/cortex-a7/neon-vfpv4. Validate an ARMv7
+# manual upload using the official package ABI even on this non-ARM test host.
+native_test_arch=$TEST_CORE_ARCH
+TEST_CORE_ARCH=armv7
+export TEST_CORE_ARCH
+make_bundle 0.4.10 1 "$tmp/core-0.4.10-armv7.tar.gz"
+CANDY_OPENWRT_RELEASE_FILE="$tmp/openwrt-ipq40xx-release" \
+	"$manager" install-local "$tmp/core-0.4.10-armv7.tar.gz" >/dev/null
+[ -x "$cores/0.4.10/candy-core" ]
+
+# A broad ARM-family or unrelated package ABI must not authorize the IPQ40xx
+# hard-float Core merely because its kernel reports an ARM-compatible ISA.
+if CANDY_OPENWRT_RELEASE_FILE="$tmp/openwrt-other-arm-release" \
+	"$manager" install-local "$tmp/core-0.4.10-armv7.tar.gz" >/dev/null 2>&1; then
+	echo "ARMv7 Core was accepted for an incompatible OpenWrt package ABI" >&2
+	exit 1
+fi
+grep -F '"error_code":"arch_incompatible"' "$CANDY_CORE_OPERATION_FILE" >/dev/null
+TEST_CORE_ARCH=$native_test_arch
+export TEST_CORE_ARCH
 
 make_bundle 0.5.0 2 "$tmp/core-bad-api.tar.gz"
 sha_bad_api=$(sha256sum "$tmp/core-bad-api.tar.gz" | awk '{ print $1 }')

@@ -22,7 +22,7 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 case "$expression" in
-	'@.core.releases.*.version') expression='.core.releases[].version' ;;
+	'@.core.releases[*].version') expression='.core.releases[].version' ;;
 	@.*) expression=".${expression#@.}" ;;
 esac
 if [ -n "$file" ]; then
@@ -396,8 +396,21 @@ jq --arg core_url "https://github.com/reTsubasa/candy-release/releases/download/
 		url:$core_url,sha256:$core_sha,size:$core_size
 	}' "$FAKE_CATALOG" > "$tmp/arm-catalog.json"
 cp "$tmp/arm-catalog.json" "$FAKE_CATALOG"
-CANDY_UPDATE_TEST_TARGET=ipq40xx/generic CANDY_UPDATE_TEST_ARCH=armv7l "$manager" check >/dev/null
+if CANDY_UPDATE_TEST_TARGET=ipq40xx/generic CANDY_UPDATE_TEST_ARCH=armv7l "$manager" check >/dev/null 2>&1; then
+	echo "IPQ40xx update accepted a kernel ISA in place of the OpenWrt package ABI" >&2
+	exit 1
+fi
 CANDY_UPDATE_TEST_TARGET=ipq40xx/generic CANDY_UPDATE_TEST_ARCH=arm_cortex-a7_neon-vfpv4 "$manager" check >/dev/null
+CANDY_UPDATE_TEST_TARGET=ipq40xx/chromium CANDY_UPDATE_TEST_ARCH=arm_cortex-a7_neon-vfpv4 "$manager" check >/dev/null
+CANDY_UPDATE_TEST_TARGET=ipq40xx/mikrotik CANDY_UPDATE_TEST_ARCH=arm_cortex_a7_neon_vfpv4 "$manager" check >/dev/null
+
+# The production jsonfilter wildcard syntax must yield a compatible ARMv7
+# Core candidate, not an empty list hidden by the local test shim.
+ipq_status=$(CANDY_UPDATE_TEST_TARGET=ipq40xx/generic CANDY_UPDATE_TEST_ARCH=arm_cortex-a7_neon-vfpv4 "$manager" status)
+printf '%s\n' "$ipq_status" | jq -e '.core_candidates | map(select(.version == "0.3.5")) | length == 1' >/dev/null || {
+	echo "IPQ40xx status omitted the compatible ARMv7 Core candidate" >&2
+	exit 1
+}
 
 "$manager" check >/dev/null
 

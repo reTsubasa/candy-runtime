@@ -14,6 +14,7 @@ CATALOG_SIGNATURE=$STATE_ROOT/stable.json.sig
 SEQUENCE_FILE=$STATE_ROOT/sequence
 CATALOG_HASH_FILE=$STATE_ROOT/catalog.sha256
 CHECKED_AT_FILE=$STATE_ROOT/checked-at
+OPENWRT_RELEASE_FILE=${CANDY_OPENWRT_RELEASE_FILE:-/etc/openwrt_release}
 OPERATION_FILE=${CANDY_UPDATE_OPERATION_FILE:-/tmp/candy-update-operation.json}
 CORE_OPERATION_FILE=${CANDY_CORE_OPERATION_FILE:-/tmp/candy-core-operation.json}
 LOCK_DIR=${CANDY_UPDATE_LOCK_DIR:-/var/lock/candy-update-manager.lock}
@@ -252,7 +253,7 @@ platform_release() {
 		printf '%s\n' "${CANDY_UPDATE_TEST_OPENWRT_RELEASE:-}"
 		return
 	fi
-	sed -n "s/^DISTRIB_RELEASE='\([^']*\)'/\1/p; s/^DISTRIB_RELEASE=\"\([^\"]*\)\"/\1/p" /etc/openwrt_release 2>/dev/null | head -1
+	sed -n "s/^DISTRIB_RELEASE='\([^']*\)'/\1/p; s/^DISTRIB_RELEASE=\"\([^\"]*\)\"/\1/p" "$OPENWRT_RELEASE_FILE" 2>/dev/null | head -1
 }
 
 platform_target() {
@@ -260,7 +261,7 @@ platform_target() {
 		printf '%s\n' "${CANDY_UPDATE_TEST_TARGET:-}"
 		return
 	fi
-	sed -n "s/^DISTRIB_TARGET='\([^']*\)'/\1/p; s/^DISTRIB_TARGET=\"\([^\"]*\)\"/\1/p" /etc/openwrt_release 2>/dev/null | head -1
+	sed -n "s/^DISTRIB_TARGET='\([^']*\)'/\1/p; s/^DISTRIB_TARGET=\"\([^\"]*\)\"/\1/p" "$OPENWRT_RELEASE_FILE" 2>/dev/null | head -1
 }
 
 platform_arch() {
@@ -271,7 +272,7 @@ platform_arch() {
 	fi
 	# OpenWrt's DISTRIB_ARCH is the package ABI and is more reliable than
 	# uname(1), which may report a generic or vendor-specific ARM name.
-	arch=$(sed -n "s/^DISTRIB_ARCH='\([^']*\)'/\1/p; s/^DISTRIB_ARCH=\"\([^\"]*\)\"/\1/p" /etc/openwrt_release 2>/dev/null | head -1)
+	arch=$(sed -n "s/^DISTRIB_ARCH='\([^']*\)'/\1/p; s/^DISTRIB_ARCH=\"\([^\"]*\)\"/\1/p" "$OPENWRT_RELEASE_FILE" 2>/dev/null | head -1)
 	[ -n "$arch" ] && { printf '%s\n' "$arch"; return; }
 	uname -m 2>/dev/null || true
 }
@@ -292,7 +293,11 @@ require_supported_platform() {
 			CORE_RUST_TARGET=x86_64-unknown-linux-musl
 			CORE_ARCH=x86_64
 			;;
-		ipq40xx/generic:armv7l|ipq40xx/generic:armv7|ipq40xx/generic:arm|ipq40xx/generic:arm_cortex-a7_neon-vfpv4|ipq40xx/generic:arm_cortex_a7_neon_vfpv4)
+		# OpenWrt defines generic, chromium and mikrotik as IPQ40xx
+		# subtargets. They share the exact Cortex-A7 NEON/VFPv4 package ABI.
+		# Select the signed IPQ40xx userspace artifact by ABI while retaining
+		# the SoC-family boundary; do not treat unrelated ARM targets as equal.
+		ipq40xx/*:arm_cortex-a7_neon-vfpv4|ipq40xx/*:arm_cortex_a7_neon_vfpv4)
 			SUPPORTED_TARGET=ipq40xx/generic
 			SUPPORTED_ARCH=arm_cortex-a7_neon-vfpv4
 			RUNTIME_TARGET_KEY=openwrt_25_12_4_arm_cortex_a7_neon_vfpv4
@@ -734,7 +739,10 @@ core_candidates_json() {
 	installed_versions=$(printf '%s' "$core_status" | jsonfilter -e '@.installed[*].version' 2>/dev/null || true)
 	current_bundle_sha=$(printf '%s' "$core_status" | jsonfilter -e '@.current_bundle_sha256' 2>/dev/null || true)
 	latest=$(catalog_field "$CATALOG_FILE" '@.core.latest')
-	versions=$(jsonfilter -i "$CATALOG_FILE" -e '@.core.releases.*.version' 2>/dev/null | awk -F. '
+	# OpenWrt jsonfilter uses [*] for object-member wildcards. The dotted
+	# form is accepted by the local test shim but returns no values on real
+	# jsonfilter builds, which made valid ARMv7/IPQ40xx Core candidates vanish.
+	versions=$(jsonfilter -i "$CATALOG_FILE" -e '@.core.releases[*].version' 2>/dev/null | awk -F. '
 		/^[0-9]+\.[0-9]+\.[0-9]+([+.-].*)?$/ {
 			split($3, patch, /[-+]/)
 			printf "%010d.%010d.%010d\t%s\n", $1, $2, patch[1], $0
