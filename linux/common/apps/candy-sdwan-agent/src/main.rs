@@ -1731,6 +1731,12 @@ fn wait_for_core_readiness(
         .context("Core readiness deadline overflow")?;
     let renew_every = Duration::from_millis((args.lease_ms / 3).max(1_000));
     let mut next_renewal = Instant::now() + renew_every;
+    // Core publishes readiness with an atomic rename.  During replacement the
+    // status path can briefly be absent even though the authenticated server
+    // listener remains bound.  Once a valid listener receipt was observed,
+    // preserve that fact across such a telemetry gap; the next poll still
+    // validates PID, token, generation and schema before changing state.
+    let mut listener_readiness_observed = false;
     loop {
         if shutdown_requested() {
             return Ok(ReadinessWait::ShutdownRequested);
@@ -1761,11 +1767,14 @@ fn wait_for_core_readiness(
         }
         let server_listener_ready = args.core_role == CoreRole::Server
             && matches!(readiness, Some(ReadinessState::ListenerReady));
+        if server_listener_ready {
+            listener_readiness_observed = true;
+        }
         // An authenticated server listener can be healthy before a peer is
         // connected. Keep Core alive in that phase so the peer's next dial can
         // complete; netd remains prepared but uncommitted until a route owner
         // is authenticated.
-        if Instant::now() >= deadline && !server_listener_ready {
+        if Instant::now() >= deadline && !(server_listener_ready || listener_readiness_observed) {
             eprintln!(
                 "level=error event=core_readiness_timeout stage=readiness_wait error_code=core_readiness_timeout generation={} pid={} status={} activation={}",
                 args.generation, child.id(), args.status.display(),
