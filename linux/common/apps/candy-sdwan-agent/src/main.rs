@@ -3470,6 +3470,7 @@ mod tests {
                     }
                     Err(error) => panic!("{error}"),
                 };
+                stream.set_nonblocking(false).unwrap();
                 let request = recv_request(&stream).unwrap();
                 let generation = request.owner.generation;
                 let tun = File::open("/dev/null").unwrap();
@@ -3555,6 +3556,12 @@ mod tests {
                     }
                     Err(error) => panic!("{error}"),
                 };
+                // Accepted sockets inherit the listener's nonblocking mode on
+                // Linux. The mock protocol is length-delimited by EOF, so
+                // switch the connected stream back to blocking mode before
+                // draining the request; otherwise a partial write can yield
+                // WouldBlock and poison every subsequent serialized test.
+                stream.set_nonblocking(false).unwrap();
                 // macOS can reject SO_RCVTIMEO after Abort's sender has
                 // closed. Its buffered request is still readable.
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
