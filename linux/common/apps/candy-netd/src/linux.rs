@@ -175,7 +175,11 @@ mod backend {
                 return false;
             };
             if route.header.kind == RouteType::Throw {
-                return plan.throw_prefixes().contains(&prefix);
+                // A failed-prefix fallback is represented by a static throw
+                // route for the affected signed route.  It may therefore be
+                // remote, local, or an underlay exclusion; only prefixes in
+                // the current signed declaration are reclaimable.
+                return plan.cleanup_throw_prefixes().contains(&prefix);
             }
             // Signed remote routes are unicast link routes with a destination
             // present in the signed plan. The output interface is deliberately
@@ -846,7 +850,16 @@ impl LinuxNetworkPlan {
                     .collect()
             })
             .unwrap_or_default();
-        (link_routes, self.throw_prefixes())
+        (link_routes, self.cleanup_throw_prefixes())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn cleanup_throw_prefixes(&self) -> Vec<Ipv4Prefix> {
+        let mut prefixes = self.throw_prefixes();
+        prefixes.extend(self.remote_routes.iter().copied());
+        prefixes.sort_unstable();
+        prefixes.dedup();
+        prefixes
     }
 }
 
@@ -895,7 +908,7 @@ mod tests {
         );
         assert_eq!(
             throw_routes,
-            vec![cloud, local],
+            vec![Ipv4Prefix::new([0, 0, 0, 0], 0).unwrap(), cloud, local,],
             "table-scoped throw routes must remain cleanup targets after candy0 disappears"
         );
 
@@ -904,7 +917,10 @@ mod tests {
             link_routes,
             vec![(Ipv4Prefix::new([0, 0, 0, 0], 0).unwrap(), 17)]
         );
-        assert_eq!(throw_routes, vec![cloud, local]);
+        assert_eq!(
+            throw_routes,
+            vec![Ipv4Prefix::new([0, 0, 0, 0], 0).unwrap(), cloud, local]
+        );
     }
 
     #[cfg(target_os = "linux")]
