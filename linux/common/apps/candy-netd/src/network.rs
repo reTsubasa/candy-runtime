@@ -459,7 +459,14 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             .as_ref()
             .ok_or(NetworkError::InvalidTransition)?;
         ensure_owner(record.owner, owner)?;
-        if record.phase != TransactionPhase::Active {
+        // Peer-loss fallback suspends only the policy rule.  The route table
+        // remains Candy-owned, so failed-prefix reconciliation must be
+        // re-entrant while the transaction is Suspended; otherwise the
+        // recovery loop fails itself with an invalid phase.
+        if !matches!(
+            record.phase,
+            TransactionPhase::Active | TransactionPhase::Suspended
+        ) {
             return Err(NetworkError::InvalidTransition);
         }
         let declaration = record.declaration.clone();
