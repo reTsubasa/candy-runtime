@@ -49,7 +49,9 @@ const CONFIGURATION_MEDIA_TYPE: &str = "application/vnd.candy.runtime-configurat
 const PUBLIC_ENDPOINT_ENV: &str = "CANDY_PUBLIC_ENDPOINT";
 const CLOUD_ENDPOINT_CACHE: &str = "cloud-api-endpoints-v1.json";
 const MAX_CLOUD_ENDPOINTS: usize = 16;
-const CERTIFICATE_RENEWAL_WINDOW_SECONDS: i64 = 48 * 60 * 60;
+// Keep the client window aligned with Cloud's NORMAL_RENEWAL_WINDOW. The
+// seven-day device certificate is renewed with a three-day safety margin.
+const CERTIFICATE_RENEWAL_WINDOW_SECONDS: i64 = 3 * 24 * 60 * 60;
 const CERTIFICATE_RENEWAL_MAX_BACKOFF_SECONDS: u64 = 6 * 60 * 60;
 
 #[derive(Debug, Parser)]
@@ -6273,8 +6275,8 @@ mod tests {
         let now = DateTime::parse_from_rfc3339("2026-09-03T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        assert!(!certificate_renewal_due("2026-09-05T00:00:01Z", now).unwrap());
-        assert!(certificate_renewal_due("2026-09-05T00:00:00Z", now).unwrap());
+        assert!(!certificate_renewal_due("2026-09-06T00:00:01Z", now).unwrap());
+        assert!(certificate_renewal_due("2026-09-06T00:00:00Z", now).unwrap());
         assert!(certificate_renewal_due("2026-09-02T00:00:00Z", now).unwrap());
         assert!(certificate_renewal_due("invalid", now).is_err());
         assert_eq!(certificate_renewal_backoff(1), 30);
