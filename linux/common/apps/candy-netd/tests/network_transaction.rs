@@ -460,6 +460,20 @@ fn failed_prefix_updates_are_scoped_persisted_and_restore_only_healthy_routes() 
 }
 
 #[test]
+fn initial_empty_failed_prefix_report_reconciles_routes() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let journal = MemoryJournal::default();
+    let mut transaction =
+        NetworkTransaction::new(RecordingBackend(events.clone()), journal).unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+    events.borrow_mut().clear();
+
+    transaction.set_failed_prefixes(owner(), &[]).unwrap();
+    assert_eq!(*events.borrow(), ["prepare_routes"]);
+}
+
+#[test]
 fn failed_prefix_updates_are_reentrant_during_peer_loss_suspend() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let journal = MemoryJournal::default();

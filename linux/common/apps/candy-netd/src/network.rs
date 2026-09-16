@@ -486,7 +486,14 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         }
         let previous = record.failed_prefixes.clone();
         let recovered = previous.iter().any(|prefix| !desired.contains(prefix));
-        if recovered {
+        // The active journal records ownership, not the kernel's current
+        // route contents.  After a netlink restart, interface recreation, or
+        // an interrupted cleanup, a remote route can be missing while the
+        // journal still says that no prefix is degraded.  The first empty
+        // readiness report is therefore an idempotent route reconciliation,
+        // so a healthy Core status cannot mask a missing data-plane route.
+        let initial_route_reconciliation = previous.is_empty() && desired.is_empty();
+        if recovered || initial_route_reconciliation {
             self.backend.prepare_routes(&declaration)?;
         }
         // Re-installing routes above restores the whole declaration.  Reapply
