@@ -407,6 +407,8 @@ struct RuntimeTelemetry<'a> {
     active_peers: u32,
     required_route_owners: u32,
     ready_route_owners: u32,
+    #[serde(default)]
+    failed_route_prefixes: &'a [String],
     fail_open_required: bool,
     last_error_code: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -513,6 +515,8 @@ struct CoreRuntimeStatus {
     active_peers: u32,
     required_route_owners: u32,
     ready_route_owners: u32,
+    #[serde(default)]
+    failed_prefixes: Vec<String>,
     fail_open_required: bool,
     #[serde(default)]
     steering_suspended: bool,
@@ -2483,6 +2487,7 @@ fn report_runtime_telemetry(
         active_peers: 0,
         required_route_owners: 0,
         ready_route_owners: 0,
+        failed_prefixes: Vec::new(),
         fail_open_required: lifecycle == "fail_open",
         steering_suspended: false,
         last_error_code: None,
@@ -2511,6 +2516,7 @@ fn report_runtime_telemetry(
         active_peers: status.active_peers,
         required_route_owners: status.required_route_owners,
         ready_route_owners: status.ready_route_owners,
+        failed_route_prefixes: &status.failed_prefixes,
         fail_open_required: lifecycle == "fail_open",
         last_error_code: reported_error_code,
         last_error_detail: reported_error_detail,
@@ -6460,6 +6466,7 @@ default via 192.0.2.1 dev eth0 proto static
             active_peers: 1,
             required_route_owners: 1,
             ready_route_owners: 1,
+            failed_prefixes: Vec::new(),
             fail_open_required: false,
             steering_suspended: false,
             last_error_code: None,
@@ -7667,6 +7674,7 @@ default via 192.0.2.1 dev eth0 proto static
             active_peers: 1,
             required_route_owners: 1,
             ready_route_owners: 1,
+            failed_prefixes: Vec::new(),
             fail_open_required: false,
             steering_suspended: false,
             last_error_code: None,
