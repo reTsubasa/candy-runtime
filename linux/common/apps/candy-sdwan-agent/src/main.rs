@@ -399,12 +399,14 @@ fn parse_failed_prefixes(
     for value in values {
         let prefix = parse_prefix(value)
             .with_context(|| format!("Core reported invalid failed prefix {value}"))?;
-        if !declaration
-            .routes
-            .iter()
-            .any(|route| route.prefix == prefix)
-        {
-            bail!("Core reported failed prefix {value} outside netd declaration")
+        if !declaration.routes.iter().any(|route| {
+            route.prefix == prefix
+                && matches!(
+                    route.kind,
+                    RouteKind::Remote | RouteKind::RemoteEgress | RouteKind::RemoteEgressGateway
+                )
+        }) {
+            bail!("Core reported failed prefix {value} outside remote route declaration")
         }
         if !prefixes.contains(&prefix) {
             prefixes.push(prefix);

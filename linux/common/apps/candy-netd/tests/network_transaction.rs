@@ -502,20 +502,25 @@ fn commit_installs_policy_rule_only_after_all_prepared_state() {
 fn failed_prefix_updates_are_scoped_persisted_and_restore_only_healthy_routes() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let journal = MemoryJournal::default();
+    let mut declaration = declaration();
+    let first = Ipv4Prefix::new([10, 3, 0, 0], 16).unwrap();
+    declaration.routes.push(RouteDeclaration {
+        prefix: first,
+        kind: RouteKind::Remote,
+    });
     let mut transaction =
         NetworkTransaction::new(RecordingBackend(events.clone()), journal.clone()).unwrap();
-    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.prepare(owner(), declaration).unwrap();
     transaction.commit(owner()).unwrap();
     events.borrow_mut().clear();
 
-    let first = Ipv4Prefix::new([10, 1, 0, 0], 16).unwrap();
     let second = Ipv4Prefix::new([10, 2, 0, 0], 16).unwrap();
     transaction
         .set_failed_prefixes(owner(), &[second, first, second])
         .unwrap();
     assert_eq!(
         journal.load().unwrap().unwrap().failed_prefixes,
-        vec![first, second]
+        vec![second, first]
     );
     assert_eq!(*events.borrow(), ["reconcile_routes"]);
 
@@ -529,7 +534,13 @@ fn failed_prefix_updates_are_scoped_persisted_and_restore_only_healthy_routes() 
         vec![second]
     );
 
-    let out_of_scope = Ipv4Prefix::new([10, 3, 0, 0], 16).unwrap();
+    let local = Ipv4Prefix::new([10, 1, 0, 0], 16).unwrap();
+    assert!(matches!(
+        transaction.set_failed_prefixes(owner(), &[local]),
+        Err(NetworkError::Conflict)
+    ));
+
+    let out_of_scope = Ipv4Prefix::new([10, 4, 0, 0], 16).unwrap();
     assert!(matches!(
         transaction.set_failed_prefixes(owner(), &[out_of_scope]),
         Err(NetworkError::Conflict)
@@ -587,7 +598,7 @@ fn failed_prefix_updates_are_reentrant_during_peer_loss_suspend() {
     events.borrow_mut().clear();
 
     transaction.suspend(owner()).unwrap();
-    let failed = Ipv4Prefix::new([10, 1, 0, 0], 16).unwrap();
+    let failed = Ipv4Prefix::new([10, 2, 0, 0], 16).unwrap();
     transaction.set_failed_prefixes(owner(), &[failed]).unwrap();
     assert_eq!(
         journal.load().unwrap().unwrap().failed_prefixes,

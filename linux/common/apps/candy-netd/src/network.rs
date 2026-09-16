@@ -488,10 +488,15 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         // an out-of-scope prefix here prevents a compromised/stale Core status
         // report from changing unrelated host routing state.
         if desired.iter().any(|prefix| {
-            !declaration
-                .routes
-                .iter()
-                .any(|route| route.prefix == *prefix)
+            !declaration.routes.iter().any(|route| {
+                route.prefix == *prefix
+                    && matches!(
+                        route.kind,
+                        RouteKind::Remote
+                            | RouteKind::RemoteEgress
+                            | RouteKind::RemoteEgressGateway
+                    )
+            })
         }) {
             return Err(NetworkError::Conflict);
         }
