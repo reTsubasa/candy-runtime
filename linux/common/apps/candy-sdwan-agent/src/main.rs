@@ -2812,7 +2812,6 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     // Core status is sampled every 100ms. Keep the last applied failed-prefix
     // set so an unchanged report does not generate a redundant netd IPC
     // request (and route transaction) on every sample.
-    let mut last_failed_prefixes = None::<Vec<Ipv4Prefix>>;
     loop {
         // All recovery and candidate-inspection branches below may continue
         // early. Renew first so repeated transient states cannot starve netd.
@@ -3251,11 +3250,13 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     let declaration = parse_declaration(&args.declaration)
                         .context("parse declaration for failed-prefix recovery")?;
                     if let Some(prefixes) = parse_failed_prefixes(&status, &declaration)? {
-                        if last_failed_prefixes.as_ref() != Some(&prefixes) {
-                            netd.set_failed_prefixes(prefixes.clone())
-                                .context("apply Core failed-prefix route set")?;
-                            last_failed_prefixes = Some(prefixes);
-                        }
+                        // Reconcile on every authenticated status sample. A
+                        // previous identical failed-prefix set does not prove
+                        // the kernel routes still exist: netlink restarts,
+                        // interface recreation, and external route changes can
+                        // silently remove them while Core remains healthy.
+                        netd.set_failed_prefixes(prefixes.clone())
+                            .context("reconcile Core failed-prefix route set")?;
                     }
                 }
                 Ok(None) => {}

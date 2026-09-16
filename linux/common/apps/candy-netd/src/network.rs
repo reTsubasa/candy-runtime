@@ -493,7 +493,12 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         // readiness report is therefore an idempotent route reconciliation,
         // so a healthy Core status cannot mask a missing data-plane route.
         let initial_route_reconciliation = previous.is_empty() && desired.is_empty();
-        if recovered || initial_route_reconciliation {
+        // Reconcile on every report. Core status is only a logical view; the
+        // kernel route set can drift after netlink restart, interface
+        // recreation, or an external administrator change. Reinstalling the
+        // signed declaration is idempotent, and failed prefixes are withdrawn
+        // immediately below so a degraded prefix never leaks back in.
+        if recovered || initial_route_reconciliation || previous == desired {
             self.backend.prepare_routes(&declaration)?;
         }
         // Re-installing routes above restores the whole declaration.  Reapply
