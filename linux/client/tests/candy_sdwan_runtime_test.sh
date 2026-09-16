@@ -8,6 +8,10 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
 fail() { printf '%s\n' "candy_sdwan_runtime_test: $*" >&2; exit 1; }
 
+grep -Fx 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
+	"$root/linux/client/packaging/candy-sdwan.service" >/dev/null ||
+	fail "SD-WAN client service cannot open route netlink diagnostics"
+
 state=$tmp/state
 run=$tmp/run
 bootstrap=$tmp/candy-node-bootstrap.json

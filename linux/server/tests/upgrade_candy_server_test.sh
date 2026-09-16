@@ -166,6 +166,9 @@ grep -F 'LimitMEMLOCK=64M' "$repo_root/linux/server/packaging/candy-server.servi
 	fail "server transaction agent cannot set its 64 MiB memlock limit"
 grep -Fx 'CapabilityBoundingSet=' "$repo_root/linux/server/packaging/candy-server.service" >/dev/null ||
 	fail "server service gained a capability bounding set"
+grep -Fx 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
+	"$repo_root/linux/server/packaging/candy-server.service" >/dev/null ||
+	fail "SD-WAN server service cannot open route netlink diagnostics"
 if grep -Eq '^AmbientCapabilities=|^CapabilityBoundingSet=CAP_' "$repo_root/linux/server/packaging/candy-server.service"; then
 	fail "server kernel tuning grants broad capabilities"
 fi

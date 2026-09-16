@@ -634,7 +634,7 @@ ProtectHome=yes
 ProtectSystem=strict
 ReadWritePaths=$STATE_DIR /run/candy
 CapabilityBoundingSet=
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target
