@@ -3696,6 +3696,11 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 }
             }
             match read_core_status(&args.status, args.generation, child.id(), &readiness_token) {
+                // Fallback has removed the SD-WAN policy rule, so this
+                // route table cannot receive traffic. Keep it immutable
+                // while Core redials; the first healthy iteration resumes
+                // steering before reconciling the exact failed set.
+                Ok(Some(_)) if transition.steering_suspended => {}
                 // During the bounded post-commit recovery window the status
                 // file may legitimately be absent while Core atomically
                 // replaces it.  Readiness handling above already put traffic

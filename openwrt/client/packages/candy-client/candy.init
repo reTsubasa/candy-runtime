@@ -144,10 +144,13 @@ log_event() {
 		rotate_log_file "$LOG_FILE" 1048576 5
 		rmdir "$LOG_FILE.rotate.lock" 2>/dev/null || true
 	fi
-	printf '%s level=%s event=%s pid=%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$event" "$$" "$*" >> "$LOG_FILE"
 	if command -v logger >/dev/null 2>&1; then
 		logger -t candy -- "level=$level event=$event pid=$$ $*"
 	fi
+	# File rotation and the root/candy-sdwan writers may race while creating
+	# the replacement file. Syslog above is authoritative; a local file
+	# permission race must never terminate either supervisor under `set -e`.
+	printf '%s level=%s event=%s pid=%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$event" "$$" "$*" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 log_msg() {
