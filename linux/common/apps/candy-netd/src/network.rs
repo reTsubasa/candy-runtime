@@ -85,6 +85,17 @@ pub trait NetworkBackend {
     ) -> Result<Vec<SysctlChange>, NetworkError>;
     fn prepare_link(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError>;
     fn prepare_routes(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError>;
+    fn reconcile_routes(
+        &mut self,
+        declaration: &PrepareDeclaration,
+        failed_prefixes: &[Ipv4Prefix],
+    ) -> Result<(), NetworkError> {
+        self.prepare_routes(declaration)?;
+        if !failed_prefixes.is_empty() {
+            self.withdraw_prefixes(declaration, failed_prefixes)?;
+        }
+        Ok(())
+    }
     fn prepare_firewall(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError>;
     fn prepare_sysctls(
         &mut self,
@@ -484,31 +495,11 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         }) {
             return Err(NetworkError::Conflict);
         }
-        let previous = record.failed_prefixes.clone();
-        let recovered = previous
-            .iter()
-            .copied()
-            .filter(|prefix| !desired.contains(prefix))
-            .collect::<Vec<_>>();
-        if !recovered.is_empty() {
-            // A failed remote prefix is a throw route with the same route key
-            // as the healthy link route. Remove only the recovered, signed
-            // prefixes first; otherwise RTM_NEWROUTE may return EEXIST while
-            // the old throw route continues to black-hole replies.
-            let mut recovered_declaration = declaration.clone();
-            recovered_declaration
-                .routes
-                .retain(|route| recovered.contains(&route.prefix));
-            self.backend.remove_routes(&recovered_declaration)?;
-        }
-        // This operation is the active route-integrity reconcile. It is safe
-        // to repeat because prepare_routes is scoped to the signed declaration.
-        self.backend.prepare_routes(&declaration)?;
-        // Reapply the complete failed set after restoring healthy routes so a
-        // still-unavailable sibling cannot accidentally become routable.
-        if !desired.is_empty() {
-            self.backend.withdraw_prefixes(&declaration, &desired)?;
-        }
+        // The journal is ownership intent, never evidence of kernel state.
+        // Reconcile the exact signed declaration against the backend's actual
+        // route set so an orphan throw can be replaced even when the journal
+        // already records an empty failed-prefix set.
+        self.backend.reconcile_routes(&declaration, &desired)?;
         let record = self
             .record
             .as_mut()

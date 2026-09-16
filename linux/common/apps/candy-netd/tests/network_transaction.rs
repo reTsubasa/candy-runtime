@@ -35,6 +35,78 @@ struct ReconfigureRecoveryFailingBackend {
     fail_restore: bool,
 }
 
+struct StaleThrowBackend {
+    inner: RecordingBackend,
+    stale_throw: Rc<Cell<bool>>,
+}
+
+impl NetworkBackend for StaleThrowBackend {
+    fn preflight(
+        &mut self,
+        declaration: &PrepareDeclaration,
+    ) -> Result<Vec<candy_netd::SysctlChange>, NetworkError> {
+        self.inner.preflight(declaration)
+    }
+    fn prepare_link(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.prepare_link(declaration)
+    }
+    fn prepare_routes(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.prepare_routes(declaration)
+    }
+    fn reconcile_routes(
+        &mut self,
+        _declaration: &PrepareDeclaration,
+        failed_prefixes: &[Ipv4Prefix],
+    ) -> Result<(), NetworkError> {
+        assert!(failed_prefixes.is_empty());
+        self.inner.event("remove_stale_throw");
+        self.stale_throw.set(false);
+        self.inner.event("install_missing_unicast");
+        Ok(())
+    }
+    fn prepare_firewall(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.prepare_firewall(declaration)
+    }
+    fn prepare_sysctls(
+        &mut self,
+        declaration: &PrepareDeclaration,
+        changes: &[candy_netd::SysctlChange],
+    ) -> Result<(), NetworkError> {
+        self.inner.prepare_sysctls(declaration, changes)
+    }
+    fn activate_link(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.activate_link(declaration)
+    }
+    fn install_policy_rule(
+        &mut self,
+        declaration: &PrepareDeclaration,
+    ) -> Result<(), NetworkError> {
+        self.inner.install_policy_rule(declaration)
+    }
+    fn remove_policy_rule(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.remove_policy_rule(declaration)
+    }
+    fn deactivate_link(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.deactivate_link(declaration)
+    }
+    fn remove_firewall(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.remove_firewall(declaration)
+    }
+    fn remove_routes(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.remove_routes(declaration)
+    }
+    fn remove_link(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.inner.remove_link(declaration)
+    }
+    fn restore_sysctls(
+        &mut self,
+        declaration: &PrepareDeclaration,
+        changes: &[candy_netd::SysctlChange],
+    ) -> Result<(), NetworkError> {
+        self.inner.restore_sysctls(declaration, changes)
+    }
+}
+
 fn is_replacement(declaration: &PrepareDeclaration) -> bool {
     declaration
         .routes
@@ -214,6 +286,15 @@ impl NetworkBackend for RecordingBackend {
 
     fn prepare_routes(&mut self, _declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
         self.event("prepare_routes");
+        Ok(())
+    }
+
+    fn reconcile_routes(
+        &mut self,
+        _declaration: &PrepareDeclaration,
+        _failed_prefixes: &[Ipv4Prefix],
+    ) -> Result<(), NetworkError> {
+        self.event("reconcile_routes");
         Ok(())
     }
 
@@ -436,16 +517,13 @@ fn failed_prefix_updates_are_scoped_persisted_and_restore_only_healthy_routes() 
         journal.load().unwrap().unwrap().failed_prefixes,
         vec![first, second]
     );
-    assert_eq!(*events.borrow(), ["prepare_routes", "remove_routes"]);
+    assert_eq!(*events.borrow(), ["reconcile_routes"]);
 
     // Recovering one prefix must rebuild the route table and immediately
     // withdraw the sibling that is still failed.
     events.borrow_mut().clear();
     transaction.set_failed_prefixes(owner(), &[second]).unwrap();
-    assert_eq!(
-        *events.borrow(),
-        ["remove_routes", "prepare_routes", "remove_routes"]
-    );
+    assert_eq!(*events.borrow(), ["reconcile_routes"]);
     assert_eq!(
         journal.load().unwrap().unwrap().failed_prefixes,
         vec![second]
@@ -473,7 +551,29 @@ fn initial_empty_failed_prefix_report_reconciles_routes() {
     events.borrow_mut().clear();
 
     transaction.set_failed_prefixes(owner(), &[]).unwrap();
-    assert_eq!(*events.borrow(), ["prepare_routes"]);
+    assert_eq!(*events.borrow(), ["reconcile_routes"]);
+}
+
+#[test]
+fn empty_journal_state_replaces_a_kernel_stale_throw_with_healthy_unicast() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let stale_throw = Rc::new(Cell::new(true));
+    let backend = StaleThrowBackend {
+        inner: RecordingBackend(events.clone()),
+        stale_throw: stale_throw.clone(),
+    };
+    let mut transaction = NetworkTransaction::new(backend, MemoryJournal::default()).unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+    events.borrow_mut().clear();
+
+    transaction.set_failed_prefixes(owner(), &[]).unwrap();
+
+    assert!(!stale_throw.get());
+    assert_eq!(
+        *events.borrow(),
+        ["remove_stale_throw", "install_missing_unicast"]
+    );
 }
 
 #[test]
@@ -494,7 +594,7 @@ fn failed_prefix_updates_are_reentrant_during_peer_loss_suspend() {
         vec![failed]
     );
     transaction.resume(owner()).unwrap();
-    assert!(events.borrow().contains(&"remove_routes"));
+    assert!(events.borrow().contains(&"reconcile_routes"));
     assert!(events.borrow().contains(&"install_policy_rule"));
 }
 

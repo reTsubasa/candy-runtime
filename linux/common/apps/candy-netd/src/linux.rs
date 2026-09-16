@@ -236,6 +236,119 @@ mod backend {
             Ok(())
         }
 
+        async fn reconcile_routes(
+            handle: &Handle,
+            plan: &LinuxNetworkPlan,
+            failed_prefixes: &[Ipv4Prefix],
+        ) -> Result<(), NetworkError> {
+            let index = Self::link_index(handle).await?;
+            let failed = failed_prefixes
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            let healthy_remote = plan
+                .remote_routes
+                .iter()
+                .copied()
+                .filter(|prefix| !failed.contains(prefix))
+                .collect::<std::collections::HashSet<_>>();
+            let expected_throw = plan
+                .throw_prefixes()
+                .into_iter()
+                .chain(failed.iter().copied())
+                .collect::<std::collections::HashSet<_>>();
+            let mut present_healthy = std::collections::HashSet::new();
+            let mut present_throw = std::collections::HashSet::new();
+            let mut stale_owned = Vec::new();
+            let query = RouteMessageBuilder::<Ipv4Addr>::new()
+                .table_id(plan.route_table)
+                .build();
+            let mut routes = handle.route().get(query).execute();
+            while let Some(route) = routes.try_next().await.map_err(|_| NetworkError::Backend)? {
+                let table = route.attributes.iter().find_map(|value| match value {
+                    RouteAttribute::Table(value) => Some(*value),
+                    _ => None,
+                });
+                let in_table = table == Some(plan.route_table)
+                    || (plan.route_table <= u8::MAX.into()
+                        && u32::from(route.header.table) == plan.route_table);
+                if !in_table || route.header.protocol != RouteProtocol::Static {
+                    continue;
+                }
+                let prefix = route.attributes.iter().find_map(|value| match value {
+                    RouteAttribute::Destination(RouteAddress::Inet(value)) => {
+                        Ipv4Prefix::new(value.octets(), route.header.destination_prefix_length).ok()
+                    }
+                    _ => None,
+                });
+                let Some(prefix) = prefix else { continue };
+                let oif = route.attributes.iter().find_map(|value| match value {
+                    RouteAttribute::Oif(value) => Some(*value),
+                    _ => None,
+                });
+                if healthy_remote.contains(&prefix) {
+                    if route.header.kind == RouteType::Unicast
+                        && route.header.scope == RouteScope::Link
+                        && oif == Some(index)
+                    {
+                        present_healthy.insert(prefix);
+                    } else if matches!(route.header.kind, RouteType::Throw | RouteType::Unicast) {
+                        // This prefix is signed and expected to be healthy.
+                        // Remove only Candy's static throw/link variants; an
+                        // unrelated protocol remains fail-closed in preflight.
+                        stale_owned.push(route);
+                    }
+                } else if expected_throw.contains(&prefix) {
+                    if route.header.kind == RouteType::Throw {
+                        present_throw.insert(prefix);
+                    } else if route.header.kind == RouteType::Unicast {
+                        stale_owned.push(route);
+                    }
+                }
+            }
+            for route in stale_owned {
+                if let Err(error) = handle.route().del(route).execute().await {
+                    if !route_delete_is_idempotent(&error) {
+                        return Err(NetworkError::Backend);
+                    }
+                }
+            }
+            for prefix in healthy_remote.difference(&present_healthy) {
+                let mut route = RouteMessageBuilder::<Ipv4Addr>::new()
+                    .destination_prefix(Ipv4Addr::from(prefix.network), prefix.prefix_len)
+                    .output_interface(index)
+                    .table_id(plan.route_table)
+                    .protocol(RouteProtocol::Static)
+                    .scope(RouteScope::Link)
+                    .build();
+                route.attributes.push(RouteAttribute::Metrics(vec![
+                    RouteMetric::Mtu(u32::from(plan.route_mtu)),
+                    RouteMetric::Advmss(u32::from(plan.tcp_advmss)),
+                ]));
+                handle
+                    .route()
+                    .add(route)
+                    .execute()
+                    .await
+                    .map_err(|_| NetworkError::Backend)?;
+            }
+            for prefix in expected_throw.difference(&present_throw) {
+                let route = RouteMessageBuilder::<Ipv4Addr>::new()
+                    .destination_prefix(Ipv4Addr::from(prefix.network), prefix.prefix_len)
+                    .table_id(plan.route_table)
+                    .protocol(RouteProtocol::Static)
+                    .kind(RouteType::Throw)
+                    .build();
+                handle
+                    .route()
+                    .add(route)
+                    .execute()
+                    .await
+                    .map_err(|_| NetworkError::Backend)?;
+            }
+            Ok(())
+        }
+
         async fn delete_routes(
             handle: &Handle,
             plan: &LinuxNetworkPlan,
@@ -401,6 +514,17 @@ mod backend {
             let plan = Self::plan(declaration)?;
             let handle = self.handle.clone();
             self.with_async(async move { Self::add_routes(&handle, &plan).await })
+        }
+
+        fn reconcile_routes(
+            &mut self,
+            declaration: &PrepareDeclaration,
+            failed_prefixes: &[Ipv4Prefix],
+        ) -> Result<(), NetworkError> {
+            let plan = Self::plan(declaration)?;
+            let failed = failed_prefixes.to_vec();
+            let handle = self.handle.clone();
+            self.with_async(async move { Self::reconcile_routes(&handle, &plan, &failed).await })
         }
 
         fn prepare_firewall(
