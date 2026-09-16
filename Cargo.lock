@@ -241,11 +241,15 @@ dependencies = [
  "candy-netd-client",
  "candy-netd-proto",
  "clap",
+ "futures-util",
+ "netlink-packet-route",
  "nix 0.29.0",
+ "rtnetlink",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "tokio",
  "uuid",
 ]
 

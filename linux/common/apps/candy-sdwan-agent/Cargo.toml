@@ -16,5 +16,11 @@ serde_json.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+futures-util.workspace = true
+netlink-packet-route.workspace = true
+rtnetlink.workspace = true
+tokio.workspace = true
+
 [dev-dependencies]
 tempfile = "3"

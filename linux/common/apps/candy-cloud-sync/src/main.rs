@@ -407,6 +407,8 @@ struct RuntimeTelemetry<'a> {
     active_peers: u32,
     required_route_owners: u32,
     ready_route_owners: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route_diagnostics: Option<&'a RuntimeRouteDiagnostics>,
     #[serde(default)]
     failed_route_prefixes: &'a [String],
     fail_open_required: bool,
@@ -427,6 +429,55 @@ struct RuntimeTelemetry<'a> {
     paths: &'a [RuntimePathTelemetry],
     #[serde(skip_serializing_if = "Option::is_none")]
     local_networks: Option<&'a [LocalNetworkTelemetry]>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RouteDiagnosticsFile {
+    schema_version: u8,
+    generation: u64,
+    integrity: String,
+    expected_snapshot_sha256: String,
+    observed_snapshot_sha256: String,
+    expected_routes: u32,
+    observed_routes: u32,
+    orphaned_routes: u32,
+    reconcile_attempts: u64,
+    reconcile_successes: u64,
+    last_checked_at_unix: u64,
+    last_reconciled_at_unix: Option<u64>,
+    last_recovered_at_unix: Option<u64>,
+    last_recovery_duration_ms: Option<u64>,
+    last_error_code: Option<String>,
+    probe_state: String,
+    probe_targets: u32,
+    probe_successes: u32,
+    probe_rtt_ms: Option<u32>,
+    probe_checked_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeRouteDiagnostics {
+    schema_version: u8,
+    integrity: String,
+    expected_snapshot_sha256: String,
+    observed_snapshot_sha256: String,
+    expected_routes: u32,
+    observed_routes: u32,
+    orphaned_routes: u32,
+    reconcile_attempts: u64,
+    reconcile_successes: u64,
+    last_checked_at_unix: u64,
+    last_reconciled_at_unix: Option<u64>,
+    last_recovered_at_unix: Option<u64>,
+    last_recovery_duration_ms: Option<u64>,
+    last_error_code: Option<String>,
+    probe_state: String,
+    probe_targets: u32,
+    probe_successes: u32,
+    probe_rtt_ms: Option<u32>,
+    probe_checked_at_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Eq, PartialEq)]
@@ -2499,6 +2550,16 @@ fn report_runtime_telemetry(
         transport_mode: None,
     };
     let status = core_status.as_ref().unwrap_or(&empty);
+    let route_diagnostics = match read_route_diagnostics(run_dir, status.generation) {
+        Ok(diagnostics) => diagnostics,
+        Err(error) => {
+            eprintln!(
+                "level=warn event=route_diagnostics_telemetry_omitted reason={}",
+                sanitize_log_value(&format!("{error:#}"))
+            );
+            None
+        }
+    };
     let reported_error_code = status
         .last_error_code
         .as_deref()
@@ -2516,6 +2577,7 @@ fn report_runtime_telemetry(
         active_peers: status.active_peers,
         required_route_owners: status.required_route_owners,
         ready_route_owners: status.ready_route_owners,
+        route_diagnostics: route_diagnostics.as_ref(),
         failed_route_prefixes: &status.failed_prefixes,
         fail_open_required: lifecycle == "fail_open",
         last_error_code: reported_error_code,
@@ -2570,6 +2632,117 @@ fn report_runtime_telemetry(
         atomic_json(&sample_path, &sample, 0o600)?;
     }
     Ok(())
+}
+
+fn read_route_diagnostics(
+    run_dir: &Path,
+    runtime_generation: u64,
+) -> Result<Option<RuntimeRouteDiagnostics>> {
+    if runtime_generation == 0 {
+        return Ok(None);
+    }
+    let path = run_dir.join("route-diagnostics-v1.json");
+    let value = match read_bounded_json::<RouteDiagnosticsFile>(&path, 64 * 1024) {
+        Ok(value) => value,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error).context("read route diagnostics"),
+    };
+    let valid_hash = |hash: &str| {
+        hash.len() == 64
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    let error_valid = value.last_error_code.as_deref().is_none_or(|code| {
+        !code.is_empty()
+            && code.len() <= 80
+            && code
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    });
+    let probe_valid = match value.probe_state.as_str() {
+        "unreported" => {
+            value.probe_targets == 0
+                && value.probe_successes == 0
+                && value.probe_rtt_ms.is_none()
+                && value.probe_checked_at_unix.is_none()
+        }
+        "pending" => {
+            value.probe_successes <= value.probe_targets && value.probe_checked_at_unix.is_none()
+        }
+        "succeeded" => {
+            value.probe_targets > 0
+                && value.probe_successes == value.probe_targets
+                && value.probe_checked_at_unix.is_some()
+        }
+        "failed" => {
+            value.probe_targets > 0
+                && value.probe_successes < value.probe_targets
+                && value.probe_checked_at_unix.is_some()
+        }
+        _ => false,
+    };
+    let consistent = value.integrity != "consistent"
+        || (value.expected_snapshot_sha256 == value.observed_snapshot_sha256
+            && value.expected_routes == value.observed_routes
+            && value.orphaned_routes == 0);
+    let now = unix_now()?;
+    if value.schema_version != 1
+        || value.generation != runtime_generation
+        || !matches!(
+            value.integrity.as_str(),
+            "consistent" | "drifted" | "reconciling" | "failed"
+        )
+        || !valid_hash(&value.expected_snapshot_sha256)
+        || !valid_hash(&value.observed_snapshot_sha256)
+        || value.expected_routes > 8192
+        || value.observed_routes > 8192
+        || value.orphaned_routes > value.observed_routes
+        || value.reconcile_successes > value.reconcile_attempts
+        || value.last_checked_at_unix == 0
+        || value.last_checked_at_unix > now.saturating_add(300)
+        || value
+            .last_reconciled_at_unix
+            .is_some_and(|timestamp| timestamp == 0 || timestamp > value.last_checked_at_unix)
+        || value
+            .last_recovered_at_unix
+            .is_some_and(|timestamp| timestamp == 0 || timestamp > value.last_checked_at_unix)
+        || value
+            .last_recovery_duration_ms
+            .is_some_and(|duration| duration > 300_000)
+        || !error_valid
+        || !probe_valid
+        || !consistent
+    {
+        bail!("route diagnostics failed local validation")
+    }
+    Ok(Some(RuntimeRouteDiagnostics {
+        schema_version: value.schema_version,
+        integrity: value.integrity,
+        expected_snapshot_sha256: value.expected_snapshot_sha256,
+        observed_snapshot_sha256: value.observed_snapshot_sha256,
+        expected_routes: value.expected_routes,
+        observed_routes: value.observed_routes,
+        orphaned_routes: value.orphaned_routes,
+        reconcile_attempts: value.reconcile_attempts,
+        reconcile_successes: value.reconcile_successes,
+        last_checked_at_unix: value.last_checked_at_unix,
+        last_reconciled_at_unix: value.last_reconciled_at_unix,
+        last_recovered_at_unix: value.last_recovered_at_unix,
+        last_recovery_duration_ms: value.last_recovery_duration_ms,
+        last_error_code: value.last_error_code,
+        probe_state: value.probe_state,
+        probe_targets: value.probe_targets,
+        probe_successes: value.probe_successes,
+        probe_rtt_ms: value.probe_rtt_ms,
+        probe_checked_at_unix: value.probe_checked_at_unix,
+    }))
 }
 
 fn discover_local_networks() -> Result<Vec<LocalNetworkTelemetry>> {
@@ -6275,6 +6448,48 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_diagnostics_require_matching_generation_and_truthful_probe_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("route-diagnostics-v1.json");
+        let now = unix_now().unwrap();
+        let document = serde_json::json!({
+            "schema_version": 1,
+            "generation": 7,
+            "integrity": "consistent",
+            "expected_snapshot_sha256": "11".repeat(32),
+            "observed_snapshot_sha256": "11".repeat(32),
+            "expected_routes": 3,
+            "observed_routes": 3,
+            "orphaned_routes": 0,
+            "reconcile_attempts": 2,
+            "reconcile_successes": 2,
+            "last_checked_at_unix": now,
+            "last_reconciled_at_unix": now,
+            "last_recovered_at_unix": now,
+            "last_recovery_duration_ms": 12,
+            "last_error_code": null,
+            "probe_state": "unreported",
+            "probe_targets": 0,
+            "probe_successes": 0,
+            "probe_rtt_ms": null,
+            "probe_checked_at_unix": null
+        });
+        fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+        let diagnostics = read_route_diagnostics(directory.path(), 7)
+            .unwrap()
+            .expect("matching diagnostics");
+        assert_eq!(diagnostics.integrity, "consistent");
+        assert_eq!(diagnostics.probe_state, "unreported");
+        assert!(read_route_diagnostics(directory.path(), 8).is_err());
+
+        let mut forged = document;
+        forged["probe_state"] = serde_json::json!("succeeded");
+        fs::write(&path, serde_json::to_vec(&forged).unwrap()).unwrap();
+        assert!(read_route_diagnostics(directory.path(), 7).is_err());
+    }
 
     #[test]
     fn certificate_renewal_window_and_backoff_are_bounded() {

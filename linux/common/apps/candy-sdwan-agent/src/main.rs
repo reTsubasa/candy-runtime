@@ -18,6 +18,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "linux")]
+use futures_util::TryStreamExt;
+#[cfg(target_os = "linux")]
+use netlink_packet_route::route::{
+    RouteAddress, RouteAttribute, RouteMetric, RouteProtocol, RouteScope, RouteType,
+};
+#[cfg(target_os = "linux")]
+use rtnetlink::RouteMessageBuilder;
+
 const MAX_DECLARATION_BYTES: u64 = 1024 * 1024;
 const MIN_LEASE_MS: u64 = 5_000;
 const MAX_LEASE_MS: u64 = 120_000;
@@ -358,6 +367,100 @@ struct JsonFirewall {
     manage_rp_filter: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RouteDiagnosticsFile {
+    schema_version: u8,
+    generation: u64,
+    integrity: String,
+    expected_snapshot_sha256: String,
+    observed_snapshot_sha256: String,
+    expected_routes: u32,
+    observed_routes: u32,
+    orphaned_routes: u32,
+    reconcile_attempts: u64,
+    reconcile_successes: u64,
+    last_checked_at_unix: u64,
+    last_reconciled_at_unix: Option<u64>,
+    last_recovered_at_unix: Option<u64>,
+    last_recovery_duration_ms: Option<u64>,
+    last_error_code: Option<String>,
+    probe_state: String,
+    probe_targets: u32,
+    probe_successes: u32,
+    probe_rtt_ms: Option<u32>,
+    probe_checked_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct RouteSnapshot {
+    expected_snapshot_sha256: String,
+    observed_snapshot_sha256: String,
+    expected_routes: u32,
+    observed_routes: u32,
+    orphaned_routes: u32,
+}
+
+impl RouteDiagnosticsFile {
+    fn new(generation: u64) -> Self {
+        Self {
+            schema_version: 1,
+            generation,
+            integrity: "reconciling".into(),
+            expected_snapshot_sha256: "0".repeat(64),
+            observed_snapshot_sha256: "0".repeat(64),
+            expected_routes: 0,
+            observed_routes: 0,
+            orphaned_routes: 0,
+            reconcile_attempts: 0,
+            reconcile_successes: 0,
+            last_checked_at_unix: 1,
+            last_reconciled_at_unix: None,
+            last_recovered_at_unix: None,
+            last_recovery_duration_ms: None,
+            last_error_code: None,
+            probe_state: "unreported".into(),
+            probe_targets: 0,
+            probe_successes: 0,
+            probe_rtt_ms: None,
+            probe_checked_at_unix: None,
+        }
+    }
+
+    fn record_snapshot(&mut self, snapshot: RouteSnapshot, now: u64, duration_ms: u64) {
+        let was_unhealthy = self.integrity != "consistent";
+        self.expected_snapshot_sha256 = snapshot.expected_snapshot_sha256;
+        self.observed_snapshot_sha256 = snapshot.observed_snapshot_sha256;
+        self.expected_routes = snapshot.expected_routes;
+        self.observed_routes = snapshot.observed_routes;
+        self.orphaned_routes = snapshot.orphaned_routes;
+        self.last_checked_at_unix = now;
+        self.last_reconciled_at_unix = Some(now);
+        self.last_recovery_duration_ms = Some(duration_ms.min(300_000));
+        if self.expected_snapshot_sha256 == self.observed_snapshot_sha256
+            && self.orphaned_routes == 0
+        {
+            self.integrity = "consistent".into();
+            self.reconcile_successes = self.reconcile_successes.saturating_add(1);
+            self.last_error_code = None;
+            if was_unhealthy {
+                self.last_recovered_at_unix = Some(now);
+            }
+        } else {
+            self.integrity = "drifted".into();
+            self.last_error_code = Some("route_snapshot_mismatch".into());
+        }
+    }
+
+    fn record_error(&mut self, now: u64, duration_ms: u64, code: &str) {
+        self.integrity = "failed".into();
+        self.last_checked_at_unix = now;
+        self.last_reconciled_at_unix = Some(now);
+        self.last_recovery_duration_ms = Some(duration_ms.min(300_000));
+        self.last_error_code = Some(code.into());
+    }
+}
+
 #[derive(Deserialize, Debug)]
 struct CoreReadinessStatus {
     schema_version: u16,
@@ -413,6 +516,283 @@ fn parse_failed_prefixes(
         }
     }
     Ok(Some(prefixes))
+}
+
+fn desired_failed_prefixes(
+    status: &CoreReadinessStatus,
+    declaration: &PrepareDeclaration,
+) -> Result<Option<Vec<Ipv4Prefix>>> {
+    parse_failed_prefixes(status, declaration)
+}
+
+fn route_diagnostics_path(status: &Path) -> Result<PathBuf> {
+    Ok(status
+        .parent()
+        .context("Core status path has no parent")?
+        .join("route-diagnostics-v1.json"))
+}
+
+fn unix_seconds() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("read wall clock for route diagnostics")?
+        .as_secs()
+        .max(1))
+}
+
+fn load_route_diagnostics(path: &Path, generation: u64) -> RouteDiagnosticsFile {
+    let value = (|| -> Result<RouteDiagnosticsFile> {
+        let metadata = fs::symlink_metadata(path).context("inspect route diagnostics")?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 64 * 1024 {
+            bail!("route diagnostics file is unsafe")
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
+            .open(path)
+            .context("open route diagnostics")?;
+        serde_json::from_reader(file).context("parse route diagnostics")
+    })();
+    match value {
+        Ok(value) if value.schema_version == 1 && value.generation == generation => value,
+        _ => RouteDiagnosticsFile::new(generation),
+    }
+}
+
+fn write_route_diagnostics(path: &Path, value: &RouteDiagnosticsFile) -> Result<()> {
+    let parent = path.parent().context("route diagnostics has no parent")?;
+    let metadata = fs::symlink_metadata(parent).context("inspect route diagnostics directory")?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        bail!("route diagnostics directory must be a real directory")
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("route diagnostics has no file name")?;
+    let temporary = parent.join(format!(".{name}.{}.tmp", std::process::id()));
+    let _ = fs::remove_file(&temporary);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
+        .open(&temporary)
+        .context("create route diagnostics")?;
+    let result = (|| {
+        serde_json::to_writer(&mut file, value).context("write route diagnostics")?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        fs::rename(&temporary, path).context("publish route diagnostics")?;
+        File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn canonical_prefix(prefix: Ipv4Prefix) -> String {
+    format!(
+        "{}.{}.{}.{}/{}",
+        prefix.network[0],
+        prefix.network[1],
+        prefix.network[2],
+        prefix.network[3],
+        prefix.prefix_len
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn snapshot_hash(entries: &[String]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"candy/netd-route-snapshot/v1\0");
+    for entry in entries {
+        digest.update((entry.len() as u64).to_be_bytes());
+        digest.update(entry.as_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_kernel_routes(
+    declaration: &PrepareDeclaration,
+    failed_prefixes: &[Ipv4Prefix],
+) -> Result<RouteSnapshot> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .context("create route diagnostics runtime")?;
+    let guard = runtime.enter();
+    let (connection, handle, _) = rtnetlink::new_connection().context("open route netlink")?;
+    drop(guard);
+    runtime.spawn(connection);
+    runtime.block_on(async move {
+        let mut links = handle
+            .link()
+            .get()
+            .match_name(candy_netd_proto::CANDY_INTERFACE_NAME.to_string())
+            .execute();
+        let link = links
+            .try_next()
+            .await
+            .context("read Candy interface")?
+            .context("Candy interface is missing")?;
+        if links
+            .try_next()
+            .await
+            .context("read Candy interface")?
+            .is_some()
+        {
+            bail!("multiple Candy interfaces exist")
+        }
+        let link_index = link.header.index;
+        let failed = failed_prefixes
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let mut expected = Vec::new();
+        for route in &declaration.routes {
+            match route.kind {
+                RouteKind::Remote | RouteKind::RemoteEgress | RouteKind::RemoteEgressGateway
+                    if !failed.contains(&route.prefix) =>
+                {
+                    expected.push(format!(
+                        "{}|link|mtu={}|advmss={}",
+                        canonical_prefix(route.prefix),
+                        declaration.effective_mtu,
+                        declaration.effective_mtu.saturating_sub(40)
+                    ));
+                }
+                RouteKind::Local
+                | RouteKind::Remote
+                | RouteKind::RemoteEgress
+                | RouteKind::RemoteEgressGateway => {
+                    expected.push(format!("{}|throw", canonical_prefix(route.prefix)));
+                }
+            }
+        }
+        expected.extend(
+            declaration
+                .exclusions
+                .iter()
+                .map(|value| format!("{}|throw", canonical_prefix(value.prefix))),
+        );
+        expected.sort_unstable();
+        expected.dedup();
+
+        let expected_set = expected
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let mut observed = Vec::new();
+        let query = RouteMessageBuilder::<std::net::Ipv4Addr>::new()
+            .table_id(declaration.table_id)
+            .build();
+        let mut routes = handle.route().get(query).execute();
+        while let Some(route) = routes.try_next().await.context("read Candy route table")? {
+            let table = route
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    RouteAttribute::Table(value) => Some(*value),
+                    _ => None,
+                });
+            let in_table = table == Some(declaration.table_id)
+                || (declaration.table_id <= u8::MAX.into()
+                    && u32::from(route.header.table) == declaration.table_id);
+            if !in_table {
+                continue;
+            }
+            let destination = route
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    RouteAttribute::Destination(RouteAddress::Inet(value)) => Some(*value),
+                    _ => None,
+                });
+            let destination = destination.unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+            let prefix =
+                Ipv4Prefix::new(destination.octets(), route.header.destination_prefix_length).ok();
+            let oif = route
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    RouteAttribute::Oif(value) => Some(*value),
+                    _ => None,
+                });
+            let metrics = route
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    RouteAttribute::Metrics(value) => Some(value),
+                    _ => None,
+                });
+            let mtu = metrics.and_then(|values| {
+                values.iter().find_map(|metric| match metric {
+                    RouteMetric::Mtu(value) => Some(*value),
+                    _ => None,
+                })
+            });
+            let advmss = metrics.and_then(|values| {
+                values.iter().find_map(|metric| match metric {
+                    RouteMetric::Advmss(value) => Some(*value),
+                    _ => None,
+                })
+            });
+            let canonical = prefix.and_then(|prefix| {
+                if route.header.protocol == RouteProtocol::Static
+                    && route.header.kind == RouteType::Throw
+                {
+                    Some(format!("{}|throw", canonical_prefix(prefix)))
+                } else if route.header.protocol == RouteProtocol::Static
+                    && route.header.kind == RouteType::Unicast
+                    && route.header.scope == RouteScope::Link
+                    && oif == Some(link_index)
+                {
+                    Some(format!(
+                        "{}|link|mtu={}|advmss={}",
+                        canonical_prefix(prefix),
+                        mtu.unwrap_or_default(),
+                        advmss.unwrap_or_default()
+                    ))
+                } else {
+                    None
+                }
+            });
+            observed.push(canonical.unwrap_or_else(|| {
+                format!(
+                    "orphan|{destination}/{}|{:?}|{:?}|{:?}|oif={}",
+                    route.header.destination_prefix_length,
+                    route.header.protocol,
+                    route.header.kind,
+                    route.header.scope,
+                    oif.unwrap_or_default()
+                )
+            }));
+        }
+        observed.sort_unstable();
+        let orphaned_routes = observed
+            .iter()
+            .filter(|entry| !expected_set.contains(*entry))
+            .count() as u32;
+        Ok(RouteSnapshot {
+            expected_snapshot_sha256: snapshot_hash(&expected),
+            observed_snapshot_sha256: snapshot_hash(&observed),
+            expected_routes: expected.len() as u32,
+            observed_routes: observed.len() as u32,
+            orphaned_routes,
+        })
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn inspect_kernel_routes(
+    _declaration: &PrepareDeclaration,
+    _failed_prefixes: &[Ipv4Prefix],
+) -> Result<RouteSnapshot> {
+    bail!("kernel route inspection is supported only on Linux")
 }
 
 #[derive(Debug, Deserialize)]
@@ -2816,6 +3196,8 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     // 100 ms Core status sample.
     let mut last_failed_prefixes = None::<Vec<Ipv4Prefix>>;
     let mut last_route_reconcile = None::<Instant>;
+    let route_diagnostics_path = route_diagnostics_path(&args.status)?;
+    let mut route_diagnostics = load_route_diagnostics(&route_diagnostics_path, args.generation);
     loop {
         // All recovery and candidate-inspection branches below may continue
         // early. Renew first so repeated transient states cannot starve netd.
@@ -3253,15 +3635,100 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 Ok(Some(status)) => {
                     let declaration = parse_declaration(&args.declaration)
                         .context("parse declaration for failed-prefix recovery")?;
-                    if let Some(prefixes) = parse_failed_prefixes(&status, &declaration)? {
-                        let reconcile_due = last_route_reconcile
-                            .is_none_or(|last| last.elapsed() >= ROUTE_RECONCILE_INTERVAL);
+                    // Older Core builds do not report the exact failed set.
+                    // Retain the last kernel state and expose why
+                    // reconciliation was skipped instead of guessing empty.
+                    let desired_prefixes = desired_failed_prefixes(&status, &declaration)?;
+                    let reconcile_due = last_route_reconcile
+                        .is_none_or(|last| last.elapsed() >= ROUTE_RECONCILE_INTERVAL);
+                    if let Some(prefixes) = desired_prefixes {
                         if last_failed_prefixes.as_ref() != Some(&prefixes) || reconcile_due {
-                            netd.set_failed_prefixes(prefixes.clone())
-                                .context("reconcile Core failed-prefix route set")?;
+                            let started = Instant::now();
+                            route_diagnostics.reconcile_attempts =
+                                route_diagnostics.reconcile_attempts.saturating_add(1);
+                            if let Err(error) = netd.set_failed_prefixes(prefixes.clone()) {
+                                route_diagnostics.record_error(
+                                    unix_seconds()?,
+                                    started.elapsed().as_millis() as u64,
+                                    "netd_route_reconcile_failed",
+                                );
+                                if let Err(write_error) = write_route_diagnostics(
+                                    &route_diagnostics_path,
+                                    &route_diagnostics,
+                                ) {
+                                    eprintln!(
+                                        "level=warn event=route_diagnostics_write_failed error_code=route_diagnostics_write_failed error={}",
+                                        sanitize_log_value(&format!("{write_error:#}"))
+                                    );
+                                }
+                                return Err(anyhow::Error::new(error))
+                                    .context("reconcile Core failed-prefix route set");
+                            }
+                            let now = unix_seconds()?;
+                            match inspect_kernel_routes(&declaration, &prefixes) {
+                                Ok(snapshot) => route_diagnostics.record_snapshot(
+                                    snapshot,
+                                    now,
+                                    started.elapsed().as_millis() as u64,
+                                ),
+                                Err(error) => {
+                                    route_diagnostics.record_error(
+                                        now,
+                                        started.elapsed().as_millis() as u64,
+                                        "route_snapshot_inspection_failed",
+                                    );
+                                    eprintln!(
+                                        "level=warn event=route_snapshot_inspection_failed error_code=route_snapshot_inspection_failed error={}",
+                                        sanitize_log_value(&format!("{error:#}"))
+                                    );
+                                }
+                            }
+                            if let Err(error) =
+                                write_route_diagnostics(&route_diagnostics_path, &route_diagnostics)
+                            {
+                                eprintln!(
+                                    "level=warn event=route_diagnostics_write_failed error_code=route_diagnostics_write_failed error={}",
+                                    sanitize_log_value(&format!("{error:#}"))
+                                );
+                            }
+                            eprintln!(
+                                "level=info event=route_reconcile_completed generation={} desired_failed_prefix_count={} integrity={} expected_routes={} observed_routes={} orphaned_routes={} attempts={} successes={} error_code={}",
+                                args.generation,
+                                prefixes.len(),
+                                route_diagnostics.integrity,
+                                route_diagnostics.expected_routes,
+                                route_diagnostics.observed_routes,
+                                route_diagnostics.orphaned_routes,
+                                route_diagnostics.reconcile_attempts,
+                                route_diagnostics.reconcile_successes,
+                                route_diagnostics.last_error_code.as_deref().unwrap_or("none")
+                            );
                             last_failed_prefixes = Some(prefixes);
                             last_route_reconcile = Some(Instant::now());
                         }
+                    } else if reconcile_due {
+                        route_diagnostics.record_error(
+                            unix_seconds()?,
+                            0,
+                            "core_failed_prefixes_unreported",
+                        );
+                        if let Err(error) =
+                            write_route_diagnostics(&route_diagnostics_path, &route_diagnostics)
+                        {
+                            eprintln!(
+                                "level=warn event=route_diagnostics_write_failed error_code=route_diagnostics_write_failed error={}",
+                                sanitize_log_value(&format!("{error:#}"))
+                            );
+                        }
+                        eprintln!(
+                            "level=warn event=route_reconcile_skipped generation={} reason=core_failed_prefixes_unreported configured_peers={} active_peers={} required_routes={} ready_routes={} error_code=core_failed_prefixes_unreported",
+                            args.generation,
+                            status.configured_peers,
+                            status.active_peers,
+                            status.required_route_owners,
+                            status.ready_route_owners
+                        );
+                        last_route_reconcile = Some(Instant::now());
                     }
                 }
                 Ok(None) => {}
@@ -3352,6 +3819,100 @@ mod tests {
         super::run_once(args, false)
     }
     use super::*;
+
+    #[test]
+    fn route_diagnostics_persist_real_reconcile_outcomes_without_inventing_probes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("route-diagnostics-v1.json");
+        let mut diagnostics = RouteDiagnosticsFile::new(9);
+        diagnostics.reconcile_attempts = 1;
+        diagnostics.record_snapshot(
+            RouteSnapshot {
+                expected_snapshot_sha256: "11".repeat(32),
+                observed_snapshot_sha256: "11".repeat(32),
+                expected_routes: 4,
+                observed_routes: 4,
+                orphaned_routes: 0,
+            },
+            100,
+            17,
+        );
+        write_route_diagnostics(&path, &diagnostics).unwrap();
+
+        let restored = load_route_diagnostics(&path, 9);
+        assert_eq!(restored.integrity, "consistent");
+        assert_eq!(restored.reconcile_successes, 1);
+        assert_eq!(restored.last_recovery_duration_ms, Some(17));
+        assert_eq!(restored.probe_state, "unreported");
+        assert_eq!(restored.probe_successes, 0);
+        assert_eq!(load_route_diagnostics(&path, 10).reconcile_attempts, 0);
+    }
+
+    #[test]
+    fn route_diagnostics_keep_snapshot_drift_visible() {
+        let mut diagnostics = RouteDiagnosticsFile::new(9);
+        diagnostics.reconcile_attempts = 1;
+        diagnostics.record_snapshot(
+            RouteSnapshot {
+                expected_snapshot_sha256: "11".repeat(32),
+                observed_snapshot_sha256: "22".repeat(32),
+                expected_routes: 4,
+                observed_routes: 5,
+                orphaned_routes: 1,
+            },
+            100,
+            9,
+        );
+        assert_eq!(diagnostics.integrity, "drifted");
+        assert_eq!(diagnostics.reconcile_successes, 0);
+        assert_eq!(
+            diagnostics.last_error_code.as_deref(),
+            Some("route_snapshot_mismatch")
+        );
+    }
+
+    #[test]
+    fn legacy_core_never_guesses_an_empty_failed_prefix_set() {
+        let declaration = PrepareDeclaration {
+            table_id: 20_001,
+            overlay_router_ipv4: [100, 64, 0, 2],
+            effective_mtu: 1_300,
+            routes: vec![RouteDeclaration {
+                prefix: Ipv4Prefix::new([192, 168, 1, 0], 24).unwrap(),
+                kind: RouteKind::Remote,
+            }],
+            exclusions: Vec::new(),
+            firewall: FirewallPolicy {
+                allow_forward: true,
+                clamp_tcp_mss: true,
+                require_ipv4_forwarding: true,
+                manage_rp_filter: true,
+            },
+        };
+        let status = |ready| {
+            serde_json::from_value::<CoreReadinessStatus>(serde_json::json!({
+                "schema_version": 2,
+                "generation": 7,
+                "pid": 42,
+                "readiness_token": "token",
+                "lifecycle": "active",
+                "configured_peers": 1,
+                "active_peers": ready,
+                "required_route_owners": 1,
+                "ready_route_owners": ready,
+                "fail_open_required": false
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            desired_failed_prefixes(&status(1), &declaration).unwrap(),
+            None
+        );
+        assert_eq!(
+            desired_failed_prefixes(&status(0), &declaration).unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn runtime_diagnostics_preserve_typed_causes_through_context() {

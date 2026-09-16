@@ -122,7 +122,11 @@ impl NetdClient {
         &mut self,
         prefixes: Vec<candy_netd_proto::Ipv4Prefix>,
     ) -> Result<u64, IpcError> {
-        if self.phase != ClientPhase::Active {
+        // Peer-loss handling suspends policy steering before reconciling the
+        // exact failed route set. The daemon accepts this operation while the
+        // route table remains owned in either phase, so the client state
+        // machine must preserve the same contract.
+        if !matches!(self.phase, ClientPhase::Active | ClientPhase::Suspended) {
             return Err(IpcError::InvalidTransition);
         }
         self.exchange_generation(

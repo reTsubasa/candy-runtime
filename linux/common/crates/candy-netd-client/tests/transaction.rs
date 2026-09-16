@@ -155,6 +155,62 @@ fn remote_rejection_does_not_advance_the_local_phase() {
 }
 
 #[test]
+fn suspended_transaction_accepts_failed_prefix_reconciliation() {
+    let path = socket_path("suspended-prefixes");
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).unwrap();
+    let failed = Ipv4Prefix::new([10, 2, 0, 0], 16).unwrap();
+    let server = std::thread::spawn(move || {
+        for expected in 1..=5 {
+            let (stream, _) = listener.accept().unwrap();
+            let request = recv_request(&stream).unwrap();
+            assert_eq!(request.request_id, expected);
+            let (body, descriptor) = match request.operation {
+                NetdOperation::Prepare(_) => (
+                    ResponseBody::Prepared {
+                        generation: 7,
+                        tun_fd_attached: true,
+                    },
+                    Some(File::open("/dev/null").unwrap()),
+                ),
+                NetdOperation::Commit => (ResponseBody::Committed { generation: 7 }, None),
+                NetdOperation::Suspend => (ResponseBody::Suspended { generation: 7 }, None),
+                NetdOperation::WithdrawPrefixes { prefixes } => {
+                    assert_eq!(prefixes, vec![failed]);
+                    (
+                        ResponseBody::PrefixesWithdrawn {
+                            generation: 7,
+                            count: 1,
+                        },
+                        None,
+                    )
+                }
+                NetdOperation::Rollback => (ResponseBody::RolledBack { generation: 7 }, None),
+                operation => panic!("unexpected operation: {operation:?}"),
+            };
+            send_response(
+                &stream,
+                &NetdResponse {
+                    request_id: request.request_id,
+                    body,
+                },
+                descriptor.as_ref().map(AsRawFd::as_raw_fd),
+            )
+            .unwrap();
+        }
+    });
+
+    let mut client = NetdClient::new(&path, owner());
+    let _prepared = client.prepare(declaration()).unwrap();
+    client.commit().unwrap();
+    client.suspend().unwrap();
+    assert_eq!(client.set_failed_prefixes(vec![failed]).unwrap(), 7);
+    client.rollback().unwrap();
+    server.join().unwrap();
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn dropping_a_prepared_transaction_requests_rollback() {
     let path = socket_path("drop");
     let _ = std::fs::remove_file(&path);

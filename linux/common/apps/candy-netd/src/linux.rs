@@ -162,16 +162,7 @@ mod backend {
             if route.header.protocol != RouteProtocol::Static {
                 return false;
             }
-            let destination = route.attributes.iter().find_map(|value| match value {
-                RouteAttribute::Destination(RouteAddress::Inet(value)) => Some(*value),
-                _ => None,
-            });
-            let Some(destination) = destination else {
-                return false;
-            };
-            let Some(prefix) =
-                Ipv4Prefix::new(destination.octets(), route.header.destination_prefix_length).ok()
-            else {
+            let Some(prefix) = Self::route_prefix(route) else {
                 return false;
             };
             if route.header.kind == RouteType::Throw {
@@ -188,6 +179,26 @@ mod backend {
             route.header.kind == RouteType::Unicast
                 && route.header.scope == RouteScope::Link
                 && plan.remote_routes.contains(&prefix)
+        }
+
+        fn route_prefix(route: &netlink_packet_route::route::RouteMessage) -> Option<Ipv4Prefix> {
+            let destination = route.attributes.iter().find_map(|value| match value {
+                RouteAttribute::Destination(RouteAddress::Inet(value)) => Some(*value),
+                _ => None,
+            });
+            match destination {
+                Some(value) => {
+                    Ipv4Prefix::new(value.octets(), route.header.destination_prefix_length).ok()
+                }
+                // Linux omits RTA_DST for the IPv4 default route. Treat only
+                // an actual /0 header as the canonical 0.0.0.0/0 prefix;
+                // missing destinations on any other prefix length are
+                // malformed and remain fail-closed.
+                None if route.header.destination_prefix_length == 0 => {
+                    Ipv4Prefix::new([0, 0, 0, 0], 0).ok()
+                }
+                None => None,
+            }
         }
 
         async fn link_index(handle: &Handle) -> Result<u32, NetworkError> {
@@ -275,12 +286,7 @@ mod backend {
                 if !in_table || route.header.protocol != RouteProtocol::Static {
                     continue;
                 }
-                let prefix = route.attributes.iter().find_map(|value| match value {
-                    RouteAttribute::Destination(RouteAddress::Inet(value)) => {
-                        Ipv4Prefix::new(value.octets(), route.header.destination_prefix_length).ok()
-                    }
-                    _ => None,
-                });
+                let prefix = Self::route_prefix(&route);
                 let Some(prefix) = prefix else { continue };
                 let oif = route.attributes.iter().find_map(|value| match value {
                     RouteAttribute::Oif(value) => Some(*value),
@@ -290,6 +296,7 @@ mod backend {
                     if route.header.kind == RouteType::Unicast
                         && route.header.scope == RouteScope::Link
                         && oif == Some(index)
+                        && Self::route_metrics_match(&route, plan)
                     {
                         present_healthy.insert(prefix);
                     } else if matches!(route.header.kind, RouteType::Throw | RouteType::Unicast) {
@@ -349,6 +356,32 @@ mod backend {
             Ok(())
         }
 
+        fn route_metrics_match(
+            route: &netlink_packet_route::route::RouteMessage,
+            plan: &LinuxNetworkPlan,
+        ) -> bool {
+            let metrics = route
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    RouteAttribute::Metrics(values) => Some(values),
+                    _ => None,
+                });
+            let mtu = metrics.and_then(|values| {
+                values.iter().find_map(|metric| match metric {
+                    RouteMetric::Mtu(value) => Some(*value),
+                    _ => None,
+                })
+            });
+            let advmss = metrics.and_then(|values| {
+                values.iter().find_map(|metric| match metric {
+                    RouteMetric::Advmss(value) => Some(*value),
+                    _ => None,
+                })
+            });
+            mtu == Some(u32::from(plan.route_mtu)) && advmss == Some(u32::from(plan.tcp_advmss))
+        }
+
         async fn delete_routes(
             handle: &Handle,
             plan: &LinuxNetworkPlan,
@@ -399,13 +432,7 @@ mod backend {
                     RouteAttribute::Table(value) => Some(*value),
                     _ => None,
                 });
-                let destination = route.attributes.iter().find_map(|value| match value {
-                    RouteAttribute::Destination(RouteAddress::Inet(value)) => Some(*value),
-                    _ => None,
-                });
-                let prefix = destination.and_then(|value| {
-                    Ipv4Prefix::new(value.octets(), route.header.destination_prefix_length).ok()
-                });
+                let prefix = Self::route_prefix(&route);
                 let in_table = table == Some(plan.route_table)
                     || (plan.route_table <= u8::MAX.into()
                         && u32::from(route.header.table) == plan.route_table);
@@ -832,6 +859,24 @@ mod backend {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn route_prefix_recognizes_kernel_default_without_destination_attribute() {
+            let mut route = RouteMessageBuilder::<Ipv4Addr>::new()
+                .destination_prefix(Ipv4Addr::UNSPECIFIED, 0)
+                .build();
+            route
+                .attributes
+                .retain(|attribute| !matches!(attribute, RouteAttribute::Destination(_)));
+
+            assert_eq!(
+                LinuxNetworkBackend::route_prefix(&route),
+                Some(Ipv4Prefix::new([0, 0, 0, 0], 0).unwrap())
+            );
+
+            route.header.destination_prefix_length = 24;
+            assert_eq!(LinuxNetworkBackend::route_prefix(&route), None);
+        }
 
         #[test]
         fn missing_interface_sysctl_is_clean_during_restore() {
