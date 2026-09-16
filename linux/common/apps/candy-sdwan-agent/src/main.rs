@@ -29,6 +29,7 @@ const MAX_STATUS_BYTES: u64 = 256 * 1024;
 // alive during that hand-off instead of tearing down the whole data plane.
 const CORE_READINESS_RECOVERY_GRACE: Duration = Duration::from_secs(20);
 const PARTIAL_ROUTE_RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
+const ROUTE_RECONCILE_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_ACTIVATION_BYTES: u64 = 64 * 1024;
 const CORE_TERMINATION_GRACE: Duration = Duration::from_secs(15);
 const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -2809,9 +2810,10 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     let mut rejected_activation = None::<PathBuf>;
     let mut preparation_retry_target = None::<PathBuf>;
     let mut next_preparation_retry = Instant::now();
-    // Core status is sampled every 100ms. Keep the last applied failed-prefix
-    // set so an unchanged report does not generate a redundant netd IPC
-    // request (and route transaction) on every sample.
+    // Bound repair latency without issuing a netlink transaction on every
+    // 100 ms Core status sample.
+    let mut last_failed_prefixes = None::<Vec<Ipv4Prefix>>;
+    let mut last_route_reconcile = None::<Instant>;
     loop {
         // All recovery and candidate-inspection branches below may continue
         // early. Renew first so repeated transient states cannot starve netd.
@@ -3250,13 +3252,14 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     let declaration = parse_declaration(&args.declaration)
                         .context("parse declaration for failed-prefix recovery")?;
                     if let Some(prefixes) = parse_failed_prefixes(&status, &declaration)? {
-                        // Reconcile on every authenticated status sample. A
-                        // previous identical failed-prefix set does not prove
-                        // the kernel routes still exist: netlink restarts,
-                        // interface recreation, and external route changes can
-                        // silently remove them while Core remains healthy.
-                        netd.set_failed_prefixes(prefixes.clone())
-                            .context("reconcile Core failed-prefix route set")?;
+                        let reconcile_due = last_route_reconcile
+                            .is_none_or(|last| last.elapsed() >= ROUTE_RECONCILE_INTERVAL);
+                        if last_failed_prefixes.as_ref() != Some(&prefixes) || reconcile_due {
+                            netd.set_failed_prefixes(prefixes.clone())
+                                .context("reconcile Core failed-prefix route set")?;
+                            last_failed_prefixes = Some(prefixes);
+                            last_route_reconcile = Some(Instant::now());
+                        }
                     }
                 }
                 Ok(None) => {}

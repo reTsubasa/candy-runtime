@@ -436,13 +436,16 @@ fn failed_prefix_updates_are_scoped_persisted_and_restore_only_healthy_routes() 
         journal.load().unwrap().unwrap().failed_prefixes,
         vec![first, second]
     );
-    assert_eq!(*events.borrow(), ["remove_routes"]);
+    assert_eq!(*events.borrow(), ["prepare_routes", "remove_routes"]);
 
     // Recovering one prefix must rebuild the route table and immediately
     // withdraw the sibling that is still failed.
     events.borrow_mut().clear();
     transaction.set_failed_prefixes(owner(), &[second]).unwrap();
-    assert_eq!(*events.borrow(), ["prepare_routes", "remove_routes"]);
+    assert_eq!(
+        *events.borrow(),
+        ["remove_routes", "prepare_routes", "remove_routes"]
+    );
     assert_eq!(
         journal.load().unwrap().unwrap().failed_prefixes,
         vec![second]

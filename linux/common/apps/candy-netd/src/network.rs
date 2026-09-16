@@ -485,37 +485,29 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             return Err(NetworkError::Conflict);
         }
         let previous = record.failed_prefixes.clone();
-        let recovered = previous.iter().any(|prefix| !desired.contains(prefix));
-        // The active journal records ownership, not the kernel's current
-        // route contents.  After a netlink restart, interface recreation, or
-        // an interrupted cleanup, a remote route can be missing while the
-        // journal still says that no prefix is degraded.  The first empty
-        // readiness report is therefore an idempotent route reconciliation,
-        // so a healthy Core status cannot mask a missing data-plane route.
-        let initial_route_reconciliation = previous.is_empty() && desired.is_empty();
-        // Reconcile on every report. Core status is only a logical view; the
-        // kernel route set can drift after netlink restart, interface
-        // recreation, or an external administrator change. Reinstalling the
-        // signed declaration is idempotent, and failed prefixes are withdrawn
-        // immediately below so a degraded prefix never leaks back in.
-        if recovered || initial_route_reconciliation || previous == desired {
-            self.backend.prepare_routes(&declaration)?;
+        let recovered = previous
+            .iter()
+            .copied()
+            .filter(|prefix| !desired.contains(prefix))
+            .collect::<Vec<_>>();
+        if !recovered.is_empty() {
+            // A failed remote prefix is a throw route with the same route key
+            // as the healthy link route. Remove only the recovered, signed
+            // prefixes first; otherwise RTM_NEWROUTE may return EEXIST while
+            // the old throw route continues to black-hole replies.
+            let mut recovered_declaration = declaration.clone();
+            recovered_declaration
+                .routes
+                .retain(|route| recovered.contains(&route.prefix));
+            self.backend.remove_routes(&recovered_declaration)?;
         }
-        // Re-installing routes above restores the whole declaration.  Reapply
-        // the complete desired failed set so a still-failed prefix never
-        // regains the SD-WAN route during recovery of a sibling prefix.  When
-        // no prefix recovered this remains an incremental operation.
-        let withdrawn = if recovered {
-            desired.clone()
-        } else {
-            desired
-                .iter()
-                .copied()
-                .filter(|prefix| !previous.contains(prefix))
-                .collect()
-        };
-        if !withdrawn.is_empty() {
-            self.backend.withdraw_prefixes(&declaration, &withdrawn)?;
+        // This operation is the active route-integrity reconcile. It is safe
+        // to repeat because prepare_routes is scoped to the signed declaration.
+        self.backend.prepare_routes(&declaration)?;
+        // Reapply the complete failed set after restoring healthy routes so a
+        // still-unavailable sibling cannot accidentally become routable.
+        if !desired.is_empty() {
+            self.backend.withdraw_prefixes(&declaration, &desired)?;
         }
         let record = self
             .record
