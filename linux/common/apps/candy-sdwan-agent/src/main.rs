@@ -856,6 +856,8 @@ struct CoreReadinessPath {
     _rx_idle_ms: u64,
     #[serde(default)]
     streams: Vec<CoreReadinessStream>,
+    #[serde(default)]
+    probe_misses: u8,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1319,12 +1321,11 @@ fn spawn_core(args: &RuntimeArgs, tun: &OwnedFd, readiness_token: &str) -> Resul
         .arg("--reload-socket")
         .arg(core_reload_socket(args)?)
         .spawn()
-        .map(|child| {
+        .inspect(|child| {
             eprintln!(
                 "level=info event=core_spawned stage=process_start error_code=none pid={} generation={}",
                 child.id(), args.generation
             );
-            child
         })
         .with_context(|| format!("start Candy Core: {}", args.core.display()))
 }
@@ -2038,7 +2039,7 @@ fn classify_core_readiness(
     let has_authenticated_path_evidence = status.paths.as_ref().is_some_and(|paths| {
         paths
             .iter()
-            .filter(|path| path.rtt_sample_count > 0)
+            .filter(|path| path.rtt_sample_count > 0 && path.probe_misses < 3)
             .count()
             >= status.ready_route_owners
     });
@@ -2054,7 +2055,13 @@ fn classify_core_readiness(
     // session under sustained traffic (the all_peer_lanes_unavailable loop).
     let recoverable_peer_loss_code = matches!(
         status.last_error_code.as_deref(),
-        Some("all_peer_reads_failed" | "all_peer_writes_failed" | "route_has_no_active_peer")
+        Some(
+            "all_peer_reads_failed"
+                | "all_peer_writes_failed"
+                | "route_has_no_active_peer"
+                | "tun_route_probe_timeout"
+                | "tun_route_probe_no_reply",
+        )
     );
     let recoverable_stream_not_ready =
         status.last_error_code.as_deref() == Some("stream_not_ready") && status.fail_open_required;
@@ -2912,8 +2919,7 @@ fn hot_replace_activation(
                     sanitize_log_value(&format!("{drain_error:#}"))
                 );
                 return Err(anyhow::Error::new(AppliedHotReloadPending(
-                    anyhow::Error::from(drain_error)
-                        .context("drain committed replacement before fallback"),
+                    drain_error.context("drain committed replacement before fallback"),
                 )));
             }
         }
@@ -2929,8 +2935,7 @@ fn hot_replace_activation(
         if !already_suspended {
             if let Err(drain_error) = drain_old_bounded(netd) {
                 return Err(anyhow::Error::new(AppliedHotReloadPending(
-                    anyhow::Error::from(drain_error)
-                        .context("drain superseded replacement before fallback"),
+                    drain_error.context("drain superseded replacement before fallback"),
                 )));
             }
         }
@@ -2943,7 +2948,7 @@ fn hot_replace_activation(
     if !already_suspended {
         if let Err(error) = drain_old_bounded(netd) {
             return Err(anyhow::Error::new(AppliedHotReloadPending(
-                anyhow::Error::from(error).context("drain old netd owner"),
+                error.context("drain old netd owner"),
             )));
         }
     } else if let Err(error) = leave_proxy_fallback(replacement, child, netd, transition) {

@@ -514,6 +514,8 @@ struct RuntimePathTelemetry {
     #[serde(skip_serializing_if = "Option::is_none")]
     ready_streams: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    probe_misses: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     queue_depth: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     queue_limit: Option<u64>,
@@ -631,6 +633,8 @@ struct CorePathStatus {
     stream_count: Option<u32>,
     #[serde(default)]
     ready_streams: Option<u32>,
+    #[serde(default)]
+    probe_misses: Option<u8>,
     #[serde(default)]
     queue_depth: Option<u64>,
     #[serde(default)]
@@ -3115,6 +3119,7 @@ fn derive_runtime_paths(
                 congestion_state: path.congestion_state.clone(),
                 stream_count: path.stream_count,
                 ready_streams: path.ready_streams,
+                probe_misses: path.probe_misses,
                 queue_depth: path.queue_depth,
                 queue_limit: path.queue_limit,
                 last_ack_seq: path.last_ack_seq,
@@ -6712,6 +6717,7 @@ default via 192.0.2.1 dev eth0 proto static
                 congestion_state: Some("normal".into()),
                 stream_count: Some(2),
                 ready_streams: Some(2),
+                probe_misses: Some(0),
                 queue_depth: Some(4),
                 queue_limit: Some(1024),
                 last_ack_seq: Some(140),
@@ -7917,6 +7923,7 @@ default via 192.0.2.1 dev eth0 proto static
                 congestion_state: Some("normal".into()),
                 stream_count: Some(1),
                 ready_streams: Some(1),
+                probe_misses: Some(0),
                 queue_depth: Some(0),
                 queue_limit: Some(1024),
                 last_ack_seq: Some(1),
