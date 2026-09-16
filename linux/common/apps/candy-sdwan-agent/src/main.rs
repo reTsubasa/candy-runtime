@@ -459,6 +459,58 @@ impl RouteDiagnosticsFile {
         self.last_recovery_duration_ms = Some(duration_ms.min(300_000));
         self.last_error_code = Some(code.into());
     }
+
+    fn record_probe(&mut self, status: &CoreReadinessStatus, now: u64) {
+        let probe_reported = status.paths.as_ref().is_some_and(|paths| {
+            paths.iter().any(|path| {
+                path.streams
+                    .iter()
+                    .any(|stream| stream.packet_probe_state.is_some())
+            })
+        });
+        if !probe_reported || status.required_route_owners == 0 {
+            self.probe_state = "unreported".into();
+            self.probe_targets = 0;
+            self.probe_successes = 0;
+            self.probe_rtt_ms = None;
+            self.probe_checked_at_unix = None;
+            return;
+        }
+
+        let targets = u32::try_from(status.required_route_owners).unwrap_or(u32::MAX);
+        let successes = u32::try_from(status.ready_route_owners)
+            .unwrap_or(u32::MAX)
+            .min(targets);
+        let max_rtt_micros = status
+            .paths
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .flat_map(|path| &path.streams)
+            .filter(|stream| {
+                stream.packet_probe_state.as_deref() == Some("ready")
+                    && stream.packet_probe_generation == Some(status.generation)
+            })
+            .filter_map(|stream| stream.packet_probe_rtt_micros)
+            .max();
+        self.probe_targets = targets;
+        self.probe_successes = successes;
+        self.probe_rtt_ms = max_rtt_micros
+            .map(|micros| u32::try_from(micros.saturating_add(999) / 1_000).unwrap_or(u32::MAX));
+        if successes == targets {
+            self.probe_state = "succeeded".into();
+            self.probe_checked_at_unix = Some(now);
+        } else if matches!(
+            status.last_error_code.as_deref(),
+            Some("tun_route_probe_timeout" | "tun_route_probe_no_reply")
+        ) {
+            self.probe_state = "failed".into();
+            self.probe_checked_at_unix = Some(now);
+        } else {
+            self.probe_state = "pending".into();
+            self.probe_checked_at_unix = None;
+        }
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -802,6 +854,18 @@ struct CoreReadinessPath {
     _rx_bytes: u64,
     #[serde(rename = "rx_idle_ms")]
     _rx_idle_ms: u64,
+    #[serde(default)]
+    streams: Vec<CoreReadinessStream>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreReadinessStream {
+    #[serde(default)]
+    packet_probe_state: Option<String>,
+    #[serde(default)]
+    packet_probe_generation: Option<u64>,
+    #[serde(default)]
+    packet_probe_rtt_micros: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3646,9 +3710,11 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                             let started = Instant::now();
                             route_diagnostics.reconcile_attempts =
                                 route_diagnostics.reconcile_attempts.saturating_add(1);
+                            let now = unix_seconds()?;
+                            route_diagnostics.record_probe(&status, now);
                             if let Err(error) = netd.set_failed_prefixes(prefixes.clone()) {
                                 route_diagnostics.record_error(
-                                    unix_seconds()?,
+                                    now,
                                     started.elapsed().as_millis() as u64,
                                     "netd_route_reconcile_failed",
                                 );
@@ -3664,7 +3730,6 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                                 return Err(anyhow::Error::new(error))
                                     .context("reconcile Core failed-prefix route set");
                             }
-                            let now = unix_seconds()?;
                             match inspect_kernel_routes(&declaration, &prefixes) {
                                 Ok(snapshot) => route_diagnostics.record_snapshot(
                                     snapshot,
@@ -3869,6 +3934,74 @@ mod tests {
             diagnostics.last_error_code.as_deref(),
             Some("route_snapshot_mismatch")
         );
+    }
+
+    #[test]
+    fn route_diagnostics_report_only_generation_bound_packet_probes() {
+        let status = |generation, ready_route_owners, probe_generation, error_code| {
+            serde_json::from_value::<CoreReadinessStatus>(serde_json::json!({
+                "schema_version": 3,
+                "generation": generation,
+                "pid": 42,
+                "readiness_token": "token",
+                "lifecycle": "active",
+                "configured_peers": 1,
+                "active_peers": 1,
+                "required_route_owners": 1,
+                "ready_route_owners": ready_route_owners,
+                "failed_prefixes": [],
+                "fail_open_required": ready_route_owners == 0,
+                "last_error_code": error_code,
+                "paths": [{
+                    "rtt_sample_count": 1,
+                    "rx_bytes": 0,
+                    "rx_idle_ms": 0,
+                    "streams": [{
+                        "packet_probe_state": if ready_route_owners == 1 { "ready" } else { "pending" },
+                        "packet_probe_generation": probe_generation,
+                        "packet_probe_rtt_micros": if ready_route_owners == 1 { Some(12_001_u64) } else { None }
+                    }]
+                }]
+            }))
+            .unwrap()
+        };
+
+        let mut diagnostics = RouteDiagnosticsFile::new(9);
+        diagnostics.record_probe(&status(9, 1, Some(9), None), 100);
+        assert_eq!(diagnostics.probe_state, "succeeded");
+        assert_eq!(diagnostics.probe_targets, 1);
+        assert_eq!(diagnostics.probe_successes, 1);
+        assert_eq!(diagnostics.probe_rtt_ms, Some(13));
+        assert_eq!(diagnostics.probe_checked_at_unix, Some(100));
+
+        diagnostics.record_probe(
+            &status(10, 0, Some(9), Some("tun_route_probe_no_reply")),
+            101,
+        );
+        assert_eq!(diagnostics.probe_state, "failed");
+        assert_eq!(diagnostics.probe_successes, 0);
+        assert_eq!(diagnostics.probe_rtt_ms, None);
+        assert_eq!(diagnostics.probe_checked_at_unix, Some(101));
+
+        let legacy = serde_json::from_value::<CoreReadinessStatus>(serde_json::json!({
+            "schema_version": 3,
+            "generation": 10,
+            "pid": 42,
+            "readiness_token": "token",
+            "lifecycle": "active",
+            "configured_peers": 1,
+            "active_peers": 1,
+            "required_route_owners": 1,
+            "ready_route_owners": 1,
+            "failed_prefixes": [],
+            "fail_open_required": false,
+            "paths": [{"rtt_sample_count": 1, "rx_bytes": 0, "rx_idle_ms": 0}]
+        }))
+        .unwrap();
+        diagnostics.record_probe(&legacy, 102);
+        assert_eq!(diagnostics.probe_state, "unreported");
+        assert_eq!(diagnostics.probe_targets, 0);
+        assert_eq!(diagnostics.probe_checked_at_unix, None);
     }
 
     #[test]
