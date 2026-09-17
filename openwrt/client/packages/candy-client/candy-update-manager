@@ -424,7 +424,7 @@ cached_catalog_valid() {
 }
 
 check_catalog() {
-	local downloaded_catalog downloaded_signature new_sequence old_sequence old_hash new_hash checked_at
+	local downloaded_catalog downloaded_signature new_sequence old_sequence old_hash new_hash checked_at attempt verified
 	require_supported_platform || fail "this Runtime package does not support the current OpenWrt platform"
 	[ -f "$CATALOG_KEY" ] && [ ! -L "$CATALOG_KEY" ] || fail "catalog signing key is unavailable"
 	mkdir -p "$STATE_ROOT" || fail "cannot create update state directory"
@@ -434,13 +434,25 @@ check_catalog() {
 	mkdir -m 0700 "$TEMPORARY" || fail "cannot create catalog staging directory"
 	downloaded_catalog=$TEMPORARY/stable.json
 	downloaded_signature=$TEMPORARY/stable.json.sig
-	fetch_https "$CATALOG_URL" "$downloaded_catalog" || fail "catalog download failed"
-	fetch_https "$CATALOG_SIGNATURE_URL" "$downloaded_signature" || fail "catalog signature download failed"
-	regular_bounded_file "$downloaded_catalog" "$MAX_CATALOG_BYTES" ||
-		fail "catalog is empty or exceeds the $MAX_CATALOG_BYTES-byte limit"
-	regular_bounded_file "$downloaded_signature" "$MAX_SIGNATURE_BYTES" ||
-		fail "catalog signature is empty or exceeds the $MAX_SIGNATURE_BYTES-byte limit"
-	verify_catalog_signature "$downloaded_catalog" "$downloaded_signature" || fail "catalog signature is invalid"
+	attempt=1
+	verified=0
+	while [ "$attempt" -le 3 ]; do
+		fetch_https "$CATALOG_URL" "$downloaded_catalog" || fail "catalog download failed"
+		fetch_https "$CATALOG_SIGNATURE_URL" "$downloaded_signature" || fail "catalog signature download failed"
+		regular_bounded_file "$downloaded_catalog" "$MAX_CATALOG_BYTES" ||
+			fail "catalog is empty or exceeds the $MAX_CATALOG_BYTES-byte limit"
+		regular_bounded_file "$downloaded_signature" "$MAX_SIGNATURE_BYTES" ||
+			fail "catalog signature is empty or exceeds the $MAX_SIGNATURE_BYTES-byte limit"
+		if verify_catalog_signature "$downloaded_catalog" "$downloaded_signature"; then
+			verified=1
+			break
+		fi
+		# A release updates the catalog and detached signature in one Git
+		# commit, but raw CDN edges can briefly expose different generations.
+		[ "$attempt" -eq 3 ] || sleep 1
+		attempt=$((attempt + 1))
+	done
+	[ "$verified" -eq 1 ] || fail "catalog signature is invalid after 3 coherent-pair attempts"
 	validate_catalog "$downloaded_catalog" || fail "catalog schema or platform entries are invalid"
 	new_sequence=$(catalog_field "$downloaded_catalog" '@.sequence')
 	if [ -e "$SEQUENCE_FILE" ]; then

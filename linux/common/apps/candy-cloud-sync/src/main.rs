@@ -426,6 +426,13 @@ struct RuntimeTelemetry<'a> {
     transport_mode: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     runtime_generation: Option<u64>,
+    /// Generation of the live transport/tunnel graph. This can remain stable
+    /// while a policy-only projection is applied in place.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tunnel_generation: Option<u64>,
+    /// Generation of the active routing policy/projection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_generation: Option<u64>,
     paths: &'a [RuntimePathTelemetry],
     #[serde(skip_serializing_if = "Option::is_none")]
     local_networks: Option<&'a [LocalNetworkTelemetry]>,
@@ -560,6 +567,8 @@ struct RuntimeStreamTelemetry {
 struct CoreRuntimeStatus {
     schema_version: u16,
     generation: u64,
+    #[serde(default)]
+    policy_generation: u64,
     pid: u32,
     lifecycle: String,
     #[serde(default)]
@@ -979,15 +988,17 @@ fn read_runtime_failure_code(
     Ok(Some(marker.error_code))
 }
 
-fn verified_local_runtime_snapshot(
-    state_dir: &Path,
-    run_dir: &Path,
-) -> Result<(
+type VerifiedLocalRuntimeSnapshot = (
     &'static str,
     Option<CoreRuntimeStatus>,
     Option<String>,
     Option<String>,
-)> {
+);
+
+fn verified_local_runtime_snapshot(
+    state_dir: &Path,
+    run_dir: &Path,
+) -> Result<VerifiedLocalRuntimeSnapshot> {
     let Some((descriptor, _proof)) = read_active_activation(state_dir)? else {
         return if fs::symlink_metadata(state_dir.join("active")).is_ok() {
             Ok((
@@ -2269,7 +2280,7 @@ fn sync_once_with_retry(
                 }
             };
             let discovery_bytes = serde_json::to_vec(&discovery)?;
-            if let Err(error) = publish_configuration_generation(
+            publish_configuration_generation(
                 &args.state_dir,
                 &digest,
                 &segment,
@@ -2282,11 +2293,7 @@ fn sync_once_with_retry(
                 &bytes,
                 &discovery_bytes,
                 configuration.activation_phase == "commit",
-            ) {
-                // Local publication failure is not evidence that the signed
-                // policy is invalid. Keep its ETag unacknowledged for retry.
-                return Err(error);
-            }
+            )?;
             if configuration.activation_phase == "prepare" {
                 report_configuration_status(
                     &client,
@@ -2360,9 +2367,7 @@ fn sync_once_with_retry(
                 })
             };
             if let Some(result) = activation_result {
-                if let Err(error) = result {
-                    return Err(error);
-                }
+                result?;
                 state.activation_required = true;
                 state.activation_rejected_etag = None;
                 state.activation_rejected_at_unix = None;
@@ -2535,6 +2540,7 @@ fn report_runtime_telemetry(
     let empty = CoreRuntimeStatus {
         schema_version: 1,
         generation: 0,
+        policy_generation: 0,
         pid: 0,
         lifecycle: "unknown".into(),
         dataplane_phase: Some("control_received".into()),
@@ -2554,6 +2560,9 @@ fn report_runtime_telemetry(
         transport_mode: None,
     };
     let status = core_status.as_ref().unwrap_or(&empty);
+    let policy_generation = (status.policy_generation != 0)
+        .then_some(status.policy_generation)
+        .or_else(|| (status.generation != 0).then_some(status.generation));
     let route_diagnostics = match read_route_diagnostics(run_dir, status.generation) {
         Ok(diagnostics) => diagnostics,
         Err(error) => {
@@ -2594,7 +2603,11 @@ fn report_runtime_telemetry(
         reconnects: performance.reconnects,
         path_changes: performance.path_changes,
         transport_mode: status.transport_mode.as_deref(),
-        runtime_generation: (status.generation != 0).then_some(status.generation),
+        // Keep runtime_generation as the active projection generation for
+        // rolling compatibility with older Cloud deployments.
+        runtime_generation: policy_generation,
+        tunnel_generation: (status.generation != 0).then_some(status.generation),
+        policy_generation,
         paths: &path_performance,
         local_networks: local_networks.as_deref(),
     };
@@ -6679,6 +6692,7 @@ default via 192.0.2.1 dev eth0 proto static
         CoreRuntimeStatus {
             schema_version: 2,
             generation: 7,
+            policy_generation: 7,
             pid: std::process::id(),
             lifecycle: "active".into(),
             dataplane_phase: Some("data_plane_active".into()),
@@ -7888,6 +7902,7 @@ default via 192.0.2.1 dev eth0 proto static
         CoreRuntimeStatus {
             schema_version: 3,
             generation: 5,
+            policy_generation: 6,
             pid: std::process::id(),
             lifecycle: "active".into(),
             dataplane_phase: Some("data_plane_active".into()),

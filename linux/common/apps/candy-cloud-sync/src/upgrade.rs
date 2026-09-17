@@ -6,6 +6,7 @@ const CATALOG_KEY: &str =
     include_str!("../../../../../openwrt/client/packages/candy-client/catalog-release.pub");
 const RELEASE_ROOT: &str = "https://github.com/reTsubasa/candy-release/releases/download/";
 const MAX_BUNDLE: u64 = 256 * 1024 * 1024;
+const CATALOG_FETCH_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -128,28 +129,43 @@ fn catalog(root: &Path) -> Result<serde_json::Value> {
         .connect_timeout(Duration::from_secs(10))
         .build()?;
     let raw = "https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json";
-    fetch(&client, raw, &root.join("catalog.json"), 4 * 1024 * 1024)?;
-    fetch(
-        &client,
-        &format!("{raw}.sig"),
-        &root.join("catalog.sig"),
-        4096,
-    )?;
     atomic_bytes(&root.join("catalog.pub"), CATALOG_KEY.as_bytes(), 0o600)?;
-    command(
-        "usign",
-        &[
-            "-V",
-            "-p",
-            root.join("catalog.pub").to_str().context("path")?,
-            "-m",
-            root.join("catalog.json").to_str().context("path")?,
-            "-x",
-            root.join("catalog.sig").to_str().context("path")?,
-        ],
-        root,
-    )
-    .context("stage=catalog_signature error_code=signature_verification_failed")?;
+    let mut verified = false;
+    for attempt in 1..=CATALOG_FETCH_ATTEMPTS {
+        fetch(&client, raw, &root.join("catalog.json"), 4 * 1024 * 1024)?;
+        fetch(
+            &client,
+            &format!("{raw}.sig"),
+            &root.join("catalog.sig"),
+            4096,
+        )?;
+        if command(
+            "usign",
+            &[
+                "-V",
+                "-p",
+                root.join("catalog.pub").to_str().context("path")?,
+                "-m",
+                root.join("catalog.json").to_str().context("path")?,
+                "-x",
+                root.join("catalog.sig").to_str().context("path")?,
+            ],
+            root,
+        )
+        .is_ok()
+        {
+            verified = true;
+            break;
+        }
+        if attempt < CATALOG_FETCH_ATTEMPTS {
+            // The mutable branch ref and its two raw files can briefly be
+            // served from different CDN generations while a release lands.
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+    if !verified {
+        bail!("stage=catalog_signature error_code=signature_verification_failed");
+    }
     let value: serde_json::Value = read_bounded_json(&root.join("catalog.json"), 4 * 1024 * 1024)?;
     let sequence = value["sequence"]
         .as_u64()

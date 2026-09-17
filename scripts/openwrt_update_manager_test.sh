@@ -77,7 +77,14 @@ case "$url" in
 esac
 case "$url" in
 	https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json) source=$FAKE_CATALOG ;;
-	https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json.sig) source=$FAKE_CATALOG_SIGNATURE ;;
+	https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json.sig)
+		if [ "${FAKE_SIGNATURE_MISMATCH_ONCE:-0}" = 1 ] && [ ! -e "$FAKE_SIGNATURE_MISMATCH_STATE" ]; then
+			printf '%s\n' bad-signature > "$destination"
+			: > "$FAKE_SIGNATURE_MISMATCH_STATE"
+			exit 0
+		fi
+		source=$FAKE_CATALOG_SIGNATURE
+		;;
 	https://github.com/reTsubasa/candy-release/releases/download/*) source="$FAKE_ASSET_DIR/${url##*/}" ;;
 	*) exit 92 ;;
 esac
@@ -285,6 +292,7 @@ export CANDY_UPDATE_TEST_TARGET=x86/64
 export CANDY_UPDATE_TEST_ARCH=x86_64
 export FAKE_CATALOG="$tmp/stable.json"
 export FAKE_CATALOG_SIGNATURE="$tmp/stable.json.sig"
+export FAKE_SIGNATURE_MISMATCH_STATE="$tmp/signature-mismatch-seen"
 export FAKE_ASSET_DIR="$assets"
 export FAKE_FETCH_LOG="$tmp/fetch.log"
 export FAKE_CURRENT_CORE_SHA=0000000000000000000000000000000000000000000000000000000000000000
@@ -360,6 +368,9 @@ if "$manager" check >/dev/null 2>&1; then
 fi
 
 make_catalog 3 3 0.3.5
+FAKE_SIGNATURE_MISMATCH_ONCE=1 "$manager" check >/dev/null
+[ -f "$FAKE_SIGNATURE_MISMATCH_STATE" ]
+
 printf '%s\n' bad-signature > "$FAKE_CATALOG_SIGNATURE"
 if "$manager" check >/dev/null 2>&1; then
 	echo "catalog with an invalid signature was accepted" >&2
@@ -386,6 +397,7 @@ fi
 arm_core="$assets/candy-core-0.3.5-armv7-unknown-linux-musleabihf.tar.gz"
 jq --arg core_url "https://github.com/reTsubasa/candy-release/releases/download/core-v0.3.5/candy-core-0.3.5-armv7-unknown-linux-musleabihf.tar.gz" \
 	--arg core_sha "$(file_sha "$arm_core")" --argjson core_size "$(file_size "$arm_core")" '
+	.sequence = 4 |
 	.runtime.releases.v0_4_0_r3.targets.openwrt_25_12_4_arm_cortex_a7_neon_vfpv4 =
 		(.runtime.releases.v0_4_0_r3.targets.openwrt_25_12_4_x86_64 |
 		 .target = "ipq40xx/generic" | .arch = "arm_cortex-a7_neon-vfpv4" |
@@ -547,7 +559,7 @@ tail -n +$((apk_lines_before + 1)) "$FAKE_APK_LOG" | grep -F 'candy-client-0.4.0
 tail -n +$((apk_lines_before + 1)) "$FAKE_APK_LOG" | grep -F -- '--force-old-apk' >/dev/null
 [ "$(cat "$FAKE_INSTALLED_VERSION")" = 0.4.0-r2 ]
 
-make_catalog 4 3 0.3.4
+make_catalog 5 3 0.3.4
 "$manager" check >/dev/null
 replacement_status=$("$manager" status)
 printf '%s\n' "$replacement_status" | jq -e '.core_candidates[] | select(.version == "0.3.4") | .installed == true and .active == true and .update_available == true' >/dev/null || {
@@ -569,7 +581,7 @@ if "$manager" install-core-upload "$tmp/outside.tar.gz" >/dev/null 2>&1; then
 	exit 1
 fi
 
-make_catalog 5 1 0.3.5
+make_catalog 6 1 0.3.5
 "$manager" check >/dev/null
 if "$manager" install-runtime v0_4_0_r1 >/dev/null 2>&1; then
 	echo "Runtime downgrade was accepted" >&2
@@ -579,7 +591,7 @@ fi
 # The status contract exposes the five newest compatible catalog releases,
 # independently of the latest pointer.
 cp "$assets/candy-core-0.3.5-x86_64-unknown-linux-musl.tar.gz" "$assets/candy-core-0.3.9-x86_64-unknown-linux-musl.tar.gz"
-make_catalog 6 3 0.3.9
+make_catalog 7 3 0.3.9
 base_entry=$(jq -c '.core.releases.v0_3_9' "$FAKE_CATALOG")
 for candidate in 0.3.4 0.3.5 0.3.6 0.3.7 0.3.8; do
 	key="v$(printf '%s' "$candidate" | tr . _)"

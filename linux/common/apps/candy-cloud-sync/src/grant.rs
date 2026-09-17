@@ -949,7 +949,8 @@ mod tests {
 
     #[test]
     fn grant_binding_errors_identify_each_invalid_field() {
-        let cases: &[(fn(&mut VerifiedGrantReport), &str, &str)] = &[
+        type GrantBindingCase = (fn(&mut VerifiedGrantReport), &'static str, &'static str);
+        let cases: &[GrantBindingCase] = &[
             (
                 |r| r.schema_version = 2,
                 "grant_core_report",

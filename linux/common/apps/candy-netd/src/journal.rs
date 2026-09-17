@@ -358,9 +358,7 @@ fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
                 return Err(NetworkError::Journal);
             };
             if recovery.owner != request.owner {
-                if recovery.owner != request.owner {
-                    recovery_candidate_owner = Some(recovery.owner);
-                }
+                recovery_candidate_owner = Some(recovery.owner);
             }
             Some(candidate)
         }
@@ -508,7 +506,7 @@ mod tests {
     use super::*;
     #[test]
     fn decode_v4_truncation_is_always_fail_closed() {
-        let mut encoded = vec![0u8; HEADER_LEN + CHECKSUM_LEN + 64];
+        let mut encoded = [0u8; HEADER_LEN + CHECKSUM_LEN + 64];
         encoded[..8].copy_from_slice(MAGIC_V4);
         let digest = Sha256::digest(&encoded[..encoded.len() - CHECKSUM_LEN]);
         let checksum_start = encoded.len() - CHECKSUM_LEN;
