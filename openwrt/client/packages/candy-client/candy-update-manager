@@ -632,6 +632,43 @@ restore_config() {
 	chmod 0600 "$CONFIG_FILE" 2>/dev/null || true
 }
 
+finalize_runtime_package_files() {
+	local init
+	# APK preserves a locally active init script as .apk-new. Cloud-driven
+	# upgrades deliberately suppress package scripts so the running data plane
+	# is not stopped by default_prerm; promote the verified replacement here.
+	for init in "$SERVICE_INIT" "$CLOUD_SYNC_INIT"; do
+		if [ -f "$init.apk-new" ]; then
+			[ ! -L "$init.apk-new" ] || return 1
+			cp "$init.apk-new" "$init" || return 1
+			chmod 0755 "$init" || return 1
+			rm -f "$init.apk-new" || return 1
+		fi
+	done
+	[ -x "$SERVICE_INIT" ] && [ -x "$CLOUD_SYNC_INIT" ] &&
+		[ -x "$0" ] && [ -x "$HEALTH_CHECK" ]
+}
+
+install_runtime_packages() {
+	local client_package="$1" luci_package="$2"
+	if [ "$PRESERVE_CLOUD_UPGRADE_WORKER" = 1 ]; then
+		apk add --scripts=no --allow-untrusted "$client_package" "$luci_package" &&
+			finalize_runtime_package_files
+	else
+		apk add --allow-untrusted "$client_package" "$luci_package"
+	fi
+}
+
+restore_runtime_packages() {
+	local client_package="$1" luci_package="$2"
+	if [ "$PRESERVE_CLOUD_UPGRADE_WORKER" = 1 ]; then
+		apk add --scripts=no --allow-untrusted --force-old-apk "$client_package" "$luci_package" &&
+			finalize_runtime_package_files
+	else
+		apk add --allow-untrusted --force-old-apk "$client_package" "$luci_package"
+	fi
+}
+
 restore_service_state() {
 	local was_enabled="$1" was_running="$2"
 	if [ "$was_enabled" = 1 ]; then
@@ -761,36 +798,40 @@ install_runtime() {
 	if [ -x "$CLOUD_SYNC_INIT" ] && cloud_identity_valid && "$CLOUD_SYNC_INIT" enabled >/dev/null 2>&1; then
 		cloud_sync_should_run=1
 	fi
-	"$SERVICE_INIT" stop >/dev/null 2>&1 || fail "cannot stop Candy before Runtime update"
-	"$SERVICE_INIT" disable >/dev/null 2>&1 || fail "cannot disable Candy during Runtime update"
-	if ! apk add --allow-untrusted "$client_package" "$luci_package"; then
-		apk add --allow-untrusted --force-old-apk "$old_client" "$old_luci" >/dev/null 2>&1 || true
+	if [ "$PRESERVE_CLOUD_UPGRADE_WORKER" != 1 ]; then
+		"$SERVICE_INIT" stop >/dev/null 2>&1 || fail "cannot stop Candy before Runtime update"
+		"$SERVICE_INIT" disable >/dev/null 2>&1 || fail "cannot disable Candy during Runtime update"
+	fi
+	if ! install_runtime_packages "$client_package" "$luci_package"; then
+		restore_runtime_packages "$old_client" "$old_luci" >/dev/null 2>&1 || true
 		restore_config "$config_backup" || true
-		restore_service_state "$was_enabled" "$was_running" || true
+		[ "$PRESERVE_CLOUD_UPGRADE_WORKER" = 1 ] || restore_service_state "$was_enabled" "$was_running" || true
 		if ! restore_cloud_sync_state "$cloud_sync_should_run"; then
 			fail_stage rollback cloud_sync_restore_failed "Runtime APK transaction failed and Candy Cloud sync could not be restored"
 		fi
 		fail_stage install apk_transaction_failed "Runtime APK transaction failed; previous packages were restored"
 	fi
 	restore_config "$config_backup" || fail "Runtime installed but Candy configuration could not be restored"
-	restore_service_state "$was_enabled" "$was_running" || fail "Runtime installed but Candy service state could not be restored"
+	if [ "$PRESERVE_CLOUD_UPGRADE_WORKER" != 1 ]; then
+		restore_service_state "$was_enabled" "$was_running" || fail "Runtime installed but Candy service state could not be restored"
+	fi
 	if ! restore_cloud_sync_state "$cloud_sync_should_run"; then
 		log_update error runtime_update health cloud_sync_restart_failed "Target Runtime could not restore Candy Cloud sync; starting rollback"
 		stop_cloud_sync_for_rollback
-		"$SERVICE_INIT" stop >/dev/null 2>&1 || true
-		apk add --allow-untrusted --force-old-apk "$old_client" "$old_luci" >/dev/null 2>&1 || fail_stage rollback package_restore_failed "Candy Cloud sync restart failed and rollback package installation also failed"
+		[ "$PRESERVE_CLOUD_UPGRADE_WORKER" = 1 ] || "$SERVICE_INIT" stop >/dev/null 2>&1 || true
+		restore_runtime_packages "$old_client" "$old_luci" >/dev/null 2>&1 || fail_stage rollback package_restore_failed "Candy Cloud sync restart failed and rollback package installation also failed"
 		restore_config "$config_backup" || fail_stage rollback config_restore_failed "Runtime rollback could not restore Candy configuration"
-		restore_service_state "$was_enabled" "$was_running" || fail_stage rollback service_restore_failed "Runtime rollback could not restore Candy service state"
+		[ "$PRESERVE_CLOUD_UPGRADE_WORKER" = 1 ] || restore_service_state "$was_enabled" "$was_running" || fail_stage rollback service_restore_failed "Runtime rollback could not restore Candy service state"
 		restore_cloud_sync_state "$cloud_sync_should_run" || fail_stage rollback cloud_sync_restore_failed "Runtime rollback could not restore Candy Cloud sync"
 		[ "$was_running" = 0 ] || runtime_healthy || fail_stage rollback health_check_failed "Runtime rollback health check failed"
 		fail_stage health cloud_sync_restart_failed "Runtime $display could not restore Candy Cloud sync and was rolled back to $current_display"
 	fi
 	if [ "$was_running" = 1 ] && ! runtime_healthy; then
 		[ "$cloud_sync_should_run" = 0 ] || stop_cloud_sync_for_rollback
-		"$SERVICE_INIT" stop >/dev/null 2>&1 || true
-		apk add --allow-untrusted --force-old-apk "$old_client" "$old_luci" >/dev/null 2>&1 || fail "Runtime health check failed and rollback package installation also failed"
+		[ "$PRESERVE_CLOUD_UPGRADE_WORKER" = 1 ] || "$SERVICE_INIT" stop >/dev/null 2>&1 || true
+		restore_runtime_packages "$old_client" "$old_luci" >/dev/null 2>&1 || fail "Runtime health check failed and rollback package installation also failed"
 		restore_config "$config_backup" || fail "Runtime rollback could not restore Candy configuration"
-		restore_service_state "$was_enabled" "$was_running" || fail "Runtime rollback could not restore Candy service state"
+		[ "$PRESERVE_CLOUD_UPGRADE_WORKER" = 1 ] || restore_service_state "$was_enabled" "$was_running" || fail "Runtime rollback could not restore Candy service state"
 		restore_cloud_sync_state "$cloud_sync_should_run" || fail_stage rollback cloud_sync_restore_failed "Runtime rollback could not restore Candy Cloud sync"
 		runtime_healthy || fail "Runtime update and rollback health checks both failed"
 		fail "Runtime $display failed its health check and was rolled back to $current_display"

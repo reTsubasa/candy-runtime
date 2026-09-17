@@ -560,6 +560,7 @@ grep -Fx running "$FAKE_CLOUD_SYNC_LOG" >/dev/null
 # init service that owns the current transaction. The worker exits only after
 # Cloud receipt and journal cleanup, then procd respawns the new binary.
 : > "$FAKE_CLOUD_SYNC_LOG"
+: > "$FAKE_SERVICE_LOG"
 printf '%s\n' 1 > "$FAKE_CLOUD_SYNC_RUNNING"
 CANDY_UPDATE_PRESERVE_CLOUD_UPGRADE_WORKER=1 "$manager" install-runtime v0_4_0_r3 >/dev/null
 grep -Fx enable "$FAKE_CLOUD_SYNC_LOG" >/dev/null
@@ -568,6 +569,14 @@ if grep -Eq '^(restart|stop)$' "$FAKE_CLOUD_SYNC_LOG"; then
 	echo "Cloud-driven Runtime update stopped or restarted its own upgrade worker" >&2
 	exit 1
 fi
+if grep -Eq '^(stop|disable|start)$' "$FAKE_SERVICE_LOG"; then
+	echo "Cloud-driven Runtime update interrupted the running data plane" >&2
+	exit 1
+fi
+tail -n 1 "$FAKE_APK_LOG" | grep -F -- '--scripts=no' >/dev/null || {
+	echo "Cloud-driven Runtime update allowed APK lifecycle scripts to stop the data plane" >&2
+	exit 1
+}
 
 # A target Runtime that cannot restore Cloud sync is rejected and rolled back;
 # the rollback must also restore the previously enabled Cloud sync service.
