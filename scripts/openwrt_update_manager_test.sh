@@ -44,6 +44,13 @@ exec /usr/bin/stat "$@"
 EOF
 chmod 0755 "$bin/stat"
 
+cat > "$bin/df" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on'
+printf 'overlay 1048576 0 %s 0%% /\n' "${FAKE_ROOT_AVAILABLE_KB:-1048576}"
+EOF
+chmod 0755 "$bin/df"
+
 cat > "$bin/ls" <<'EOF'
 #!/bin/sh
 if [ "${FAKE_STAT_UNAVAILABLE:-0}" = 1 ]; then
@@ -485,6 +492,17 @@ if grep -E 'core-cloud-module-v|cloud-abi' "$FAKE_FETCH_LOG" >/dev/null; then
 	exit 1
 fi
 
+# Root space is checked before handing the bundle to the Core manager.
+core_lines_before=$(wc -l < "$FAKE_CORE_LOG" | tr -d ' ')
+if FAKE_ROOT_AVAILABLE_KB=1 "$manager" install-core v0_3_5 >/dev/null 2>&1; then
+	echo "Core update ignored insufficient root filesystem space" >&2
+	exit 1
+fi
+[ "$(wc -l < "$FAKE_CORE_LOG" | tr -d ' ')" = "$core_lines_before" ]
+grep -q '"phase":"preflight"' "$CANDY_UPDATE_OPERATION_FILE"
+grep -q '"error_code":"insufficient_space"' "$CANDY_UPDATE_OPERATION_FILE"
+grep -Eq 'required_bytes=[0-9]+ available_bytes=[0-9]+ filesystem=/' "$CANDY_UPDATE_OPERATION_FILE"
+
 "$manager" install-runtime v0_4_0_r3 >/dev/null
 grep -F 'add --allow-untrusted ' "$FAKE_APK_LOG" >/dev/null
 grep -F 'candy-client-0.4.0-r3.apk' "$FAKE_APK_LOG" >/dev/null
@@ -495,6 +513,16 @@ grep -Fx enable "$FAKE_SERVICE_LOG" >/dev/null
 grep -Fx start "$FAKE_SERVICE_LOG" >/dev/null
 [ "$(cat "$CANDY_UPDATE_CONFIG_FILE")" = test-config ]
 [ ! -s "$FAKE_CLOUD_SYNC_LOG" ]
+
+# Runtime space preflight must fail before stopping or disabling services.
+: > "$FAKE_SERVICE_LOG"
+if FAKE_ROOT_AVAILABLE_KB=1 "$manager" install-runtime v0_4_0_r3 >/dev/null 2>&1; then
+	echo "Runtime update ignored insufficient root filesystem space" >&2
+	exit 1
+fi
+[ ! -s "$FAKE_SERVICE_LOG" ]
+grep -q '"phase":"preflight"' "$CANDY_UPDATE_OPERATION_FILE"
+grep -q '"error_code":"insufficient_space"' "$CANDY_UPDATE_OPERATION_FILE"
 
 # A disabled Cloud sync service must remain disabled even when an identity is
 # present. Runtime update ownership is limited to services already enabled by
@@ -586,6 +614,14 @@ grep -F 'Core 0.3.4 updated and remains active' "$tmp/core-replacement.out" >/de
 
 mkdir -m 0700 "$CANDY_UPDATE_UPLOAD_ROOT"
 printf '%s\n' uploaded-core > "$CANDY_UPDATE_UPLOAD_ROOT/core-test.tar.gz"
+core_lines_before=$(wc -l < "$FAKE_CORE_LOG" | tr -d ' ')
+if FAKE_ROOT_AVAILABLE_KB=1 "$manager" install-core-upload "$CANDY_UPDATE_UPLOAD_ROOT/core-test.tar.gz" >/dev/null 2>&1; then
+	echo "uploaded Core update ignored insufficient root filesystem space" >&2
+	exit 1
+fi
+[ -f "$CANDY_UPDATE_UPLOAD_ROOT/core-test.tar.gz" ]
+[ "$(wc -l < "$FAKE_CORE_LOG" | tr -d ' ')" = "$core_lines_before" ]
+grep -q '"error_code":"insufficient_space"' "$CANDY_UPDATE_OPERATION_FILE"
 "$manager" install-core-upload "$CANDY_UPDATE_UPLOAD_ROOT/core-test.tar.gz" >/dev/null
 grep -F 'install-local ' "$FAKE_CORE_LOG" >/dev/null
 [ ! -e "$CANDY_UPDATE_UPLOAD_ROOT/core-test.tar.gz" ]

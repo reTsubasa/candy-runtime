@@ -1,5 +1,6 @@
 use super::*;
 use nix::fcntl::{Flock, FlockArg};
+use std::io::{Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 const CATALOG_KEY: &str =
@@ -9,6 +10,10 @@ const MAX_BUNDLE: u64 = 256 * 1024 * 1024;
 const CATALOG_FETCH_ATTEMPTS: usize = 3;
 const OPENWRT_UPDATE_MANAGER: &str = "/usr/libexec/candy-update-manager";
 const OPENWRT_UPDATE_CATALOG: &str = "/var/lib/candy/update/stable.json";
+const OPENWRT_UPDATE_OPERATION: &str = "/tmp/candy-update-operation.json";
+const OPENWRT_CORE_OPERATION: &str = "/tmp/candy-core-operation.json";
+const MAX_OPERATION_BYTES: u64 = 64 * 1024;
+const MAX_FAILURE_DETAIL_CHARS: usize = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum UpgradeOutcome {
@@ -57,6 +62,49 @@ struct Journal {
     job: Job,
     phase: String,
     error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure_phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error_detail: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManagerOperation {
+    state: String,
+    action: String,
+    phase: String,
+    error_code: String,
+    detail: String,
+    #[serde(default)]
+    updated_at: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct UpgradeFailure {
+    phase: String,
+    error_code: String,
+    detail: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreManagerStatus {
+    #[serde(default)]
+    current_version: Option<String>,
+    #[serde(default)]
+    previous_version: Option<String>,
+    #[serde(default)]
+    installed: Vec<InstalledCore>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InstalledCore {
+    version: String,
+    #[serde(default)]
+    active: bool,
+    #[serde(default)]
+    rollback: bool,
+    #[serde(default)]
+    managed: bool,
 }
 
 #[derive(Serialize)]
@@ -394,6 +442,7 @@ fn install(
         )?;
         if target.component == "core" {
             command(manager(true), &["activate", &target.version], root)?;
+            cleanup_managed_cores(root, true);
         }
     } else if target.component == "core" {
         let bundle = download_artifact(root, artifact, "core.tar.gz")?;
@@ -408,6 +457,7 @@ fn install(
             root,
         )?;
         command(manager(false), &["activate", &target.version], root)?;
+        cleanup_managed_cores(root, false);
     } else {
         let bundle = download_artifact(root, &artifact["runtime"], "runtime.tar.gz")?;
         // Only extract the one installer from an authenticated artifact. Its
@@ -488,11 +538,228 @@ fn upgrade_error_code(error: &anyhow::Error) -> &'static str {
     "upgrade_execution_failed"
 }
 
+fn safe_failure_detail(value: &str) -> String {
+    value
+        .chars()
+        .take(MAX_FAILURE_DETAIL_CHARS)
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+fn cloud_failure_phase(manager_phase: &str) -> &'static str {
+    if manager_phase.contains("rollback") {
+        return "rolled_back";
+    }
+    if manager_phase.contains("health") {
+        return "health_check";
+    }
+    match manager_phase {
+        "preflight" | "request" => "prepared",
+        "download" | "archive" | "signature" | "manifest" | "validation" | "process_probe"
+        | "executable" | "upload" => "verifying",
+        "install" => "installing",
+        _ => "executing",
+    }
+}
+
+fn operation_failure_from_bytes(bytes: &[u8]) -> Option<(ManagerOperation, UpgradeFailure)> {
+    let operation: ManagerOperation = serde_json::from_slice(bytes).ok()?;
+    if operation.state != "error"
+        || !token(&operation.action)
+        || !token(&operation.phase)
+        || !token(&operation.error_code)
+    {
+        return None;
+    }
+    let detail = safe_failure_detail(&operation.detail);
+    let failure = UpgradeFailure {
+        phase: cloud_failure_phase(&operation.phase).into(),
+        error_code: operation.error_code.clone(),
+        detail,
+    };
+    Some((operation, failure))
+}
+
+fn operation_failure(path: &Path) -> Option<(ManagerOperation, UpgradeFailure)> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o022 != 0
+        || metadata.len() == 0
+        || metadata.len() > MAX_OPERATION_BYTES
+    {
+        return None;
+    }
+    let bytes = read_bounded(path, MAX_OPERATION_BYTES).ok()?;
+    operation_failure_from_bytes(&bytes)
+}
+
+fn structured_failure_from_log(value: &str) -> Option<UpgradeFailure> {
+    let mut phase = None;
+    let mut error_code = None;
+    for field in value.split_ascii_whitespace() {
+        if let Some(value) = field.strip_prefix("stage=").filter(|value| token(value)) {
+            phase = Some(value);
+        }
+        if let Some(value) = field
+            .strip_prefix("error_code=")
+            .filter(|value| token(value))
+        {
+            error_code = Some(value);
+        }
+    }
+    Some(UpgradeFailure {
+        phase: cloud_failure_phase(phase?).into(),
+        error_code: error_code?.into(),
+        detail: safe_failure_detail(value),
+    })
+}
+
+fn execution_log_failure(root: &Path) -> Option<UpgradeFailure> {
+    let path = root.join("execution.log");
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.mode() & 0o022 != 0 {
+        return None;
+    }
+    let mut file = File::open(path).ok()?;
+    let length = metadata.len();
+    let keep = length.min(4096);
+    file.seek(SeekFrom::Start(length.saturating_sub(keep)))
+        .ok()?;
+    let mut bytes = Vec::with_capacity(keep as usize);
+    file.take(keep).read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    text.lines().rev().find_map(structured_failure_from_log)
+}
+
+fn reset_execution_log(root: &Path) -> Result<()> {
+    let path = root.join("execution.log");
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(&path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn upgrade_failure(
+    root: &Path,
+    openwrt: bool,
+    component: &str,
+    error: &anyhow::Error,
+) -> UpgradeFailure {
+    if openwrt {
+        let operation_paths: &[&str] = if component == "runtime" {
+            &[OPENWRT_UPDATE_OPERATION]
+        } else {
+            &[OPENWRT_UPDATE_OPERATION, OPENWRT_CORE_OPERATION]
+        };
+        let mut operations = operation_paths
+            .iter()
+            .copied()
+            .filter_map(|path| {
+                let (operation, failure) = operation_failure(Path::new(path))?;
+                let action_matches = match component {
+                    "runtime" => operation.action == "install-runtime",
+                    "core" => matches!(operation.action.as_str(), "install-core" | "activate"),
+                    _ => false,
+                };
+                action_matches.then_some((operation.updated_at, failure))
+            })
+            .collect::<Vec<_>>();
+        operations.sort_by_key(|(updated_at, _)| *updated_at);
+        if let Some((_, failure)) = operations.pop() {
+            return failure;
+        }
+    }
+    if let Some(failure) = execution_log_failure(root) {
+        return failure;
+    }
+    UpgradeFailure {
+        phase: "executing".into(),
+        error_code: upgrade_error_code(error).into(),
+        detail: safe_failure_detail(&format!("{error:#}")),
+    }
+}
+
+fn managed_core_cleanup_versions(status: &CoreManagerStatus) -> Vec<String> {
+    status
+        .installed
+        .iter()
+        .filter(|installed| {
+            installed.managed
+                && !installed.active
+                && !installed.rollback
+                && status.current_version.as_deref() != Some(&installed.version)
+                && status.previous_version.as_deref() != Some(&installed.version)
+                && token(&installed.version)
+        })
+        .map(|installed| installed.version.clone())
+        .collect()
+}
+
+fn cleanup_managed_cores(root: &Path, openwrt: bool) {
+    let manager = manager(openwrt);
+    let output = match ProcessCommand::new(manager).arg("status").output() {
+        Ok(output)
+            if output.status.success() && output.stdout.len() <= MAX_OPERATION_BYTES as usize =>
+        {
+            output
+        }
+        Ok(output) => {
+            eprintln!(
+                "event=core_history_cleanup_failed phase=status error_code=core_status_failed exit={}",
+                output.status.code().unwrap_or(-1)
+            );
+            return;
+        }
+        Err(error) => {
+            eprintln!(
+                "event=core_history_cleanup_failed phase=status error_code=core_status_execute_failed detail={}",
+                safe_failure_detail(&error.to_string())
+            );
+            return;
+        }
+    };
+    let status: CoreManagerStatus = match serde_json::from_slice(&output.stdout) {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!(
+                "event=core_history_cleanup_failed phase=status error_code=core_status_invalid detail={}",
+                safe_failure_detail(&error.to_string())
+            );
+            return;
+        }
+    };
+    for version in managed_core_cleanup_versions(&status) {
+        if let Err(error) = command(manager, &["remove", &version], root) {
+            eprintln!(
+                "event=core_history_cleanup_failed phase=remove error_code=core_remove_failed version={} detail={}",
+                version,
+                safe_failure_detail(&format!("{error:#}"))
+            );
+        }
+    }
+}
+
 fn receipt(client: &Client, cloud: &Url, journal: &Journal, state: &str) -> Result<()> {
     client
         .put(endpoint(cloud, "auth/v1/runtime/upgrades")?)
         .json(
-            &serde_json::json!({"id":journal.job.id,"state":state,"phase":journal.phase,"error_code":journal.error_code}),
+            &serde_json::json!({"id":journal.job.id,"state":state,"phase":journal.failure_phase.as_deref().unwrap_or(&journal.phase),"error_code":journal.error_code}),
         )
         .send()?
         .error_for_status()?;
@@ -601,7 +868,10 @@ pub(super) fn run(args: &Args) -> Result<UpgradeOutcome> {
         job,
         phase: "prepared".into(),
         error_code: None,
+        failure_phase: None,
+        error_detail: None,
     };
+    reset_execution_log(root)?;
     atomic_bytes(&journal_path, &serde_json::to_vec(&journal)?, 0o600)?;
     receipt(&client, &cloud, &journal, "running")?;
     journal.phase = "executing".into();
@@ -618,12 +888,14 @@ pub(super) fn run(args: &Args) -> Result<UpgradeOutcome> {
     }
     .into();
     if let Err(error) = result {
+        let failure = upgrade_failure(root, openwrt, &target.component, &error);
         eprintln!(
-            "event=node_upgrade_failed id={} detail={}",
-            journal.job.id,
-            sanitize_log_value(&format!("{error:#}"))
+            "event=node_upgrade_failed id={} phase={} error_code={} detail={}",
+            journal.job.id, failure.phase, failure.error_code, failure.detail
         );
-        journal.error_code = Some(upgrade_error_code(&error).into());
+        journal.failure_phase = Some(failure.phase);
+        journal.error_code = Some(failure.error_code);
+        journal.error_detail = Some(failure.detail);
     }
     atomic_bytes(&journal_path, &serde_json::to_vec(&journal)?, 0o600)?;
     receipt(&client, &cloud, &journal, &journal.phase)?;
@@ -682,6 +954,49 @@ mod tests {
             upgrade_error_code(&anyhow::anyhow!("unexpected process failure")),
             "upgrade_execution_failed"
         );
+        let (_, failure) = operation_failure_from_bytes(
+            br#"{"state":"error","action":"install-runtime","phase":"preflight","error_code":"insufficient_space","detail":"required_bytes=900 available_bytes=100\nunsafe","updated_at":7}"#,
+        )
+        .unwrap();
+        assert_eq!(failure.phase, "prepared");
+        assert_eq!(failure.error_code, "insufficient_space");
+        assert_eq!(
+            failure.detail,
+            "required_bytes=900 available_bytes=100 unsafe"
+        );
+        assert_eq!(
+            structured_failure_from_log(
+                "candy-core-manager: stage=core_rollback error_code=service_recovery_failed detail"
+            ),
+            Some(UpgradeFailure {
+                phase: "rolled_back".into(),
+                error_code: "service_recovery_failed".into(),
+                detail: "candy-core-manager: stage=core_rollback error_code=service_recovery_failed detail".into(),
+            })
+        );
+        assert!(operation_failure_from_bytes(
+            br#"{"state":"error","action":"install-runtime","phase":"install","error_code":"bad code","detail":"x"}"#,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn managed_core_cleanup_preserves_active_rollback_and_unmanaged_versions() {
+        let status: CoreManagerStatus = serde_json::from_value(serde_json::json!({
+            "current_version": "0.3.53",
+            "previous_version": "0.3.52",
+            "installed": [
+                {"version":"0.3.53","active":false,"rollback":false,"managed":true},
+                {"version":"0.3.52","active":false,"rollback":false,"managed":true},
+                {"version":"0.3.51","active":false,"rollback":false,"managed":true},
+                {"version":"0.3.50","active":false,"rollback":false,"managed":false},
+                {"version":"0.3.49","active":true,"rollback":false,"managed":true},
+                {"version":"0.3.48","active":false,"rollback":true,"managed":true},
+                {"version":"../escape","active":false,"rollback":false,"managed":true}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(managed_core_cleanup_versions(&status), ["0.3.51"]);
     }
 
     #[test]

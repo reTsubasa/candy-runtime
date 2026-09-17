@@ -40,6 +40,8 @@ MAX_CATALOG_BYTES=${CANDY_UPDATE_MAX_CATALOG_BYTES:-4194304}
 MAX_SIGNATURE_BYTES=${CANDY_UPDATE_MAX_SIGNATURE_BYTES:-4096}
 MAX_RUNTIME_PACKAGE_BYTES=${CANDY_UPDATE_MAX_RUNTIME_PACKAGE_BYTES:-16777216}
 MAX_CORE_BYTES=${CANDY_UPDATE_MAX_CORE_BYTES:-134217728}
+SPACE_MARGIN_BYTES=${CANDY_UPDATE_SPACE_MARGIN_BYTES:-8388608}
+ROOT_FILESYSTEM=${CANDY_UPDATE_ROOT_FILESYSTEM:-/}
 UPLOAD_ROOT=${CANDY_UPDATE_UPLOAD_ROOT:-/tmp/candy-core-upload}
 CORE_STAGING_ROOT=${CANDY_UPDATE_CORE_STAGING_ROOT:-/tmp/candy-core-update}
 OPERATION_ACTION=
@@ -490,6 +492,27 @@ verify_download() {
 	[ "$actual_sha" = "$(printf '%s' "$expected_sha" | tr 'A-F' 'a-f')" ]
 }
 
+root_available_bytes() {
+	local available
+	available=$(df -Pk "$ROOT_FILESYSTEM" 2>/dev/null | awk 'NR == 2 { printf "%.0f\n", $4 * 1024; exit }')
+	case "$available" in ''|*[!0-9]*) return 1 ;; esac
+	printf '%s\n' "$available"
+}
+
+require_transaction_space() {
+	local payload_bytes="$1" available required
+	case "$payload_bytes:$SPACE_MARGIN_BYTES" in
+		*[!0-9:]*|:*|*:) fail_stage preflight space_probe_failed "Cannot calculate required root filesystem space" ;;
+	esac
+	# APK/Core extraction, package database transaction files, and a bounded
+	# rollback copy can coexist. Reserve three compressed payload equivalents
+	# plus fixed metadata/journal headroom before stopping any service.
+	required=$((payload_bytes * 3 + SPACE_MARGIN_BYTES))
+	available=$(root_available_bytes) || fail_stage preflight space_probe_failed "Cannot determine available root filesystem space"
+	[ "$available" -ge "$required" ] ||
+		fail_stage preflight insufficient_space "required_bytes=$required available_bytes=$available filesystem=$ROOT_FILESYSTEM"
+}
+
 install_core() {
 	local key="$1" version url sha size archive current
 	require_supported_platform || fail "this Runtime package does not support the current OpenWrt platform"
@@ -506,6 +529,7 @@ install_core() {
 	archive=$TEMPORARY/core.tar.gz
 	fetch_https "$url" "$archive" || fail "Core download failed"
 	verify_download "$archive" "$size" "$sha" "$MAX_CORE_BYTES" || fail "Core download size or SHA-256 is invalid"
+	require_transaction_space "$size"
 	if ! CANDY_CORE_ALLOW_FILE_URL=1 CANDY_CORE_OPERATION_FILE="$CORE_OPERATION_FILE" "$CORE_MANAGER" install "$version" "file://$archive" "$sha"; then
 		propagate_core_failure "Core installation failed"
 	fi
@@ -539,6 +563,7 @@ install_core_upload() {
 	size=$(wc -c < "$path" 2>/dev/null | tr -d ' ' || printf 0)
 	case "$size" in ''|*[!0-9]*) fail_stage upload upload_size_invalid "Uploaded Core size is invalid" ;; esac
 	[ "$size" -le "$MAX_CORE_BYTES" ] || fail_stage upload upload_too_large "Uploaded Core exceeds the size limit"
+	require_transaction_space "$size"
 	UPLOAD_FILE=$path
 	if ! CANDY_CORE_OPERATION_FILE="$CORE_OPERATION_FILE" "$CORE_MANAGER" install-local "$path"; then
 		propagate_core_failure "Uploaded Core installation failed"
@@ -686,7 +711,7 @@ runtime_healthy() {
 }
 
 install_runtime() {
-	local key="$1" version revision display current_key current_display target_dir rollback_dir client_package luci_package old_client old_luci config_backup was_enabled=0 was_running=0 cloud_sync_should_run=0
+	local key="$1" version revision display current_key current_display target_dir rollback_dir client_package luci_package old_client old_luci config_backup transaction_payload was_enabled=0 was_running=0 cloud_sync_should_run=0
 	require_supported_platform || fail "this Runtime package does not support the current OpenWrt platform"
 	cached_catalog_valid || fail "no valid checked catalog is available"
 	validate_runtime_entry "$CATALOG_FILE" "$key" || fail "requested Runtime release is invalid or incompatible"
@@ -707,6 +732,11 @@ install_runtime() {
 	luci_package=$target_dir/luci-app-candy-$display.apk
 	old_client=$rollback_dir/candy-client-$current_display.apk
 	old_luci=$rollback_dir/luci-app-candy-$current_display.apk
+	transaction_payload=$(wc -c < "$client_package" 2>/dev/null || printf 0)
+	transaction_payload=$((transaction_payload + $(wc -c < "$luci_package" 2>/dev/null || printf 0)))
+	transaction_payload=$((transaction_payload + $(wc -c < "$old_client" 2>/dev/null || printf 0)))
+	transaction_payload=$((transaction_payload + $(wc -c < "$old_luci" 2>/dev/null || printf 0)))
+	require_transaction_space "$transaction_payload"
 	config_backup=$TEMPORARY/candy.config
 	if [ -e "$CONFIG_FILE" ]; then
 		[ -f "$CONFIG_FILE" ] && [ ! -L "$CONFIG_FILE" ] || fail "Candy configuration is not a regular file"

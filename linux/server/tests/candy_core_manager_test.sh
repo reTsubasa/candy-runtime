@@ -262,6 +262,17 @@ make_bundle 1.1.1 1 1 "$host_arch" 0 "$bundle_static_musl" musl
 sha_static_musl=$(sha256sum "$bundle_static_musl" | awk '{ print $1 }')
 "$manager" install 1.1.1 "$bundle_static_musl" "$sha_static_musl" >/dev/null ||
 	fail "portable musl Core was rejected on a GNU/Linux host"
+status_with_history=$($manager status)
+printf '%s' "$status_with_history" | jq -e '.installed[] | select(.version == "1.1.1") | .managed == true and .active == false and .rollback == false' >/dev/null ||
+	fail "manager status did not expose managed inactive Core history"
+if "$manager" remove 1.0.1 >/dev/null 2>&1; then
+	fail "manager removed the current Core"
+fi
+if "$manager" remove 1.0.0 >/dev/null 2>&1; then
+	fail "manager removed the rollback Core"
+fi
+"$manager" remove 1.1.1 >/dev/null
+[ ! -e "$cores/1.1.1" ] || fail "manager did not remove managed inactive Core history"
 
 bundle_gnu=$tmp/core-1.1.2.tar.gz
 make_bundle 1.1.2 1 1 "$host_arch" 0 "$bundle_gnu" gnu

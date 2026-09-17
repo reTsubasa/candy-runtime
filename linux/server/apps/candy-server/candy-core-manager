@@ -245,6 +245,15 @@ validate_core_directory() {
 	rm -f "$info"
 }
 
+managed_core_directory() {
+	local directory version
+	directory=$1
+	version=$2
+	validate_manifest "$directory/manifest.json" "$version" || return 1
+	[ -f "$directory/manifest.sig" ] && [ ! -L "$directory/manifest.sig" ] || return 1
+	[ -f "$directory/candy-core" ] && [ -x "$directory/candy-core" ] && [ ! -L "$directory/candy-core" ] || return 1
+}
+
 safe_archive() {
 	local archive
 	archive=$1
@@ -500,19 +509,48 @@ rollback_core() {
 	[ -z "$current" ] || atomic_link "$PREVIOUS_LINK" "$current" || fail "cannot preserve replaced Core as rollback version"
 }
 
+remove_core() {
+	local version directory current previous
+	version=$1
+	directory=$(version_path "$version") || fail "invalid Core version"
+	current=$(link_version "$CURRENT_LINK")
+	previous=$(link_version "$PREVIOUS_LINK")
+	[ "$version" != "$current" ] || fail "cannot remove the current Core"
+	[ "$version" != "$previous" ] || fail "cannot remove the rollback Core"
+	[ -d "$directory" ] && [ ! -L "$directory" ] || fail "Core $version is not safely installed"
+	managed_core_directory "$directory" "$version" || fail "Core $version is not Runtime-managed"
+	rm -rf "$directory" || fail "cannot remove Core $version"
+	[ ! -e "$directory" ] || fail "cannot remove Core $version"
+	printf '%s\n' "removed Core $version"
+}
+
 status_core() {
-	local current previous current_bundle_sha
+	local current previous current_bundle_sha directory version installed first=1
 	current=$(link_version "$CURRENT_LINK")
 	previous=$(link_version "$PREVIOUS_LINK")
 	current_bundle_sha=$(cat "$CORE_ROOT/$current/$BUNDLE_SHA_FILE" 2>/dev/null || true)
 	valid_sha256 "$current_bundle_sha" || current_bundle_sha=
+	installed='['
+	for directory in "$CORE_ROOT"/*; do
+		[ -d "$directory" ] && [ ! -L "$directory" ] || continue
+		version=$(basename "$directory")
+		valid_version "$version" || continue
+		[ "$first" = 1 ] || installed="$installed,"
+		first=0
+		installed="$installed$(jq -cn --arg version "$version" \
+			--arg current "$current" --arg previous "$previous" \
+			--argjson managed "$(managed_core_directory "$directory" "$version" && printf true || printf false)" \
+			'{version:$version,active:($version == $current),rollback:($version == $previous),managed:$managed}')"
+	done
+	installed="$installed]"
 	jq -n \
 		--arg current "$current" \
 		--arg previous "$previous" \
 		--arg current_bundle_sha "$current_bundle_sha" \
+		--argjson installed "$installed" \
 		--argjson process_api "$EXPECTED_PROCESS_API" \
 		--argjson core_api "$EXPECTED_CORE_API" \
-		'{schema_version:1,manager_api_version:1,required_core_process_api_version:$process_api,required_core_api_version:$core_api,current_version:(if $current == "" then null else $current end),current_bundle_sha256:(if $current_bundle_sha == "" then null else $current_bundle_sha end),previous_version:(if $previous == "" then null else $previous end)}'
+		'{schema_version:1,manager_api_version:1,required_core_process_api_version:$process_api,required_core_api_version:$core_api,current_version:(if $current == "" then null else $current end),current_bundle_sha256:(if $current_bundle_sha == "" then null else $current_bundle_sha end),previous_version:(if $previous == "" then null else $previous end),installed:$installed}'
 }
 
 need_command jq
@@ -540,6 +578,11 @@ case "$command" in
 		[ "$#" -eq 1 ] || fail "usage: $0 rollback"
 		acquire_lock
 		rollback_core
+		;;
+	remove)
+		[ "$#" -eq 2 ] || fail "usage: $0 remove VERSION"
+		acquire_lock
+		remove_core "$2"
 		;;
 	*) fail "unknown command: $command" ;;
 esac
