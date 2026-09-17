@@ -219,12 +219,15 @@ fi
 EOF
 chmod 0755 "$bin/candy-health"
 
-printf '%s\n' runtime-client-r3 > "$assets/candy-client-0.4.0-r3.apk"
-printf '%s\n' runtime-luci-r3 > "$assets/luci-app-candy-0.4.0-r3.apk"
-printf '%s\n' runtime-client-r1 > "$assets/candy-client-0.4.0-r1.apk"
-printf '%s\n' runtime-luci-r1 > "$assets/luci-app-candy-0.4.0-r1.apk"
-printf '%s\n' runtime-client-r2 > "$assets/candy-client-0.4.0-r2.apk"
-printf '%s\n' runtime-luci-r2 > "$assets/luci-app-candy-0.4.0-r2.apk"
+for runtime_asset in \
+	"$assets/candy-client-0.4.0-r3.apk" \
+	"$assets/luci-app-candy-0.4.0-r3.apk" \
+	"$assets/candy-client-0.4.0-r1.apk" \
+	"$assets/luci-app-candy-0.4.0-r1.apk" \
+	"$assets/candy-client-0.4.0-r2.apk" \
+	"$assets/luci-app-candy-0.4.0-r2.apk"; do
+	dd if=/dev/zero of="$runtime_asset" bs=200 count=1 2>/dev/null
+done
 printf '%s\n' core-0.3.4 > "$assets/candy-core-0.3.4-x86_64-unknown-linux-musl.tar.gz"
 printf '%s\n' core-0.3.5 > "$assets/candy-core-0.3.5-x86_64-unknown-linux-musl.tar.gz"
 printf '%s\n' core-arm-0.3.5 > "$assets/candy-core-0.3.5-armv7-unknown-linux-musleabihf.tar.gz"
@@ -503,7 +506,11 @@ grep -q '"phase":"preflight"' "$CANDY_UPDATE_OPERATION_FILE"
 grep -q '"error_code":"insufficient_space"' "$CANDY_UPDATE_OPERATION_FILE"
 grep -Eq 'required_bytes=[0-9]+ available_bytes=[0-9]+ filesystem=/' "$CANDY_UPDATE_OPERATION_FILE"
 
-"$manager" install-runtime v0_4_0_r3 >/dev/null
+# Four staged 200-byte APKs would require 2400 bytes under the old repeated
+# three-times-total budget. The transaction only needs 800 additional bytes
+# for the two 200-byte target APKs, so 1 KiB must be accepted with no margin.
+CANDY_UPDATE_SPACE_MARGIN_BYTES=0 FAKE_ROOT_AVAILABLE_KB=1 \
+	"$manager" install-runtime v0_4_0_r3 >/dev/null
 grep -F 'add --allow-untrusted ' "$FAKE_APK_LOG" >/dev/null
 grep -F 'candy-client-0.4.0-r3.apk' "$FAKE_APK_LOG" >/dev/null
 grep -F 'luci-app-candy-0.4.0-r3.apk' "$FAKE_APK_LOG" >/dev/null
