@@ -660,6 +660,84 @@ if "$manager" install-core '../../bad' >/dev/null 2>&1; then
 	exit 1
 fi
 
+# A Cloud-driven Runtime update commits a durable handoff marker and delegates
+# the full service restart to a process outside both procd workers. The helper
+# must load the committed binary and long-running sync loop before publishing
+# completion evidence for the new upgrade worker.
+handoff=$root/openwrt/client/packages/candy-client/candy-cloud-sync-handoff
+handoff_root=$tmp/handoff
+handoff_bin=$handoff_root/candy-cloud-sync
+handoff_loop=$handoff_root/candy-cloud-sync-loop
+handoff_init=$handoff_root/candy-cloud-sync.init
+handoff_marker=$handoff_root/runtime-restart-required.json
+handoff_completion=$handoff_root/runtime-restart-completed.json
+handoff_failure=$handoff_root/runtime-restart-failed.json
+handoff_service_log=$handoff_root/service.log
+handoff_loaded_bin=$handoff_root/loaded-bin.sha256
+handoff_loaded_loop=$handoff_root/loaded-loop.sha256
+mkdir -p "$handoff_root"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$handoff_bin"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$handoff_loop"
+chmod 0755 "$handoff_bin" "$handoff_loop"
+cat > "$handoff_init" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$1" >> "$FAKE_HANDOFF_SERVICE_LOG"
+case "$1" in
+	restart)
+		[ "${FAKE_HANDOFF_RESTART_FAIL:-0}" = 0 ] || exit 1
+		sha256sum "$CANDY_HANDOFF_SYNC_BIN" | awk '{ print tolower($1) }' > "$FAKE_HANDOFF_LOADED_BIN"
+		sha256sum "$CANDY_HANDOFF_SYNC_LOOP" | awk '{ print tolower($1) }' > "$FAKE_HANDOFF_LOADED_LOOP"
+		;;
+	running) [ "${FAKE_HANDOFF_RESTART_FAIL:-0}" = 0 ] ;;
+	*) exit 1 ;;
+esac
+EOF
+chmod 0755 "$handoff_init"
+handoff_bin_sha=$(sha256sum "$handoff_bin" | awk '{ print tolower($1) }')
+handoff_loop_sha=$(sha256sum "$handoff_loop" | awk '{ print tolower($1) }')
+jq -n --arg bin "$handoff_bin_sha" --arg loop "$handoff_loop_sha" '{schema_version:1,job_id:"00000000-0000-0000-0000-000000000000",version:"0.4.0-r133",sync_binary_sha256:$bin,sync_loop_sha256:$loop,requested_at:1}' > "$handoff_marker"
+chmod 0600 "$handoff_marker"
+FAKE_HANDOFF_SERVICE_LOG=$handoff_service_log \
+FAKE_HANDOFF_LOADED_BIN=$handoff_loaded_bin \
+FAKE_HANDOFF_LOADED_LOOP=$handoff_loaded_loop \
+CANDY_HANDOFF_STATE_ROOT=$handoff_root \
+CANDY_HANDOFF_SYNC_BIN=$handoff_bin \
+CANDY_HANDOFF_SYNC_LOOP=$handoff_loop \
+CANDY_HANDOFF_SERVICE_INIT=$handoff_init \
+CANDY_HANDOFF_LOCK_DIR=$handoff_root/lock \
+CANDY_HANDOFF_START_DELAY=0 \
+CANDY_HANDOFF_RETRY_DELAY=0 \
+	"$handoff" "$handoff_marker"
+grep -Fx restart "$handoff_service_log" >/dev/null
+grep -Fx running "$handoff_service_log" >/dev/null
+[ "$(cat "$handoff_loaded_bin")" = "$handoff_bin_sha" ]
+[ "$(cat "$handoff_loaded_loop")" = "$handoff_loop_sha" ]
+cmp -s "$handoff_marker" "$handoff_completion"
+[ -f "$handoff_marker" ] || { echo "handoff helper removed the marker before the new worker receipt" >&2; exit 1; }
+[ ! -e "$handoff_failure" ]
+
+# A bounded restart failure keeps the marker and emits a phase-specific error
+# instead of allowing the Cloud job to remain running or become false-success.
+rm -f "$handoff_completion"
+if FAKE_HANDOFF_RESTART_FAIL=1 \
+	FAKE_HANDOFF_SERVICE_LOG=$handoff_service_log \
+	FAKE_HANDOFF_LOADED_BIN=$handoff_loaded_bin \
+	FAKE_HANDOFF_LOADED_LOOP=$handoff_loaded_loop \
+	CANDY_HANDOFF_STATE_ROOT=$handoff_root \
+	CANDY_HANDOFF_SYNC_BIN=$handoff_bin \
+	CANDY_HANDOFF_SYNC_LOOP=$handoff_loop \
+	CANDY_HANDOFF_SERVICE_INIT=$handoff_init \
+	CANDY_HANDOFF_LOCK_DIR=$handoff_root/lock \
+	CANDY_HANDOFF_START_DELAY=0 \
+	CANDY_HANDOFF_RETRY_DELAY=0 \
+	"$handoff" "$handoff_marker" >/dev/null 2>&1; then
+	echo "failed Cloud sync handoff was accepted" >&2
+	exit 1
+fi
+jq -e '.state == "failed" and .phase == "runtime_handoff" and .error_code == "handoff_service_restart_failed"' "$handoff_failure" >/dev/null
+[ -f "$handoff_marker" ]
+[ ! -e "$handoff_completion" ]
+
 grep -Fx 'untrusted comment: Candy release catalog 2026' "$root/openwrt/client/packages/candy-client/catalog-release.pub" >/dev/null
 grep -Fx 'RWT1+qFiLjZvb7KNiVxQkJhfovyk2jBy+DEDVozcS3Z1CcxO0larkH4P' "$root/openwrt/client/packages/candy-client/catalog-release.pub" >/dev/null
 

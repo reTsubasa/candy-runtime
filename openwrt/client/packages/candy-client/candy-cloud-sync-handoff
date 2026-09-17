@@ -1,0 +1,134 @@
+#!/bin/sh
+
+set -u
+
+MARKER=${1:-/etc/candy/node-upgrades/runtime-restart-required.json}
+STATE_ROOT=${CANDY_HANDOFF_STATE_ROOT:-$(dirname "$MARKER")}
+SYNC_BIN=${CANDY_HANDOFF_SYNC_BIN:-/usr/libexec/candy-cloud-sync}
+SYNC_LOOP=${CANDY_HANDOFF_SYNC_LOOP:-/usr/libexec/candy-cloud-sync-loop}
+SERVICE_INIT=${CANDY_HANDOFF_SERVICE_INIT:-/etc/init.d/candy-cloud-sync}
+LOCK_DIR=${CANDY_HANDOFF_LOCK_DIR:-/var/lock/candy-cloud-sync-handoff.lock}
+FAILURE_FILE=${CANDY_HANDOFF_FAILURE_FILE:-$STATE_ROOT/runtime-restart-failed.json}
+COMPLETION_FILE=${CANDY_HANDOFF_COMPLETION_FILE:-$STATE_ROOT/runtime-restart-completed.json}
+START_DELAY=${CANDY_HANDOFF_START_DELAY:-2}
+RETRY_DELAY=${CANDY_HANDOFF_RETRY_DELAY:-2}
+MAX_MARKER_BYTES=65536
+
+log_handoff() {
+	local level="$1" event="$2" code="$3"
+	shift 3
+	command -v logger >/dev/null 2>&1 && logger -t candy -- "level=$level event=$event phase=runtime_handoff code=$code detail=$*"
+}
+
+valid_token() {
+	[ -n "$1" ] && [ "${#1}" -le 128 ] && printf '%s' "$1" | grep -Eq '^[0-9A-Za-z._+-]+$'
+}
+
+valid_sha256() {
+	printf '%s' "$1" | grep -Eq '^[0-9a-f]{64}$'
+}
+
+regular_bounded_file() {
+	local path="$1" maximum="$2" size
+	[ -f "$path" ] && [ ! -L "$path" ] || return 1
+	size=$(wc -c < "$path" 2>/dev/null | tr -d ' ' || printf 0)
+	case "$size" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$size" -gt 0 ] && [ "$size" -le "$maximum" ]
+}
+
+write_failure() {
+	local code="$1" version="${2:-unknown}" temporary now
+	valid_token "$version" || version=unknown
+	now=$(date +%s 2>/dev/null || printf 0)
+	temporary=$FAILURE_FILE.tmp.$$
+	umask 077
+	printf '{"schema_version":1,"state":"failed","phase":"runtime_handoff","error_code":"%s","version":"%s","updated_at":%s}\n' \
+		"$code" "$version" "$now" > "$temporary" &&
+		chmod 0600 "$temporary" && mv -f "$temporary" "$FAILURE_FILE"
+}
+
+fail_handoff() {
+	local code="$1" version="$2"
+	shift 2
+	write_failure "$code" "$version" || true
+	log_handoff error runtime_upgrade_handoff_failed "$code" "$*"
+	printf '%s\n' "candy-cloud-sync-handoff: phase=runtime_handoff error_code=$code detail=$*" >&2
+	exit 1
+}
+
+cleanup_lock() {
+	if [ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] &&
+		[ -f "$LOCK_DIR/pid" ] && [ ! -L "$LOCK_DIR/pid" ] &&
+		[ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
+		rm -f "$LOCK_DIR/pid" 2>/dev/null || true
+		rmdir "$LOCK_DIR" 2>/dev/null || true
+	fi
+}
+
+acquire_lock() {
+	local owner
+	mkdir -p "$(dirname "$LOCK_DIR")" || return 1
+	if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+		[ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] || return 1
+		[ -f "$LOCK_DIR/pid" ] && [ ! -L "$LOCK_DIR/pid" ] || return 1
+		owner=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+		case "$owner" in ''|*[!0-9]*) return 1 ;; esac
+		# An already running helper owns the retry. Treat duplicate scheduling as
+		# success so the upgrade loop does not start a competing restart.
+		kill -0 "$owner" 2>/dev/null && exit 0
+		rm -f "$LOCK_DIR/pid" 2>/dev/null || return 1
+		rmdir "$LOCK_DIR" 2>/dev/null || return 1
+		mkdir "$LOCK_DIR" 2>/dev/null || return 1
+	fi
+	printf '%s\n' "$$" > "$LOCK_DIR/pid" || return 1
+	trap cleanup_lock EXIT HUP INT TERM
+}
+
+acquire_lock || fail_handoff handoff_lock_failed unknown "cannot acquire the Runtime handoff lock"
+regular_bounded_file "$MARKER" "$MAX_MARKER_BYTES" || fail_handoff handoff_marker_invalid unknown "restart marker is missing, unsafe, empty, or oversized"
+command -v jsonfilter >/dev/null 2>&1 || fail_handoff handoff_jsonfilter_missing unknown "jsonfilter is unavailable"
+
+schema=$(jsonfilter -i "$MARKER" -e '@.schema_version' 2>/dev/null || true)
+version=$(jsonfilter -i "$MARKER" -e '@.version' 2>/dev/null || true)
+expected_bin=$(jsonfilter -i "$MARKER" -e '@.sync_binary_sha256' 2>/dev/null || true)
+expected_loop=$(jsonfilter -i "$MARKER" -e '@.sync_loop_sha256' 2>/dev/null || true)
+requested_at=$(jsonfilter -i "$MARKER" -e '@.requested_at' 2>/dev/null || true)
+case "$requested_at" in ''|*[!0-9]*|0) fail_handoff handoff_marker_invalid "$version" "restart marker timestamp is invalid" ;; esac
+[ "$schema" = 1 ] && valid_token "$version" && valid_sha256 "$expected_bin" && valid_sha256 "$expected_loop" ||
+	fail_handoff handoff_marker_invalid "$version" "restart marker fields are invalid"
+[ -x "$SYNC_BIN" ] && [ -f "$SYNC_BIN" ] && [ ! -L "$SYNC_BIN" ] ||
+	fail_handoff handoff_binary_invalid "$version" "installed Cloud sync binary is unavailable or unsafe"
+[ -x "$SYNC_LOOP" ] && [ -f "$SYNC_LOOP" ] && [ ! -L "$SYNC_LOOP" ] ||
+	fail_handoff handoff_loop_invalid "$version" "installed Cloud sync loop is unavailable or unsafe"
+actual_bin=$(sha256sum "$SYNC_BIN" 2>/dev/null | awk '{ print tolower($1) }')
+actual_loop=$(sha256sum "$SYNC_LOOP" 2>/dev/null | awk '{ print tolower($1) }')
+[ "$actual_bin" = "$expected_bin" ] || fail_handoff handoff_binary_changed "$version" "installed Cloud sync binary does not match the committed upgrade"
+[ "$actual_loop" = "$expected_loop" ] || fail_handoff handoff_loop_changed "$version" "installed Cloud sync loop does not match the committed upgrade"
+[ -x "$SERVICE_INIT" ] || fail_handoff handoff_service_missing "$version" "Cloud sync service controller is unavailable"
+
+sleep "$START_DELAY"
+restarted=0
+for attempt in 1 2 3 4 5; do
+	if "$SERVICE_INIT" restart >/dev/null 2>&1; then
+		sleep "$RETRY_DELAY"
+		if "$SERVICE_INIT" running >/dev/null 2>&1; then
+			restarted=1
+			break
+		fi
+	fi
+	[ "$attempt" -eq 5 ] || sleep "$RETRY_DELAY"
+done
+[ "$restarted" = 1 ] || fail_handoff handoff_service_restart_failed "$version" "Cloud sync service did not become running after 5 restart attempts"
+
+# Re-check the path contents after restart. A successful result means both
+# named procd instances were registered from the committed binary and loop.
+actual_bin=$(sha256sum "$SYNC_BIN" 2>/dev/null | awk '{ print tolower($1) }')
+actual_loop=$(sha256sum "$SYNC_LOOP" 2>/dev/null | awk '{ print tolower($1) }')
+[ "$actual_bin" = "$expected_bin" ] && [ "$actual_loop" = "$expected_loop" ] ||
+	fail_handoff handoff_artifact_changed_after_restart "$version" "Cloud sync artifacts changed during service restart"
+completion_temporary=$COMPLETION_FILE.tmp.$$
+cp "$MARKER" "$completion_temporary" && chmod 0600 "$completion_temporary" && mv -f "$completion_temporary" "$COMPLETION_FILE" ||
+	fail_handoff handoff_completion_write_failed "$version" "cannot commit full-service restart evidence"
+rm -f "$FAILURE_FILE" 2>/dev/null || true
+sync
+log_handoff info runtime_upgrade_handoff_completed ok "version=$version sync=loaded upgrade=loaded receipt=pending_new_worker"

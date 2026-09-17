@@ -3,10 +3,14 @@
 START=94
 STOP=11
 USE_PROCD=1
+EXTRA_COMMANDS="handoff_runtime_upgrade"
+EXTRA_HELP="\n\thandoff_runtime_upgrade\tRestart both Cloud sync workers after a committed Runtime upgrade"
 SYNC_BIN=${CANDY_CLOUD_SYNC_BIN:-/usr/libexec/candy-cloud-sync}
 SYNC_LOOP=${CANDY_CLOUD_SYNC_LOOP:-/usr/libexec/candy-cloud-sync-loop}
+HANDOFF_HELPER=${CANDY_CLOUD_SYNC_HANDOFF_HELPER:-/usr/libexec/candy-cloud-sync-handoff}
 STATE_DIR=${CANDY_SDWAN_STATE_DIR:-/etc/candy/sdwan}
 IDENTITY_FILE=$STATE_DIR/identity/device-identity-v1.json
+HANDOFF_MARKER=${CANDY_CLOUD_SYNC_HANDOFF_MARKER:-/etc/candy/node-upgrades/runtime-restart-required.json}
 
 start_service() {
 	[ -x "$SYNC_BIN" ] || return 0
@@ -24,6 +28,15 @@ start_service() {
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
+}
+
+handoff_runtime_upgrade() {
+	[ -x "$HANDOFF_HELPER" ] || return 1
+	[ -f "$HANDOFF_MARKER" ] && [ ! -L "$HANDOFF_MARKER" ] || return 1
+	# The helper is deliberately detached from both named procd instances. It
+	# waits briefly, restarts the whole service, and therefore replaces the old
+	# long-running sync shell as well as the upgrade worker.
+	start-stop-daemon -S -b -x "$HANDOFF_HELPER" -- "$HANDOFF_MARKER"
 }
 
 service_triggers() {

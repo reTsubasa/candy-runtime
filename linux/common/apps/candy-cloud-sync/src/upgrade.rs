@@ -9,9 +9,16 @@ const RELEASE_ROOT: &str = "https://github.com/reTsubasa/candy-release/releases/
 const MAX_BUNDLE: u64 = 256 * 1024 * 1024;
 const CATALOG_FETCH_ATTEMPTS: usize = 3;
 const OPENWRT_UPDATE_MANAGER: &str = "/usr/libexec/candy-update-manager";
+const OPENWRT_CLOUD_SYNC_INIT: &str = "/etc/init.d/candy-cloud-sync";
+const OPENWRT_CLOUD_SYNC_BIN: &str = "/usr/libexec/candy-cloud-sync";
+const OPENWRT_CLOUD_SYNC_LOOP: &str = "/usr/libexec/candy-cloud-sync-loop";
 const OPENWRT_UPDATE_CATALOG: &str = "/var/lib/candy/update/stable.json";
 const OPENWRT_UPDATE_OPERATION: &str = "/tmp/candy-update-operation.json";
 const OPENWRT_CORE_OPERATION: &str = "/tmp/candy-core-operation.json";
+const OPENWRT_RUNTIME_HANDOFF_MARKER: &str = "runtime-restart-required.json";
+const OPENWRT_RUNTIME_HANDOFF_COMPLETED: &str = "runtime-restart-completed.json";
+const OPENWRT_RUNTIME_HANDOFF_FAILURE: &str = "runtime-restart-failed.json";
+const OPENWRT_RUNTIME_HANDOFF_TIMEOUT_SECONDS: u64 = 5 * 60;
 const MAX_OPERATION_BYTES: u64 = 64 * 1024;
 const MAX_FAILURE_DETAIL_CHARS: usize = 512;
 
@@ -56,7 +63,7 @@ struct Job {
     updated_at: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Journal {
     job: Job,
@@ -66,6 +73,28 @@ struct Journal {
     failure_phase: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error_detail: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RuntimeHandoffMarker {
+    schema_version: u8,
+    job_id: Uuid,
+    version: String,
+    sync_binary_sha256: String,
+    sync_loop_sha256: String,
+    requested_at: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeHandoffFailure {
+    schema_version: u8,
+    state: String,
+    phase: String,
+    error_code: String,
+    version: String,
+    updated_at: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,6 +223,97 @@ fn command_with_env(
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+fn artifact_sha256(path: &Path, reject_symlink: bool) -> Result<String> {
+    let metadata = if reject_symlink {
+        fs::symlink_metadata(path)?
+    } else {
+        fs::metadata(path)?
+    };
+    if !metadata.is_file()
+        || (reject_symlink && metadata.file_type().is_symlink())
+        || metadata.mode() & 0o022 != 0
+        || metadata.len() == 0
+        || metadata.len() > MAX_BUNDLE
+    {
+        bail!("runtime_handoff_artifact_unsafe");
+    }
+    let mut file = File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let length = file.read(&mut buffer)?;
+        if length == 0 {
+            break;
+        }
+        digest.update(&buffer[..length]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn installed_artifact_sha256(path: &Path) -> Result<String> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.uid() != 0 {
+        bail!("runtime_handoff_artifact_unsafe");
+    }
+    artifact_sha256(path, true)
+}
+
+fn running_executable_sha256() -> Result<String> {
+    // /proc/self/exe follows the inode mapped by this process. After an APK
+    // replacement it still exposes the old deleted binary, so matching this
+    // digest proves the final receipt is sent by the newly loaded worker.
+    artifact_sha256(Path::new("/proc/self/exe"), false)
+}
+
+fn runtime_handoff_marker(root: &Path, journal: &Journal) -> Result<RuntimeHandoffMarker> {
+    let path = root.join(OPENWRT_RUNTIME_HANDOFF_MARKER);
+    let marker = RuntimeHandoffMarker {
+        schema_version: 1,
+        job_id: journal.job.id,
+        version: journal.job.target.version.clone(),
+        sync_binary_sha256: installed_artifact_sha256(Path::new(OPENWRT_CLOUD_SYNC_BIN))?,
+        sync_loop_sha256: installed_artifact_sha256(Path::new(OPENWRT_CLOUD_SYNC_LOOP))?,
+        requested_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+    };
+    if !path.exists() {
+        return Ok(marker);
+    }
+    let committed: RuntimeHandoffMarker = read_bounded_json(&path, MAX_PROFILE_BYTES)?;
+    if committed.schema_version != marker.schema_version
+        || committed.job_id != marker.job_id
+        || committed.version != marker.version
+        || committed.sync_binary_sha256 != marker.sync_binary_sha256
+        || committed.sync_loop_sha256 != marker.sync_loop_sha256
+        || committed.requested_at == 0
+    {
+        bail!("runtime_handoff_marker_conflict");
+    }
+    Ok(committed)
+}
+
+fn validate_runtime_handoff_marker(marker: &RuntimeHandoffMarker) -> Result<()> {
+    let valid_digest = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    if marker.schema_version != 1
+        || !token(&marker.version)
+        || !valid_digest(&marker.sync_binary_sha256)
+        || !valid_digest(&marker.sync_loop_sha256)
+        || marker.requested_at == 0
+    {
+        bail!("runtime_handoff_marker_invalid");
+    }
+    Ok(())
+}
+
+fn schedule_openwrt_runtime_handoff(root: &Path) -> Result<()> {
+    command(OPENWRT_CLOUD_SYNC_INIT, &["handoff_runtime_upgrade"], root)
+        .context("runtime_handoff_schedule_failed")
 }
 
 fn catalog(root: &Path) -> Result<serde_json::Value> {
@@ -766,6 +886,231 @@ fn receipt(client: &Client, cloud: &Url, journal: &Journal, state: &str) -> Resu
     Ok(())
 }
 
+fn finalize_terminal_journal<Submit>(
+    root: &Path,
+    journal_path: &Path,
+    journal: &Journal,
+    mut submit_receipt: Submit,
+) -> Result<UpgradeOutcome>
+where
+    Submit: FnMut() -> Result<()>,
+{
+    submit_receipt()?;
+    fs::remove_file(journal_path)?;
+    File::open(root)?.sync_all()?;
+    Ok(completed_upgrade_outcome(
+        &journal.job.target.component,
+        &journal.phase,
+    ))
+}
+
+fn ensure_runtime_handoff_marker(root: &Path, marker: &RuntimeHandoffMarker) -> Result<()> {
+    validate_runtime_handoff_marker(marker)?;
+    let path = root.join(OPENWRT_RUNTIME_HANDOFF_MARKER);
+    if path.exists() {
+        let committed: RuntimeHandoffMarker = read_bounded_json(&path, MAX_PROFILE_BYTES)?;
+        if committed != *marker {
+            bail!("runtime_handoff_marker_conflict");
+        }
+        return Ok(());
+    }
+    atomic_bytes(&path, &serde_json::to_vec(marker)?, 0o600)?;
+    File::open(root)?.sync_all()?;
+    Ok(())
+}
+
+fn read_runtime_handoff_completion(root: &Path, marker: &RuntimeHandoffMarker) -> Result<bool> {
+    let path = root.join(OPENWRT_RUNTIME_HANDOFF_COMPLETED);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let completed: RuntimeHandoffMarker = read_bounded_json(&path, MAX_PROFILE_BYTES)?;
+    if completed != *marker {
+        bail!("runtime_handoff_completion_conflict");
+    }
+    Ok(true)
+}
+
+fn read_runtime_handoff_failure(
+    root: &Path,
+    marker: &RuntimeHandoffMarker,
+) -> Result<Option<RuntimeHandoffFailure>> {
+    let path = root.join(OPENWRT_RUNTIME_HANDOFF_FAILURE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let failure: RuntimeHandoffFailure = read_bounded_json(&path, MAX_PROFILE_BYTES)?;
+    if failure.schema_version != 1
+        || failure.state != "failed"
+        || failure.phase != "runtime_handoff"
+        || !token(&failure.error_code)
+        || failure.version != marker.version
+        || failure.updated_at == 0
+    {
+        bail!("runtime_handoff_failure_invalid");
+    }
+    Ok(Some(failure))
+}
+
+fn record_runtime_handoff_failure(
+    root: &Path,
+    marker: &RuntimeHandoffMarker,
+    error_code: &str,
+) -> Result<()> {
+    let failure = RuntimeHandoffFailure {
+        schema_version: 1,
+        state: "failed".into(),
+        phase: "runtime_handoff".into(),
+        error_code: error_code.into(),
+        version: marker.version.clone(),
+        updated_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+    };
+    atomic_bytes(
+        &root.join(OPENWRT_RUNTIME_HANDOFF_FAILURE),
+        &serde_json::to_vec(&failure)?,
+        0o600,
+    )?;
+    File::open(root)?.sync_all()?;
+    Ok(())
+}
+
+fn runtime_handoff_timed_out(marker: &RuntimeHandoffMarker, now: u64) -> bool {
+    now.saturating_sub(marker.requested_at) >= OPENWRT_RUNTIME_HANDOFF_TIMEOUT_SECONDS
+}
+
+fn schedule_committed_runtime_handoff(root: &Path, marker: &RuntimeHandoffMarker) -> Result<()> {
+    if let Err(error) = schedule_openwrt_runtime_handoff(root) {
+        record_runtime_handoff_failure(root, marker, "handoff_schedule_failed")?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn begin_runtime_handoff<Schedule>(
+    root: &Path,
+    journal_path: &Path,
+    marker: &RuntimeHandoffMarker,
+    mut schedule_handoff: Schedule,
+) -> Result<UpgradeOutcome>
+where
+    Schedule: FnMut() -> Result<()>,
+{
+    ensure_runtime_handoff_marker(root, marker)?;
+    // The succeeded journal deliberately remains durable. Only the newly
+    // loaded worker may submit the final success receipt and remove it.
+    if !journal_path.exists() {
+        bail!("runtime_handoff_journal_missing");
+    }
+    schedule_handoff()?;
+    Ok(UpgradeOutcome::Continue)
+}
+
+fn finalize_completed_runtime_handoff<Submit>(
+    root: &Path,
+    journal_path: &Path,
+    mut submit_receipt: Submit,
+) -> Result<UpgradeOutcome>
+where
+    Submit: FnMut() -> Result<()>,
+{
+    submit_receipt()?;
+    fs::remove_file(journal_path)?;
+    for name in [
+        OPENWRT_RUNTIME_HANDOFF_MARKER,
+        OPENWRT_RUNTIME_HANDOFF_COMPLETED,
+        OPENWRT_RUNTIME_HANDOFF_FAILURE,
+    ] {
+        match fs::remove_file(root.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    File::open(root)?.sync_all()?;
+    Ok(UpgradeOutcome::Continue)
+}
+
+fn finalize_failed_runtime_handoff<Submit>(
+    root: &Path,
+    journal_path: &Path,
+    journal: &mut Journal,
+    marker: &RuntimeHandoffMarker,
+    failure: &RuntimeHandoffFailure,
+    mut submit_receipt: Submit,
+) -> Result<UpgradeOutcome>
+where
+    Submit: FnMut(&Journal) -> Result<()>,
+{
+    journal.phase = "failed".into();
+    journal.failure_phase = Some("runtime_handoff".into());
+    journal.error_code = Some(failure.error_code.clone());
+    journal.error_detail = Some(format!(
+        "Runtime {} installed but the full Cloud sync service handoff failed",
+        marker.version
+    ));
+    atomic_bytes(journal_path, &serde_json::to_vec(journal)?, 0o600)?;
+    File::open(root)?.sync_all()?;
+    submit_receipt(journal)?;
+    fs::remove_file(journal_path)?;
+    File::open(root)?.sync_all()?;
+    Ok(UpgradeOutcome::Continue)
+}
+
+fn finish_terminal_upgrade(
+    client: &Client,
+    cloud: &Url,
+    root: &Path,
+    journal_path: &Path,
+    journal: &mut Journal,
+    openwrt: bool,
+) -> Result<UpgradeOutcome> {
+    if openwrt && journal.phase == "succeeded" && journal.job.target.component == "runtime" {
+        let marker = runtime_handoff_marker(root, journal)?;
+        ensure_runtime_handoff_marker(root, &marker)?;
+        if read_runtime_handoff_completion(root, &marker)? {
+            if running_executable_sha256()? != marker.sync_binary_sha256 {
+                schedule_committed_runtime_handoff(root, &marker)?;
+                return Ok(UpgradeOutcome::Continue);
+            }
+            let receipt_journal = journal.clone();
+            return finalize_completed_runtime_handoff(root, journal_path, || {
+                receipt(client, cloud, &receipt_journal, "succeeded")
+            });
+        }
+        if read_runtime_handoff_failure(root, &marker)?.is_none()
+            && runtime_handoff_timed_out(
+                &marker,
+                SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+            )
+        {
+            record_runtime_handoff_failure(root, &marker, "handoff_timeout")?;
+        }
+        if let Some(failure) = read_runtime_handoff_failure(root, &marker)? {
+            finalize_failed_runtime_handoff(
+                root,
+                journal_path,
+                journal,
+                &marker,
+                &failure,
+                |failed_journal| receipt(client, cloud, failed_journal, "failed"),
+            )?;
+            // The Cloud job is now terminal failed, but the installed Runtime
+            // still needs local recovery. Keep the marker and retry detached.
+            schedule_committed_runtime_handoff(root, &marker)?;
+            return Ok(UpgradeOutcome::Continue);
+        }
+        return begin_runtime_handoff(root, journal_path, &marker, || {
+            schedule_committed_runtime_handoff(root, &marker)
+        });
+    }
+
+    let state = journal.phase.clone();
+    let receipt_journal = journal.clone();
+    finalize_terminal_journal(root, journal_path, journal, || {
+        receipt(client, cloud, &receipt_journal, &state)
+    })
+}
+
 pub(super) fn run(args: &Args) -> Result<UpgradeOutcome> {
     if !nix::unistd::Uid::effective().is_root() {
         bail!("upgrade_requires_root");
@@ -815,14 +1160,41 @@ pub(super) fn run(args: &Args) -> Result<UpgradeOutcome> {
             atomic_bytes(&journal_path, &serde_json::to_vec(&journal)?, 0o600)?;
         }
         if matches!(journal.phase.as_str(), "succeeded" | "failed") {
-            receipt(&client, &cloud, &journal, &journal.phase)?;
-            let outcome = completed_upgrade_outcome(&journal.job.target.component, &journal.phase);
-            fs::remove_file(&journal_path)?;
-            File::open(root)?.sync_all()?;
-            if outcome == UpgradeOutcome::RestartRequired {
-                return Ok(outcome);
-            }
+            return finish_terminal_upgrade(
+                &client,
+                &cloud,
+                root,
+                &journal_path,
+                &mut journal,
+                openwrt,
+            );
         }
+    }
+    if openwrt && root.join(OPENWRT_RUNTIME_HANDOFF_MARKER).exists() {
+        let marker: RuntimeHandoffMarker = read_bounded_json(
+            &root.join(OPENWRT_RUNTIME_HANDOFF_MARKER),
+            MAX_PROFILE_BYTES,
+        )?;
+        validate_runtime_handoff_marker(&marker)?;
+        if read_runtime_handoff_completion(root, &marker)?
+            && running_executable_sha256()? == marker.sync_binary_sha256
+        {
+            for name in [
+                OPENWRT_RUNTIME_HANDOFF_MARKER,
+                OPENWRT_RUNTIME_HANDOFF_COMPLETED,
+                OPENWRT_RUNTIME_HANDOFF_FAILURE,
+            ] {
+                match fs::remove_file(root.join(name)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            File::open(root)?.sync_all()?;
+            return Ok(UpgradeOutcome::Continue);
+        }
+        schedule_committed_runtime_handoff(root, &marker)?;
+        return Ok(UpgradeOutcome::Continue);
     }
     let catalog = catalog(root)?;
     let arch = std::env::consts::ARCH;
@@ -898,15 +1270,52 @@ pub(super) fn run(args: &Args) -> Result<UpgradeOutcome> {
         journal.error_detail = Some(failure.detail);
     }
     atomic_bytes(&journal_path, &serde_json::to_vec(&journal)?, 0o600)?;
-    receipt(&client, &cloud, &journal, &journal.phase)?;
-    fs::remove_file(journal_path)?;
-    File::open(root)?.sync_all()?;
-    Ok(completed_upgrade_outcome(&target.component, &journal.phase))
+    finish_terminal_upgrade(&client, &cloud, root, &journal_path, &mut journal, openwrt)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    fn succeeded_runtime_journal() -> Journal {
+        Journal {
+            job: Job {
+                id: Uuid::nil(),
+                node_id: Uuid::nil(),
+                device_id: Uuid::nil(),
+                device_key_id: Uuid::nil(),
+                target: Target {
+                    component: "runtime".into(),
+                    current_version: "0.4.0-r132".into(),
+                    version: "0.4.0-r133".into(),
+                    version_key: "v0_4_0_r133".into(),
+                    digest: "digest".into(),
+                },
+                state: "running".into(),
+                error_code: None,
+                phase: Some("executing".into()),
+                created_at: "2026-09-17T00:00:00Z".into(),
+                updated_at: "2026-09-17T00:00:01Z".into(),
+            },
+            phase: "succeeded".into(),
+            error_code: None,
+            failure_phase: None,
+            error_detail: None,
+        }
+    }
+
+    fn runtime_handoff_fixture(journal: &Journal) -> RuntimeHandoffMarker {
+        RuntimeHandoffMarker {
+            schema_version: 1,
+            job_id: journal.job.id,
+            version: journal.job.target.version.clone(),
+            sync_binary_sha256: "a".repeat(64),
+            sync_loop_sha256: "b".repeat(64),
+            requested_at: 1,
+        }
+    }
+
     #[test]
     fn identifiers_and_architectures_are_restricted() {
         assert!(token("v0_4_0_r112"));
@@ -1037,5 +1446,143 @@ mod tests {
             completed_upgrade_outcome("core", "succeeded"),
             UpgradeOutcome::Continue
         );
+    }
+
+    #[test]
+    fn runtime_handoff_keeps_terminal_receipt_pending_until_new_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let journal_path = root.join("receipt.json");
+        fs::write(&journal_path, b"journal").unwrap();
+        let journal = succeeded_runtime_journal();
+        let marker = runtime_handoff_fixture(&journal);
+        let events = RefCell::new(Vec::new());
+
+        let outcome = begin_runtime_handoff(root, &journal_path, &marker, || {
+            assert!(journal_path.exists());
+            let committed: RuntimeHandoffMarker = read_bounded_json(
+                &root.join(OPENWRT_RUNTIME_HANDOFF_MARKER),
+                MAX_PROFILE_BYTES,
+            )?;
+            assert_eq!(committed, marker);
+            events.borrow_mut().push("handoff");
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(outcome, UpgradeOutcome::Continue);
+        assert_eq!(*events.borrow(), ["handoff"]);
+        assert!(journal_path.exists());
+    }
+
+    #[test]
+    fn new_worker_commits_success_before_removing_handoff_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let journal_path = root.join("receipt.json");
+        fs::write(&journal_path, b"journal").unwrap();
+        let journal = succeeded_runtime_journal();
+        let marker = runtime_handoff_fixture(&journal);
+        ensure_runtime_handoff_marker(root, &marker).unwrap();
+        fs::write(
+            root.join(OPENWRT_RUNTIME_HANDOFF_COMPLETED),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+
+        let outcome = finalize_completed_runtime_handoff(root, &journal_path, || {
+            assert!(journal_path.exists());
+            assert!(root.join(OPENWRT_RUNTIME_HANDOFF_MARKER).exists());
+            assert!(root.join(OPENWRT_RUNTIME_HANDOFF_COMPLETED).exists());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(outcome, UpgradeOutcome::Continue);
+        assert!(!journal_path.exists());
+        assert!(!root.join(OPENWRT_RUNTIME_HANDOFF_MARKER).exists());
+        assert!(!root.join(OPENWRT_RUNTIME_HANDOFF_COMPLETED).exists());
+    }
+
+    #[test]
+    fn bounded_handoff_failure_submits_precise_terminal_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let journal_path = root.join("receipt.json");
+        fs::write(&journal_path, b"journal").unwrap();
+        let mut journal = succeeded_runtime_journal();
+        let marker = runtime_handoff_fixture(&journal);
+        ensure_runtime_handoff_marker(root, &marker).unwrap();
+        let failure = RuntimeHandoffFailure {
+            schema_version: 1,
+            state: "failed".into(),
+            phase: "runtime_handoff".into(),
+            error_code: "handoff_service_restart_failed".into(),
+            version: marker.version.clone(),
+            updated_at: 1,
+        };
+
+        let outcome = finalize_failed_runtime_handoff(
+            root,
+            &journal_path,
+            &mut journal,
+            &marker,
+            &failure,
+            |failed_journal| {
+                assert_eq!(failed_journal.phase, "failed");
+                assert_eq!(
+                    failed_journal.failure_phase.as_deref(),
+                    Some("runtime_handoff")
+                );
+                assert_eq!(
+                    failed_journal.error_code.as_deref(),
+                    Some("handoff_service_restart_failed")
+                );
+                assert!(journal_path.exists());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome, UpgradeOutcome::Continue);
+        assert!(!journal_path.exists());
+        assert!(root.join(OPENWRT_RUNTIME_HANDOFF_MARKER).exists());
+    }
+
+    #[test]
+    fn power_loss_retry_is_idempotent_and_failed_schedule_keeps_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let journal_path = root.join("receipt.json");
+        fs::write(&journal_path, b"journal").unwrap();
+        let journal = succeeded_runtime_journal();
+        let marker = runtime_handoff_fixture(&journal);
+
+        let error = begin_runtime_handoff(root, &journal_path, &marker, || {
+            bail!("detached_restart_unavailable")
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("detached_restart_unavailable"));
+        assert!(journal_path.exists());
+        assert!(root.join(OPENWRT_RUNTIME_HANDOFF_MARKER).exists());
+
+        let outcome = begin_runtime_handoff(root, &journal_path, &marker, || Ok(())).unwrap();
+        assert_eq!(outcome, UpgradeOutcome::Continue);
+        let committed: RuntimeHandoffMarker = read_bounded_json(
+            &root.join(OPENWRT_RUNTIME_HANDOFF_MARKER),
+            MAX_PROFILE_BYTES,
+        )
+        .unwrap();
+        assert_eq!(committed, marker);
+    }
+
+    #[test]
+    fn missing_handoff_evidence_has_a_bounded_cloud_deadline() {
+        let journal = succeeded_runtime_journal();
+        let mut marker = runtime_handoff_fixture(&journal);
+        marker.requested_at = 1_000;
+        assert!(!runtime_handoff_timed_out(&marker, 1_299));
+        assert!(runtime_handoff_timed_out(&marker, 1_300));
     }
 }

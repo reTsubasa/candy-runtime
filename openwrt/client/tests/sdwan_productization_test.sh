@@ -11,6 +11,7 @@ sdwan="$root/luci-app-candy/root/usr/lib/lua/luci/view/candy/sdwan.htm"
 po="$root/luci-app-candy/po/zh-cn/candy.zh-cn.po"
 cloud_sync_init="$root/candy-client/candy-cloud-sync.init"
 cloud_sync_loop="$root/candy-client/candy-cloud-sync-loop"
+cloud_sync_handoff="$root/candy-client/candy-cloud-sync-handoff"
 
 fail() {
 	printf 'openwrt_sdwan_productization_test: %s\n' "$*" >&2
@@ -30,7 +31,15 @@ grep -F 'procd_open_instance upgrade' "$cloud_sync_init" >/dev/null || fail "Clo
 grep -F 'upgrade-loop' "$cloud_sync_init" >/dev/null || fail "Cloud Runtime upgrade worker does not poll inventory"
 grep -F '$(INSTALL_BIN) ./candy-cloud-sync.init $(1)/etc/init.d/candy-cloud-sync' "$makefile" >/dev/null || fail "Cloud synchronization service is not packaged"
 grep -F '$(INSTALL_BIN) ./candy-cloud-sync-loop $(1)/usr/libexec/candy-cloud-sync-loop' "$makefile" >/dev/null || fail "Cloud synchronization supervisor is not packaged"
+grep -F '$(INSTALL_BIN) ./candy-cloud-sync-handoff $(1)/usr/libexec/candy-cloud-sync-handoff' "$makefile" >/dev/null || fail "Cloud Runtime handoff helper is not packaged"
 grep -F 'procd_set_param command "$SYNC_LOOP"' "$cloud_sync_init" >/dev/null || fail "Cloud synchronization does not use the independent supervisor"
+grep -F 'EXTRA_COMMANDS="handoff_runtime_upgrade"' "$cloud_sync_init" >/dev/null || fail "Cloud sync init does not expose the post-receipt handoff"
+grep -F 'start-stop-daemon -S -b -x "$HANDOFF_HELPER" -- "$HANDOFF_MARKER"' "$cloud_sync_init" >/dev/null || fail "Runtime handoff is not detached from the active upgrade worker"
+grep -F 'runtime-restart-completed.json' "$cloud_sync_handoff" >/dev/null || fail "Runtime handoff does not publish completion evidence"
+grep -F 'handoff_service_restart_failed' "$cloud_sync_handoff" >/dev/null || fail "Runtime handoff restart failure is not phase-specific"
+if grep -F 'rm -f "$MARKER"' "$cloud_sync_handoff" >/dev/null; then
+	fail "handoff helper removes receipt state before the new worker commits success"
+fi
 if grep -F 'procd_set_param command "$initscript"' "$cloud_sync_init" >/dev/null; then
 	fail "Cloud synchronization still executes rc.common as a procd worker"
 fi
