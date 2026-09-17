@@ -279,7 +279,8 @@ docker run --rm --platform linux/amd64 \
         "$payload/client/usr/bin/candy-netd" \
         "$payload/client/usr/bin/candy-sdwan-agent" \
         "$payload/client/usr/libexec/candy-cloud-enroll" \
-        "$payload/client/usr/libexec/candy-cloud-sync"; do
+        "$payload/client/usr/libexec/candy-cloud-sync" \
+        "$payload/client/usr/libexec/candy-cloud-sync-handoff"; do
         [ -x "$executable" ] || { echo "OpenWrt package is missing executable ${executable#$payload/}" >&2; exit 1; }
       done
       for asset in \
