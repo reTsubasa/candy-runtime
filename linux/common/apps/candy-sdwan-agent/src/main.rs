@@ -290,6 +290,7 @@ enum CoreReloadAction {
     Abort,
     Suspend,
     Resume,
+    PolicyUpdate,
 }
 
 #[derive(Deserialize)]
@@ -299,6 +300,10 @@ struct CoreReloadResponse {
     ok: bool,
     generation: Option<u64>,
     error: Option<String>,
+    #[serde(default)]
+    policy_generation: Option<u64>,
+    #[serde(default)]
+    replacement_required: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1435,8 +1440,16 @@ fn request_core_transaction(
     let request = CoreReloadRequest {
         schema_version: 1,
         action,
-        config: matches!(action, CoreReloadAction::Prepare).then_some(args.config.as_path()),
-        status: matches!(action, CoreReloadAction::Prepare).then_some(args.status.as_path()),
+        config: matches!(
+            action,
+            CoreReloadAction::Prepare | CoreReloadAction::PolicyUpdate
+        )
+        .then_some(args.config.as_path()),
+        status: matches!(
+            action,
+            CoreReloadAction::Prepare | CoreReloadAction::PolicyUpdate
+        )
+        .then_some(args.status.as_path()),
         transaction_id,
     };
     let encoded = serde_json::to_vec(&request).context("encode Core reload request")?;
@@ -1486,9 +1499,10 @@ fn request_core_transaction(
         "Core reload response schema mismatch: expected=1 received={}",
         response.schema_version
     );
-    let generation_matches =
-        !matches!(action, CoreReloadAction::Prepare | CoreReloadAction::Commit)
-            || response.generation == Some(args.generation);
+    let generation_matches = !matches!(
+        action,
+        CoreReloadAction::Prepare | CoreReloadAction::Commit | CoreReloadAction::PolicyUpdate
+    ) || response.generation == Some(args.generation);
     if matches!(action, CoreReloadAction::Prepare) && !response.ok {
         if let Some(detail) = response
             .error
@@ -1500,18 +1514,98 @@ fn request_core_transaction(
             )));
         }
     }
-    anyhow::ensure!(
-        response.ok,
-        "Candy Core rejected hot reload: {}",
-        response.error.as_deref().unwrap_or("unknown error")
-    );
+    if !response.ok {
+        return Err(anyhow::Error::new(CoreReloadRejected {
+            message: response.error.unwrap_or_else(|| "unknown error".to_owned()),
+            replacement_required: response.replacement_required,
+        }));
+    }
     anyhow::ensure!(
         generation_matches,
         "Core reload succeeded but response generation mismatched: expected={} received={:?}",
         args.generation,
         response.generation
     );
+    if matches!(action, CoreReloadAction::PolicyUpdate) {
+        anyhow::ensure!(
+            response.policy_generation.is_some(),
+            "Core policy update succeeded without policy generation"
+        );
+    }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PolicyUpdateOutcome {
+    Applied,
+    RequiresTunnelReplacement,
+    Rejected,
+    Retry,
+}
+
+fn policy_update_activation(
+    current: &RuntimeArgs,
+    replacement: &RuntimeArgs,
+    child: &mut Child,
+) -> Result<PolicyUpdateOutcome> {
+    // A policy-only update must not alter the declaration owned by netd. A
+    // declaration change means attachment/underlay state changed and is
+    // deliberately handed to the existing transactional replacement path.
+    if sha256_file(&current.declaration)? != sha256_file(&replacement.declaration)? {
+        return Ok(PolicyUpdateOutcome::RequiresTunnelReplacement);
+    }
+    let mut request_args = replacement.clone();
+    request_args.generation = current.generation;
+    request_args.declaration = current.declaration.clone();
+    match request_core_transaction(
+        &request_args,
+        child,
+        CoreReloadAction::PolicyUpdate,
+        None,
+        || Ok(()),
+    ) {
+        Ok(()) => {
+            eprintln!(
+                "level=info event=sdwan_policy_hot_updated tunnel_generation={} policy_source_generation={} core_pid={} netd=unchanged",
+                current.generation,
+                replacement
+                    .activation_descriptor
+                    .as_ref()
+                    .map(|descriptor| descriptor.projection_generation)
+                    .unwrap_or(current.generation),
+                child.id()
+            );
+            Ok(PolicyUpdateOutcome::Applied)
+        }
+        Err(error)
+            if error
+                .downcast_ref::<CoreReloadRejected>()
+                .is_some_and(|rejected| rejected.replacement_required) =>
+        {
+            Ok(PolicyUpdateOutcome::RequiresTunnelReplacement)
+        }
+        Err(error) if error.downcast_ref::<CoreReloadRejected>().is_some() => {
+            eprintln!(
+                "level=warn event=sdwan_policy_hot_update_rejected error_code=policy_update_rejected error={}",
+                sanitize_log_value(&format!("{error:#}"))
+            );
+            Ok(PolicyUpdateOutcome::Rejected)
+        }
+        Err(error) => {
+            eprintln!(
+                "level=warn event=sdwan_policy_hot_update_retry error_code=policy_update_transport_pending error={}",
+                sanitize_log_value(&format!("{error:#}"))
+            );
+            Ok(PolicyUpdateOutcome::Retry)
+        }
+    }
+}
+
+fn adopt_policy_activation(current: &RuntimeArgs, replacement: &RuntimeArgs) -> RuntimeArgs {
+    let mut applied = replacement.clone();
+    applied.generation = current.generation;
+    applied.status = current.status.clone();
+    applied
 }
 
 fn renew_transition_lease(
@@ -1872,7 +1966,12 @@ fn activation_binding_unchanged(args: &RuntimeArgs) -> Result<bool> {
         && sha256_file(&config)? == expected_config_sha256
         && sha256_file(&declaration)? == expected_declaration_sha256
         && descriptor.core_role == args.core_role
-        && descriptor.projection_generation == args.generation)
+        && descriptor.projection_generation
+            == args
+                .activation_descriptor
+                .as_ref()
+                .map(|active| active.projection_generation)
+                .unwrap_or(args.generation))
 }
 
 fn activation_retry_eligible(args: &RuntimeArgs) -> Result<bool> {
@@ -2971,6 +3070,24 @@ struct AppliedHotReloadPending(anyhow::Error);
 #[derive(Debug)]
 struct CorePreparationPending(String);
 
+#[derive(Debug)]
+struct CoreReloadRejected {
+    message: String,
+    replacement_required: bool,
+}
+
+impl std::fmt::Display for CoreReloadRejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Candy Core rejected hot reload: {}",
+            self.message
+        )
+    }
+}
+
+impl std::error::Error for CoreReloadRejected {}
+
 impl std::fmt::Display for CorePreparationPending {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "candidate preparation pending: {}", self.0)
@@ -3299,6 +3416,30 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     && (preparation_retry_target != replacement.activation_target
                         || Instant::now() >= next_preparation_retry)
                 {
+                    match policy_update_activation(&args, &replacement, &mut child)? {
+                        PolicyUpdateOutcome::Applied => {
+                            let applied = adopt_policy_activation(&args, &replacement);
+                            write_runtime_activation_receipt(&applied, "committed", None)?;
+                            args = applied;
+                            rejected_activation = None;
+                            preparation_retry_target = None;
+                            continue;
+                        }
+                        PolicyUpdateOutcome::Rejected => {
+                            write_failed_activation_receipt(
+                                &replacement,
+                                "policy_update_rejected",
+                            )?;
+                            rejected_activation = replacement.activation_target.clone();
+                            continue;
+                        }
+                        PolicyUpdateOutcome::Retry => {
+                            preparation_retry_target = replacement.activation_target.clone();
+                            next_preparation_retry = Instant::now() + RETRY_INITIAL_DELAY;
+                            continue;
+                        }
+                        PolicyUpdateOutcome::RequiresTunnelReplacement => {}
+                    }
                     match hot_replace_activation(
                         &args,
                         &replacement,
@@ -5021,6 +5162,25 @@ exit 17
             !format!("{error:#}").contains("ordinary Candy Server"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn policy_activation_adoption_preserves_tunnel_generation_and_status_path() {
+        let (_root, current) = server_runtime_fixture();
+        let mut replacement = current.clone();
+        replacement.generation = current.generation + 1;
+        replacement.config = PathBuf::from("/new/policy.toml");
+        replacement.declaration = PathBuf::from("/new/declaration.json");
+        replacement.status = PathBuf::from("/new/status.json");
+        replacement.activation_target = Some(PathBuf::from("new-candidate"));
+
+        let applied = adopt_policy_activation(&current, &replacement);
+
+        assert_eq!(applied.generation, current.generation);
+        assert_eq!(applied.status, current.status);
+        assert_eq!(applied.config, replacement.config);
+        assert_eq!(applied.declaration, replacement.declaration);
+        assert_eq!(applied.activation_target, replacement.activation_target);
     }
 
     #[test]
