@@ -5,6 +5,10 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 const CATALOG_KEY: &str =
     include_str!("../../../../../openwrt/client/packages/candy-client/catalog-release.pub");
+const CATALOG_URL: &str =
+    "https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json";
+const CATALOG_SIGNATURE_URL: &str =
+    "https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json.sig";
 const RELEASE_ROOT: &str = "https://github.com/reTsubasa/candy-release/releases/download/";
 const MAX_BUNDLE: u64 = 256 * 1024 * 1024;
 const CATALOG_FETCH_ATTEMPTS: usize = 3;
@@ -316,23 +320,35 @@ fn schedule_openwrt_runtime_handoff(root: &Path) -> Result<()> {
         .context("runtime_handoff_schedule_failed")
 }
 
+fn catalog_attempt_urls(nonce: u128, attempt: usize) -> (String, String) {
+    let query = format!(
+        "?candy_catalog_attempt={nonce}-{}-{attempt}",
+        std::process::id()
+    );
+    (
+        format!("{CATALOG_URL}{query}"),
+        format!("{CATALOG_SIGNATURE_URL}{query}"),
+    )
+}
+
 fn catalog(root: &Path) -> Result<serde_json::Value> {
     let client = Client::builder()
         .https_only(true)
         .timeout(Duration::from_secs(180))
         .connect_timeout(Duration::from_secs(10))
         .build()?;
-    let raw = "https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json";
     atomic_bytes(&root.join("catalog.pub"), CATALOG_KEY.as_bytes(), 0o600)?;
     let mut verified = false;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     for attempt in 1..=CATALOG_FETCH_ATTEMPTS {
-        fetch(&client, raw, &root.join("catalog.json"), 4 * 1024 * 1024)?;
+        let (catalog_url, signature_url) = catalog_attempt_urls(nonce, attempt);
         fetch(
             &client,
-            &format!("{raw}.sig"),
-            &root.join("catalog.sig"),
-            4096,
+            &catalog_url,
+            &root.join("catalog.json"),
+            4 * 1024 * 1024,
         )?;
+        fetch(&client, &signature_url, &root.join("catalog.sig"), 4096)?;
         if command(
             "usign",
             &[
@@ -1334,6 +1350,21 @@ mod tests {
         assert_eq!(
             target_key("core", false, "aarch64").unwrap(),
             "linux_musl_aarch64"
+        );
+        let (catalog_url, signature_url) = catalog_attempt_urls(123, 2);
+        assert_eq!(
+            catalog_url,
+            format!(
+                "{CATALOG_URL}?candy_catalog_attempt=123-{}-2",
+                std::process::id()
+            )
+        );
+        assert_eq!(
+            signature_url,
+            format!(
+                "{CATALOG_SIGNATURE_URL}?candy_catalog_attempt=123-{}-2",
+                std::process::id()
+            )
         );
     }
 

@@ -83,8 +83,8 @@ case "$url" in
 	;;
 esac
 case "$url" in
-	https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json) source=$FAKE_CATALOG ;;
-	https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json.sig)
+	https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json\?candy_catalog_attempt=*) source=$FAKE_CATALOG ;;
+	https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json.sig\?candy_catalog_attempt=*)
 		if [ "${FAKE_SIGNATURE_MISMATCH_ONCE:-0}" = 1 ] && [ ! -e "$FAKE_SIGNATURE_MISMATCH_STATE" ]; then
 			printf '%s\n' bad-signature > "$destination"
 			: > "$FAKE_SIGNATURE_MISMATCH_STATE"
@@ -338,7 +338,13 @@ make_catalog 1 3 0.3.5
 "$manager" check >/dev/null
 [ "$(cat "$state/sequence")" = 1 ]
 [ "$(stat -c '%a' "$state" 2>/dev/null || stat -f '%Lp' "$state")" = 700 ]
-grep -Fx 'https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json' "$FAKE_FETCH_LOG" >/dev/null
+grep -E '^https://raw\.githubusercontent\.com/reTsubasa/candy-release/refs/heads/main/channels/stable\.json\?candy_catalog_attempt=[0-9]+-[0-9]+-1$' "$FAKE_FETCH_LOG" >/dev/null
+catalog_query=$(sed -n 's|^https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json?candy_catalog_attempt=||p' "$FAKE_FETCH_LOG" | head -1)
+signature_query=$(sed -n 's|^https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json.sig?candy_catalog_attempt=||p' "$FAKE_FETCH_LOG" | head -1)
+[ -n "$catalog_query" ] && [ "$catalog_query" = "$signature_query" ] || {
+	echo "catalog and signature did not use the same cache generation key" >&2
+	exit 1
+}
 grep -q '"catalog_valid":true' <<EOF
 $("$manager" status)
 EOF
@@ -730,6 +736,28 @@ grep -Fx running "$handoff_service_log" >/dev/null
 [ "$(cat "$handoff_loaded_loop")" = "$handoff_loop_sha" ]
 cmp -s "$handoff_marker" "$handoff_completion"
 [ -f "$handoff_marker" ] || { echo "handoff helper removed the marker before the new worker receipt" >&2; exit 1; }
+[ ! -e "$handoff_failure" ]
+
+# A newly started worker can schedule the same detached handoff after the
+# first helper has published completion but before the receipt removes the
+# marker. The duplicate must be a no-op and must clear stale failure evidence.
+handoff_calls=$(wc -l < "$handoff_service_log" | tr -d ' ')
+printf '%s\n' stale > "$handoff_failure"
+FAKE_HANDOFF_SERVICE_LOG=$handoff_service_log \
+FAKE_HANDOFF_LOADED_BIN=$handoff_loaded_bin \
+FAKE_HANDOFF_LOADED_LOOP=$handoff_loaded_loop \
+CANDY_HANDOFF_STATE_ROOT=$handoff_root \
+CANDY_HANDOFF_SYNC_BIN=$handoff_bin \
+CANDY_HANDOFF_SYNC_LOOP=$handoff_loop \
+CANDY_HANDOFF_SERVICE_INIT=$handoff_init \
+CANDY_HANDOFF_LOCK_DIR=$handoff_root/lock \
+CANDY_HANDOFF_START_DELAY=0 \
+CANDY_HANDOFF_RETRY_DELAY=0 \
+	"$handoff" "$handoff_marker"
+[ "$(wc -l < "$handoff_service_log" | tr -d ' ')" = "$handoff_calls" ] || {
+	echo "completed Cloud sync handoff restarted the service again" >&2
+	exit 1
+}
 [ ! -e "$handoff_failure" ]
 
 # A bounded restart failure keeps the marker and emits a phase-specific error

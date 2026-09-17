@@ -427,7 +427,7 @@ cached_catalog_valid() {
 }
 
 check_catalog() {
-	local downloaded_catalog downloaded_signature new_sequence old_sequence old_hash new_hash checked_at attempt verified
+	local downloaded_catalog downloaded_signature new_sequence old_sequence old_hash new_hash checked_at attempt verified cache_key
 	require_supported_platform || fail "this Runtime package does not support the current OpenWrt platform"
 	[ -f "$CATALOG_KEY" ] && [ ! -L "$CATALOG_KEY" ] || fail "catalog signing key is unavailable"
 	mkdir -p "$STATE_ROOT" || fail "cannot create update state directory"
@@ -440,8 +440,9 @@ check_catalog() {
 	attempt=1
 	verified=0
 	while [ "$attempt" -le 3 ]; do
-		fetch_https "$CATALOG_URL" "$downloaded_catalog" || fail "catalog download failed"
-		fetch_https "$CATALOG_SIGNATURE_URL" "$downloaded_signature" || fail "catalog signature download failed"
+		cache_key="$(date +%s 2>/dev/null || printf 0)-$$-$attempt"
+		fetch_https "$CATALOG_URL?candy_catalog_attempt=$cache_key" "$downloaded_catalog" || fail "catalog download failed"
+		fetch_https "$CATALOG_SIGNATURE_URL?candy_catalog_attempt=$cache_key" "$downloaded_signature" || fail "catalog signature download failed"
 		regular_bounded_file "$downloaded_catalog" "$MAX_CATALOG_BYTES" ||
 			fail "catalog is empty or exceeds the $MAX_CATALOG_BYTES-byte limit"
 		regular_bounded_file "$downloaded_signature" "$MAX_SIGNATURE_BYTES" ||
@@ -451,7 +452,8 @@ check_catalog() {
 			break
 		fi
 		# A release updates the catalog and detached signature in one Git
-		# commit, but raw CDN edges can briefly expose different generations.
+		# commit. Use the same cache-busting key for both paths so an edge cannot
+		# combine independently cached generations.
 		[ "$attempt" -eq 3 ] || sleep 1
 		attempt=$((attempt + 1))
 	done
