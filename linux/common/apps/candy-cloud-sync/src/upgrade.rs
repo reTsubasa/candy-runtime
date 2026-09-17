@@ -875,12 +875,20 @@ fn cleanup_managed_cores(root: &Path, openwrt: bool) {
     }
 }
 
+fn receipt_body(journal: &Journal, state: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": journal.job.id,
+        "state": state,
+        "phase": journal.failure_phase.as_deref().unwrap_or(&journal.phase),
+        "error_code": journal.error_code,
+        "error_detail": journal.error_detail,
+    })
+}
+
 fn receipt(client: &Client, cloud: &Url, journal: &Journal, state: &str) -> Result<()> {
     client
         .put(endpoint(cloud, "auth/v1/runtime/upgrades")?)
-        .json(
-            &serde_json::json!({"id":journal.job.id,"state":state,"phase":journal.failure_phase.as_deref().unwrap_or(&journal.phase),"error_code":journal.error_code}),
-        )
+        .json(&receipt_body(journal, state))
         .send()?
         .error_for_status()?;
     Ok(())
@@ -1584,5 +1592,25 @@ mod tests {
         marker.requested_at = 1_000;
         assert!(!runtime_handoff_timed_out(&marker, 1_299));
         assert!(runtime_handoff_timed_out(&marker, 1_300));
+    }
+
+    #[test]
+    fn failed_receipt_preserves_handoff_phase_and_detail() {
+        let mut journal = succeeded_runtime_journal();
+        journal.phase = "failed".into();
+        journal.failure_phase = Some("runtime_handoff".into());
+        journal.error_code = Some("handoff_service_restart_failed".into());
+        journal.error_detail = Some(
+            "Runtime 0.4.0-r134 installed but the full Cloud sync service handoff failed".into(),
+        );
+
+        let body = receipt_body(&journal, "failed");
+        assert_eq!(body["state"], "failed");
+        assert_eq!(body["phase"], "runtime_handoff");
+        assert_eq!(body["error_code"], "handoff_service_restart_failed");
+        assert_eq!(
+            body["error_detail"],
+            "Runtime 0.4.0-r134 installed but the full Cloud sync service handoff failed"
+        );
     }
 }
