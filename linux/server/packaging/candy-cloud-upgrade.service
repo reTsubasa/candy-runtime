@@ -17,5 +17,4 @@ NoNewPrivileges=false
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/candy/sdwan /run/candy /var/lib/candy/node-upgrades
-
+ReadWritePaths=/var/lib/candy/sdwan /run/candy /run/lock /var/lib/candy/node-upgrades /opt/candy /usr/local/bin /usr/local/libexec /usr/local/sbin /usr/lib/tmpfiles.d /usr/lib/sysctl.d /etc/systemd/system /etc/candy

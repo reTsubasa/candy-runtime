@@ -172,6 +172,21 @@ grep -Fx 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
 if grep -Eq '^AmbientCapabilities=|^CapabilityBoundingSet=CAP_' "$repo_root/linux/server/packaging/candy-server.service"; then
 	fail "server kernel tuning grants broad capabilities"
 fi
+for unit in \
+	"$repo_root/linux/server/packaging/candy-cloud-upgrade.service" \
+	"$repo_root/linux/client/packaging/candy-cloud-upgrade.service"; do
+	grep -Fx 'ProtectSystem=strict' "$unit" >/dev/null || fail "$unit lost its read-only system sandbox"
+	for writable in /run/lock /opt/candy /usr/local/bin /usr/local/libexec /usr/local/sbin /usr/lib/tmpfiles.d /usr/lib/sysctl.d /etc/systemd/system /etc/candy; do
+		grep -F "ReadWritePaths=" "$unit" | grep -F " $writable" >/dev/null ||
+			fail "$unit cannot write required Runtime transaction path $writable"
+	done
+done
+sed -n "/^services='/,/^'/p" "$upgrader" | grep -Fx 'candy-cloud-upgrade.service' >/dev/null ||
+	fail "Cloud upgrade worker is missing from service state preservation"
+stop_loop=$(sed -n '/^stop_services()/,/^}/p' "$upgrader" | grep 'for service in')
+case "$stop_loop" in
+	*candy-cloud-upgrade.service*) fail "Cloud upgrade worker remains in the transaction stop list" ;;
+esac
 for unit in candy-server.service candy-cloud-sync.service; do
 	grep -F 'Environment=CANDY_SDWAN_STATE_DIR=/var/lib/candy/sdwan' \
 		"$repo_root/linux/server/packaging/$unit" >/dev/null || fail "$unit does not pin the canonical state directory"
@@ -216,6 +231,8 @@ printf '%s\n' core-preserved >"$host/opt/candy/cores/current/candy-core"
 make_bundle "$tmp/good" x86_64 0.4.0-r62
 good_sha=$(sha256 "$tmp/good.tar.gz")
 reset_service_state
+printf 1 >"$fake_state/candy-cloud-upgrade.service.enabled"
+printf 1 >"$fake_state/candy-cloud-upgrade.service.active"
 installed_upgrader=$tmp/installed-upgrade-candy-server.sh
 cp "$upgrader" "$installed_upgrader"
 printf '%s\n' '# simulate the previous installed Runtime revision' >>"$installed_upgrader"
@@ -257,6 +274,9 @@ done
 [ "$(cat "$fake_state/candy-proxy.service.active")" = 0 ] || fail "optional Proxy service started without operator configuration"
 grep -F 'start --no-block candy-cloud-sync.service' "$tmp/systemd.log" >/dev/null ||
 	fail "restored Cloud sync timer was not armed by a oneshot dispatch"
+if grep -Fx 'stop candy-cloud-upgrade.service' "$tmp/systemd.log" >/dev/null; then
+	fail "Runtime transaction stopped its own Cloud upgrade worker before receipt cleanup"
+fi
 
 # Integrity and architecture failures happen before services or files are touched.
 : >"$tmp/systemd.log"

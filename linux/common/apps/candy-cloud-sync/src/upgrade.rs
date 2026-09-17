@@ -7,6 +7,22 @@ const CATALOG_KEY: &str =
 const RELEASE_ROOT: &str = "https://github.com/reTsubasa/candy-release/releases/download/";
 const MAX_BUNDLE: u64 = 256 * 1024 * 1024;
 const CATALOG_FETCH_ATTEMPTS: usize = 3;
+const OPENWRT_UPDATE_MANAGER: &str = "/usr/libexec/candy-update-manager";
+const OPENWRT_UPDATE_CATALOG: &str = "/var/lib/candy/update/stable.json";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum UpgradeOutcome {
+    Continue,
+    RestartRequired,
+}
+
+fn completed_upgrade_outcome(component: &str, phase: &str) -> UpgradeOutcome {
+    if component == "runtime" && phase == "succeeded" {
+        UpgradeOutcome::RestartRequired
+    } else {
+        UpgradeOutcome::Continue
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -91,6 +107,15 @@ fn fetch(client: &Client, url: &str, destination: &Path, limit: u64) -> Result<(
 }
 
 fn command(program: &str, arguments: &[&str], root: &Path) -> Result<()> {
+    command_with_env(program, arguments, root, &[])
+}
+
+fn command_with_env(
+    program: &str,
+    arguments: &[&str],
+    root: &Path,
+    environment: &[(&str, &str)],
+) -> Result<()> {
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -98,6 +123,7 @@ fn command(program: &str, arguments: &[&str], root: &Path) -> Result<()> {
         .open(root.join("execution.log"))?;
     let mut child = ProcessCommand::new(program)
         .args(arguments)
+        .envs(environment.iter().copied())
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log)
@@ -304,16 +330,75 @@ fn download_artifact(root: &Path, artifact: &serde_json::Value, name: &str) -> R
     Ok(path)
 }
 
+fn openwrt_manager_action(component: &str) -> Result<&'static str> {
+    match component {
+        "core" => Ok("install-core"),
+        "runtime" => Ok("install-runtime"),
+        _ => bail!("invalid_upgrade_target"),
+    }
+}
+
+fn verify_openwrt_manager_target(root: &Path, target: &Target) -> Result<()> {
+    command(OPENWRT_UPDATE_MANAGER, &["check"], root)?;
+    let cache: serde_json::Value =
+        read_bounded_json(Path::new(OPENWRT_UPDATE_CATALOG), 4 * 1024 * 1024)?;
+    let (checked, _) = candidate(
+        &cache,
+        &target.component,
+        true,
+        std::env::consts::ARCH,
+        &target.version_key,
+    )?;
+    if checked.digest != target.digest || checked.version != target.version {
+        bail!("catalog_target_changed");
+    }
+    Ok(())
+}
+
+fn linux_runtime_installer_arguments<'a>(
+    script: &'a str,
+    bundle: &'a str,
+    digest: &'a str,
+    version: &'a str,
+) -> [&'a str; 7] {
+    [
+        script,
+        "--bundle-file",
+        bundle,
+        "--sha256",
+        digest,
+        "--version",
+        version,
+    ]
+}
+
 fn install(
     root: &Path,
     target: &Target,
     artifact: &serde_json::Value,
     openwrt: bool,
 ) -> Result<()> {
-    if target.component == "core" {
+    if openwrt {
+        // The OpenWrt update manager owns its verified catalog cache, package
+        // rollback and local-file handoff to the Core manager. Re-check its
+        // signed view and bind it to the Cloud-selected target before install.
+        verify_openwrt_manager_target(root, target)?;
+        command_with_env(
+            OPENWRT_UPDATE_MANAGER,
+            &[
+                openwrt_manager_action(&target.component)?,
+                &target.version_key,
+            ],
+            root,
+            &[("CANDY_UPDATE_PRESERVE_CLOUD_UPGRADE_WORKER", "1")],
+        )?;
+        if target.component == "core" {
+            command(manager(true), &["activate", &target.version], root)?;
+        }
+    } else if target.component == "core" {
         let bundle = download_artifact(root, artifact, "core.tar.gz")?;
         command(
-            manager(openwrt),
+            manager(false),
             &[
                 "install",
                 &target.version,
@@ -322,30 +407,7 @@ fn install(
             ],
             root,
         )?;
-        command(manager(openwrt), &["activate", &target.version], root)?;
-    } else if openwrt {
-        // The existing OpenWrt manager verifies its catalog and APKs and owns
-        // package rollback. Refuse if the freshly checked artifact has changed.
-        command("/usr/libexec/candy-update-manager", &["check"], root)?;
-        let cache: serde_json::Value = read_bounded_json(
-            Path::new("/var/lib/candy/update/catalog.json"),
-            4 * 1024 * 1024,
-        )?;
-        let (checked, _) = candidate(
-            &cache,
-            "runtime",
-            true,
-            std::env::consts::ARCH,
-            &target.version_key,
-        )?;
-        if checked.digest != target.digest {
-            bail!("catalog_target_changed");
-        }
-        command(
-            "/usr/libexec/candy-update-manager",
-            &["install-runtime", &target.version_key],
-            root,
-        )?;
+        command(manager(false), &["activate", &target.version], root)?;
     } else {
         let bundle = download_artifact(root, &artifact["runtime"], "runtime.tar.gz")?;
         // Only extract the one installer from an authenticated artifact. Its
@@ -357,22 +419,18 @@ fn install(
                 "./install/upgrade-candy-server.sh",
             ])
             .output()?;
-        if !output.status.success() || output.stdout.len() > 128 * 1024 {
+        if !output.status.success() || output.stdout.is_empty() || output.stdout.len() > 128 * 1024
+        {
             bail!("runtime_installer_invalid");
         }
         let script = root.join("upgrade.sh");
         atomic_bytes(&script, &output.stdout, 0o700)?;
+        let script = script.to_str().context("path")?;
+        let bundle = bundle.to_str().context("path")?;
+        let digest = artifact["runtime"]["sha256"].as_str().context("digest")?;
         command(
             "sh",
-            &[
-                script.to_str().context("path")?,
-                "--bundle-file",
-                bundle.to_str().context("path")?,
-                "--sha256",
-                artifact["runtime"]["sha256"].as_str().context("digest")?,
-                "--version",
-                &target.version,
-            ],
+            &linux_runtime_installer_arguments(script, bundle, digest, &target.version),
             root,
         )?;
     }
@@ -441,7 +499,7 @@ fn receipt(client: &Client, cloud: &Url, journal: &Journal, state: &str) -> Resu
     Ok(())
 }
 
-pub(super) fn run(args: &Args) -> Result<()> {
+pub(super) fn run(args: &Args) -> Result<UpgradeOutcome> {
     if !nix::unistd::Uid::effective().is_root() {
         bail!("upgrade_requires_root");
     }
@@ -491,8 +549,12 @@ pub(super) fn run(args: &Args) -> Result<()> {
         }
         if matches!(journal.phase.as_str(), "succeeded" | "failed") {
             receipt(&client, &cloud, &journal, &journal.phase)?;
+            let outcome = completed_upgrade_outcome(&journal.job.target.component, &journal.phase);
             fs::remove_file(&journal_path)?;
             File::open(root)?.sync_all()?;
+            if outcome == UpgradeOutcome::RestartRequired {
+                return Ok(outcome);
+            }
         }
     }
     let catalog = catalog(root)?;
@@ -523,7 +585,7 @@ pub(super) fn run(args: &Args) -> Result<()> {
     let Some(job) =
         serde_json::from_slice::<Option<Job>>(&bounded_response(response, MAX_PROFILE_BYTES)?)?
     else {
-        return Ok(());
+        return Ok(UpgradeOutcome::Continue);
     };
     if job.device_id != identity.device_id || job.device_key_id != identity.device_key_id {
         bail!("upgrade_identity_mismatch");
@@ -567,7 +629,7 @@ pub(super) fn run(args: &Args) -> Result<()> {
     receipt(&client, &cloud, &journal, &journal.phase)?;
     fs::remove_file(journal_path)?;
     File::open(root)?.sync_all()?;
-    Ok(())
+    Ok(completed_upgrade_outcome(&target.component, &journal.phase))
 }
 
 #[cfg(test)]
@@ -619,6 +681,46 @@ mod tests {
         assert_eq!(
             upgrade_error_code(&anyhow::anyhow!("unexpected process failure")),
             "upgrade_execution_failed"
+        );
+    }
+
+    #[test]
+    fn platform_install_contracts_use_the_owning_manager_and_exact_arguments() {
+        assert_eq!(OPENWRT_UPDATE_CATALOG, "/var/lib/candy/update/stable.json");
+        assert_eq!(
+            openwrt_manager_action("runtime").unwrap(),
+            "install-runtime"
+        );
+        assert_eq!(openwrt_manager_action("core").unwrap(), "install-core");
+        assert!(openwrt_manager_action("other").is_err());
+        assert_eq!(
+            linux_runtime_installer_arguments(
+                "/var/lib/candy/node-upgrades/upgrade.sh",
+                "/var/lib/candy/node-upgrades/runtime.tar.gz",
+                "digest",
+                "0.4.0-r129",
+            ),
+            [
+                "/var/lib/candy/node-upgrades/upgrade.sh",
+                "--bundle-file",
+                "/var/lib/candy/node-upgrades/runtime.tar.gz",
+                "--sha256",
+                "digest",
+                "--version",
+                "0.4.0-r129",
+            ]
+        );
+        assert_eq!(
+            completed_upgrade_outcome("runtime", "succeeded"),
+            UpgradeOutcome::RestartRequired
+        );
+        assert_eq!(
+            completed_upgrade_outcome("runtime", "failed"),
+            UpgradeOutcome::Continue
+        );
+        assert_eq!(
+            completed_upgrade_outcome("core", "succeeded"),
+            UpgradeOutcome::Continue
         );
     }
 }

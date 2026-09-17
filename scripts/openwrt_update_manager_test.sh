@@ -520,6 +520,20 @@ grep -Fx restart "$FAKE_CLOUD_SYNC_LOG" >/dev/null
 grep -Fx running "$FAKE_CLOUD_SYNC_LOG" >/dev/null
 [ "$(cat "$FAKE_CLOUD_SYNC_RUNNING")" = 1 ]
 
+# A Cloud-driven upgrade is itself the procd upgrade instance. It must verify
+# that the service remains enabled/running without restarting or stopping the
+# init service that owns the current transaction. The worker exits only after
+# Cloud receipt and journal cleanup, then procd respawns the new binary.
+: > "$FAKE_CLOUD_SYNC_LOG"
+printf '%s\n' 1 > "$FAKE_CLOUD_SYNC_RUNNING"
+CANDY_UPDATE_PRESERVE_CLOUD_UPGRADE_WORKER=1 "$manager" install-runtime v0_4_0_r3 >/dev/null
+grep -Fx enable "$FAKE_CLOUD_SYNC_LOG" >/dev/null
+grep -Fx running "$FAKE_CLOUD_SYNC_LOG" >/dev/null
+if grep -Eq '^(restart|stop)$' "$FAKE_CLOUD_SYNC_LOG"; then
+	echo "Cloud-driven Runtime update stopped or restarted its own upgrade worker" >&2
+	exit 1
+fi
+
 # A target Runtime that cannot restore Cloud sync is rejected and rolled back;
 # the rollback must also restore the previously enabled Cloud sync service.
 : > "$FAKE_CLOUD_SYNC_LOG"

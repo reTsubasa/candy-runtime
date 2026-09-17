@@ -147,7 +147,11 @@ record_service_state() {
 
 stop_services() {
 	stop_failed=0
-	for service in candy-cloud-sync.timer candy-cloud-upgrade.service candy-cloud-sync.service candy-proxy.service candy-server.service candy-netd.service; do
+	# The transaction is launched by candy-cloud-upgrade.service. Stopping that
+	# unit would kill this process before it can commit, report its receipt, or
+	# remove the durable journal. The worker exits after a successful Runtime
+	# receipt and systemd then starts the newly installed binary.
+	for service in candy-cloud-sync.timer candy-cloud-sync.service candy-proxy.service candy-server.service candy-netd.service; do
 		"$SYSTEMCTL" stop "$service" >/dev/null 2>&1 || true
 		if "$SYSTEMCTL" is-active --quiet "$service" >/dev/null 2>&1; then
 			log "could not stop $service"

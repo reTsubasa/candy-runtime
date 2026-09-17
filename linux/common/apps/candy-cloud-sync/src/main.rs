@@ -909,13 +909,17 @@ fn main() {
 fn run(args: Args) -> Result<()> {
     match args.command {
         Command::SyncOnce => sync_once(&args),
-        Command::UpgradeOnce => upgrade::run(&args),
+        Command::UpgradeOnce => upgrade::run(&args).map(|_| ()),
         Command::UpgradeLoop => loop {
-            if let Err(error) = upgrade::run(&args) {
-                eprintln!(
-                    "event=node_upgrade_poll_failed detail={}",
-                    sanitize_log_value(&format!("{error:#}"))
-                );
+            match upgrade::run(&args) {
+                Ok(upgrade::UpgradeOutcome::RestartRequired) => return Ok(()),
+                Ok(upgrade::UpgradeOutcome::Continue) => {}
+                Err(error) => {
+                    eprintln!(
+                        "event=node_upgrade_poll_failed detail={}",
+                        sanitize_log_value(&format!("{error:#}"))
+                    );
+                }
             }
             std::thread::sleep(Duration::from_secs(60));
         },
