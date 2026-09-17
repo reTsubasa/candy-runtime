@@ -461,6 +461,21 @@ struct RouteDiagnosticsFile {
     probe_successes: u32,
     probe_rtt_ms: Option<u32>,
     probe_checked_at_unix: Option<u64>,
+    #[serde(default)]
+    active_issues: Vec<RuntimeRouteIssue>,
+    #[serde(default)]
+    last_recovered_issues: Vec<RuntimeRouteIssue>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RuntimeRouteIssue {
+    prefix: String,
+    table_id: u32,
+    expected_kind: String,
+    observed_kind: String,
+    reason: String,
+    action: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -485,6 +500,8 @@ struct RuntimeRouteDiagnostics {
     probe_successes: u32,
     probe_rtt_ms: Option<u32>,
     probe_checked_at_unix: Option<u64>,
+    active_issues: Vec<RuntimeRouteIssue>,
+    last_recovered_issues: Vec<RuntimeRouteIssue>,
 }
 
 #[derive(Debug, Clone, Serialize, Eq, PartialEq)]
@@ -595,6 +612,14 @@ struct CoreRuntimeStatus {
     path_changes: u64,
     #[serde(default)]
     transport_mode: Option<String>,
+}
+
+fn core_policy_generation(status: &CoreRuntimeStatus) -> u64 {
+    if status.policy_generation == 0 {
+        status.generation
+    } else {
+        status.policy_generation
+    }
 }
 
 fn core_data_plane_ready(status: &CoreRuntimeStatus) -> bool {
@@ -1050,7 +1075,7 @@ fn verified_local_runtime_snapshot(
         }
         Err(error) => return Err(error).context("inspect activation-specific Core Runtime status"),
     };
-    if status.generation != descriptor.projection_generation
+    if core_policy_generation(&status) != descriptor.projection_generation
         || !valid_core_status_metadata(&status)?
     {
         return Ok((
@@ -2564,9 +2589,9 @@ fn report_runtime_telemetry(
         transport_mode: None,
     };
     let status = core_status.as_ref().unwrap_or(&empty);
-    let policy_generation = (status.policy_generation != 0)
-        .then_some(status.policy_generation)
-        .or_else(|| (status.generation != 0).then_some(status.generation));
+    let effective_policy_generation = core_policy_generation(status);
+    let policy_generation =
+        (effective_policy_generation != 0).then_some(effective_policy_generation);
     let route_diagnostics = match read_route_diagnostics(run_dir, status.generation) {
         Ok(diagnostics) => diagnostics,
         Err(error) => {
@@ -2712,9 +2737,46 @@ fn read_route_diagnostics(
     let consistent = value.integrity != "consistent"
         || (value.expected_snapshot_sha256 == value.observed_snapshot_sha256
             && value.expected_routes == value.observed_routes
-            && value.orphaned_routes == 0);
+            && value.orphaned_routes == 0
+            && value.active_issues.is_empty());
+    let valid_issue = |issue: &RuntimeRouteIssue| {
+        let (address, length) = issue.prefix.split_once('/').unwrap_or(("", ""));
+        let address = address.parse::<Ipv4Addr>().ok();
+        let length = length.parse::<u8>().ok();
+        let canonical_prefix = address.zip(length).is_some_and(|(address, length)| {
+            length <= 32 && ipv4_network(address, length) == address
+        });
+        canonical_prefix
+            && (20_000..=20_999).contains(&issue.table_id)
+            && matches!(issue.expected_kind.as_str(), "absent" | "link" | "throw")
+            && matches!(
+                issue.observed_kind.as_str(),
+                "missing" | "link" | "throw" | "unrecognized"
+            )
+            && matches!(
+                issue.reason.as_str(),
+                "missing_route"
+                    | "stale_failed_prefix_throw"
+                    | "stale_active_route"
+                    | "route_metrics_mismatch"
+                    | "route_attributes_mismatch"
+                    | "undeclared_route"
+            )
+            && matches!(
+                issue.action.as_str(),
+                "restore_signed_route" | "suspend_steering_and_require_review"
+            )
+    };
+    let issues_valid = value.active_issues.len() <= 64
+        && value.last_recovered_issues.len() <= 64
+        && value.active_issues.iter().all(valid_issue)
+        && value.last_recovered_issues.iter().all(valid_issue)
+        && (value.schema_version != 1
+            || (value.active_issues.is_empty() && value.last_recovered_issues.is_empty()))
+        && (value.active_issues.is_empty() || value.integrity != "consistent")
+        && (value.last_recovered_issues.is_empty() || value.last_recovered_at_unix.is_some());
     let now = unix_now()?;
-    if value.schema_version != 1
+    if !matches!(value.schema_version, 1 | 2)
         || value.generation != runtime_generation
         || !matches!(
             value.integrity.as_str(),
@@ -2740,6 +2802,7 @@ fn read_route_diagnostics(
         || !error_valid
         || !probe_valid
         || !consistent
+        || !issues_valid
     {
         bail!("route diagnostics failed local validation")
     }
@@ -2763,6 +2826,8 @@ fn read_route_diagnostics(
         probe_successes: value.probe_successes,
         probe_rtt_ms: value.probe_rtt_ms,
         probe_checked_at_unix: value.probe_checked_at_unix,
+        active_issues: value.active_issues,
+        last_recovered_issues: value.last_recovered_issues,
     }))
 }
 
@@ -3298,7 +3363,7 @@ fn read_active_core_status(
     let Some(status) = status else {
         return Ok(None);
     };
-    if status.generation != descriptor.projection_generation {
+    if core_policy_generation(&status) != descriptor.projection_generation {
         return Ok(None);
     }
     if !valid_core_status_metadata(&status)? {
@@ -6514,6 +6579,54 @@ mod tests {
     }
 
     #[test]
+    fn route_diagnostics_validate_bounded_issue_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("route-diagnostics-v1.json");
+        let now = unix_now().unwrap();
+        let document = serde_json::json!({
+            "schema_version": 2,
+            "generation": 7,
+            "integrity": "drifted",
+            "expected_snapshot_sha256": "11".repeat(32),
+            "observed_snapshot_sha256": "22".repeat(32),
+            "expected_routes": 1,
+            "observed_routes": 1,
+            "orphaned_routes": 1,
+            "reconcile_attempts": 2,
+            "reconcile_successes": 1,
+            "last_checked_at_unix": now,
+            "last_reconciled_at_unix": now,
+            "last_recovered_at_unix": null,
+            "last_recovery_duration_ms": 12,
+            "last_error_code": "route_snapshot_mismatch",
+            "probe_state": "pending",
+            "probe_targets": 1,
+            "probe_successes": 0,
+            "probe_rtt_ms": null,
+            "probe_checked_at_unix": null,
+            "active_issues": [{
+                "prefix": "10.0.0.0/24",
+                "table_id": 20001,
+                "expected_kind": "link",
+                "observed_kind": "throw",
+                "reason": "stale_failed_prefix_throw",
+                "action": "restore_signed_route"
+            }],
+            "last_recovered_issues": []
+        });
+        fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+        let diagnostics = read_route_diagnostics(directory.path(), 7)
+            .unwrap()
+            .expect("versioned route diagnostics");
+        assert_eq!(diagnostics.active_issues.len(), 1);
+
+        let mut invalid = document;
+        invalid["active_issues"][0]["prefix"] = serde_json::json!("10.0.0.1/24");
+        fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(read_route_diagnostics(directory.path(), 7).is_err());
+    }
+
+    #[test]
     fn certificate_renewal_window_and_backoff_are_bounded() {
         let now = DateTime::parse_from_rfc3339("2026-09-03T00:00:00Z")
             .unwrap()
@@ -6989,7 +7102,8 @@ default via 192.0.2.1 dev eth0 proto static
             &activation_status,
             serde_json::json!({
                 "schema_version": 3,
-                "generation": 7,
+                "generation": 6,
+                "policy_generation": 7,
                 "pid": std::process::id(),
                 "lifecycle": "active",
                 "configured_peers": 1,
@@ -7006,6 +7120,8 @@ default via 192.0.2.1 dev eth0 proto static
             .unwrap()
             .unwrap();
         assert_eq!(status.lifecycle, "active");
+        assert_eq!(status.generation, 6);
+        assert_eq!(status.policy_generation, 7);
         assert_eq!(status.active_peers, 1);
         assert_eq!(status.schema_version, 3);
         assert_eq!(
@@ -7042,7 +7158,8 @@ default via 192.0.2.1 dev eth0 proto static
             &activation_status,
             serde_json::json!({
                 "schema_version": 3,
-                "generation": 7,
+                "generation": 6,
+                "policy_generation": 7,
                 "pid": std::process::id(),
                 "lifecycle": "active",
                 "configured_peers": 1,

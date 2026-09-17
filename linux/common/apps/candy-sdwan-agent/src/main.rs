@@ -395,6 +395,21 @@ struct RouteDiagnosticsFile {
     probe_successes: u32,
     probe_rtt_ms: Option<u32>,
     probe_checked_at_unix: Option<u64>,
+    #[serde(default)]
+    active_issues: Vec<RouteDiagnosticIssue>,
+    #[serde(default)]
+    last_recovered_issues: Vec<RouteDiagnosticIssue>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RouteDiagnosticIssue {
+    prefix: String,
+    table_id: u32,
+    expected_kind: String,
+    observed_kind: String,
+    reason: String,
+    action: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -404,12 +419,13 @@ struct RouteSnapshot {
     expected_routes: u32,
     observed_routes: u32,
     orphaned_routes: u32,
+    issues: Vec<RouteDiagnosticIssue>,
 }
 
 impl RouteDiagnosticsFile {
     fn new(generation: u64) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             generation,
             integrity: "reconciling".into(),
             expected_snapshot_sha256: "0".repeat(64),
@@ -429,11 +445,23 @@ impl RouteDiagnosticsFile {
             probe_successes: 0,
             probe_rtt_ms: None,
             probe_checked_at_unix: None,
+            active_issues: Vec::new(),
+            last_recovered_issues: Vec::new(),
         }
     }
 
-    fn record_snapshot(&mut self, snapshot: RouteSnapshot, now: u64, duration_ms: u64) {
+    fn record_snapshot(
+        &mut self,
+        before: Option<RouteSnapshot>,
+        snapshot: RouteSnapshot,
+        now: u64,
+        duration_ms: u64,
+    ) {
         let was_unhealthy = self.integrity != "consistent";
+        let detected_issues = before
+            .as_ref()
+            .map(|value| value.issues.clone())
+            .unwrap_or_default();
         self.expected_snapshot_sha256 = snapshot.expected_snapshot_sha256;
         self.observed_snapshot_sha256 = snapshot.observed_snapshot_sha256;
         self.expected_routes = snapshot.expected_routes;
@@ -446,13 +474,18 @@ impl RouteDiagnosticsFile {
             && self.orphaned_routes == 0
         {
             self.integrity = "consistent".into();
+            self.active_issues.clear();
             self.reconcile_successes = self.reconcile_successes.saturating_add(1);
             self.last_error_code = None;
-            if was_unhealthy {
+            if !detected_issues.is_empty() {
+                self.last_recovered_issues = detected_issues;
+                self.last_recovered_at_unix = Some(now);
+            } else if was_unhealthy {
                 self.last_recovered_at_unix = Some(now);
             }
         } else {
             self.integrity = "drifted".into();
+            self.active_issues = snapshot.issues;
             self.last_error_code = Some("route_snapshot_mismatch".into());
         }
     }
@@ -522,6 +555,8 @@ impl RouteDiagnosticsFile {
 struct CoreReadinessStatus {
     schema_version: u16,
     generation: u64,
+    #[serde(default)]
+    policy_generation: u64,
     pid: u32,
     readiness_token: String,
     lifecycle: String,
@@ -611,7 +646,7 @@ fn load_route_diagnostics(path: &Path, generation: u64) -> RouteDiagnosticsFile 
         serde_json::from_reader(file).context("parse route diagnostics")
     })();
     match value {
-        Ok(value) if value.schema_version == 1 && value.generation == generation => value,
+        Ok(value) if value.schema_version == 2 && value.generation == generation => value,
         _ => RouteDiagnosticsFile::new(generation),
     }
 }
@@ -670,6 +705,106 @@ fn snapshot_hash(entries: &[String]) -> String {
         digest.update(entry.as_bytes());
     }
     format!("{:x}", digest.finalize())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn snapshot_entry_prefix(entry: &str) -> Option<&str> {
+    entry
+        .strip_prefix("orphan|")
+        .unwrap_or(entry)
+        .split('|')
+        .next()
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn snapshot_entry_kind(entry: &str) -> &'static str {
+    let entry = entry.strip_prefix("orphan|").unwrap_or(entry);
+    match entry.split('|').nth(1) {
+        Some("link") => "link",
+        Some("throw") => "throw",
+        _ => "unrecognized",
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn route_snapshot_issues(
+    table_id: u32,
+    expected: &[String],
+    observed: &[String],
+) -> Vec<RouteDiagnosticIssue> {
+    const MAX_ISSUES: usize = 64;
+    let mut issues = Vec::new();
+    for expected_entry in expected {
+        if observed.contains(expected_entry) {
+            continue;
+        }
+        let Some(prefix) = snapshot_entry_prefix(expected_entry) else {
+            continue;
+        };
+        let expected_kind = snapshot_entry_kind(expected_entry);
+        let observed_entry = observed
+            .iter()
+            .find(|entry| snapshot_entry_prefix(entry) == Some(prefix));
+        let observed_kind = observed_entry
+            .map(|entry| snapshot_entry_kind(entry))
+            .unwrap_or("missing");
+        let reason = match (expected_kind, observed_kind) {
+            (_, "missing") => "missing_route",
+            ("link", "throw") => "stale_failed_prefix_throw",
+            ("throw", "link") => "stale_active_route",
+            ("link", "link") => "route_metrics_mismatch",
+            _ => "route_attributes_mismatch",
+        };
+        issues.push(RouteDiagnosticIssue {
+            prefix: prefix.to_owned(),
+            table_id,
+            expected_kind: expected_kind.into(),
+            observed_kind: observed_kind.into(),
+            reason: reason.into(),
+            action: "restore_signed_route".into(),
+        });
+        if issues.len() == MAX_ISSUES {
+            return issues;
+        }
+    }
+    for observed_entry in observed {
+        if expected.contains(observed_entry) {
+            continue;
+        }
+        let Some(prefix) = snapshot_entry_prefix(observed_entry) else {
+            continue;
+        };
+        if issues.iter().any(|issue| issue.prefix == prefix) {
+            continue;
+        }
+        let expected_entry = expected
+            .iter()
+            .find(|entry| snapshot_entry_prefix(entry) == Some(prefix));
+        let observed_kind = snapshot_entry_kind(observed_entry);
+        let expected_kind = expected_entry
+            .map(|entry| snapshot_entry_kind(entry))
+            .unwrap_or("absent");
+        let (reason, action) = match (expected_kind, observed_kind) {
+            ("link", "throw") => ("stale_failed_prefix_throw", "restore_signed_route"),
+            ("throw", "link") => ("stale_active_route", "restore_signed_route"),
+            ("link", "link") => ("route_metrics_mismatch", "restore_signed_route"),
+            ("absent", _) => ("undeclared_route", "suspend_steering_and_require_review"),
+            _ => ("route_attributes_mismatch", "restore_signed_route"),
+        };
+        issues.push(RouteDiagnosticIssue {
+            prefix: prefix.to_owned(),
+            table_id,
+            expected_kind: expected_kind.into(),
+            observed_kind: observed_kind.into(),
+            reason: reason.into(),
+            action: action.into(),
+        });
+        if issues.len() == MAX_ISSUES {
+            break;
+        }
+    }
+    issues
 }
 
 #[cfg(target_os = "linux")]
@@ -834,12 +969,14 @@ fn inspect_kernel_routes(
             .iter()
             .filter(|entry| !expected_set.contains(*entry))
             .count() as u32;
+        let issues = route_snapshot_issues(declaration.table_id, &expected, &observed);
         Ok(RouteSnapshot {
             expected_snapshot_sha256: snapshot_hash(&expected),
             observed_snapshot_sha256: snapshot_hash(&observed),
             expected_routes: expected.len() as u32,
             observed_routes: observed.len() as u32,
             orphaned_routes,
+            issues,
         })
     })
 }
@@ -1315,6 +1452,10 @@ fn spawn_core(args: &RuntimeArgs, tun: &OwnedFd, readiness_token: &str) -> Resul
             .map_or("", |path| path.to_str().unwrap_or("<invalid>"))
     );
     command
+        .env(
+            "CANDY_FENCING_TOKEN_PATH",
+            core_fencing_token_path(args)?,
+        )
         .arg("--config")
         .arg(&args.config)
         .arg("--tun-fd")
@@ -1333,6 +1474,25 @@ fn spawn_core(args: &RuntimeArgs, tun: &OwnedFd, readiness_token: &str) -> Resul
             );
         })
         .with_context(|| format!("start Candy Core: {}", args.core.display()))
+}
+
+fn core_fencing_token_path(args: &RuntimeArgs) -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("CANDY_FENCING_TOKEN_PATH") {
+        let path = PathBuf::from(path);
+        anyhow::ensure!(
+            path.is_absolute(),
+            "CANDY_FENCING_TOKEN_PATH must be absolute"
+        );
+        return Ok(path);
+    }
+    let activation_link = args
+        .activation_link
+        .as_deref()
+        .context("Cloud SD-WAN activation link is required for fencing state")?;
+    let state_dir = activation_link
+        .parent()
+        .context("Cloud SD-WAN activation link has no state directory")?;
+    Ok(state_dir.join("fencing.token"))
 }
 
 fn protect_child_lifetime(command: &mut Command) {
@@ -1527,9 +1687,12 @@ fn request_core_transaction(
         response.generation
     );
     if matches!(action, CoreReloadAction::PolicyUpdate) {
+        let expected_policy_generation = runtime_policy_generation(args);
         anyhow::ensure!(
-            response.policy_generation.is_some(),
-            "Core policy update succeeded without policy generation"
+            response.policy_generation == Some(expected_policy_generation),
+            "Core policy update succeeded with mismatched policy generation: expected={} received={:?}",
+            expected_policy_generation,
+            response.policy_generation
         );
     }
     Ok(())
@@ -1604,8 +1767,14 @@ fn policy_update_activation(
 fn adopt_policy_activation(current: &RuntimeArgs, replacement: &RuntimeArgs) -> RuntimeArgs {
     let mut applied = replacement.clone();
     applied.generation = current.generation;
-    applied.status = current.status.clone();
     applied
+}
+
+fn runtime_policy_generation(args: &RuntimeArgs) -> u64 {
+    args.activation_descriptor
+        .as_ref()
+        .map(|descriptor| descriptor.projection_generation)
+        .unwrap_or(args.generation)
 }
 
 fn renew_transition_lease(
@@ -1822,7 +1991,7 @@ fn write_runtime_activation_receipt(
 ) -> Result<()> {
     write_activation_receipt(
         args.activation_ready.as_deref(),
-        args.generation,
+        runtime_policy_generation(args),
         args.activation_target
             .as_deref()
             .and_then(|target| target.file_name().and_then(|name| name.to_str())),
@@ -1866,7 +2035,7 @@ fn write_runtime_failure_marker(args: &RuntimeArgs, error_code: &'static str) ->
     ));
     let bytes = serde_json::to_vec(&RuntimeFailureMarker {
         schema_version: 1,
-        generation: args.generation,
+        generation: runtime_policy_generation(args),
         error_code: error_code.into(),
     })?;
     let mut file = OpenOptions::new()
@@ -2113,6 +2282,9 @@ fn read_core_status(
     }
     if status.generation > generation {
         bail!("SD-WAN Core readiness generation is newer than the requested activation")
+    }
+    if status.policy_generation != 0 && status.policy_generation < status.generation {
+        bail!("SD-WAN Core readiness policy generation precedes tunnel generation")
     }
     if status.active_peers > status.configured_peers
         || status.ready_route_owners > status.active_peers
@@ -3367,6 +3539,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
     let mut next_renewal = Instant::now() + renew_every;
     let mut transition = HotTransitionState::default();
     let mut peer_loss_fallback = false;
+    let mut route_integrity_fallback = false;
     // This is deliberately separate from `peer_loss_fallback`: the latter is
     // the current forwarding mode, while this flag records that this process
     // has completed one successful activation.  A post-commit readiness flap
@@ -3451,6 +3624,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                         Ok(true) => {
                             args = replacement;
                             peer_loss_fallback = false;
+                            route_integrity_fallback = false;
                             rejected_activation = None;
                             next_renewal = Instant::now() + renew_every;
                         }
@@ -3517,6 +3691,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 // A withdrawn Cloud policy owns the fallback decision. Do not
                 // let a stale pre-withdrawal readiness report resume steering.
                 peer_loss_fallback = false;
+                route_integrity_fallback = false;
                 rejected_activation = None;
                 let was_in_fallback = transition.complete();
                 if !was_in_fallback {
@@ -3597,7 +3772,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 anyhow::anyhow!("Candy Core SD-WAN exited with status {code}"),
             );
         }
-        if !transition.steering_suspended || peer_loss_fallback {
+        if !transition.steering_suspended || peer_loss_fallback || route_integrity_fallback {
             let readiness_policy = if args.core_role == CoreRole::Server {
                 ReadinessPolicy::CommittedServer
             } else {
@@ -3616,7 +3791,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     committed_ready = true;
                     readiness_lost_since = None;
                     last_partial_route_log = None;
-                    if peer_loss_fallback {
+                    if peer_loss_fallback && !route_integrity_fallback {
                         match leave_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
                             .and_then(|_| {
                                 write_runtime_activation_receipt(&args, "committed", None)
@@ -3637,7 +3812,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     committed_ready = true;
                     readiness_lost_since = None;
                     last_partial_route_log = None;
-                    if peer_loss_fallback {
+                    if peer_loss_fallback && !route_integrity_fallback {
                         if let Err(error) =
                             leave_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
                                 .and_then(|_| {
@@ -3661,11 +3836,10 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     committed_ready = true;
                     readiness_lost_since = None;
                     // A recovered owner must restore healthy-route forwarding
-                    // immediately after an all-peer fallback. The current
-                    // Core/netd contract cannot identify and withdraw only the
-                    // failed owner's prefixes, so keep the failure explicitly
-                    // visible instead of tearing down every healthy route.
-                    if peer_loss_fallback {
+                    // immediately after an all-peer fallback. Exact failed
+                    // prefixes are reconciled below from the authenticated
+                    // Core status; healthy routes remain installed.
+                    if peer_loss_fallback && !route_integrity_fallback {
                         if let Err(error) =
                             leave_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
                                 .and_then(|_| {
@@ -3695,7 +3869,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                         .ok()
                         .flatten();
                         eprintln!(
-                            "level=warn event=sdwan_partial_route_degraded generation={} error_code=partial_route_owner_unavailable action=preserve_healthy_routes_and_retry failed_prefix_fallback=unavailable_contract configured_peers={} active_peers={} required_routes={} ready_routes={}",
+                            "level=warn event=sdwan_partial_route_degraded generation={} error_code=partial_route_owner_unavailable action=reconcile_exact_failed_prefixes configured_peers={} active_peers={} required_routes={} ready_routes={}",
                             args.generation,
                             evidence.as_ref().map_or(0, |status| status.configured_peers),
                             evidence.as_ref().map_or(0, |status| status.active_peers),
@@ -3841,7 +4015,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                 // route table cannot receive traffic. Keep it immutable
                 // while Core redials; the first healthy iteration resumes
                 // steering before reconciling the exact failed set.
-                Ok(Some(_)) if transition.steering_suspended => {}
+                Ok(Some(_)) if transition.steering_suspended && !route_integrity_fallback => {}
                 // During the bounded post-commit recovery window the status
                 // file may legitimately be absent while Core atomically
                 // replaces it.  Readiness handling above already put traffic
@@ -3863,12 +4037,25 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                                 route_diagnostics.reconcile_attempts.saturating_add(1);
                             let now = unix_seconds()?;
                             route_diagnostics.record_probe(&status, now);
+                            let before = match inspect_kernel_routes(&declaration, &prefixes) {
+                                Ok(snapshot) => Some(snapshot),
+                                Err(error) => {
+                                    eprintln!(
+                                        "level=warn event=route_snapshot_pre_reconcile_failed error_code=route_snapshot_inspection_failed error={}",
+                                        sanitize_log_value(&format!("{error:#}"))
+                                    );
+                                    None
+                                }
+                            };
                             if let Err(error) = netd.set_failed_prefixes(prefixes.clone()) {
                                 route_diagnostics.record_error(
                                     now,
                                     started.elapsed().as_millis() as u64,
                                     "netd_route_reconcile_failed",
                                 );
+                                if let Some(snapshot) = &before {
+                                    route_diagnostics.active_issues = snapshot.issues.clone();
+                                }
                                 if let Err(write_error) = write_route_diagnostics(
                                     &route_diagnostics_path,
                                     &route_diagnostics,
@@ -3883,6 +4070,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                             }
                             match inspect_kernel_routes(&declaration, &prefixes) {
                                 Ok(snapshot) => route_diagnostics.record_snapshot(
+                                    before,
                                     snapshot,
                                     now,
                                     started.elapsed().as_millis() as u64,
@@ -3893,6 +4081,9 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                                         started.elapsed().as_millis() as u64,
                                         "route_snapshot_inspection_failed",
                                     );
+                                    if let Some(snapshot) = before {
+                                        route_diagnostics.active_issues = snapshot.issues;
+                                    }
                                     eprintln!(
                                         "level=warn event=route_snapshot_inspection_failed error_code=route_snapshot_inspection_failed error={}",
                                         sanitize_log_value(&format!("{error:#}"))
@@ -3908,17 +4099,74 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                                 );
                             }
                             eprintln!(
-                                "level=info event=route_reconcile_completed generation={} desired_failed_prefix_count={} integrity={} expected_routes={} observed_routes={} orphaned_routes={} attempts={} successes={} error_code={}",
+                                "level=info event=route_reconcile_completed generation={} desired_failed_prefix_count={} integrity={} expected_routes={} observed_routes={} orphaned_routes={} active_issues={} recovered_issues={} attempts={} successes={} error_code={}",
                                 args.generation,
                                 prefixes.len(),
                                 route_diagnostics.integrity,
                                 route_diagnostics.expected_routes,
                                 route_diagnostics.observed_routes,
                                 route_diagnostics.orphaned_routes,
+                                route_diagnostics.active_issues.len(),
+                                route_diagnostics.last_recovered_issues.len(),
                                 route_diagnostics.reconcile_attempts,
                                 route_diagnostics.reconcile_successes,
                                 route_diagnostics.last_error_code.as_deref().unwrap_or("none")
                             );
+                            if route_diagnostics.integrity == "consistent"
+                                && route_integrity_fallback
+                            {
+                                if peer_loss_fallback {
+                                    route_integrity_fallback = false;
+                                    eprintln!(
+                                        "level=info event=route_integrity_recovered generation={} action=keep_peer_loss_fallback",
+                                        args.generation
+                                    );
+                                } else {
+                                    match leave_proxy_fallback(
+                                        &args,
+                                        &mut child,
+                                        &mut netd,
+                                        &mut transition,
+                                    ) {
+                                        Ok(()) => {
+                                            route_integrity_fallback = false;
+                                            eprintln!(
+                                                "level=info event=route_integrity_recovered generation={} action=resume_sdwan_steering",
+                                                args.generation
+                                            );
+                                        }
+                                        Err(error) => eprintln!(
+                                            "level=warn event=route_integrity_resume_pending generation={} error_code=steering_resume_failed error={}",
+                                            args.generation,
+                                            sanitize_log_value(&format!("{error:#}"))
+                                        ),
+                                    }
+                                }
+                            } else if route_diagnostics.integrity != "consistent"
+                                && !route_integrity_fallback
+                            {
+                                match netd.suspend() {
+                                    Ok(_) => {
+                                        transition.steering_suspended = true;
+                                        route_integrity_fallback = true;
+                                        eprintln!(
+                                            "level=error event=route_integrity_fallback generation={} error_code=route_snapshot_mismatch action=suspend_sdwan_steering active_issues={}",
+                                            args.generation,
+                                            route_diagnostics.active_issues.len()
+                                        );
+                                    }
+                                    Err(error) => {
+                                        return retry_after_rollback(
+                                            &args,
+                                            &mut child,
+                                            &mut netd,
+                                            "route integrity fallback failed",
+                                            "route_integrity_fallback_failed",
+                                            error.into(),
+                                        );
+                                    }
+                                }
+                            }
                             last_failed_prefixes = Some(prefixes);
                             last_route_reconcile = Some(Instant::now());
                         }
@@ -4043,12 +4291,14 @@ mod tests {
         let mut diagnostics = RouteDiagnosticsFile::new(9);
         diagnostics.reconcile_attempts = 1;
         diagnostics.record_snapshot(
+            None,
             RouteSnapshot {
                 expected_snapshot_sha256: "11".repeat(32),
                 observed_snapshot_sha256: "11".repeat(32),
                 expected_routes: 4,
                 observed_routes: 4,
                 orphaned_routes: 0,
+                issues: Vec::new(),
             },
             100,
             17,
@@ -4069,22 +4319,87 @@ mod tests {
         let mut diagnostics = RouteDiagnosticsFile::new(9);
         diagnostics.reconcile_attempts = 1;
         diagnostics.record_snapshot(
+            None,
             RouteSnapshot {
                 expected_snapshot_sha256: "11".repeat(32),
                 observed_snapshot_sha256: "22".repeat(32),
                 expected_routes: 4,
                 observed_routes: 5,
                 orphaned_routes: 1,
+                issues: vec![RouteDiagnosticIssue {
+                    prefix: "10.0.0.0/24".into(),
+                    table_id: 20_001,
+                    expected_kind: "link".into(),
+                    observed_kind: "throw".into(),
+                    reason: "stale_failed_prefix_throw".into(),
+                    action: "restore_signed_route".into(),
+                }],
             },
             100,
             9,
         );
         assert_eq!(diagnostics.integrity, "drifted");
         assert_eq!(diagnostics.reconcile_successes, 0);
+        assert_eq!(diagnostics.active_issues.len(), 1);
         assert_eq!(
             diagnostics.last_error_code.as_deref(),
             Some("route_snapshot_mismatch")
         );
+    }
+
+    #[test]
+    fn route_diagnostics_preserve_repair_evidence_after_snapshot_recovers() {
+        let issue = RouteDiagnosticIssue {
+            prefix: "10.0.0.0/24".into(),
+            table_id: 20_001,
+            expected_kind: "link".into(),
+            observed_kind: "throw".into(),
+            reason: "stale_failed_prefix_throw".into(),
+            action: "restore_signed_route".into(),
+        };
+        let before = RouteSnapshot {
+            expected_snapshot_sha256: "11".repeat(32),
+            observed_snapshot_sha256: "22".repeat(32),
+            expected_routes: 1,
+            observed_routes: 1,
+            orphaned_routes: 1,
+            issues: vec![issue.clone()],
+        };
+        let after = RouteSnapshot {
+            expected_snapshot_sha256: "11".repeat(32),
+            observed_snapshot_sha256: "11".repeat(32),
+            expected_routes: 1,
+            observed_routes: 1,
+            orphaned_routes: 0,
+            issues: Vec::new(),
+        };
+        let mut diagnostics = RouteDiagnosticsFile::new(9);
+        diagnostics.record_snapshot(Some(before), after, 100, 7);
+
+        assert_eq!(diagnostics.integrity, "consistent");
+        assert!(diagnostics.active_issues.is_empty());
+        assert_eq!(diagnostics.last_recovered_issues, vec![issue]);
+        assert_eq!(diagnostics.last_recovered_at_unix, Some(100));
+    }
+
+    #[test]
+    fn route_snapshot_issues_classify_recoverable_and_unknown_routes() {
+        let expected = vec![
+            "10.0.0.0/24|link|mtu=1180|advmss=1140".to_owned(),
+            "192.168.0.0/24|throw".to_owned(),
+        ];
+        let observed = vec![
+            "10.0.0.0/24|throw".to_owned(),
+            "orphan|203.0.113.0/24|Static|Unicast|Universe|oif=2".to_owned(),
+            "192.168.0.0/24|throw".to_owned(),
+        ];
+
+        let issues = route_snapshot_issues(20_001, &expected, &observed);
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].reason, "stale_failed_prefix_throw");
+        assert_eq!(issues[0].action, "restore_signed_route");
+        assert_eq!(issues[1].reason, "undeclared_route");
+        assert_eq!(issues[1].action, "suspend_steering_and_require_review");
     }
 
     #[test]
@@ -5165,7 +5480,7 @@ exit 17
     }
 
     #[test]
-    fn policy_activation_adoption_preserves_tunnel_generation_and_status_path() {
+    fn policy_activation_adoption_preserves_tunnel_generation_and_uses_candidate_status_path() {
         let (_root, current) = server_runtime_fixture();
         let mut replacement = current.clone();
         replacement.generation = current.generation + 1;
@@ -5173,14 +5488,39 @@ exit 17
         replacement.declaration = PathBuf::from("/new/declaration.json");
         replacement.status = PathBuf::from("/new/status.json");
         replacement.activation_target = Some(PathBuf::from("new-candidate"));
+        replacement.activation_descriptor = Some(ActivationDescriptor {
+            schema_version: 1,
+            activation_id: "b".repeat(64),
+            delivery_etag: format!("\"sha256-{}\"", "c".repeat(64)),
+            delivery_sha256: "c".repeat(64),
+            projection_publication_id: "d".repeat(32),
+            projection_content_hash: "e".repeat(64),
+            segment_generation: 1,
+            projection_generation: replacement.generation,
+            core_role: replacement.core_role,
+            core_config: "core.toml".into(),
+            netd_declaration: "declaration.json".into(),
+            grant_refresh_after_unix: 0,
+            grant_expires_at_unix: 0,
+        });
 
         let applied = adopt_policy_activation(&current, &replacement);
 
         assert_eq!(applied.generation, current.generation);
-        assert_eq!(applied.status, current.status);
+        assert_eq!(applied.status, replacement.status);
+        assert_eq!(runtime_policy_generation(&applied), replacement.generation);
         assert_eq!(applied.config, replacement.config);
         assert_eq!(applied.declaration, replacement.declaration);
         assert_eq!(applied.activation_target, replacement.activation_target);
+    }
+
+    #[test]
+    fn core_fencing_token_is_scoped_to_the_writable_sdwan_state_directory() {
+        let (root, args) = server_runtime_fixture();
+        assert_eq!(
+            core_fencing_token_path(&args).unwrap(),
+            root.path().join("fencing.token")
+        );
     }
 
     #[test]
