@@ -39,6 +39,8 @@ case "$expression" in
 	@.state) printf '%s\n' "$input" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p' ;;
 	@.cleanup) printf '%s\n' "$input" | sed -n 's/.*"cleanup":"\([^"]*\)".*/\1/p' ;;
 	@.scope) printf '%s\n' "$input" | sed -n 's/.*"scope":"\([^"]*\)".*/\1/p' ;;
+	@.reason) printf '%s\n' "$input" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p' ;;
+	@.updated_at) printf '%s\n' "$input" | sed -n 's/.*"updated_at":\([0-9][0-9]*\).*/\1/p' ;;
 	*) exit 1 ;;
 esac
 EOF
@@ -199,6 +201,29 @@ grep -Fx sdwan_reconcile "$tmp/reconcile.log" >/dev/null || fail "ordinary fault
 grep -Fx sdwan_prune_history "$tmp/reconcile.log" >/dev/null || fail "fail-open service history was left unbounded"
 grep -F 'event=cloud_sync_reconcile scope=ordinary reason=runtime_fault sdwan=reconciling' "$tmp/logger.log" >/dev/null ||
 	fail "ordinary fail-open scope was not reported"
+
+# A health watchdog fail-open is retried after a bounded quiet period. The
+# init script performs an additive ordinary-only start so the active SD-WAN
+# procd instances are not replaced by the recovery transaction.
+mkdir -p "$tmp/state/identity"
+printf '%s\n' '{}' >"$tmp/state/identity/device-identity-v1.json"
+printf '%s\n' '{"schema_version":1,"scope":"ordinary","state":"active","reason":"health_check_threshold","cleanup":"completed","updated_at":1}' >"$tmp/runtime-fault.json"
+: >"$tmp/logger.log"
+: >"$tmp/reconcile.log"
+PATH="$tmp/bin:$PATH" \
+	CANDY_TEST_LOG="$tmp/logger.log" \
+	CANDY_TEST_RECONCILE_LOG="$tmp/reconcile.log" \
+	CANDY_TEST_IDENTITY_FILE="$tmp/state/identity/device-identity-v1.json" \
+	CANDY_CLOUD_SYNC_BIN="$tmp/sync" \
+	CANDY_SDWAN_STATE_DIR="$tmp/state" \
+	CANDY_FAULT_STATE_FILE="$tmp/runtime-fault.json" \
+	CANDY_INIT="$tmp/candy.init" \
+	CANDY_ORDINARY_RECOVERY_DELAY_SECONDS=1 \
+	CANDY_CLOUD_SYNC_INTERVAL=1 \
+	"$sync_loop" >/dev/null 2>"$stderr_log" || fail "ordinary health recovery failed"
+grep -Fx start "$tmp/reconcile.log" >/dev/null || fail "ordinary health fault was not retried"
+grep -F 'event=cloud_sync_reconcile result=recovered reason=ordinary_health_fault sdwan=preserved' "$tmp/logger.log" >/dev/null ||
+	fail "ordinary health recovery was not reported"
 
 # Old records do not identify which data plane failed. Preserve their latch.
 mkdir -p "$tmp/state/identity"

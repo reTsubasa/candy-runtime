@@ -12,6 +12,7 @@ CANDY_CORE_BIN=${CANDY_CORE_BIN:-/usr/lib/candy/cores/current/candy-core}
 FAULT_STATE_FILE=${CANDY_FAULT_STATE_FILE:-/etc/candy/runtime-fault.json}
 CANDY_LIFECYCLE_FILE=${CANDY_LIFECYCLE_FILE:-/tmp/candy.lifecycle}
 CANDY_LIFECYCLE_TTL_SECONDS=${CANDY_LIFECYCLE_TTL_SECONDS:-10}
+CANDY_ORDINARY_RECOVERY_DELAY_SECONDS=${CANDY_ORDINARY_RECOVERY_DELAY_SECONDS:-60}
 MAX_ERROR_BACKOFF=${CANDY_CLOUD_SYNC_MAX_ERROR_BACKOFF:-60}
 
 active_runtime_fault() {
@@ -22,6 +23,18 @@ active_runtime_fault() {
 		pending|failed|completed) return 0 ;;
 		*) return 1 ;;
 	esac
+}
+
+ordinary_fault_recovery_due() {
+	[ "$(jsonfilter -e '@.scope' <"$FAULT_STATE_FILE" 2>/dev/null)" = ordinary ] || return 1
+	[ "$(jsonfilter -e '@.cleanup' <"$FAULT_STATE_FILE" 2>/dev/null)" = completed ] || return 1
+	[ "$(jsonfilter -e '@.reason' <"$FAULT_STATE_FILE" 2>/dev/null)" = health_check_threshold ] || return 1
+	updated_at=$(jsonfilter -e '@.updated_at' <"$FAULT_STATE_FILE" 2>/dev/null)
+	now=$(date +%s 2>/dev/null || true)
+	case "$updated_at" in ''|*[!0-9]*) return 1 ;; esac
+	case "$now" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$now" -ge "$updated_at" ] || return 1
+	[ $((now - updated_at)) -ge "$CANDY_ORDINARY_RECOVERY_DELAY_SECONDS" ]
 }
 
 current_lifecycle_transition() {
@@ -54,6 +67,14 @@ reconcile_sdwan() {
 				if [ "$(jsonfilter -e '@.scope' <"$FAULT_STATE_FILE" 2>/dev/null)" != ordinary ]; then
 					logger -t candy -- "level=warn event=cloud_sync_reconcile result=deferred reason=runtime_fault"
 					return 0
+				fi
+				if ordinary_fault_recovery_due; then
+					if "$CANDY_INIT" start >/dev/null 2>&1; then
+						logger -t candy -- "level=info event=cloud_sync_reconcile result=recovered reason=ordinary_health_fault sdwan=preserved"
+						return 0
+					fi
+					logger -t candy -- "level=error event=cloud_sync_reconcile result=failed reason=ordinary_recovery_failed sdwan=preserved"
+					return 1
 				fi
 				logger -t candy -- "level=warn event=cloud_sync_reconcile scope=ordinary reason=runtime_fault sdwan=reconciling"
 			elif "$CANDY_INIT" start >/dev/null 2>&1; then
@@ -90,6 +111,7 @@ sync_state_from_stdout() {
 
 case "$INTERVAL" in ''|*[!0-9]*|0) INTERVAL=1 ;; esac
 case "$CANDY_LIFECYCLE_TTL_SECONDS" in ''|*[!0-9]*) CANDY_LIFECYCLE_TTL_SECONDS=10 ;; esac
+case "$CANDY_ORDINARY_RECOVERY_DELAY_SECONDS" in ''|*[!0-9]*) CANDY_ORDINARY_RECOVERY_DELAY_SECONDS=60 ;; esac
 case "$MAX_ERROR_BACKOFF" in ''|*[!0-9]*|0) MAX_ERROR_BACKOFF=60 ;; esac
 [ -x "$SYNC_BIN" ] || exit 1
 [ -x "$CANDY_INIT" ] || exit 1

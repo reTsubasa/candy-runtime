@@ -3883,9 +3883,20 @@ running() {
 }
 
 start() {
+	case "${1:-}" in
+		ordinary-only|sdwan-only)
+			export CANDY_PROCD_START=1
+			exec "$CANDY_INIT_SELF" start "$@"
+			;;
+	esac
 	if candy_process_running && current_readiness; then
 		log_msg "start skipped: Candy service is already healthy"
 		return 0
+	fi
+	if [ -n "$(sdwan_process_pids)" ] || [ -n "$(sdwan_netd_pids)" ]; then
+		log_event info ordinary_recovery "result=requested sdwan=preserved"
+		export CANDY_PROCD_START=1
+		exec "$CANDY_INIT_SELF" start ordinary-only
 	fi
 	export CANDY_PROCD_START=1
 	exec "$CANDY_INIT_SELF" start "$@"
@@ -3941,8 +3952,23 @@ cleanup_failed_start() {
 }
 
 start_service() {
+	local start_scope="${1:-all}"
+	case "$start_scope" in
+		all|ordinary-only|sdwan-only) ;;
+		*) start_scope=all ;;
+	esac
 	CANDY_START_PHASE=failed
 	CANDY_SDWAN_START_READY=0
+	if [ "$start_scope" = sdwan-only ]; then
+		sdwan_runtime_state publish || true
+		if start_sdwan_supervision; then
+			CANDY_START_PHASE=sdwan-submitted
+			log_event info sdwan_supervision_recovery "result=submitted ordinary_client=preserved"
+			return 0
+		fi
+		log_event error sdwan_supervision_recovery "result=failed ordinary_client=preserved"
+		return 1
+	fi
 	clear_passive_status
 	write_lifecycle_state start starting
 	rotate_log_file "$LOG_FILE"
@@ -3963,11 +3989,13 @@ start_service() {
 	if ! sdwan_candidate_ready; then
 		sdwan_runtime_state stopped || true
 	fi
-	if start_sdwan_supervision; then
-		CANDY_SDWAN_START_READY=1
-	else
-		log_error "SD-WAN supervision could not be submitted; ordinary Candy will continue"
-		sdwan_runtime_state fail-open "sdwan supervision start failed" || true
+	if [ "$start_scope" != ordinary-only ]; then
+		if start_sdwan_supervision; then
+			CANDY_SDWAN_START_READY=1
+		else
+			log_error "SD-WAN supervision could not be submitted; ordinary Candy will continue"
+			sdwan_runtime_state fail-open "sdwan supervision start failed" || true
+		fi
 	fi
 	local enabled
 	config_get_bool enabled client enabled 0
@@ -4029,6 +4057,9 @@ start_service() {
 
 service_started() {
 	case "${CANDY_START_PHASE:-failed}" in
+		sdwan-submitted)
+			return 0
+			;;
 		disabled|setup_required)
 			return 0
 			;;
@@ -4287,6 +4318,15 @@ sdwan_reconcile() {
 	if load_sdwan_candidate; then
 		active_target=$(sdwan_active_target 2>/dev/null || true)
 		if [ "$active_target" = "$CANDY_SDWAN_CANDIDATE_TARGET" ]; then
+			if [ -z "$(sdwan_process_pids)" ] || [ -z "$(sdwan_netd_pids)" ]; then
+				sdwan_runtime_state reconnect || true
+				if "$CANDY_INIT_SELF" start sdwan-only >/dev/null 2>&1; then
+					log_event info sdwan_reconcile "result=recovery_requested activation=$CANDY_SDWAN_CANDIDATE_HASH ordinary_client=preserved"
+					return 0
+				fi
+				log_event error sdwan_reconcile "result=recovery_failed activation=$CANDY_SDWAN_CANDIDATE_HASH ordinary_client=preserved"
+				return 1
+			fi
 			sdwan_refresh_runtime_state || return 1
 			write_active_traffic_path_state || true
 			log_event info sdwan_reconcile "result=unchanged activation=$CANDY_SDWAN_CANDIDATE_HASH ordinary_client=preserved"

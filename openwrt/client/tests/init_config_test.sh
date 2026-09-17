@@ -2024,10 +2024,57 @@ done
     fail "healthy repeated start was not recorded"
 
   candy_process_running() { return 1; }
+  sdwan_process_pids() { return 1; }
+  sdwan_netd_pids() { return 1; }
   start regression-check
 )
 grep -Fq 'phase=1 args=start regression-check' "$runtime_dir/start-guard/second-phase" ||
   fail "unhealthy start did not enter the guarded procd phase"
+
+(
+  . "$repo_root/candy-client/candy.init"
+  CANDY_INIT_SELF=$runtime_dir/start-guard/candy-init
+  CANDY_START_GUARD_MARKER=$runtime_dir/start-guard/second-phase
+  export CANDY_START_GUARD_MARKER
+  candy_process_running() { return 1; }
+  current_readiness() { return 1; }
+  sdwan_process_pids() { printf '%s\n' 101; }
+  sdwan_netd_pids() { printf '%s\n' 202; }
+  start
+)
+grep -Fq 'phase=1 args=start ordinary-only' "$runtime_dir/start-guard/second-phase" ||
+  fail "ordinary recovery did not preserve active SD-WAN supervision"
+
+(
+  . "$repo_root/candy-client/candy.init"
+  CANDY_INIT_SELF=$runtime_dir/start-guard/candy-init
+  CANDY_START_GUARD_MARKER=$runtime_dir/start-guard/second-phase
+  export CANDY_START_GUARD_MARKER
+  candy_process_running() { return 0; }
+  current_readiness() { return 0; }
+  start sdwan-only
+)
+grep -Fq 'phase=1 args=start sdwan-only' "$runtime_dir/start-guard/second-phase" ||
+  fail "isolated SD-WAN recovery was skipped by ordinary readiness"
+
+(
+  . "$repo_root/candy-client/candy.init"
+  CANDY_INIT_SELF=$runtime_dir/start-guard/candy-init
+  CANDY_START_GUARD_MARKER=$runtime_dir/start-guard/second-phase
+  export CANDY_START_GUARD_MARKER
+  CANDY_SDWAN_CANDIDATE_TARGET=activations/test
+  CANDY_SDWAN_CANDIDATE_HASH=test
+  sdwan_user_stopped() { return 1; }
+  load_sdwan_candidate() { return 0; }
+  sdwan_active_target() { printf '%s\n' activations/test; }
+  sdwan_process_pids() { return 1; }
+  sdwan_netd_pids() { return 1; }
+  sdwan_runtime_state() { return 0; }
+  log_event() { return 0; }
+  sdwan_reconcile || fail "missing SD-WAN supervisors were not recovered"
+)
+grep -Fq 'phase=0 args=start sdwan-only' "$runtime_dir/start-guard/second-phase" ||
+  fail "SD-WAN reconcile did not request isolated supervisor recovery"
 
 (
   . "$repo_root/candy-client/candy.init"
