@@ -513,6 +513,20 @@ require_transaction_space() {
 		fail_stage preflight insufficient_space "required_bytes=$required available_bytes=$available filesystem=$ROOT_FILESYSTEM"
 }
 
+require_runtime_transaction_space() {
+	local target_payload_bytes="$1" available required
+	case "$target_payload_bytes:$SPACE_MARGIN_BYTES" in
+		*[!0-9:]*|:*|*:) fail_stage preflight space_probe_failed "Cannot calculate required root filesystem space" ;;
+	esac
+	# Target and rollback APKs are already present in the staging directory
+	# when this check runs. Reserve two target compressed equivalents for APK
+	# extraction/transaction files plus fixed metadata and journal headroom.
+	required=$((target_payload_bytes * 2 + SPACE_MARGIN_BYTES))
+	available=$(root_available_bytes) || fail_stage preflight space_probe_failed "Cannot determine available root filesystem space"
+	[ "$available" -ge "$required" ] ||
+		fail_stage preflight insufficient_space "required_bytes=$required available_bytes=$available filesystem=$ROOT_FILESYSTEM"
+}
+
 install_core() {
 	local key="$1" version url sha size archive current
 	require_supported_platform || fail "this Runtime package does not support the current OpenWrt platform"
@@ -734,9 +748,7 @@ install_runtime() {
 	old_luci=$rollback_dir/luci-app-candy-$current_display.apk
 	transaction_payload=$(wc -c < "$client_package" 2>/dev/null || printf 0)
 	transaction_payload=$((transaction_payload + $(wc -c < "$luci_package" 2>/dev/null || printf 0)))
-	transaction_payload=$((transaction_payload + $(wc -c < "$old_client" 2>/dev/null || printf 0)))
-	transaction_payload=$((transaction_payload + $(wc -c < "$old_luci" 2>/dev/null || printf 0)))
-	require_transaction_space "$transaction_payload"
+	require_runtime_transaction_space "$transaction_payload"
 	config_backup=$TEMPORARY/candy.config
 	if [ -e "$CONFIG_FILE" ]; then
 		[ -f "$CONFIG_FILE" ] && [ ! -L "$CONFIG_FILE" ] || fail "Candy configuration is not a regular file"
