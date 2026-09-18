@@ -527,7 +527,11 @@ impl RouteDiagnosticsFile {
             .flat_map(|path| &path.streams)
             .filter(|stream| {
                 stream.packet_probe_state.as_deref() == Some("ready")
-                    && stream.packet_probe_generation == Some(status.generation)
+                    // Policy-only reloads keep the tunnel generation stable
+                    // while advancing policy_generation (287 -> 288). Probe
+                    // freshness follows the effective policy generation.
+                    && stream.packet_probe_generation
+                        == Some(status.policy_generation.max(status.generation))
             })
             .filter_map(|stream| stream.packet_probe_rtt_micros)
             .max();
@@ -1710,6 +1714,7 @@ fn policy_update_activation(
     current: &RuntimeArgs,
     replacement: &RuntimeArgs,
     child: &mut Child,
+    netd: &mut NetdClient,
 ) -> Result<PolicyUpdateOutcome> {
     // A policy-only update must not alter the declaration owned by netd. A
     // declaration change means attachment/underlay state changed and is
@@ -1720,12 +1725,16 @@ fn policy_update_activation(
     let mut request_args = replacement.clone();
     request_args.generation = current.generation;
     request_args.declaration = current.declaration.clone();
+    // Core may wait for its routing actor for up to 30 seconds. Renew the
+    // active netd lease during that wait so a successful hot reload cannot
+    // race an expired lease and trigger an unnecessary fail-open.
+    let mut next_renewal = Instant::now();
     match request_core_transaction(
         &request_args,
         child,
         CoreReloadAction::PolicyUpdate,
         None,
-        || Ok(()),
+        || renew_transition_lease(current, netd, &mut next_renewal),
     ) {
         Ok(()) => {
             eprintln!(
@@ -3589,7 +3598,7 @@ fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
                     && (preparation_retry_target != replacement.activation_target
                         || Instant::now() >= next_preparation_retry)
                 {
-                    match policy_update_activation(&args, &replacement, &mut child)? {
+                    match policy_update_activation(&args, &replacement, &mut child, &mut netd)? {
                         PolicyUpdateOutcome::Applied => {
                             let applied = adopt_policy_activation(&args, &replacement);
                             write_runtime_activation_receipt(&applied, "committed", None)?;
@@ -4448,6 +4457,32 @@ mod tests {
         assert_eq!(diagnostics.probe_successes, 0);
         assert_eq!(diagnostics.probe_rtt_ms, None);
         assert_eq!(diagnostics.probe_checked_at_unix, Some(101));
+
+        // A policy-only refresh advances the policy generation without
+        // replacing the tunnel. A probe tagged with 288 is valid for a
+        // tunnel that remains at 287.
+        let policy_refresh = serde_json::from_value::<CoreReadinessStatus>(serde_json::json!({
+            "schema_version": 3,
+            "generation": 287,
+            "policy_generation": 288,
+            "pid": 42,
+            "readiness_token": "token",
+            "lifecycle": "active",
+            "configured_peers": 1,
+            "active_peers": 1,
+            "required_route_owners": 1,
+            "ready_route_owners": 1,
+            "failed_prefixes": [],
+            "fail_open_required": false,
+            "paths": [{"rtt_sample_count": 1, "rx_bytes": 0, "rx_idle_ms": 0,
+                "streams": [{"packet_probe_state": "ready", "packet_probe_generation": 288,
+                    "packet_probe_rtt_micros": 12001}]}]
+        }))
+        .unwrap();
+        diagnostics.record_probe(&policy_refresh, 103);
+        assert_eq!(diagnostics.probe_state, "succeeded");
+        assert_eq!(diagnostics.probe_rtt_ms, Some(13));
+        assert_eq!(diagnostics.probe_checked_at_unix, Some(103));
 
         let legacy = serde_json::from_value::<CoreReadinessStatus>(serde_json::json!({
             "schema_version": 3,
