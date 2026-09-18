@@ -97,11 +97,20 @@ case "$requested_at" in ''|*[!0-9]*|0) fail_handoff handoff_marker_invalid "$ver
 [ "$schema" = 1 ] && valid_token "$version" && valid_sha256 "$expected_bin" && valid_sha256 "$expected_loop" ||
 	fail_handoff handoff_marker_invalid "$version" "restart marker fields are invalid"
 if [ -e "$COMPLETION_FILE" ]; then
-	regular_bounded_file "$COMPLETION_FILE" "$MAX_MARKER_BYTES" && cmp -s "$MARKER" "$COMPLETION_FILE" ||
+	if regular_bounded_file "$COMPLETION_FILE" "$MAX_MARKER_BYTES" && cmp -s "$MARKER" "$COMPLETION_FILE"; then
+		rm -f "$FAILURE_FILE" 2>/dev/null || true
+		log_handoff info runtime_upgrade_handoff_already_completed ok "version=$version receipt=pending_new_worker"
+		exit 0
+	fi
+	completion_schema=$(jsonfilter -i "$COMPLETION_FILE" -e '@.schema_version' 2>/dev/null || true)
+	completion_version=$(jsonfilter -i "$COMPLETION_FILE" -e '@.version' 2>/dev/null || true)
+	if [ "$completion_schema" = 1 ] && valid_token "$completion_version" && [ "$completion_version" != "$version" ]; then
+		rm -f "$COMPLETION_FILE" ||
+			fail_handoff handoff_stale_completion_cleanup_failed "$version" "cannot remove completion evidence for version=$completion_version"
+		log_handoff warn runtime_upgrade_handoff_stale_evidence_cleaned stale_completion "version=$completion_version current=$version"
+	else
 		fail_handoff handoff_completion_conflict "$version" "existing completion evidence does not match the committed restart marker"
-	rm -f "$FAILURE_FILE" 2>/dev/null || true
-	log_handoff info runtime_upgrade_handoff_already_completed ok "version=$version receipt=pending_new_worker"
-	exit 0
+	fi
 fi
 [ -x "$SYNC_BIN" ] && [ -f "$SYNC_BIN" ] && [ ! -L "$SYNC_BIN" ] ||
 	fail_handoff handoff_binary_invalid "$version" "installed Cloud sync binary is unavailable or unsafe"

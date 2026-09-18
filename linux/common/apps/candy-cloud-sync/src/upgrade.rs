@@ -79,7 +79,7 @@ struct Journal {
     error_detail: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct RuntimeHandoffMarker {
     schema_version: u8,
@@ -90,7 +90,7 @@ struct RuntimeHandoffMarker {
     requested_at: u64,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct RuntimeHandoffFailure {
     schema_version: u8,
@@ -950,6 +950,17 @@ fn read_runtime_handoff_completion(root: &Path, marker: &RuntimeHandoffMarker) -
     }
     let completed: RuntimeHandoffMarker = read_bounded_json(&path, MAX_PROFILE_BYTES)?;
     if completed != *marker {
+        // A previous Runtime transaction may have left completion evidence
+        // behind after the worker receipt was interrupted. Only discard
+        // structurally valid evidence for another version.
+        if completed.schema_version == marker.schema_version
+            && token(&completed.version)
+            && completed.version != marker.version
+        {
+            fs::remove_file(&path)?;
+            File::open(root)?.sync_all()?;
+            return Ok(false);
+        }
         bail!("runtime_handoff_completion_conflict");
     }
     Ok(true)
@@ -968,10 +979,17 @@ fn read_runtime_handoff_failure(
         || failure.state != "failed"
         || failure.phase != "runtime_handoff"
         || !token(&failure.error_code)
-        || failure.version != marker.version
+        || !token(&failure.version)
         || failure.updated_at == 0
     {
         bail!("runtime_handoff_failure_invalid");
+    }
+    if failure.version != marker.version {
+        // A prior Runtime version must not block a newer transaction. Keep
+        // malformed and current-version evidence fail-closed.
+        fs::remove_file(&path)?;
+        File::open(root)?.sync_all()?;
+        return Ok(None);
     }
     Ok(Some(failure))
 }
@@ -1623,6 +1641,48 @@ mod tests {
         marker.requested_at = 1_000;
         assert!(!runtime_handoff_timed_out(&marker, 1_299));
         assert!(runtime_handoff_timed_out(&marker, 1_300));
+    }
+
+    #[test]
+    fn stale_handoff_failure_is_removed_for_a_new_runtime_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let journal = succeeded_runtime_journal();
+        let marker = runtime_handoff_fixture(&journal);
+        let stale = RuntimeHandoffFailure {
+            schema_version: 1,
+            state: "failed".into(),
+            phase: "runtime_handoff".into(),
+            error_code: "handoff_completion_write_failed".into(),
+            version: "0.4.0-r136".into(),
+            updated_at: 1,
+        };
+        fs::write(
+            root.join(OPENWRT_RUNTIME_HANDOFF_FAILURE),
+            serde_json::to_vec(&stale).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(read_runtime_handoff_failure(root, &marker).unwrap(), None);
+        assert!(!root.join(OPENWRT_RUNTIME_HANDOFF_FAILURE).exists());
+    }
+
+    #[test]
+    fn stale_handoff_completion_is_removed_for_a_new_runtime_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let journal = succeeded_runtime_journal();
+        let marker = runtime_handoff_fixture(&journal);
+        let mut stale = marker.clone();
+        stale.version = "0.4.0-r136".into();
+        fs::write(
+            root.join(OPENWRT_RUNTIME_HANDOFF_COMPLETED),
+            serde_json::to_vec(&stale).unwrap(),
+        )
+        .unwrap();
+
+        assert!(!read_runtime_handoff_completion(root, &marker).unwrap());
+        assert!(!root.join(OPENWRT_RUNTIME_HANDOFF_COMPLETED).exists());
     }
 
     #[test]

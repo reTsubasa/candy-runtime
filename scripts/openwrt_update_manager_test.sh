@@ -760,6 +760,28 @@ CANDY_HANDOFF_RETRY_DELAY=0 \
 }
 [ ! -e "$handoff_failure" ]
 
+# Completion evidence from an older Runtime transaction is stale, not a
+# conflict. The current marker must be allowed to restart and replace it.
+jq '.version = "0.4.0-r134"' "$handoff_marker" > "$handoff_marker.next"
+mv "$handoff_marker.next" "$handoff_marker"
+handoff_calls=$(wc -l < "$handoff_service_log" | tr -d ' ')
+FAKE_HANDOFF_SERVICE_LOG=$handoff_service_log \
+FAKE_HANDOFF_LOADED_BIN=$handoff_loaded_bin \
+FAKE_HANDOFF_LOADED_LOOP=$handoff_loaded_loop \
+CANDY_HANDOFF_STATE_ROOT=$handoff_root \
+CANDY_HANDOFF_SYNC_BIN=$handoff_bin \
+CANDY_HANDOFF_SYNC_LOOP=$handoff_loop \
+CANDY_HANDOFF_SERVICE_INIT=$handoff_init \
+CANDY_HANDOFF_LOCK_DIR=$handoff_root/lock \
+CANDY_HANDOFF_START_DELAY=0 \
+CANDY_HANDOFF_RETRY_DELAY=0 \
+	"$handoff" "$handoff_marker"
+[ "$(wc -l < "$handoff_service_log" | tr -d ' ')" -gt "$handoff_calls" ] || {
+	echo "stale completion evidence incorrectly suppressed current handoff" >&2
+	exit 1
+}
+cmp -s "$handoff_marker" "$handoff_completion"
+
 # A bounded restart failure keeps the marker and emits a phase-specific error
 # instead of allowing the Cloud job to remain running or become false-success.
 rm -f "$handoff_completion"
