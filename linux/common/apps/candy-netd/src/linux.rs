@@ -21,15 +21,19 @@ mod backend {
     use std::os::unix::fs::OpenOptionsExt;
     use std::path::Path;
 
-    fn route_delete_is_idempotent(error: &rtnetlink::Error) -> bool {
+    fn object_missing_is_idempotent(error: &rtnetlink::Error) -> bool {
         matches!(
             error,
             rtnetlink::Error::NetlinkError(message)
                 if matches!(
                     message.to_io().raw_os_error(),
-                    Some(nix::libc::ENOENT | nix::libc::ESRCH)
+                    Some(nix::libc::ENOENT | nix::libc::ESRCH | nix::libc::ENODEV)
                 )
         )
+    }
+
+    fn route_delete_is_idempotent(error: &rtnetlink::Error) -> bool {
+        object_missing_is_idempotent(error)
     }
 
     fn address_add_is_idempotent(error: &rtnetlink::Error) -> bool {
@@ -46,6 +50,20 @@ mod backend {
             rtnetlink::Error::NetlinkError(message)
                 if message.to_io().raw_os_error() == Some(nix::libc::EEXIST)
         )
+    }
+
+    fn log_route_backend_error(
+        stage: &str,
+        table: u32,
+        prefix: Option<Ipv4Prefix>,
+        error: &rtnetlink::Error,
+    ) {
+        eprintln!(
+            "level=error component=candy-netd event=network_backend_failed stage={stage} table={table} prefix={} cause={error}",
+            prefix
+                .map(|value| format!("{}/{}", Ipv4Addr::from(value.network), value.prefix_len))
+                .unwrap_or_else(|| "unknown".to_string())
+        );
     }
 
     pub struct LinuxNetworkBackend {
@@ -70,6 +88,12 @@ mod backend {
             LinuxNetworkPlan::compile(declaration)
         }
 
+        fn cleanup_plan(
+            declaration: &PrepareDeclaration,
+        ) -> Result<LinuxNetworkPlan, NetworkError> {
+            LinuxNetworkPlan::compile_for_cleanup(declaration)
+        }
+
         fn with_async<T>(
             &mut self,
             future: impl std::future::Future<Output = Result<T, NetworkError>>,
@@ -85,7 +109,11 @@ mod backend {
                 .get()
                 .match_name(CANDY_INTERFACE_NAME.to_string())
                 .execute();
-            let link = links.try_next().await.map_err(|_| NetworkError::Backend)?;
+            let link = match links.try_next().await {
+                Ok(link) => link,
+                Err(error) if object_missing_is_idempotent(&error) => return Ok(None),
+                Err(_) => return Err(NetworkError::Backend),
+            };
             if links
                 .try_next()
                 .await
@@ -275,7 +303,10 @@ mod backend {
                 .table_id(plan.route_table)
                 .build();
             let mut routes = handle.route().get(query).execute();
-            while let Some(route) = routes.try_next().await.map_err(|_| NetworkError::Backend)? {
+            while let Some(route) = routes.try_next().await.map_err(|error| {
+                log_route_backend_error("route_reconcile_list", plan.route_table, None, &error);
+                NetworkError::Backend
+            })? {
                 let table = route.attributes.iter().find_map(|value| match value {
                     RouteAttribute::Table(value) => Some(*value),
                     _ => None,
@@ -386,7 +417,13 @@ mod backend {
             handle: &Handle,
             plan: &LinuxNetworkPlan,
         ) -> Result<(), NetworkError> {
-            let link_index = match Self::candy_link(handle).await? {
+            let link_index = match Self::candy_link(handle).await.map_err(|error| {
+                eprintln!(
+                    "level=error component=candy-netd event=network_backend_failed stage=route_cleanup_link_lookup table={} cause={error}",
+                    plan.route_table
+                );
+                error
+            })? {
                 Some(link) => {
                     if !Self::link_is_tun(&link) {
                         return Err(NetworkError::Backend);
@@ -406,6 +443,12 @@ mod backend {
                     .build();
                 if let Err(error) = handle.route().del(route).execute().await {
                     if !route_delete_is_idempotent(&error) {
+                        log_route_backend_error(
+                            "link_route_delete",
+                            plan.route_table,
+                            Some(prefix),
+                            &error,
+                        );
                         return Err(NetworkError::Backend);
                     }
                 }
@@ -427,7 +470,10 @@ mod backend {
                 .table_id(plan.route_table)
                 .build();
             let mut routes = handle.route().get(query).execute();
-            while let Some(route) = routes.try_next().await.map_err(|_| NetworkError::Backend)? {
+            while let Some(route) = routes.try_next().await.map_err(|error| {
+                log_route_backend_error("route_cleanup_list", plan.route_table, None, &error);
+                NetworkError::Backend
+            })? {
                 let table = route.attributes.iter().find_map(|value| match value {
                     RouteAttribute::Table(value) => Some(*value),
                     _ => None,
@@ -443,6 +489,12 @@ mod backend {
                 {
                     if let Err(error) = handle.route().del(route).execute().await {
                         if !route_delete_is_idempotent(&error) {
+                            log_route_backend_error(
+                                "throw_route_delete",
+                                plan.route_table,
+                                prefix,
+                                &error,
+                            );
                             return Err(NetworkError::Backend);
                         }
                     }
@@ -644,7 +696,7 @@ mod backend {
             &mut self,
             declaration: &PrepareDeclaration,
         ) -> Result<(), NetworkError> {
-            let plan = Self::plan(declaration)?;
+            let plan = Self::cleanup_plan(declaration)?;
             let handle = self.handle.clone();
             self.with_async(async move {
                 let rules = Self::find_policy_rules(&handle, &plan).await?;
@@ -686,11 +738,11 @@ mod backend {
             &mut self,
             declaration: &PrepareDeclaration,
         ) -> Result<(), NetworkError> {
-            nft::remove_firewall(&Self::plan(declaration)?)
+            nft::remove_firewall(&Self::cleanup_plan(declaration)?)
         }
 
         fn remove_routes(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
-            let plan = Self::plan(declaration)?;
+            let plan = Self::cleanup_plan(declaration)?;
             let handle = self.handle.clone();
             self.with_async(async move { Self::delete_routes(&handle, &plan).await })
         }
@@ -917,7 +969,38 @@ pub struct LinuxNetworkPlan {
 
 impl LinuxNetworkPlan {
     pub fn compile(declaration: &PrepareDeclaration) -> Result<Self, NetworkError> {
-        declaration.validate().map_err(|_| NetworkError::Backend)?;
+        declaration.validate().map_err(|error| {
+            eprintln!(
+                "level=error component=candy-netd event=network_plan_invalid stage=declaration_validate table={} cause={error}",
+                declaration.table_id
+            );
+            NetworkError::Backend
+        })?;
+        Self::compile_fields(declaration)
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn compile_for_cleanup(declaration: &PrepareDeclaration) -> Result<Self, NetworkError> {
+        if !(candy_netd_proto::CANDY_TABLE_MIN..=candy_netd_proto::CANDY_TABLE_MAX)
+            .contains(&declaration.table_id)
+            || !(576..=1400).contains(&declaration.effective_mtu)
+        {
+            eprintln!(
+                "level=error component=candy-netd event=network_cleanup_plan_invalid stage=ownership_bounds table={} mtu={}",
+                declaration.table_id, declaration.effective_mtu
+            );
+            return Err(NetworkError::Backend);
+        }
+        if declaration.validate().is_err() {
+            eprintln!(
+                "level=warn component=candy-netd event=network_cleanup_legacy_declaration table={} action=bounded_cleanup",
+                declaration.table_id
+            );
+        }
+        Self::compile_fields(declaration)
+    }
+
+    fn compile_fields(declaration: &PrepareDeclaration) -> Result<Self, NetworkError> {
         let policy_priority = CANDY_POLICY_PRIORITY_MIN
             .checked_add(declaration.table_id - CANDY_TABLE_MIN)
             .ok_or(NetworkError::Backend)?;
@@ -1036,6 +1119,52 @@ impl LinuxNetworkPlan {
 mod tests {
     use super::*;
     use candy_netd_proto::{FirewallPolicy, RouteDeclaration, UnderlayKind};
+
+    #[test]
+    fn cleanup_accepts_legacy_local_default_without_weakening_new_prepare() {
+        let declaration = PrepareDeclaration {
+            table_id: 20_614,
+            overlay_router_ipv4: [100, 64, 0, 2],
+            effective_mtu: 1_300,
+            routes: vec![
+                RouteDeclaration {
+                    prefix: Ipv4Prefix::new([0, 0, 0, 0], 0).unwrap(),
+                    kind: RouteKind::Local,
+                },
+                RouteDeclaration {
+                    prefix: Ipv4Prefix::new([172, 17, 0, 0], 16).unwrap(),
+                    kind: RouteKind::Remote,
+                },
+                RouteDeclaration {
+                    prefix: Ipv4Prefix::new([192, 168, 1, 0], 24).unwrap(),
+                    kind: RouteKind::Local,
+                },
+            ],
+            exclusions: vec![UnderlayExclusion {
+                prefix: Ipv4Prefix::new([47, 83, 1, 189], 32).unwrap(),
+                kind: UnderlayKind::CloudApi,
+            }],
+            firewall: FirewallPolicy {
+                allow_forward: true,
+                clamp_tcp_mss: true,
+                require_ipv4_forwarding: true,
+                manage_rp_filter: true,
+            },
+        };
+
+        assert!(LinuxNetworkPlan::compile(&declaration).is_err());
+        let cleanup = LinuxNetworkPlan::compile_for_cleanup(&declaration).unwrap();
+        assert_eq!(cleanup.route_table, 20_614);
+        assert_eq!(
+            cleanup.cleanup_throw_prefixes(),
+            vec![
+                Ipv4Prefix::new([0, 0, 0, 0], 0).unwrap(),
+                Ipv4Prefix::new([47, 83, 1, 189], 32).unwrap(),
+                Ipv4Prefix::new([172, 17, 0, 0], 16).unwrap(),
+                Ipv4Prefix::new([192, 168, 1, 0], 24).unwrap(),
+            ]
+        );
+    }
 
     #[test]
     fn local_networks_and_underlay_endpoints_bypass_remote_egress_rules() {

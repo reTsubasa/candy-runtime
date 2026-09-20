@@ -1246,16 +1246,19 @@ prepare_sdwan_state() {
 }
 
 run_netd() {
-	local attempted_hash child rc sdwan_uid sdwan_gid stopping=0
+	local attempted_hash child rc retry_delay sdwan_uid sdwan_gid stopping=0
 	sdwan_uid=$(id -u candy-sdwan 2>/dev/null) || return 1
 	sdwan_gid=$(id -g candy-sdwan 2>/dev/null) || return 1
 	trap 'stopping=1; [ -z "${child:-}" ] || stop_supervised_child "$child" "$CANDY_SDWAN_STOP_WAIT_SECONDS"' TERM INT
 	while [ "$stopping" -eq 0 ]; do
 		wait_for_sdwan_candidate || continue
 		attempted_hash=$CANDY_SDWAN_CANDIDATE_HASH
+		retry_delay=1
+		while [ "$stopping" -eq 0 ] && load_sdwan_candidate && [ "$CANDY_SDWAN_CANDIDATE_HASH" = "$attempted_hash" ]; do
 		if ! prepare_sdwan_state; then
 			log_event error sdwan_netd_unavailable "reason=invalid_state activation=$attempted_hash"
-			sleep 2
+			sleep "$retry_delay"
+			[ "$retry_delay" -ge 30 ] || retry_delay=$((retry_delay * 2))
 			continue
 		fi
 		"$CANDY_NETD_BIN" \
@@ -1270,13 +1273,14 @@ run_netd() {
 		[ "$stopping" -eq 0 ] || break
 		if sdwan_user_stopped; then
 			log_event info sdwan_netd_stopped "reason=user_request ordinary_client=preserved"
-			continue
+			break
 		fi
-		log_event error sdwan_netd_exit "exit=$rc activation=$attempted_hash"
-		# Keep this procd instance alive while Cloud consumes the matching
-		# activation outcome. A replacement candidate starts a fresh helper.
-		while [ "$stopping" -eq 0 ] && load_sdwan_candidate && [ "$CANDY_SDWAN_CANDIDATE_HASH" = "$attempted_hash" ]; do
-			sleep 2
+		log_event error sdwan_netd_exit "exit=$rc activation=$attempted_hash retry_seconds=$retry_delay"
+		sleep "$retry_delay"
+		if [ "$retry_delay" -lt 30 ]; then
+			retry_delay=$((retry_delay * 2))
+			[ "$retry_delay" -le 30 ] || retry_delay=30
+		fi
 		done
 	done
 	trap - TERM INT

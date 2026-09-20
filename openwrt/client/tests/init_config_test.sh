@@ -2091,7 +2091,53 @@ grep -Fq 'phase=0 args=start sdwan-only' "$runtime_dir/start-guard/second-phase"
 grep -F 'while [ "$stopping" -eq 0 ]; do' "$repo_root/candy-client/candy.init" >/dev/null ||
   fail "SD-WAN children are still one-shot procd crash-loop candidates"
 grep -F 'while [ "$stopping" -eq 0 ] && load_sdwan_candidate && [ "$CANDY_SDWAN_CANDIDATE_HASH" = "$attempted_hash" ]; do' \
-  "$repo_root/candy-client/candy.init" >/dev/null ||
-  fail "failed SD-WAN activations can be retried before Cloud consumes their receipt"
+	"$repo_root/candy-client/candy.init" >/dev/null ||
+	fail "netd supervisor does not retry the same candidate"
+grep -F 'retry_delay=$((retry_delay * 2))' "$repo_root/candy-client/candy.init" >/dev/null ||
+	fail "netd supervisor does not back off same-candidate retries"
+grep -F 'retry_seconds=$retry_delay' "$repo_root/candy-client/candy.init" >/dev/null ||
+	fail "netd supervisor retry timing is not observable"
+
+(
+  netd_retry_dir=$(mktemp -d)
+  trap 'rm -rf "$netd_retry_dir"' EXIT
+  CANDY_NETD_BIN=$netd_retry_dir/netd
+  CANDY_NETD_SOCKET=$netd_retry_dir/netd.sock
+  CANDY_NETD_JOURNAL=$netd_retry_dir/netd.journal
+  cat >"$CANDY_NETD_BIN" <<EOF
+#!/bin/sh
+count=0
+[ ! -f "$netd_retry_dir/count" ] || count=\$(cat "$netd_retry_dir/count")
+count=\$((count + 1))
+printf '%s\n' "\$count" >"$netd_retry_dir/count"
+exit 17
+EOF
+  chmod +x "$CANDY_NETD_BIN"
+  id() { printf '%s\n' 123; }
+  prepare_sdwan_state() { return 0; }
+  sdwan_user_stopped() { return 1; }
+  sleep() { return 0; }
+  log_event() { printf '%s\n' "$*" >>"$netd_retry_dir/events"; }
+  wait_for_sdwan_candidate() {
+    if [ "$(cat "$netd_retry_dir/count" 2>/dev/null || printf 0)" -ge 3 ]; then
+      stopping=1
+      return 1
+    fi
+    CANDY_SDWAN_CANDIDATE_HASH=same-candidate
+    return 0
+  }
+  load_sdwan_candidate() {
+    CANDY_SDWAN_CANDIDATE_HASH=same-candidate
+    [ "$(cat "$netd_retry_dir/count" 2>/dev/null || printf 0)" -lt 3 ]
+  }
+  set +e
+  run_netd
+  run_netd_rc=$?
+  set -e
+  [ "$run_netd_rc" = 0 ] || fail "netd supervisor returned failure after bounded retries"
+  [ "$(cat "$netd_retry_dir/count")" = 3 ] || fail "netd supervisor did not retry the same candidate"
+  grep -Fq 'retry_seconds=1' "$netd_retry_dir/events" || fail "netd first retry delay is incorrect"
+  grep -Fq 'retry_seconds=2' "$netd_retry_dir/events" || fail "netd retry backoff did not advance"
+)
 
 printf '%s\n' "OpenWrt Candy init config generation test passed"

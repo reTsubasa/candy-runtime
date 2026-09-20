@@ -872,11 +872,20 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         let mut first_error = None;
         if let Some(candidate) = record.recovery_candidate.as_ref() {
             let mut candidate_error = None;
-            for result in [
-                self.backend.remove_firewall(candidate),
-                self.backend.remove_routes(candidate),
+            for (stage, result) in [
+                (
+                    "candidate_firewall_remove",
+                    self.backend.remove_firewall(candidate),
+                ),
+                (
+                    "candidate_routes_remove",
+                    self.backend.remove_routes(candidate),
+                ),
             ] {
                 if let Err(error) = result {
+                    eprintln!(
+                        "level=error component=candy-netd event=network_rollback_failed stage={stage} cause={error}"
+                    );
                     candidate_error.get_or_insert(error);
                 }
             }
@@ -895,7 +904,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             }
         }
         macro_rules! cleanup_step {
-            ($needed:expr, $operation:expr, $step:expr) => {
+            ($needed:expr, $operation:expr, $step:expr, $stage:literal) => {
                 if $needed {
                     match $operation {
                         Ok(()) => {
@@ -904,6 +913,10 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
                             }
                         }
                         Err(error) => {
+                            eprintln!(
+                                "level=error component=candy-netd event=network_rollback_failed stage={} cause={error}",
+                                $stage
+                            );
                             first_error.get_or_insert(error);
                         }
                     }
@@ -914,32 +927,38 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         cleanup_step!(
             steps & STEP_POLICY_RULE != 0,
             self.backend.remove_policy_rule(declaration),
-            STEP_POLICY_RULE
+            STEP_POLICY_RULE,
+            "policy_rule_remove"
         );
         cleanup_step!(
             steps & (STEP_LINK | STEP_LINK_ACTIVE) != 0,
             self.backend.deactivate_link(declaration),
-            STEP_LINK_ACTIVE
+            STEP_LINK_ACTIVE,
+            "link_deactivate"
         );
         cleanup_step!(
             steps & STEP_SYSCTLS != 0,
             self.backend.restore_sysctls(declaration, &record.sysctls),
-            STEP_SYSCTLS
+            STEP_SYSCTLS,
+            "sysctls_restore"
         );
         cleanup_step!(
             steps & STEP_FIREWALL != 0,
             self.backend.remove_firewall(declaration),
-            STEP_FIREWALL
+            STEP_FIREWALL,
+            "firewall_remove"
         );
         cleanup_step!(
             steps & STEP_ROUTES != 0,
             self.backend.remove_routes(&routes_for_cleanup),
-            STEP_ROUTES
+            STEP_ROUTES,
+            "routes_remove"
         );
         cleanup_step!(
             steps & STEP_LINK != 0,
             self.backend.remove_link(declaration),
-            STEP_LINK
+            STEP_LINK,
+            "link_remove"
         );
 
         if self.record.as_ref().is_some_and(|record| {
