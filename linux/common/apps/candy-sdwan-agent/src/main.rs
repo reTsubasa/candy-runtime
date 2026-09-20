@@ -2680,14 +2680,14 @@ fn transient_runtime_error(error: &anyhow::Error) -> bool {
             IpcError::Io(error) => transient_io_error(error),
             IpcError::Remote(
                 ErrorCode::SystemFailure
-                    | ErrorCode::GenerationConflict
-                    | ErrorCode::DrainPending
-                    | ErrorCode::LinkPrepareFailed
-                    | ErrorCode::RoutePrepareFailed
-                    | ErrorCode::FirewallPrepareFailed
-                    | ErrorCode::SysctlPrepareFailed
-                    | ErrorCode::LinkActivateFailed
-                    | ErrorCode::PolicyActivateFailed,
+                | ErrorCode::GenerationConflict
+                | ErrorCode::DrainPending
+                | ErrorCode::LinkPrepareFailed
+                | ErrorCode::RoutePrepareFailed
+                | ErrorCode::FirewallPrepareFailed
+                | ErrorCode::SysctlPrepareFailed
+                | ErrorCode::LinkActivateFailed
+                | ErrorCode::PolicyActivateFailed,
             ) => true,
             _ => false,
         };

@@ -6,9 +6,9 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 const CATALOG_KEY: &str =
     include_str!("../../../../../openwrt/client/packages/candy-client/catalog-release.pub");
 const CATALOG_URL: &str =
-    "https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json";
+    "https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json";
 const CATALOG_SIGNATURE_URL: &str =
-    "https://raw.githubusercontent.com/reTsubasa/candy-release/refs/heads/main/channels/stable.json.sig";
+    "https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json.sig";
 const RELEASE_ROOT: &str = "https://github.com/reTsubasa/candy-release/releases/download/";
 const MAX_BUNDLE: u64 = 256 * 1024 * 1024;
 const CATALOG_FETCH_ATTEMPTS: usize = 3;
