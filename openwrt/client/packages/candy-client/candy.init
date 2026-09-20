@@ -125,9 +125,15 @@ if [ -n "${CANDY_DIRECT_COMMAND:-}" ] && [ -f /lib/functions.sh ]; then
 fi
 
 log_event() {
-	local level="$1" event="$2"
+	local level="$1" event="$2" priority
 	shift 2
 	case "$level" in debug|info|warn|error) ;; *) level=info ;; esac
+	case "$level" in
+		debug) priority=daemon.debug ;;
+		info) priority=daemon.info ;;
+		warn) priority=daemon.warn ;;
+		error) priority=daemon.err ;;
+	esac
 	if [ "$level" = debug ] && [ "${CANDY_LOG_LEVEL:-info}" != debug ]; then
 		return 0
 	fi
@@ -145,7 +151,7 @@ log_event() {
 		rmdir "$LOG_FILE.rotate.lock" 2>/dev/null || true
 	fi
 	if command -v logger >/dev/null 2>&1; then
-		logger -t candy -- "level=$level event=$event pid=$$ $*"
+		logger -p "$priority" -t candy -- "level=$level event=$event pid=$$ $*"
 	fi
 	# File rotation and the root/candy-sdwan writers may race while creating
 	# the replacement file. Syslog above is authoritative; a local file
@@ -1301,6 +1307,7 @@ start_sdwan_netd() {
 	procd_set_param term_timeout "$((CANDY_SDWAN_STOP_WAIT_SECONDS + 5))"
 	procd_set_param user root
 	procd_set_param respawn 3600 10 5
+	procd_set_param env CANDY_LOG_TARGET=syslog
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
@@ -1329,6 +1336,7 @@ start_sdwan_supervision() {
 	procd_set_param term_timeout "$((CANDY_SDWAN_STOP_WAIT_SECONDS + 5))"
 	procd_set_param user candy-sdwan
 	procd_set_param respawn 3600 10 5
+	procd_set_param env CANDY_LOG_TARGET=syslog
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
@@ -4044,7 +4052,7 @@ start_service() {
 	procd_set_param term_timeout "$((CANDY_SERVICE_WAIT_SECONDS + 5))"
 	# Root remains required for ordinary transparent proxy routing.
 	procd_set_param user root
-	procd_set_param env CANDY_TRAFFIC_LOG="$TRAFFIC_LOG_FILE" CANDY_READY_FILE="$CANDY_READY_FILE" CANDY_PASSIVE_STATUS_FILE="$CANDY_PASSIVE_STATUS_FILE"
+	procd_set_param env CANDY_TRAFFIC_LOG="$TRAFFIC_LOG_FILE" CANDY_READY_FILE="$CANDY_READY_FILE" CANDY_PASSIVE_STATUS_FILE="$CANDY_PASSIVE_STATUS_FILE" CANDY_LOG_TARGET=syslog
 	procd_set_param respawn 3600 10 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1

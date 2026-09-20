@@ -9,6 +9,7 @@ rust-version.workspace = true
 anyhow.workspace = true
 candy-netd-client = { path = "../../crates/candy-netd-client" }
 candy-netd-proto = { path = "../../crates/candy-netd-proto" }
+candy-runtime-log.workspace = true
 clap.workspace = true
 nix.workspace = true
 sha2.workspace = true

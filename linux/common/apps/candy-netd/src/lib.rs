@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+use candy_runtime_log::structured_eprintln as eprintln;
+
 mod journal;
 mod linux;
 mod network;

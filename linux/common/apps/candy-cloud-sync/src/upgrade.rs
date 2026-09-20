@@ -1,4 +1,5 @@
 use super::*;
+use candy_runtime_log::structured_eprintln as eprintln;
 use nix::fcntl::{Flock, FlockArg};
 use std::io::{Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};

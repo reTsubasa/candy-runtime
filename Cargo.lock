@@ -183,6 +183,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64",
+ "candy-runtime-log",
  "chrono",
  "clap",
  "ed25519-dalek",
@@ -205,6 +206,7 @@ dependencies = [
  "anyhow",
  "candy-netd-client",
  "candy-netd-proto",
+ "candy-runtime-log",
  "clap",
  "futures-util",
  "netlink-packet-route",
@@ -234,12 +236,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "candy-runtime-log"
+version = "0.4.0"
+dependencies = [
+ "nix 0.29.0",
+]
+
+[[package]]
 name = "candy-sdwan-agent"
 version = "0.4.0"
 dependencies = [
  "anyhow",
  "candy-netd-client",
  "candy-netd-proto",
+ "candy-runtime-log",
  "clap",
  "futures-util",
  "netlink-packet-route",

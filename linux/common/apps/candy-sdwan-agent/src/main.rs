@@ -4,6 +4,7 @@ use candy_netd_proto::{
     ErrorCode, FirewallPolicy, Ipv4Prefix, LeaseOwner, PrepareDeclaration, RouteDeclaration,
     RouteKind, UnderlayExclusion, UnderlayKind,
 };
+use candy_runtime_log::structured_eprintln as eprintln;
 use clap::{Parser, ValueEnum};
 use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 use serde::{Deserialize, Serialize};
@@ -545,11 +546,10 @@ impl RouteDiagnosticsFile {
             .flat_map(|path| &path.streams)
             .filter(|stream| {
                 stream.packet_probe_state.as_deref() == Some("ready")
-                    // Policy-only reloads keep the tunnel generation stable
-                    // while advancing policy_generation (287 -> 288). Probe
-                    // freshness follows the effective policy generation.
-                    && stream.packet_probe_generation
-                        == Some(status.policy_generation.max(status.generation))
+                    // A packet probe attests the negotiated tunnel. A
+                    // policy-only reload must not invalidate that evidence or
+                    // transiently report the unchanged tunnel as offline.
+                    && stream.packet_probe_generation == Some(status.generation)
             })
             .filter_map(|stream| stream.packet_probe_rtt_micros)
             .max();
@@ -1728,16 +1728,20 @@ enum PolicyUpdateOutcome {
     Retry,
 }
 
+fn tunnel_declaration_changed(current: &RuntimeArgs, replacement: &RuntimeArgs) -> Result<bool> {
+    Ok(parse_declaration(&current.declaration)? != parse_declaration(&replacement.declaration)?)
+}
+
 fn policy_update_activation(
     current: &RuntimeArgs,
     replacement: &RuntimeArgs,
     child: &mut Child,
     netd: &mut NetdClient,
 ) -> Result<PolicyUpdateOutcome> {
-    // A policy-only update must not alter the declaration owned by netd. A
-    // declaration change means attachment/underlay state changed and is
-    // deliberately handed to the existing transactional replacement path.
-    if sha256_file(&current.declaration)? != sha256_file(&replacement.declaration)? {
+    // netd declarations are compared as validated protocol values. JSON
+    // whitespace and object-key order are delivery details and must never turn
+    // a policy publication into a data-plane transaction.
+    if tunnel_declaration_changed(current, replacement)? {
         return Ok(PolicyUpdateOutcome::RequiresTunnelReplacement);
     }
     let mut request_args = replacement.clone();
@@ -4484,9 +4488,8 @@ mod tests {
         assert_eq!(diagnostics.probe_rtt_ms, None);
         assert_eq!(diagnostics.probe_checked_at_unix, Some(101));
 
-        // A policy-only refresh advances the policy generation without
-        // replacing the tunnel. A probe tagged with 288 is valid for a
-        // tunnel that remains at 287.
+        // A policy-only refresh advances policy generation without replacing
+        // the tunnel, so its existing tunnel-generation probe remains valid.
         let policy_refresh = serde_json::from_value::<CoreReadinessStatus>(serde_json::json!({
             "schema_version": 3,
             "generation": 287,
@@ -4501,7 +4504,7 @@ mod tests {
             "failed_prefixes": [],
             "fail_open_required": false,
             "paths": [{"rtt_sample_count": 1, "rx_bytes": 0, "rx_idle_ms": 0,
-                "streams": [{"packet_probe_state": "ready", "packet_probe_generation": 288,
+                "streams": [{"packet_probe_state": "ready", "packet_probe_generation": 287,
                     "packet_probe_rtt_micros": 12001}]}]
         }))
         .unwrap();
@@ -5112,6 +5115,48 @@ mod tests {
             ordinary_config: Some(ordinary),
         };
         (root, args)
+    }
+
+    #[test]
+    fn declaration_formatting_does_not_replace_the_tunnel() {
+        let (_root, current) = server_runtime_fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let declaration = directory.path().join("declaration.json");
+        write_private(
+            &declaration,
+            br#"{
+                "firewall": {
+                    "manage_rp_filter": true,
+                    "require_ipv4_forwarding": true,
+                    "clamp_tcp_mss": true,
+                    "allow_forward": true
+                },
+                "exclusions": [{"kind":"cloud_api","prefix":"198.51.100.1/32"}],
+                "routes": [{"kind":"local","prefix":"10.0.0.0/24"}],
+                "effective_mtu": 1180,
+                "overlay_router_ipv4": "10.250.0.1",
+                "table_id": 20000
+            }"#,
+        );
+        let mut replacement = current.clone();
+        replacement.declaration = declaration;
+
+        assert!(!tunnel_declaration_changed(&current, &replacement).unwrap());
+    }
+
+    #[test]
+    fn declaration_semantic_change_requires_tunnel_replacement() {
+        let (_root, current) = server_runtime_fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let declaration = directory.path().join("declaration.json");
+        write_private(
+            &declaration,
+            br#"{"table_id":20000,"overlay_router_ipv4":"10.250.0.1","effective_mtu":1280,"routes":[{"prefix":"10.0.0.0/24","kind":"local"}],"exclusions":[{"prefix":"198.51.100.1/32","kind":"cloud-api"}],"firewall":{"allow_forward":true,"clamp_tcp_mss":true,"require_ipv4_forwarding":true,"manage_rp_filter":true}}"#,
+        );
+        let mut replacement = current.clone();
+        replacement.declaration = declaration;
+
+        assert!(tunnel_declaration_changed(&current, &replacement).unwrap());
     }
 
     fn start_netd_mock_with_shutdown(

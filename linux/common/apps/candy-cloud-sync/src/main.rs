@@ -15,6 +15,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine,
 };
+use candy_runtime_log::structured_eprintln as eprintln;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{pkcs8::DecodePrivateKey, SigningKey};

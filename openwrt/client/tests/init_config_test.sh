@@ -205,7 +205,10 @@ for direct_write in \
   fi
 done
 grep -F 'CANDY_READY_FILE=' "$init_source" >/dev/null || fail "missing readiness file"
-grep -F 'logger -t candy -- "level=$level event=$event pid=$$ $*"' "$init_source" >/dev/null || fail "structured service lifecycle logs are not forwarded to syslog"
+grep -F 'logger -p "$priority" -t candy -- "level=$level event=$event pid=$$ $*"' "$init_source" >/dev/null || fail "structured service lifecycle logs are not forwarded with their exact syslog priority"
+grep -F 'error) priority=daemon.err ;;' "$init_source" >/dev/null || fail "error logs are not mapped to daemon.err"
+grep -F 'warn) priority=daemon.warn ;;' "$init_source" >/dev/null || fail "warning logs are not mapped to daemon.warn"
+grep -F 'info) priority=daemon.info ;;' "$init_source" >/dev/null || fail "info logs are not mapped to daemon.info"
 grep -F 'rotate_log_file "$LOG_FILE"' "$init_source" >/dev/null || fail "service log is not bounded by rotation"
 ! grep -F ': > "$LOG_FILE"' "$init_source" >/dev/null || fail "service log is erased during start"
 grep -F 'rotate_log_file "$TRAFFIC_LOG_FILE" 2097152 5' "$init_source" >/dev/null || fail "traffic log does not retain bounded history"

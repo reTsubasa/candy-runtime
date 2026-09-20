@@ -5,6 +5,8 @@ use candy_netd::{
     bind_private_socket_for, FileNetworkJournal, LinuxNetworkBackend, NetdService,
     NetworkTransaction, SystemTunFactory,
 };
+#[cfg(target_os = "linux")]
+use candy_runtime_log::structured_eprintln as eprintln;
 use clap::Parser;
 #[cfg(target_os = "linux")]
 use nix::unistd::{Group, User};
