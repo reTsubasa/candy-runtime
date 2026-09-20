@@ -373,6 +373,12 @@ fn error_codes_are_stable() {
     assert_eq!(ErrorCode::UnauthorizedPeer as u64, 2);
     assert_eq!(ErrorCode::GenerationConflict as u64, 3);
     assert_eq!(ErrorCode::PreflightFailed as u64, 4);
+    assert_eq!(ErrorCode::LinkPrepareFailed as u64, 7);
+    assert_eq!(ErrorCode::RoutePrepareFailed as u64, 8);
+    assert_eq!(ErrorCode::FirewallPrepareFailed as u64, 9);
+    assert_eq!(ErrorCode::SysctlPrepareFailed as u64, 10);
+    assert_eq!(ErrorCode::LinkActivateFailed as u64, 11);
+    assert_eq!(ErrorCode::PolicyActivateFailed as u64, 12);
     assert_eq!(ErrorCode::SystemFailure as u64, 5);
     assert_eq!(ErrorCode::DrainPending as u64, 6);
 }

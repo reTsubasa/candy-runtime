@@ -468,6 +468,12 @@ pub enum ErrorCode {
     /// The replacement generation is active while the previous generation is
     /// still within its bounded drain window. Callers may retry Drain.
     DrainPending = 6,
+    LinkPrepareFailed = 7,
+    RoutePrepareFailed = 8,
+    FirewallPrepareFailed = 9,
+    SysctlPrepareFailed = 10,
+    LinkActivateFailed = 11,
+    PolicyActivateFailed = 12,
 }
 
 impl TryFrom<u64> for ErrorCode {
@@ -481,6 +487,12 @@ impl TryFrom<u64> for ErrorCode {
             4 => Ok(Self::PreflightFailed),
             5 => Ok(Self::SystemFailure),
             6 => Ok(Self::DrainPending),
+            7 => Ok(Self::LinkPrepareFailed),
+            8 => Ok(Self::RoutePrepareFailed),
+            9 => Ok(Self::FirewallPrepareFailed),
+            10 => Ok(Self::SysctlPrepareFailed),
+            11 => Ok(Self::LinkActivateFailed),
+            12 => Ok(Self::PolicyActivateFailed),
             _ => Err(NetdProtocolError::UnknownEnum),
         }
     }

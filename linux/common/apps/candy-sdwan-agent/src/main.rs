@@ -115,6 +115,12 @@ fn runtime_cause_code(error: &anyhow::Error) -> &str {
                 ErrorCode::PreflightFailed => "netd_preflight_failed",
                 ErrorCode::SystemFailure => "netd_system_failure",
                 ErrorCode::DrainPending => "netd_drain_pending",
+                ErrorCode::LinkPrepareFailed => "netd_link_prepare_failed",
+                ErrorCode::RoutePrepareFailed => "netd_route_prepare_failed",
+                ErrorCode::FirewallPrepareFailed => "netd_firewall_prepare_failed",
+                ErrorCode::SysctlPrepareFailed => "netd_sysctl_prepare_failed",
+                ErrorCode::LinkActivateFailed => "netd_link_activate_failed",
+                ErrorCode::PolicyActivateFailed => "netd_policy_activate_failed",
             },
         };
     }
@@ -162,6 +168,18 @@ fn netd_reconfigure_error_code(error: &IpcError) -> &'static str {
         IpcError::Remote(ErrorCode::UnauthorizedPeer) => "netd_reconfigure_unauthorized",
         IpcError::Remote(ErrorCode::SystemFailure) => "netd_reconfigure_system_failed",
         IpcError::Remote(ErrorCode::DrainPending) => "netd_reconfigure_drain_pending",
+        IpcError::Remote(ErrorCode::LinkPrepareFailed) => "netd_reconfigure_link_prepare_failed",
+        IpcError::Remote(ErrorCode::RoutePrepareFailed) => "netd_reconfigure_route_prepare_failed",
+        IpcError::Remote(ErrorCode::FirewallPrepareFailed) => {
+            "netd_reconfigure_firewall_prepare_failed"
+        }
+        IpcError::Remote(ErrorCode::SysctlPrepareFailed) => {
+            "netd_reconfigure_sysctl_prepare_failed"
+        }
+        IpcError::Remote(ErrorCode::LinkActivateFailed) => "netd_reconfigure_link_activate_failed",
+        IpcError::Remote(ErrorCode::PolicyActivateFailed) => {
+            "netd_reconfigure_policy_activate_failed"
+        }
         // netd closes the per-request Unix socket after a daemon restart or
         // transaction rollback.  Keep this distinct from a platform failure;
         // callers can safely retry the same generation after reconnecting.
@@ -2661,7 +2679,15 @@ fn transient_runtime_error(error: &anyhow::Error) -> bool {
         return match ipc {
             IpcError::Io(error) => transient_io_error(error),
             IpcError::Remote(
-                ErrorCode::SystemFailure | ErrorCode::GenerationConflict | ErrorCode::DrainPending,
+                ErrorCode::SystemFailure
+                    | ErrorCode::GenerationConflict
+                    | ErrorCode::DrainPending
+                    | ErrorCode::LinkPrepareFailed
+                    | ErrorCode::RoutePrepareFailed
+                    | ErrorCode::FirewallPrepareFailed
+                    | ErrorCode::SysctlPrepareFailed
+                    | ErrorCode::LinkActivateFailed
+                    | ErrorCode::PolicyActivateFailed,
             ) => true,
             _ => false,
         };
@@ -5895,6 +5921,12 @@ exit 17
             ErrorCode::SystemFailure,
             ErrorCode::GenerationConflict,
             ErrorCode::DrainPending,
+            ErrorCode::LinkPrepareFailed,
+            ErrorCode::RoutePrepareFailed,
+            ErrorCode::FirewallPrepareFailed,
+            ErrorCode::SysctlPrepareFailed,
+            ErrorCode::LinkActivateFailed,
+            ErrorCode::PolicyActivateFailed,
         ] {
             assert!(transient_runtime_error(&anyhow::Error::new(
                 IpcError::Remote(code)

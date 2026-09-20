@@ -488,11 +488,11 @@ fn commit_installs_policy_rule_only_after_all_prepared_state() {
         *events.borrow(),
         [
             "preflight",
+            "prepare_sysctls",
             "prepare_link",
+            "activate_link",
             "prepare_routes",
             "prepare_firewall",
-            "prepare_sysctls",
-            "activate_link",
             "install_policy_rule",
         ]
     );
@@ -1189,10 +1189,11 @@ fn sysctl_restore_requires_the_value_candy_applied_to_still_be_current() {
 #[test]
 fn every_mutating_failure_uses_recorded_intent_for_cleanup() {
     for fail_at in [
+        "prepare_sysctls",
         "prepare_link",
+        "activate_link",
         "prepare_routes",
         "prepare_firewall",
-        "prepare_sysctls",
     ] {
         let events = Rc::new(RefCell::new(Vec::new()));
         let backend = FailingBackend {
@@ -1220,7 +1221,7 @@ fn commit_failure_removes_policy_rule_before_other_state() {
     transaction.prepare(owner(), declaration()).unwrap();
     events.borrow_mut().clear();
     assert!(transaction.commit(owner()).is_err());
-    assert_eq!(events.borrow()[2], "remove_policy_rule");
+    assert_eq!(events.borrow()[1], "remove_policy_rule");
     assert!(retained.load().unwrap().is_none());
 }
 

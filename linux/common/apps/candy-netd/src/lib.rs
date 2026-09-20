@@ -11,8 +11,9 @@ pub use journal::FileNetworkJournal;
 pub use linux::LinuxNetworkBackend;
 pub use linux::{LinuxNetworkPlan, CANDY_POLICY_PRIORITY_MIN};
 pub use network::{
-    restore_sysctl_value, NetworkBackend, NetworkController, NetworkError, NetworkJournal,
-    NetworkTransaction, SysctlChange, SysctlKey, TransactionPhase, TransactionRecord,
+    restore_sysctl_value, BackendStage, NetworkBackend, NetworkController, NetworkError,
+    NetworkJournal, NetworkTransaction, SysctlChange, SysctlKey, TransactionPhase,
+    TransactionRecord,
 };
 
 use std::fs;
@@ -683,7 +684,16 @@ fn network_error_code(error: NetworkError) -> ErrorCode {
     match error {
         NetworkError::Conflict => ErrorCode::GenerationConflict,
         NetworkError::InvalidTransition => ErrorCode::InvalidRequest,
-        NetworkError::Backend => ErrorCode::PreflightFailed,
+        NetworkError::Backend => ErrorCode::SystemFailure,
+        NetworkError::BackendStage(BackendStage::Preflight) => ErrorCode::PreflightFailed,
+        NetworkError::BackendStage(BackendStage::LinkPrepare) => ErrorCode::LinkPrepareFailed,
+        NetworkError::BackendStage(BackendStage::RoutePrepare) => ErrorCode::RoutePrepareFailed,
+        NetworkError::BackendStage(BackendStage::FirewallPrepare) => {
+            ErrorCode::FirewallPrepareFailed
+        }
+        NetworkError::BackendStage(BackendStage::SysctlPrepare) => ErrorCode::SysctlPrepareFailed,
+        NetworkError::BackendStage(BackendStage::LinkActivate) => ErrorCode::LinkActivateFailed,
+        NetworkError::BackendStage(BackendStage::PolicyActivate) => ErrorCode::PolicyActivateFailed,
         NetworkError::Journal => ErrorCode::SystemFailure,
         NetworkError::DrainPending => ErrorCode::DrainPending,
     }

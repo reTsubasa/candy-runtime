@@ -74,10 +74,35 @@ pub enum NetworkError {
     InvalidTransition,
     #[error("network backend operation failed")]
     Backend,
+    #[error("network backend operation failed during {0:?}")]
+    BackendStage(BackendStage),
     #[error("network transaction journal operation failed")]
     Journal,
     #[error("network transaction is still draining the previous declaration")]
     DrainPending,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum BackendStage {
+    Preflight,
+    LinkPrepare,
+    RoutePrepare,
+    FirewallPrepare,
+    SysctlPrepare,
+    LinkActivate,
+    PolicyActivate,
+}
+
+fn at_stage<T>(result: Result<T, NetworkError>, stage: BackendStage) -> Result<T, NetworkError> {
+    result.map_err(|error| match error {
+        NetworkError::Backend => {
+            eprintln!(
+                "level=error component=candy-netd event=network_backend_failed stage={stage:?}"
+            );
+            NetworkError::BackendStage(stage)
+        }
+        error => error,
+    })
 }
 
 pub trait NetworkBackend {
@@ -262,19 +287,21 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             .ok_or(NetworkError::InvalidTransition)?
             .declaration
             .clone();
-        let sysctls = self.backend.preflight(&declaration)?;
+        let sysctls = at_stage(
+            self.backend.preflight(&declaration),
+            BackendStage::Preflight,
+        )?;
         let record = self
             .record
             .as_mut()
             .ok_or(NetworkError::InvalidTransition)?;
         record.sysctls = sysctls;
         self.journal.store(record)?;
-        self.complete_step(STEP_LINK)?;
-        self.backend.prepare_link(&declaration)?;
-        self.complete_step(STEP_ROUTES)?;
-        self.backend.prepare_routes(&declaration)?;
-        self.complete_step(STEP_FIREWALL)?;
-        self.backend.prepare_firewall(&declaration)?;
+        // The candidate TUN must be usable by Core's packet-path readiness
+        // probe before policy steering is committed. Apply interface-scoped
+        // controls while the newly-created link is still down, then bring the
+        // isolated candidate up. No customer traffic is steered to it until
+        // STEP_POLICY_RULE is installed by commit().
         self.complete_step(STEP_SYSCTLS)?;
         let sysctls = self
             .record
@@ -282,7 +309,30 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             .ok_or(NetworkError::InvalidTransition)?
             .sysctls
             .clone();
-        self.backend.prepare_sysctls(&declaration, &sysctls)?;
+        at_stage(
+            self.backend.prepare_sysctls(&declaration, &sysctls),
+            BackendStage::SysctlPrepare,
+        )?;
+        self.complete_step(STEP_LINK)?;
+        at_stage(
+            self.backend.prepare_link(&declaration),
+            BackendStage::LinkPrepare,
+        )?;
+        self.complete_step(STEP_LINK_ACTIVE)?;
+        at_stage(
+            self.backend.activate_link(&declaration),
+            BackendStage::LinkActivate,
+        )?;
+        self.complete_step(STEP_ROUTES)?;
+        at_stage(
+            self.backend.prepare_routes(&declaration),
+            BackendStage::RoutePrepare,
+        )?;
+        self.complete_step(STEP_FIREWALL)?;
+        at_stage(
+            self.backend.prepare_firewall(&declaration),
+            BackendStage::FirewallPrepare,
+        )?;
         self.set_phase(TransactionPhase::Prepared)
     }
 
@@ -349,10 +399,13 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         }
         let declaration = record.declaration.clone();
         let result = (|| {
-            self.complete_step(STEP_LINK_ACTIVE)?;
-            self.backend.activate_link(&declaration)?;
+            // Prepare already activated an isolated TUN so Core could prove
+            // the real packet path. Commit is the traffic cutover barrier.
             self.complete_step(STEP_POLICY_RULE)?;
-            self.backend.install_policy_rule(&declaration)?;
+            at_stage(
+                self.backend.install_policy_rule(&declaration),
+                BackendStage::PolicyActivate,
+            )?;
             self.set_phase(TransactionPhase::Active)
         })();
         if result.is_err() {

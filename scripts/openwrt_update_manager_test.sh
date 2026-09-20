@@ -184,6 +184,16 @@ case "$1" in
 	enable) printf '%s\n' 1 > "$FAKE_SERVICE_ENABLED" ;;
 	disable) printf '%s\n' 0 > "$FAKE_SERVICE_ENABLED" ;;
 	start) printf '%s\n' 1 > "$FAKE_SERVICE_RUNNING" ;;
+	restart)
+		printf '%s\n' 1 > "$FAKE_SERVICE_RUNNING"
+		if [ -n "${FAKE_SDWAN_STATUS_FILE:-}" ]; then
+			if [ "${FAKE_FAIL_TARGET_SDWAN:-0}" = 1 ] && [ "$(cat "$FAKE_INSTALLED_VERSION")" = 0.4.0-r3 ]; then
+				printf '%s\n' '{"runtime":{"state":"fail-open"},"tun":{"state":"unavailable","full_duplex":false}}' > "$FAKE_SDWAN_STATUS_FILE"
+			else
+				printf '%s\n' '{"runtime":{"state":"running"},"tun":{"state":"running","full_duplex":true}}' > "$FAKE_SDWAN_STATUS_FILE"
+			fi
+		fi
+		;;
 	stop) printf '%s\n' 0 > "$FAKE_SERVICE_RUNNING" ;;
 	*) exit 1 ;;
 esac
@@ -322,6 +332,9 @@ export CANDY_UPDATE_CLOUD_SYNC_INIT="$bin/candy-cloud-sync-service"
 export CANDY_UPDATE_CLOUD_IDENTITY_FILE="$tmp/sdwan/identity/device-identity-v1.json"
 export CANDY_UPDATE_HEALTH_CHECK="$bin/candy-health"
 export CANDY_UPDATE_CONFIG_FILE="$tmp/candy.config"
+export CANDY_UPDATE_SDWAN_STATUS_FILE="$tmp/sdwan-status.json"
+export CANDY_UPDATE_SDWAN_ACTIVE_LINK="$tmp/sdwan-active"
+export FAKE_SDWAN_STATUS_FILE="$CANDY_UPDATE_SDWAN_STATUS_FILE"
 # Keep this fixture independent from the package revision used by the caller
 # or by a release workflow environment.
 export CANDY_RUNTIME_VERSION=0.4.0
@@ -579,10 +592,30 @@ if grep -Eq '^(stop|disable|start)$' "$FAKE_SERVICE_LOG"; then
 	echo "Cloud-driven Runtime update interrupted the running data plane" >&2
 	exit 1
 fi
+grep -Fx restart "$FAKE_SERVICE_LOG" >/dev/null || {
+	echo "Cloud-driven Runtime update did not load and verify the installed data plane" >&2
+	exit 1
+}
 tail -n 1 "$FAKE_APK_LOG" | grep -F -- '--scripts=no' >/dev/null || {
 	echo "Cloud-driven Runtime update allowed APK lifecycle scripts to stop the data plane" >&2
 	exit 1
 }
+
+# A node whose SD-WAN data plane was healthy before a Cloud-driven upgrade
+# must prove the new netd/Core path after restart. Ordinary Proxy health alone
+# cannot commit the Runtime transaction.
+printf '%s\n' '{"runtime":{"state":"running"},"tun":{"state":"running","full_duplex":true}}' > "$CANDY_UPDATE_SDWAN_STATUS_FILE"
+ln -s active-activation "$CANDY_UPDATE_SDWAN_ACTIVE_LINK"
+apk_lines_before=$(wc -l < "$FAKE_APK_LOG" | tr -d ' ')
+if FAKE_FAIL_TARGET_SDWAN=1 CANDY_UPDATE_PRESERVE_CLOUD_UPGRADE_WORKER=1 \
+	"$manager" install-runtime v0_4_0_r3 >/dev/null 2>&1; then
+	echo "Cloud-driven Runtime update accepted a failed SD-WAN data plane" >&2
+	exit 1
+fi
+tail -n +$((apk_lines_before + 1)) "$FAKE_APK_LOG" | grep -F -- '--force-old-apk' >/dev/null
+[ "$(cat "$FAKE_INSTALLED_VERSION")" = 0.4.0-r2 ]
+grep -q '"state":"running"' "$CANDY_UPDATE_SDWAN_STATUS_FILE"
+rm -f "$CANDY_UPDATE_SDWAN_ACTIVE_LINK" "$CANDY_UPDATE_SDWAN_STATUS_FILE"
 
 # A target Runtime that cannot restore Cloud sync is rejected and rolled back;
 # the rollback must also restore the previously enabled Cloud sync service.
