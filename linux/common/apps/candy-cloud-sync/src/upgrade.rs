@@ -5,10 +5,9 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 const CATALOG_KEY: &str =
     include_str!("../../../../../openwrt/client/packages/candy-client/catalog-release.pub");
-const CATALOG_URL: &str =
-    "https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json";
-const CATALOG_SIGNATURE_URL: &str =
-    "https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json.sig";
+const CATALOG_REF_URL: &str =
+    "https://api.github.com/repos/reTsubasa/candy-release/git/ref/heads/main";
+const CATALOG_RAW_ROOT: &str = "https://raw.githubusercontent.com/reTsubasa/candy-release";
 const RELEASE_ROOT: &str = "https://github.com/reTsubasa/candy-release/releases/download/";
 const MAX_BUNDLE: u64 = 256 * 1024 * 1024;
 const CATALOG_FETCH_ATTEMPTS: usize = 3;
@@ -320,14 +319,29 @@ fn schedule_openwrt_runtime_handoff(root: &Path) -> Result<()> {
         .context("runtime_handoff_schedule_failed")
 }
 
-fn catalog_attempt_urls(nonce: u128, attempt: usize) -> (String, String) {
+fn catalog_ref_attempt_url(nonce: u128, attempt: usize) -> String {
+    let query = format!(
+        "?candy_catalog_attempt={nonce}-{}-{attempt}",
+        std::process::id()
+    );
+    format!("{CATALOG_REF_URL}{query}")
+}
+
+fn git_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn catalog_attempt_urls(commit: &str, nonce: u128, attempt: usize) -> (String, String) {
     let query = format!(
         "?candy_catalog_attempt={nonce}-{}-{attempt}",
         std::process::id()
     );
     (
-        format!("{CATALOG_URL}{query}"),
-        format!("{CATALOG_SIGNATURE_URL}{query}"),
+        format!("{CATALOG_RAW_ROOT}/{commit}/channels/stable.json{query}"),
+        format!("{CATALOG_RAW_ROOT}/{commit}/channels/stable.json.sig{query}"),
     )
 }
 
@@ -341,7 +355,19 @@ fn catalog(root: &Path) -> Result<serde_json::Value> {
     let mut verified = false;
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     for attempt in 1..=CATALOG_FETCH_ATTEMPTS {
-        let (catalog_url, signature_url) = catalog_attempt_urls(nonce, attempt);
+        fetch(
+            &client,
+            &catalog_ref_attempt_url(nonce, attempt),
+            &root.join("catalog-ref.json"),
+            64 * 1024,
+        )?;
+        let reference: serde_json::Value =
+            read_bounded_json(&root.join("catalog-ref.json"), 64 * 1024)?;
+        let commit = reference["object"]["sha"]
+            .as_str()
+            .filter(|value| git_object_id(value))
+            .context("catalog_ref_invalid_commit")?;
+        let (catalog_url, signature_url) = catalog_attempt_urls(commit, nonce, attempt);
         fetch(
             &client,
             &catalog_url,
@@ -368,8 +394,8 @@ fn catalog(root: &Path) -> Result<serde_json::Value> {
             break;
         }
         if attempt < CATALOG_FETCH_ATTEMPTS {
-            // The mutable branch ref and its two raw files can briefly be
-            // served from different CDN generations while a release lands.
+            // Re-resolve the branch before retrying. Catalog and signature are
+            // always fetched through one immutable repository generation.
             std::thread::sleep(Duration::from_secs(1));
         }
     }
@@ -1369,18 +1395,31 @@ mod tests {
             target_key("core", false, "aarch64").unwrap(),
             "linux_musl_aarch64"
         );
-        let (catalog_url, signature_url) = catalog_attempt_urls(123, 2);
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        assert!(git_object_id(commit));
+        assert!(git_object_id(&"a".repeat(64)));
+        assert!(!git_object_id("ABCDEF0123456789abcdef0123456789abcdef01"));
+        assert!(!git_object_id("../main"));
+        let ref_url = catalog_ref_attempt_url(123, 2);
+        assert_eq!(
+            ref_url,
+            format!(
+                "{CATALOG_REF_URL}?candy_catalog_attempt=123-{}-2",
+                std::process::id()
+            )
+        );
+        let (catalog_url, signature_url) = catalog_attempt_urls(commit, 123, 2);
         assert_eq!(
             catalog_url,
             format!(
-                "{CATALOG_URL}?candy_catalog_attempt=123-{}-2",
+                "{CATALOG_RAW_ROOT}/{commit}/channels/stable.json?candy_catalog_attempt=123-{}-2",
                 std::process::id()
             )
         );
         assert_eq!(
             signature_url,
             format!(
-                "{CATALOG_SIGNATURE_URL}?candy_catalog_attempt=123-{}-2",
+                "{CATALOG_RAW_ROOT}/{commit}/channels/stable.json.sig?candy_catalog_attempt=123-{}-2",
                 std::process::id()
             )
         );

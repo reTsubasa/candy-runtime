@@ -2,11 +2,8 @@
 
 set -u
 
-# Fetch both files through the raw branch path with one unique generation key.
-# Some GitHub edges retain the refs/heads alias after main has advanced; the
-# shared query key avoids stale aliases and keeps each signature pair coherent.
-CATALOG_URL=https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json
-CATALOG_SIGNATURE_URL=https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json.sig
+CATALOG_REF_URL=https://api.github.com/repos/reTsubasa/candy-release/git/ref/heads/main
+CATALOG_RAW_ROOT=https://raw.githubusercontent.com/reTsubasa/candy-release
 CATALOG_KEY=${CANDY_UPDATE_CATALOG_KEY:-/usr/share/candy/keys/catalog-release.pub}
 STATE_ROOT=${CANDY_UPDATE_STATE_ROOT:-/var/lib/candy/update}
 CATALOG_FILE=$STATE_ROOT/stable.json
@@ -40,6 +37,7 @@ CORE_RUST_TARGET=
 CORE_ARCH=
 MAX_CATALOG_BYTES=${CANDY_UPDATE_MAX_CATALOG_BYTES:-4194304}
 MAX_SIGNATURE_BYTES=${CANDY_UPDATE_MAX_SIGNATURE_BYTES:-4096}
+MAX_REF_BYTES=${CANDY_UPDATE_MAX_REF_BYTES:-65536}
 MAX_RUNTIME_PACKAGE_BYTES=${CANDY_UPDATE_MAX_RUNTIME_PACKAGE_BYTES:-16777216}
 MAX_CORE_BYTES=${CANDY_UPDATE_MAX_CORE_BYTES:-134217728}
 SPACE_MARGIN_BYTES=${CANDY_UPDATE_SPACE_MARGIN_BYTES:-8388608}
@@ -241,6 +239,10 @@ valid_sha256() {
 	printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{64}$'
 }
 
+valid_git_object_id() {
+	printf '%s' "$1" | grep -Eq '^([0-9a-f]{40}|[0-9a-f]{64})$'
+}
+
 catalog_field() {
 	jsonfilter -i "$1" -e "$2" 2>/dev/null || true
 }
@@ -429,7 +431,7 @@ cached_catalog_valid() {
 }
 
 check_catalog() {
-	local downloaded_catalog downloaded_signature new_sequence old_sequence old_hash new_hash checked_at attempt verified cache_key
+	local downloaded_ref downloaded_catalog downloaded_signature catalog_commit catalog_url signature_url new_sequence old_sequence old_hash new_hash checked_at attempt verified cache_key
 	require_supported_platform || fail "this Runtime package does not support the current OpenWrt platform"
 	[ -f "$CATALOG_KEY" ] && [ ! -L "$CATALOG_KEY" ] || fail "catalog signing key is unavailable"
 	mkdir -p "$STATE_ROOT" || fail "cannot create update state directory"
@@ -437,14 +439,21 @@ check_catalog() {
 	chmod 0700 "$STATE_ROOT" || fail "cannot protect update state directory"
 	TEMPORARY="$STATE_ROOT/.check-$$"
 	mkdir -m 0700 "$TEMPORARY" || fail "cannot create catalog staging directory"
+	downloaded_ref=$TEMPORARY/ref.json
 	downloaded_catalog=$TEMPORARY/stable.json
 	downloaded_signature=$TEMPORARY/stable.json.sig
 	attempt=1
 	verified=0
 	while [ "$attempt" -le 3 ]; do
 		cache_key="$(date +%s 2>/dev/null || printf 0)-$$-$attempt"
-		fetch_https "$CATALOG_URL?candy_catalog_attempt=$cache_key" "$downloaded_catalog" || fail "catalog download failed"
-		fetch_https "$CATALOG_SIGNATURE_URL?candy_catalog_attempt=$cache_key" "$downloaded_signature" || fail "catalog signature download failed"
+		fetch_https "$CATALOG_REF_URL?candy_catalog_attempt=$cache_key" "$downloaded_ref" || fail "catalog branch reference download failed"
+		regular_bounded_file "$downloaded_ref" "$MAX_REF_BYTES" || fail "catalog branch reference is empty or oversized"
+		catalog_commit=$(catalog_field "$downloaded_ref" '@.object.sha')
+		valid_git_object_id "$catalog_commit" || fail "catalog branch reference has an invalid commit id"
+		catalog_url="$CATALOG_RAW_ROOT/$catalog_commit/channels/stable.json?candy_catalog_attempt=$cache_key"
+		signature_url="$CATALOG_RAW_ROOT/$catalog_commit/channels/stable.json.sig?candy_catalog_attempt=$cache_key"
+		fetch_https "$catalog_url" "$downloaded_catalog" || fail "catalog download failed"
+		fetch_https "$signature_url" "$downloaded_signature" || fail "catalog signature download failed"
 		regular_bounded_file "$downloaded_catalog" "$MAX_CATALOG_BYTES" ||
 			fail "catalog is empty or exceeds the $MAX_CATALOG_BYTES-byte limit"
 		regular_bounded_file "$downloaded_signature" "$MAX_SIGNATURE_BYTES" ||
@@ -453,9 +462,8 @@ check_catalog() {
 			verified=1
 			break
 		fi
-		# A release updates the catalog and detached signature in one Git
-		# commit. Use the same cache-busting key for both paths so an edge cannot
-		# combine independently cached generations.
+		# The immutable commit path binds the catalog and detached signature to
+		# one repository generation. Re-resolve the branch before each retry.
 		[ "$attempt" -eq 3 ] || sleep 1
 		attempt=$((attempt + 1))
 	done
@@ -941,7 +949,7 @@ status_json() {
 			*) core_status= ;;
 		esac
 	fi
-	printf '{"schema_version":1,"manager_api_version":1,"catalog_url":'; json_string "$CATALOG_URL"
+	printf '{"schema_version":1,"manager_api_version":1,"catalog_url":'; json_string "$CATALOG_REF_URL"
 	printf ',"catalog_valid":'; [ "$catalog_valid" = 1 ] && printf true || printf false
 	printf ',"checked_at":%s,"platform":{"openwrt_release":' "${checked_at:-0}"; json_string "$release"
 	printf ',"target":'; json_string "$target"

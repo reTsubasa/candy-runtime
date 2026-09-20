@@ -83,8 +83,12 @@ case "$url" in
 	;;
 esac
 case "$url" in
-	https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json\?candy_catalog_attempt=*) source=$FAKE_CATALOG ;;
-	https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json.sig\?candy_catalog_attempt=*)
+	https://api.github.com/repos/reTsubasa/candy-release/git/ref/heads/main\?candy_catalog_attempt=*)
+		printf '{"object":{"sha":"%s"}}\n' "$FAKE_CATALOG_COMMIT" > "$destination"
+		exit 0
+		;;
+	https://raw.githubusercontent.com/reTsubasa/candy-release/"$FAKE_CATALOG_COMMIT"/channels/stable.json\?candy_catalog_attempt=*) source=$FAKE_CATALOG ;;
+	https://raw.githubusercontent.com/reTsubasa/candy-release/"$FAKE_CATALOG_COMMIT"/channels/stable.json.sig\?candy_catalog_attempt=*)
 		if [ "${FAKE_SIGNATURE_MISMATCH_ONCE:-0}" = 1 ] && [ ! -e "$FAKE_SIGNATURE_MISMATCH_STATE" ]; then
 			printf '%s\n' bad-signature > "$destination"
 			: > "$FAKE_SIGNATURE_MISMATCH_STATE"
@@ -312,6 +316,7 @@ export CANDY_UPDATE_TEST_TARGET=x86/64
 export CANDY_UPDATE_TEST_ARCH=x86_64
 export FAKE_CATALOG="$tmp/stable.json"
 export FAKE_CATALOG_SIGNATURE="$tmp/stable.json.sig"
+export FAKE_CATALOG_COMMIT=0123456789abcdef0123456789abcdef01234567
 export FAKE_SIGNATURE_MISMATCH_STATE="$tmp/signature-mismatch-seen"
 export FAKE_ASSET_DIR="$assets"
 export FAKE_FETCH_LOG="$tmp/fetch.log"
@@ -351,13 +356,21 @@ make_catalog 1 3 0.3.5
 "$manager" check >/dev/null
 [ "$(cat "$state/sequence")" = 1 ]
 [ "$(stat -c '%a' "$state" 2>/dev/null || stat -f '%Lp' "$state")" = 700 ]
-grep -E '^https://raw\.githubusercontent\.com/reTsubasa/candy-release/main/channels/stable\.json\?candy_catalog_attempt=[0-9]+-[0-9]+-1$' "$FAKE_FETCH_LOG" >/dev/null
-catalog_query=$(sed -n 's|^https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json?candy_catalog_attempt=||p' "$FAKE_FETCH_LOG" | head -1)
-signature_query=$(sed -n 's|^https://raw.githubusercontent.com/reTsubasa/candy-release/main/channels/stable.json.sig?candy_catalog_attempt=||p' "$FAKE_FETCH_LOG" | head -1)
+grep -E '^https://api\.github\.com/repos/reTsubasa/candy-release/git/ref/heads/main\?candy_catalog_attempt=[0-9]+-[0-9]+-1$' "$FAKE_FETCH_LOG" >/dev/null
+grep -E "^https://raw\.githubusercontent\.com/reTsubasa/candy-release/$FAKE_CATALOG_COMMIT/channels/stable\.json\?candy_catalog_attempt=[0-9]+-[0-9]+-1$" "$FAKE_FETCH_LOG" >/dev/null
+catalog_query=$(sed -n "s|^https://raw.githubusercontent.com/reTsubasa/candy-release/$FAKE_CATALOG_COMMIT/channels/stable.json?candy_catalog_attempt=||p" "$FAKE_FETCH_LOG" | head -1)
+signature_query=$(sed -n "s|^https://raw.githubusercontent.com/reTsubasa/candy-release/$FAKE_CATALOG_COMMIT/channels/stable.json.sig?candy_catalog_attempt=||p" "$FAKE_FETCH_LOG" | head -1)
 [ -n "$catalog_query" ] && [ "$catalog_query" = "$signature_query" ] || {
 	echo "catalog and signature did not use the same cache generation key" >&2
 	exit 1
 }
+valid_catalog_commit=$FAKE_CATALOG_COMMIT
+FAKE_CATALOG_COMMIT=not-a-commit
+if "$manager" check >/dev/null 2>&1; then
+	echo "catalog check accepted an invalid branch commit id" >&2
+	exit 1
+fi
+FAKE_CATALOG_COMMIT=$valid_catalog_commit
 grep -q '"catalog_valid":true' <<EOF
 $("$manager" status)
 EOF
