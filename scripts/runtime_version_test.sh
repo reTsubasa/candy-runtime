@@ -5,10 +5,12 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 version=$(tr -d '\r\n' < "$root/VERSION")
 client_manifest="$root/openwrt/client/packages/candy-client/Makefile"
 luci_manifest="$root/openwrt/client/packages/luci-app-candy/Makefile"
+release_workflow="$root/.github/workflows/release-openwrt-client.yml"
 client_version=$(sed -n 's/^PKG_VERSION:=//p' "$client_manifest")
 luci_version=$(sed -n 's/^PKG_VERSION:=//p' "$luci_manifest")
 client_revision=$(sed -n 's/^PKG_RELEASE:=//p' "$client_manifest")
 luci_revision=$(sed -n 's/^PKG_RELEASE:=//p' "$luci_manifest")
+workflow_revision=$(sed -n 's/^  CANDY_RELEASE_REVISION: "\([0-9][0-9]*\)"$/\1/p' "$release_workflow")
 
 case "$version" in
   *[!0-9.]*|.*|*.|*..*)
@@ -31,6 +33,10 @@ case "$client_revision:$luci_revision" in
     exit 1
     ;;
 esac
+[ "$client_revision" = "$luci_revision" ] && [ "$client_revision" = "$workflow_revision" ] || {
+  printf '%s\n' "revision mismatch: client=$client_revision luci=$luci_revision workflow=$workflow_revision" >&2
+  exit 1
+}
 
 grep -Fq 'EXPECTED_CORE_API=${CANDY_EXPECTED_CORE_API:-1}' \
   "$root/openwrt/client/packages/candy-client/candy-core-manager" || {
