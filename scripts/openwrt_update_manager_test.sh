@@ -75,6 +75,17 @@ done
 printf '%s\n' "$url" >> "$FAKE_FETCH_LOG"
 [ -z "${FAKE_FETCH_DEST_LOG:-}" ] || printf '%s %s\n' "$url" "$destination" >> "$FAKE_FETCH_DEST_LOG"
 case "$url" in
+	*/candy-client-0.4.0-r3.apk)
+		if [ "${FAKE_FETCH_FAIL_RUNTIME_ONCE:-0}" = 1 ] && [ ! -e "$FAKE_FETCH_FAIL_RUNTIME_STATE" ]; then
+			printf '%s\n' partial-runtime-download > "$destination"
+			: > "$FAKE_FETCH_FAIL_RUNTIME_STATE"
+			exit 95
+		fi
+		if [ "${FAKE_FETCH_FAIL_RUNTIME_ALWAYS:-0}" = 1 ]; then
+			printf '%s\n' partial-runtime-download > "$destination"
+			exit 95
+		fi
+	;;
 	*/candy-core-*.tar.gz)
 		if [ "${FAKE_FETCH_FAIL_CORE:-0}" = 1 ]; then
 			printf '%s\n' partial-core-download > "$destination"
@@ -320,6 +331,7 @@ export FAKE_CATALOG_COMMIT=0123456789abcdef0123456789abcdef01234567
 export FAKE_SIGNATURE_MISMATCH_STATE="$tmp/signature-mismatch-seen"
 export FAKE_ASSET_DIR="$assets"
 export FAKE_FETCH_LOG="$tmp/fetch.log"
+export FAKE_FETCH_FAIL_RUNTIME_STATE="$tmp/fetch-runtime-failed-once"
 export FAKE_CURRENT_CORE_SHA=0000000000000000000000000000000000000000000000000000000000000000
 export FAKE_FETCH_DEST_LOG="$tmp/fetch-destination.log"
 export FAKE_CORE_LOG="$tmp/core.log"
@@ -541,8 +553,13 @@ grep -Eq 'required_bytes=[0-9]+ available_bytes=[0-9]+ filesystem=/' "$CANDY_UPD
 # Four staged 200-byte APKs would require 2400 bytes under the old repeated
 # three-times-total budget. The transaction only needs 800 additional bytes
 # for the two 200-byte target APKs, so 1 KiB must be accepted with no margin.
-CANDY_UPDATE_SPACE_MARGIN_BYTES=0 FAKE_ROOT_AVAILABLE_KB=1 \
+rm -f "$FAKE_FETCH_FAIL_RUNTIME_STATE"
+CANDY_UPDATE_SPACE_MARGIN_BYTES=0 FAKE_ROOT_AVAILABLE_KB=1 FAKE_FETCH_FAIL_RUNTIME_ONCE=1 \
 	"$manager" install-runtime v0_4_0_r3 >/dev/null
+[ "$(grep -c '/candy-client-0.4.0-r3.apk$' "$FAKE_FETCH_LOG")" -ge 2 ] || {
+	echo "Runtime download was not retried after a transient transport failure" >&2
+	exit 1
+}
 grep -F 'add --allow-untrusted ' "$FAKE_APK_LOG" >/dev/null
 grep -F 'candy-client-0.4.0-r3.apk' "$FAKE_APK_LOG" >/dev/null
 grep -F 'luci-app-candy-0.4.0-r3.apk' "$FAKE_APK_LOG" >/dev/null
@@ -552,6 +569,16 @@ grep -Fx enable "$FAKE_SERVICE_LOG" >/dev/null
 grep -Fx start "$FAKE_SERVICE_LOG" >/dev/null
 [ "$(cat "$CANDY_UPDATE_CONFIG_FILE")" = test-config ]
 [ ! -s "$FAKE_CLOUD_SYNC_LOG" ]
+
+# A persistent transport failure is reported as the exact download failure,
+# not as a generic APK validation error.
+if FAKE_FETCH_FAIL_RUNTIME_ALWAYS=1 "$manager" install-runtime v0_4_0_r3 >/dev/null 2>&1; then
+	echo "Runtime update accepted a persistent package download failure" >&2
+	exit 1
+fi
+grep -q '"phase":"download"' "$CANDY_UPDATE_OPERATION_FILE"
+grep -q '"error_code":"runtime_client_download_failed"' "$CANDY_UPDATE_OPERATION_FILE"
+grep -q 'Failed to download candy-client 0.4.0-r3 after 3 attempts' "$CANDY_UPDATE_OPERATION_FILE"
 
 # Runtime space preflight must fail before stopping or disabling services.
 : > "$FAKE_SERVICE_LOG"

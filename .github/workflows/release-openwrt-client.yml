@@ -28,7 +28,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-openwrt-client-0.4.0-r147
+  group: release-openwrt-client-0.4.0-r148
   cancel-in-progress: false
 
 env:

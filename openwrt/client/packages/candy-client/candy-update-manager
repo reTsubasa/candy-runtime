@@ -48,6 +48,9 @@ OPERATION_ACTION=
 OPERATION_VERSION=
 TEMPORARY=
 UPLOAD_FILE=
+RUNTIME_PAIR_PHASE=
+RUNTIME_PAIR_CODE=
+RUNTIME_PAIR_DETAIL=
 
 json_string() {
 	printf '"'
@@ -318,17 +321,24 @@ require_supported_platform() {
 }
 
 fetch_https() {
-	local url="$1" destination="$2"
+	local url="$1" destination="$2" attempt=1
 	case "$url" in https://*) ;; *) return 1 ;; esac
-	if command -v uclient-fetch >/dev/null 2>&1; then
-		uclient-fetch -q -O "$destination" "$url"
-	elif command -v wget >/dev/null 2>&1; then
-		wget -q -O "$destination" "$url"
-	elif command -v curl >/dev/null 2>&1; then
-		curl -fsSL --proto '=https' --max-time 180 -o "$destination" "$url"
-	else
-		return 1
-	fi
+	while [ "$attempt" -le 3 ]; do
+		rm -f "$destination" 2>/dev/null || return 1
+		if command -v uclient-fetch >/dev/null 2>&1; then
+			uclient-fetch -q -T 180 -O "$destination" "$url" && return 0
+		elif command -v wget >/dev/null 2>&1; then
+			wget -q -T 180 -O "$destination" "$url" && return 0
+		elif command -v curl >/dev/null 2>&1; then
+			curl -fsSL --proto '=https' --max-time 180 -o "$destination" "$url" && return 0
+		else
+			return 1
+		fi
+		[ "$attempt" -eq 3 ] || sleep 1
+		attempt=$((attempt + 1))
+	done
+	rm -f "$destination" 2>/dev/null || true
+	return 1
 }
 
 verify_catalog_signature() {
@@ -610,12 +620,23 @@ apk_metadata_matches() {
 	[ "$name" = "$expected_name" ] && [ "$version" = "$expected_version" ] && [ "$arch" = "$expected_arch" ]
 }
 
+runtime_pair_error() {
+	RUNTIME_PAIR_PHASE=$1
+	RUNTIME_PAIR_CODE=$2
+	shift 2
+	RUNTIME_PAIR_DETAIL=$*
+	return 1
+}
+
 version_is_newer() {
 	[ "$(apk version -t "$1" "$2" 2>/dev/null || true)" = '>' ]
 }
 
 download_runtime_pair() {
 	local catalog="$1" key="$2" directory="$3" version revision display client_url client_sha client_size luci_url luci_sha luci_size client_package luci_package
+	RUNTIME_PAIR_PHASE=preflight
+	RUNTIME_PAIR_CODE=runtime_catalog_entry_invalid
+	RUNTIME_PAIR_DETAIL="Runtime catalog entry $key is invalid or incompatible"
 	validate_runtime_entry "$catalog" "$key" || return 1
 	version=$(runtime_entry_field "$catalog" "$key" version)
 	revision=$(runtime_entry_field "$catalog" "$key" revision)
@@ -626,15 +647,15 @@ download_runtime_pair() {
 	luci_url=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.luci_app_candy.url")
 	luci_sha=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.luci_app_candy.sha256")
 	luci_size=$(runtime_entry_field "$catalog" "$key" "targets.$RUNTIME_TARGET_KEY.luci_app_candy.size")
-	mkdir -m 0700 "$directory" || return 1
+	mkdir -m 0700 "$directory" || { runtime_pair_error download runtime_staging_directory_failed "Cannot create Runtime package staging directory"; return 1; }
 	client_package=$directory/candy-client-$display.apk
 	luci_package=$directory/luci-app-candy-$display.apk
-	fetch_https "$client_url" "$client_package" || return 1
-	fetch_https "$luci_url" "$luci_package" || return 1
-	verify_download "$client_package" "$client_size" "$client_sha" "$MAX_RUNTIME_PACKAGE_BYTES" || return 1
-	verify_download "$luci_package" "$luci_size" "$luci_sha" "$MAX_RUNTIME_PACKAGE_BYTES" || return 1
-	apk_metadata_matches "$client_package" candy-client "$display" "$SUPPORTED_ARCH" "$directory/client.metadata" || return 1
-	apk_metadata_matches "$luci_package" luci-app-candy "$display" noarch "$directory/luci.metadata" || return 1
+	fetch_https "$client_url" "$client_package" || { runtime_pair_error download runtime_client_download_failed "Failed to download candy-client $display after 3 attempts"; return 1; }
+	fetch_https "$luci_url" "$luci_package" || { runtime_pair_error download runtime_luci_download_failed "Failed to download luci-app-candy $display after 3 attempts"; return 1; }
+	verify_download "$client_package" "$client_size" "$client_sha" "$MAX_RUNTIME_PACKAGE_BYTES" || { runtime_pair_error verify runtime_client_integrity_failed "candy-client $display size or SHA-256 verification failed"; return 1; }
+	verify_download "$luci_package" "$luci_size" "$luci_sha" "$MAX_RUNTIME_PACKAGE_BYTES" || { runtime_pair_error verify runtime_luci_integrity_failed "luci-app-candy $display size or SHA-256 verification failed"; return 1; }
+	apk_metadata_matches "$client_package" candy-client "$display" "$SUPPORTED_ARCH" "$directory/client.metadata" || { runtime_pair_error verify runtime_client_metadata_mismatch "candy-client $display APK metadata does not match name, version, or architecture $SUPPORTED_ARCH"; return 1; }
+	apk_metadata_matches "$luci_package" luci-app-candy "$display" noarch "$directory/luci.metadata" || { runtime_pair_error verify runtime_luci_metadata_mismatch "luci-app-candy $display APK metadata does not match name, version, or architecture noarch"; return 1; }
 }
 
 restore_config() {
@@ -812,8 +833,12 @@ install_runtime() {
 	mkdir -m 0700 "$TEMPORARY" || fail "cannot create Runtime staging directory"
 	target_dir=$TEMPORARY/target
 	rollback_dir=$TEMPORARY/rollback
-	download_runtime_pair "$CATALOG_FILE" "$key" "$target_dir" || fail "target Runtime packages failed validation"
-	download_runtime_pair "$CATALOG_FILE" "$current_key" "$rollback_dir" || fail "current Runtime rollback packages failed validation"
+	if ! download_runtime_pair "$CATALOG_FILE" "$key" "$target_dir"; then
+		fail_stage "$RUNTIME_PAIR_PHASE" "$RUNTIME_PAIR_CODE" "Target $RUNTIME_PAIR_DETAIL"
+	fi
+	if ! download_runtime_pair "$CATALOG_FILE" "$current_key" "$rollback_dir"; then
+		fail_stage "$RUNTIME_PAIR_PHASE" "$RUNTIME_PAIR_CODE" "Rollback $RUNTIME_PAIR_DETAIL"
+	fi
 	client_package=$target_dir/candy-client-$display.apk
 	luci_package=$target_dir/luci-app-candy-$display.apk
 	old_client=$rollback_dir/candy-client-$current_display.apk
