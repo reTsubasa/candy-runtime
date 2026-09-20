@@ -42,6 +42,7 @@ pub enum SysctlKey {
     Ipv4Forward = 1,
     AllRpFilter = 2,
     CandyRpFilter = 3,
+    CandyDisableIpv6 = 4,
 }
 
 impl TryFrom<u8> for SysctlKey {
@@ -52,6 +53,7 @@ impl TryFrom<u8> for SysctlKey {
             1 => Ok(Self::Ipv4Forward),
             2 => Ok(Self::AllRpFilter),
             3 => Ok(Self::CandyRpFilter),
+            4 => Ok(Self::CandyDisableIpv6),
             _ => Err(NetworkError::Journal),
         }
     }

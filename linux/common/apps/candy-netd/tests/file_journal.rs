@@ -1,4 +1,7 @@
-use candy_netd::{FileNetworkJournal, NetworkJournal, TransactionPhase, TransactionRecord};
+use candy_netd::{
+    FileNetworkJournal, NetworkJournal, SysctlChange, SysctlKey, TransactionPhase,
+    TransactionRecord,
+};
 use candy_netd_proto::{
     FirewallPolicy, Ipv4Prefix, LeaseOwner, PrepareDeclaration, RouteDeclaration, RouteKind,
     UnderlayExclusion, UnderlayKind, CANDY_TABLE_MIN,
@@ -124,6 +127,42 @@ fn journal_round_trips_failed_prefixes_v4() {
     ];
     journal.store(&value).unwrap();
     assert_eq!(&fs::read(&path).unwrap()[..8], b"CNDJNL04");
+    assert_eq!(journal.load().unwrap(), Some(value));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn journal_round_trips_all_managed_sysctls() {
+    let directory = test_directory().with_extension("four-sysctls");
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = directory.join("state.journal");
+    let mut journal = FileNetworkJournal::new(path).unwrap();
+    let mut value = record();
+    value.sysctls = vec![
+        SysctlChange {
+            key: SysctlKey::Ipv4Forward,
+            original: 0,
+            applied: 1,
+        },
+        SysctlChange {
+            key: SysctlKey::AllRpFilter,
+            original: 1,
+            applied: 0,
+        },
+        SysctlChange {
+            key: SysctlKey::CandyRpFilter,
+            original: 1,
+            applied: 0,
+        },
+        SysctlChange {
+            key: SysctlKey::CandyDisableIpv6,
+            original: 0,
+            applied: 1,
+        },
+    ];
+    journal.store(&value).unwrap();
     assert_eq!(journal.load().unwrap(), Some(value));
     fs::remove_dir_all(directory).unwrap();
 }

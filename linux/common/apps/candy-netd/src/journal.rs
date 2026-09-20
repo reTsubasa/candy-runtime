@@ -110,7 +110,7 @@ fn encode_record(record: &TransactionRecord) -> Result<Vec<u8>, NetworkError> {
     {
         return Err(NetworkError::Journal);
     }
-    if record.sysctls.len() > 3
+    if record.sysctls.len() > 4
         || !record
             .sysctls
             .windows(2)
@@ -248,7 +248,7 @@ fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, NetworkError> {
         return Err(NetworkError::Journal);
     }
     let sysctl_count = usize::from(bytes[11]);
-    if sysctl_count > 3 {
+    if sysctl_count > 4 {
         return Err(NetworkError::Journal);
     }
     let sysctl_end = 12_usize

@@ -832,6 +832,13 @@ mod backend {
                 push_change(&mut changes, SysctlKey::CandyRpFilter, 0)?;
             }
         }
+        // candy0 carries IPv4 records only. Disable IPv6 on this interface so
+        // kernel-generated link-local traffic cannot enter the IPv4 packet
+        // engine and masquerade as customer packet corruption.
+        let disable_ipv6_path = sysctl_path(SysctlKey::CandyDisableIpv6);
+        if disable_ipv6_path.exists() {
+            push_change(&mut changes, SysctlKey::CandyDisableIpv6, 1)?;
+        }
         Ok(changes)
     }
 
@@ -856,6 +863,7 @@ mod backend {
             SysctlKey::Ipv4Forward => Path::new("/proc/sys/net/ipv4/ip_forward"),
             SysctlKey::AllRpFilter => Path::new("/proc/sys/net/ipv4/conf/all/rp_filter"),
             SysctlKey::CandyRpFilter => Path::new("/proc/sys/net/ipv4/conf/candy0/rp_filter"),
+            SysctlKey::CandyDisableIpv6 => Path::new("/proc/sys/net/ipv6/conf/candy0/disable_ipv6"),
         }
     }
 
@@ -864,7 +872,10 @@ mod backend {
     }
 
     fn read_sysctl_for_restore(key: SysctlKey) -> Result<Option<u8>, NetworkError> {
-        read_sysctl_path(sysctl_path(key), key == SysctlKey::CandyRpFilter)
+        read_sysctl_path(
+            sysctl_path(key),
+            matches!(key, SysctlKey::CandyRpFilter | SysctlKey::CandyDisableIpv6),
+        )
     }
 
     fn read_sysctl_path(path: &Path, missing_is_clean: bool) -> Result<Option<u8>, NetworkError> {
@@ -941,6 +952,14 @@ mod backend {
                 read_sysctl_path(&missing, false),
                 Err(NetworkError::Backend)
             ));
+        }
+
+        #[test]
+        fn ipv4_only_tun_uses_interface_scoped_ipv6_control() {
+            assert_eq!(
+                sysctl_path(SysctlKey::CandyDisableIpv6),
+                Path::new("/proc/sys/net/ipv6/conf/candy0/disable_ipv6")
+            );
         }
     }
 
