@@ -5621,6 +5621,126 @@ exit 17
     }
 
     #[test]
+    fn policy_update_calls_core_without_starting_a_netd_tunnel_transaction() {
+        let (_root, current) = server_runtime_fixture();
+        let mut replacement = current.clone();
+        replacement.generation = current.generation + 1;
+        replacement.config = current.config.with_file_name("policy.toml");
+        replacement.status = current.status.with_file_name("policy.status.json");
+        replacement.activation_descriptor = Some(ActivationDescriptor {
+            schema_version: 1,
+            activation_id: "b".repeat(64),
+            delivery_etag: format!("\"sha256-{}\"", "c".repeat(64)),
+            delivery_sha256: "c".repeat(64),
+            projection_publication_id: "d".repeat(32),
+            projection_content_hash: "e".repeat(64),
+            segment_generation: 1,
+            projection_generation: replacement.generation,
+            core_role: replacement.core_role,
+            core_config: "core.toml".into(),
+            netd_declaration: "declaration.json".into(),
+            grant_refresh_after_unix: 0,
+            grant_expires_at_unix: 0,
+        });
+        write_private(&replacement.config, b"policy_generation = 8\n");
+
+        let netd_listener = UnixListener::bind(&current.socket).unwrap();
+        let netd_task = thread::spawn(move || {
+            let mut operations = Vec::new();
+            for _ in 0..3 {
+                let (stream, _) = netd_listener.accept().unwrap();
+                let request = recv_request(&stream).unwrap();
+                let generation = request.owner.generation;
+                let tun = File::open("/dev/null").unwrap();
+                let (operation, body, fd) = match request.operation {
+                    NetdOperation::Prepare(_) => (
+                        "prepare",
+                        ResponseBody::Prepared {
+                            generation,
+                            tun_fd_attached: true,
+                        },
+                        Some(tun.as_raw_fd()),
+                    ),
+                    NetdOperation::Commit => {
+                        ("commit", ResponseBody::Committed { generation }, None)
+                    }
+                    NetdOperation::LeaseRenew => {
+                        ("lease", ResponseBody::LeaseRenewed { generation }, None)
+                    }
+                    other => panic!("policy update started a netd tunnel operation: {other:?}"),
+                };
+                operations.push(operation);
+                send_response(
+                    &stream,
+                    &NetdResponse {
+                        request_id: request.request_id,
+                        body,
+                    },
+                    fd,
+                )
+                .unwrap();
+            }
+            operations
+        });
+
+        let reload_listener =
+            UnixListener::bind(core_reload_socket(&replacement).unwrap()).unwrap();
+        let expected_config = replacement.config.clone();
+        let expected_status = replacement.status.clone();
+        let tunnel_generation = current.generation;
+        let policy_generation = replacement.generation;
+        let reload_task = thread::spawn(move || {
+            let (mut stream, _) = reload_listener.accept().unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).unwrap();
+            let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(request["action"], "policy_update");
+            assert_eq!(request["config"], expected_config.to_str().unwrap());
+            assert_eq!(request["status"], expected_status.to_str().unwrap());
+            assert!(request.get("transaction_id").is_none());
+            stream
+                .write_all(
+                    &serde_json::to_vec(&serde_json::json!({
+                        "schema_version": 1,
+                        "ok": true,
+                        "generation": tunnel_generation,
+                        "policy_generation": policy_generation,
+                        "error": null
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        });
+
+        let mut child = Command::new("/bin/sleep").arg("10").spawn().unwrap();
+        let core_pid = child.id();
+        let mut netd = NetdClient::new(
+            &current.socket,
+            LeaseOwner {
+                instance_id: [1; 16],
+                pid: std::process::id(),
+                generation: current.generation,
+                lease_deadline_mono_ms: monotonic_ms().unwrap() + current.lease_ms,
+            },
+        );
+        let _prepared = netd
+            .prepare(parse_declaration(&current.declaration).unwrap())
+            .unwrap();
+        netd.commit().unwrap();
+
+        let outcome = policy_update_activation(&current, &replacement, &mut child, &mut netd)
+            .expect("policy-only update should remain on the live tunnel");
+
+        assert_eq!(outcome, PolicyUpdateOutcome::Applied);
+        assert_eq!(child.id(), core_pid);
+        assert!(child.try_wait().unwrap().is_none());
+        assert_eq!(netd_task.join().unwrap(), ["prepare", "commit", "lease"]);
+        reload_task.join().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
     fn core_fencing_token_is_scoped_to_the_writable_sdwan_state_directory() {
         let (root, args) = server_runtime_fixture();
         assert_eq!(
