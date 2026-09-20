@@ -191,7 +191,30 @@ fn real_linux_backend_prepares_commits_and_rolls_back() {
     let journal = FileNetworkJournal::new(state.join("netd.journal")).unwrap();
     let mut transaction = NetworkTransaction::new(backend, journal).unwrap();
     transaction.prepare(owner, declaration).unwrap();
+    let prepared_flags = fs::read_to_string("/sys/class/net/candy0/flags").unwrap();
+    let prepared_flags =
+        u32::from_str_radix(prepared_flags.trim_start_matches("0x").trim(), 16).unwrap();
+    assert_eq!(
+        prepared_flags & nix::libc::IFF_UP as u32,
+        0,
+        "candidate TUN became active before commit"
+    );
+    assert_eq!(
+        fs::read_to_string("/proc/sys/net/ipv6/conf/candy0/disable_ipv6")
+            .unwrap()
+            .trim(),
+        "1",
+        "IPv6 was not disabled before candidate activation"
+    );
     transaction.commit(owner).unwrap();
+    let active_flags = fs::read_to_string("/sys/class/net/candy0/flags").unwrap();
+    let active_flags =
+        u32::from_str_radix(active_flags.trim_start_matches("0x").trim(), 16).unwrap();
+    assert_ne!(
+        active_flags & nix::libc::IFF_UP as u32,
+        0,
+        "committed TUN was not activated"
+    );
     let output = Command::new("ip")
         .args(["-4", "route", "show", "table", "20999"])
         .output()

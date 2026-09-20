@@ -565,7 +565,6 @@ mod backend {
                     .link()
                     .set(
                         LinkUnspec::new_with_index(link.header.index)
-                            .up()
                             .mtu(u32::from(plan.route_mtu))
                             .build(),
                     )
