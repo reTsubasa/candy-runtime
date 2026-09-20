@@ -11,6 +11,7 @@ const CATALOG_RAW_ROOT: &str = "https://raw.githubusercontent.com/reTsubasa/cand
 const RELEASE_ROOT: &str = "https://github.com/reTsubasa/candy-release/releases/download/";
 const MAX_BUNDLE: u64 = 256 * 1024 * 1024;
 const CATALOG_FETCH_ATTEMPTS: usize = 3;
+const CATALOG_CACHE_SECONDS: u64 = 120;
 const OPENWRT_UPDATE_MANAGER: &str = "/usr/libexec/candy-update-manager";
 const OPENWRT_CLOUD_SYNC_INIT: &str = "/etc/init.d/candy-cloud-sync";
 const OPENWRT_CLOUD_SYNC_BIN: &str = "/usr/libexec/candy-cloud-sync";
@@ -345,51 +346,97 @@ fn catalog_attempt_urls(commit: &str, nonce: u128, attempt: usize) -> (String, S
     )
 }
 
+fn catalog_cache_fresh(checked_at: u64, now: u64) -> bool {
+    checked_at > 0 && checked_at <= now && now.saturating_sub(checked_at) < CATALOG_CACHE_SECONDS
+}
+
+fn verify_catalog_signature(root: &Path, catalog: &Path, signature: &Path) -> bool {
+    ProcessCommand::new("usign")
+        .args([
+            "-V",
+            "-p",
+            root.join("catalog.pub").to_str().unwrap_or_default(),
+            "-m",
+            catalog.to_str().unwrap_or_default(),
+            "-x",
+            signature.to_str().unwrap_or_default(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn validate_catalog_sequence(root: &Path, value: &serde_json::Value) -> Result<u64> {
+    let sequence = value["sequence"]
+        .as_u64()
+        .context("catalog_sequence_missing")?;
+    let previous = fs::read_to_string(root.join("catalog-sequence"))
+        .unwrap_or_default()
+        .parse::<u64>()
+        .unwrap_or(0);
+    if sequence < previous || value["schema_version"] != 1 || value["channel"] != "stable" {
+        bail!("catalog_rollback_or_invalid_schema");
+    }
+    Ok(sequence)
+}
+
+fn cached_catalog(root: &Path, now: u64) -> Option<serde_json::Value> {
+    let checked_at = fs::read_to_string(root.join("catalog-checked-at"))
+        .ok()?
+        .parse::<u64>()
+        .ok()?;
+    if !catalog_cache_fresh(checked_at, now) {
+        return None;
+    }
+    let catalog_path = root.join("catalog.json");
+    let signature_path = root.join("catalog.sig");
+    if !verify_catalog_signature(root, &catalog_path, &signature_path) {
+        return None;
+    }
+    let value: serde_json::Value = read_bounded_json(&catalog_path, 4 * 1024 * 1024).ok()?;
+    let sequence = validate_catalog_sequence(root, &value).ok()?;
+    let recorded = fs::read_to_string(root.join("catalog-sequence"))
+        .ok()?
+        .parse::<u64>()
+        .ok()?;
+    (sequence == recorded).then_some(value)
+}
+
 fn catalog(root: &Path) -> Result<serde_json::Value> {
     let client = Client::builder()
         .https_only(true)
+        .user_agent(concat!("candy-runtime/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(180))
         .connect_timeout(Duration::from_secs(10))
         .build()?;
     atomic_bytes(&root.join("catalog.pub"), CATALOG_KEY.as_bytes(), 0o600)?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    if let Some(value) = cached_catalog(root, now) {
+        return Ok(value);
+    }
+    let reference_path = root.join("catalog.download.ref.json");
+    let catalog_path = root.join("catalog.download.json");
+    let signature_path = root.join("catalog.download.sig");
     let mut verified = false;
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     for attempt in 1..=CATALOG_FETCH_ATTEMPTS {
         fetch(
             &client,
             &catalog_ref_attempt_url(nonce, attempt),
-            &root.join("catalog-ref.json"),
+            &reference_path,
             64 * 1024,
         )?;
-        let reference: serde_json::Value =
-            read_bounded_json(&root.join("catalog-ref.json"), 64 * 1024)?;
+        let reference: serde_json::Value = read_bounded_json(&reference_path, 64 * 1024)?;
         let commit = reference["object"]["sha"]
             .as_str()
             .filter(|value| git_object_id(value))
             .context("catalog_ref_invalid_commit")?;
         let (catalog_url, signature_url) = catalog_attempt_urls(commit, nonce, attempt);
-        fetch(
-            &client,
-            &catalog_url,
-            &root.join("catalog.json"),
-            4 * 1024 * 1024,
-        )?;
-        fetch(&client, &signature_url, &root.join("catalog.sig"), 4096)?;
-        if command(
-            "usign",
-            &[
-                "-V",
-                "-p",
-                root.join("catalog.pub").to_str().context("path")?,
-                "-m",
-                root.join("catalog.json").to_str().context("path")?,
-                "-x",
-                root.join("catalog.sig").to_str().context("path")?,
-            ],
-            root,
-        )
-        .is_ok()
-        {
+        fetch(&client, &catalog_url, &catalog_path, 4 * 1024 * 1024)?;
+        fetch(&client, &signature_url, &signature_path, 4096)?;
+        if verify_catalog_signature(root, &catalog_path, &signature_path) {
             verified = true;
             break;
         }
@@ -402,20 +449,26 @@ fn catalog(root: &Path) -> Result<serde_json::Value> {
     if !verified {
         bail!("stage=catalog_signature error_code=signature_verification_failed");
     }
-    let value: serde_json::Value = read_bounded_json(&root.join("catalog.json"), 4 * 1024 * 1024)?;
-    let sequence = value["sequence"]
-        .as_u64()
-        .context("catalog_sequence_missing")?;
-    let previous = fs::read_to_string(root.join("catalog-sequence"))
-        .unwrap_or_default()
-        .parse::<u64>()
-        .unwrap_or(0);
-    if sequence < previous || value["schema_version"] != 1 || value["channel"] != "stable" {
-        bail!("catalog_rollback_or_invalid_schema");
-    }
+    let value: serde_json::Value = read_bounded_json(&catalog_path, 4 * 1024 * 1024)?;
+    let sequence = validate_catalog_sequence(root, &value)?;
+    atomic_bytes(
+        &root.join("catalog.json"),
+        &read_bounded(&catalog_path, 4 * 1024 * 1024)?,
+        0o600,
+    )?;
+    atomic_bytes(
+        &root.join("catalog.sig"),
+        &read_bounded(&signature_path, 4096)?,
+        0o600,
+    )?;
     atomic_bytes(
         &root.join("catalog-sequence"),
         sequence.to_string().as_bytes(),
+        0o600,
+    )?;
+    atomic_bytes(
+        &root.join("catalog-checked-at"),
+        now.to_string().as_bytes(),
         0o600,
     )?;
     Ok(value)
@@ -1400,6 +1453,11 @@ mod tests {
         assert!(git_object_id(&"a".repeat(64)));
         assert!(!git_object_id("ABCDEF0123456789abcdef0123456789abcdef01"));
         assert!(!git_object_id("../main"));
+        assert!(catalog_cache_fresh(100, 100));
+        assert!(catalog_cache_fresh(100, 219));
+        assert!(!catalog_cache_fresh(100, 220));
+        assert!(!catalog_cache_fresh(100, 99));
+        assert!(!catalog_cache_fresh(0, 1));
         let ref_url = catalog_ref_attempt_url(123, 2);
         assert_eq!(
             ref_url,
