@@ -1729,7 +1729,12 @@ enum PolicyUpdateOutcome {
 }
 
 fn tunnel_declaration_changed(current: &RuntimeArgs, replacement: &RuntimeArgs) -> Result<bool> {
-    Ok(parse_declaration(&current.declaration)? != parse_declaration(&replacement.declaration)?)
+    let current = parse_declaration(&current.declaration)?;
+    let replacement = parse_declaration(&replacement.declaration)?;
+    Ok(current.table_id != replacement.table_id
+        || current.overlay_router_ipv4 != replacement.overlay_router_ipv4
+        || current.effective_mtu != replacement.effective_mtu
+        || current.exclusions != replacement.exclusions)
 }
 
 fn policy_update_activation(
@@ -1743,6 +1748,19 @@ fn policy_update_activation(
     // a policy publication into a data-plane transaction.
     if tunnel_declaration_changed(current, replacement)? {
         return Ok(PolicyUpdateOutcome::RequiresTunnelReplacement);
+    }
+    let current_declaration = parse_declaration(&current.declaration)?;
+    let replacement_declaration = parse_declaration(&replacement.declaration)?;
+    let netd_policy_changed = current_declaration.routes != replacement_declaration.routes
+        || current_declaration.firewall != replacement_declaration.firewall;
+    if netd_policy_changed {
+        if let Err(error) = netd.update_policy(replacement_declaration) {
+            eprintln!(
+                "level=warn event=sdwan_policy_netd_update_retry error_code=netd_policy_update_failed error={}",
+                sanitize_log_value(&format!("{error:?}"))
+            );
+            return Ok(PolicyUpdateOutcome::Retry);
+        }
     }
     let mut request_args = replacement.clone();
     request_args.generation = current.generation;
@@ -1776,9 +1794,15 @@ fn policy_update_activation(
                 .downcast_ref::<CoreReloadRejected>()
                 .is_some_and(|rejected| rejected.replacement_required) =>
         {
+            if netd_policy_changed {
+                let _ = netd.update_policy(current_declaration.clone());
+            }
             Ok(PolicyUpdateOutcome::RequiresTunnelReplacement)
         }
         Err(error) if error.downcast_ref::<CoreReloadRejected>().is_some() => {
+            if netd_policy_changed {
+                let _ = netd.update_policy(current_declaration.clone());
+            }
             eprintln!(
                 "level=warn event=sdwan_policy_hot_update_rejected error_code=policy_update_rejected error={}",
                 sanitize_log_value(&format!("{error:#}"))
@@ -1786,6 +1810,9 @@ fn policy_update_activation(
             Ok(PolicyUpdateOutcome::Rejected)
         }
         Err(error) => {
+            if netd_policy_changed {
+                let _ = netd.update_policy(current_declaration);
+            }
             eprintln!(
                 "level=warn event=sdwan_policy_hot_update_retry error_code=policy_update_transport_pending error={}",
                 sanitize_log_value(&format!("{error:#}"))
@@ -5622,11 +5649,12 @@ exit 17
 
     #[test]
     fn policy_update_calls_core_without_starting_a_netd_tunnel_transaction() {
-        let (_root, current) = server_runtime_fixture();
+        let (root, current) = server_runtime_fixture();
         let mut replacement = current.clone();
         replacement.generation = current.generation + 1;
         replacement.config = current.config.with_file_name("policy.toml");
         replacement.status = current.status.with_file_name("policy.status.json");
+        replacement.declaration = root.path().join("policy-declaration.json");
         replacement.activation_descriptor = Some(ActivationDescriptor {
             schema_version: 1,
             activation_id: "b".repeat(64),
@@ -5643,11 +5671,15 @@ exit 17
             grant_expires_at_unix: 0,
         });
         write_private(&replacement.config, b"policy_generation = 8\n");
+        write_private(
+            &replacement.declaration,
+            br#"{"table_id":20000,"overlay_router_ipv4":"10.250.0.1","effective_mtu":1180,"routes":[{"prefix":"10.0.0.0/24","kind":"local"}],"exclusions":[{"prefix":"198.51.100.1/32","kind":"cloud-api"}],"firewall":{"allow_forward":false,"clamp_tcp_mss":true,"require_ipv4_forwarding":true,"manage_rp_filter":true}}"#,
+        );
 
         let netd_listener = UnixListener::bind(&current.socket).unwrap();
         let netd_task = thread::spawn(move || {
             let mut operations = Vec::new();
-            for _ in 0..3 {
+            for _ in 0..4 {
                 let (stream, _) = netd_listener.accept().unwrap();
                 let request = recv_request(&stream).unwrap();
                 let generation = request.owner.generation;
@@ -5667,6 +5699,11 @@ exit 17
                     NetdOperation::LeaseRenew => {
                         ("lease", ResponseBody::LeaseRenewed { generation }, None)
                     }
+                    NetdOperation::PolicyUpdate(_) => (
+                        "policy_update",
+                        ResponseBody::PolicyUpdated { generation },
+                        None,
+                    ),
                     other => panic!("policy update started a netd tunnel operation: {other:?}"),
                 };
                 operations.push(operation);
@@ -5734,7 +5771,10 @@ exit 17
         assert_eq!(outcome, PolicyUpdateOutcome::Applied);
         assert_eq!(child.id(), core_pid);
         assert!(child.try_wait().unwrap().is_none());
-        assert_eq!(netd_task.join().unwrap(), ["prepare", "commit", "lease"]);
+        assert_eq!(
+            netd_task.join().unwrap(),
+            ["prepare", "commit", "policy_update", "lease"]
+        );
         reload_task.join().unwrap();
         child.kill().unwrap();
         child.wait().unwrap();

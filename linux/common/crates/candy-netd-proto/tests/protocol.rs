@@ -258,6 +258,43 @@ fn active_generation_rejects_replacement_activation_takeover() {
 }
 
 #[test]
+fn active_policy_update_changes_routes_and_firewall_without_changing_tunnel() {
+    let prepare = NetdRequest {
+        request_id: 1,
+        owner: owner(),
+        operation: NetdOperation::Prepare(declaration()),
+    };
+    let commit = NetdRequest {
+        request_id: 2,
+        owner: owner(),
+        operation: NetdOperation::Commit,
+    };
+    let mut session = NetdSession::new();
+    session.apply(&prepare).unwrap();
+    session.apply(&commit).unwrap();
+
+    let mut policy = declaration();
+    policy.routes[1].prefix = prefix([10, 9, 0, 0], 16);
+    policy.firewall.allow_forward = false;
+    let update = NetdRequest {
+        request_id: 3,
+        owner: owner(),
+        operation: NetdOperation::PolicyUpdate(policy),
+    };
+    session.apply(&update).unwrap();
+
+    let mut invalid = update.clone();
+    let NetdOperation::PolicyUpdate(ref mut declaration) = invalid.operation else {
+        unreachable!();
+    };
+    declaration.effective_mtu += 1;
+    assert_eq!(
+        session.apply(&invalid).unwrap_err(),
+        NetdSessionError::InvalidTransition
+    );
+}
+
+#[test]
 fn suspended_hot_reconfigure_switches_generation_atomically() {
     let prepare = NetdRequest {
         request_id: 1,

@@ -244,12 +244,21 @@ pub enum NetdOperation {
     Rollback,
     Status,
     LeaseRenew,
-    MtuUpdate { effective_mtu: u16 },
+    MtuUpdate {
+        effective_mtu: u16,
+    },
     Suspend,
     Reconfigure(PrepareDeclaration),
     Resume,
-    Drain { now_mono_ms: u64 },
-    WithdrawPrefixes { prefixes: Vec<Ipv4Prefix> },
+    Drain {
+        now_mono_ms: u64,
+    },
+    WithdrawPrefixes {
+        prefixes: Vec<Ipv4Prefix>,
+    },
+    /// Replace only the Candy-owned route/firewall policy while retaining the
+    /// active TUN link, lease owner, and transport generation.
+    PolicyUpdate(PrepareDeclaration),
 }
 
 impl NetdOperation {
@@ -266,6 +275,7 @@ impl NetdOperation {
             Self::Resume => 9,
             Self::Drain { .. } => 10,
             Self::WithdrawPrefixes { .. } => 11,
+            Self::PolicyUpdate(_) => 12,
         }
     }
 }
@@ -283,7 +293,10 @@ impl NetdRequest {
             return Err(NetdProtocolError::InvalidRequest);
         }
         self.owner.validate()?;
-        if let NetdOperation::Prepare(value) | NetdOperation::Reconfigure(value) = &self.operation {
+        if let NetdOperation::Prepare(value)
+        | NetdOperation::Reconfigure(value)
+        | NetdOperation::PolicyUpdate(value) = &self.operation
+        {
             value.validate()?;
         }
         if let NetdOperation::MtuUpdate { effective_mtu } = &self.operation {
@@ -311,7 +324,10 @@ impl NetdRequest {
         varint(u64::from(self.owner.pid), &mut out);
         varint(self.owner.generation, &mut out);
         varint(self.owner.lease_deadline_mono_ms, &mut out);
-        if let NetdOperation::Prepare(value) | NetdOperation::Reconfigure(value) = &self.operation {
+        if let NetdOperation::Prepare(value)
+        | NetdOperation::Reconfigure(value)
+        | NetdOperation::PolicyUpdate(value) = &self.operation
+        {
             encode_declaration(value, &mut out);
         }
         if let NetdOperation::MtuUpdate { effective_mtu } = &self.operation {
@@ -375,6 +391,7 @@ impl NetdRequest {
                 }
                 NetdOperation::WithdrawPrefixes { prefixes }
             }
+            12 => NetdOperation::PolicyUpdate(decode_declaration(&mut reader)?),
             _ => return Err(NetdProtocolError::UnknownEnum),
         };
         reader.finish()?;
@@ -562,6 +579,9 @@ pub enum ResponseBody {
         generation: u64,
         count: u64,
     },
+    PolicyUpdated {
+        generation: u64,
+    },
     Error(ErrorCode),
 }
 
@@ -591,6 +611,7 @@ impl NetdResponse {
             ResponseBody::Resumed { .. } => 10,
             ResponseBody::Drained { .. } => 11,
             ResponseBody::PrefixesWithdrawn { .. } => 12,
+            ResponseBody::PolicyUpdated { .. } => 13,
         };
         varint(tag, &mut out);
         varint(self.request_id, &mut out);
@@ -620,6 +641,10 @@ impl NetdResponse {
                 valid_generation(generation)?;
                 varint(generation, &mut out);
                 varint(count, &mut out);
+            }
+            ResponseBody::PolicyUpdated { generation } => {
+                valid_generation(generation)?;
+                varint(generation, &mut out);
             }
             ResponseBody::Status { phase, generation } => {
                 if phase != SessionPhase::Stopped {
@@ -692,6 +717,9 @@ impl NetdResponse {
             12 => ResponseBody::PrefixesWithdrawn {
                 generation: reader.varint()?,
                 count: reader.varint()?,
+            },
+            13 => ResponseBody::PolicyUpdated {
+                generation: reader.varint()?,
             },
             _ => return Err(NetdProtocolError::UnknownEnum),
         };
@@ -936,6 +964,27 @@ impl NetdSession {
                 if self.phase != SessionPhase::Active {
                     return Err(NetdSessionError::InvalidTransition);
                 }
+                Ok(())
+            }
+            NetdOperation::PolicyUpdate(declaration) => {
+                if !matches!(self.phase, SessionPhase::Active | SessionPhase::Suspended) {
+                    return Err(NetdSessionError::InvalidTransition);
+                }
+                let current = self
+                    .declaration
+                    .as_ref()
+                    .ok_or(NetdSessionError::InvalidTransition)?;
+                // Policy updates may only alter route selectors and firewall
+                // rules.  Tunnel identity, link parameters, and underlay
+                // exclusions are immutable for the lifetime of a session.
+                if current.table_id != declaration.table_id
+                    || current.overlay_router_ipv4 != declaration.overlay_router_ipv4
+                    || current.effective_mtu != declaration.effective_mtu
+                    || current.exclusions != declaration.exclusions
+                {
+                    return Err(NetdSessionError::InvalidTransition);
+                }
+                self.declaration = Some(declaration.clone());
                 Ok(())
             }
         }

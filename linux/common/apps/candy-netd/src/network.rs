@@ -212,6 +212,13 @@ pub trait NetworkController {
     ) -> Result<(), NetworkError> {
         Err(NetworkError::InvalidTransition)
     }
+    fn update_policy(
+        &mut self,
+        _owner: LeaseOwner,
+        _declaration: PrepareDeclaration,
+    ) -> Result<(), NetworkError> {
+        Err(NetworkError::InvalidTransition)
+    }
     fn resume(&mut self, _owner: LeaseOwner) -> Result<(), NetworkError> {
         Err(NetworkError::InvalidTransition)
     }
@@ -576,6 +583,20 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         let Some(record) = &self.record else {
             return Ok(false);
         };
+        // Policy-only updates use the same durable candidate slot as tunnel
+        // replacements, but their immutable tunnel identity is unchanged.
+        // Recover those in place: a crash must never tear down the live TUN.
+        if record.phase == TransactionPhase::RollingBack
+            && record.recovery_candidate_owner == Some(record.owner)
+            && record.completed_steps & (STEP_LINK | STEP_ROUTES | STEP_FIREWALL)
+                == (STEP_LINK | STEP_ROUTES | STEP_FIREWALL)
+            && record
+                .recovery_candidate
+                .as_ref()
+                .is_some_and(|candidate| same_tunnel_declaration(&record.declaration, candidate))
+        {
+            return self.recover_policy_update();
+        }
         // A replacement candidate is staged beside the last-good declaration.
         // If the process disappears before commit, discard only the candidate
         // and leave the old owner active; do not run the normal full cleanup.
@@ -626,6 +647,38 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             return Ok(false);
         }
         self.cleanup_record()?;
+        Ok(true)
+    }
+
+    fn recover_policy_update(&mut self) -> Result<bool, NetworkError> {
+        let record = self
+            .record
+            .as_ref()
+            .ok_or(NetworkError::InvalidTransition)?
+            .clone();
+        let candidate = record
+            .recovery_candidate
+            .as_ref()
+            .ok_or(NetworkError::InvalidTransition)?;
+        // Candidate installation is idempotent from the backend's point of
+        // view. Remove any partial candidate, then restore the last-good
+        // policy. Keep RollingBack intent if either operation fails so the
+        // next netd instance retries without touching the tunnel.
+        self.backend.remove_firewall(candidate)?;
+        self.backend.remove_routes(candidate)?;
+        self.backend
+            .reconcile_routes(&record.declaration, &record.failed_prefixes)?;
+        self.backend.prepare_firewall(&record.declaration)?;
+        let mut restored = record;
+        restored.recovery_candidate = None;
+        restored.recovery_candidate_owner = None;
+        restored.phase = if restored.completed_steps & STEP_POLICY_RULE != 0 {
+            TransactionPhase::Active
+        } else {
+            TransactionPhase::Suspended
+        };
+        self.journal.store(&restored)?;
+        self.record = Some(restored);
         Ok(true)
     }
 
@@ -779,6 +832,114 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             };
         }
         self.record = Some(replacement_record);
+        Ok(())
+    }
+
+    pub fn update_policy(
+        &mut self,
+        owner: LeaseOwner,
+        declaration: PrepareDeclaration,
+    ) -> Result<(), NetworkError> {
+        declaration.validate().map_err(|_| NetworkError::Backend)?;
+        let record = self
+            .record
+            .as_ref()
+            .ok_or(NetworkError::InvalidTransition)?;
+        ensure_owner(record.owner, owner)?;
+        if !matches!(
+            record.phase,
+            TransactionPhase::Active | TransactionPhase::Suspended
+        ) || record.recovery_candidate.is_some()
+            || record.declaration.table_id != declaration.table_id
+            || record.declaration.overlay_router_ipv4 != declaration.overlay_router_ipv4
+            || record.declaration.effective_mtu != declaration.effective_mtu
+            || record.declaration.exclusions != declaration.exclusions
+        {
+            return Err(NetworkError::InvalidTransition);
+        }
+        if record.declaration == declaration {
+            return Ok(());
+        }
+        let previous_record = record.clone();
+        let previous = previous_record.declaration.clone();
+        let retained_failed_prefixes: Vec<_> = previous_record
+            .failed_prefixes
+            .iter()
+            .copied()
+            .filter(|prefix| {
+                declaration.routes.iter().any(|route| {
+                    route.prefix == *prefix
+                        && matches!(
+                            route.kind,
+                            RouteKind::Remote
+                                | RouteKind::RemoteEgress
+                                | RouteKind::RemoteEgressGateway
+                        )
+                })
+            })
+            .collect();
+        {
+            let record = self
+                .record
+                .as_mut()
+                .ok_or(NetworkError::InvalidTransition)?;
+            record.phase = TransactionPhase::RollingBack;
+            record.recovery_candidate = Some(declaration.clone());
+            record.recovery_candidate_owner = Some(owner);
+            self.journal.store(record)?;
+        }
+        let applied = (|| {
+            self.backend.remove_firewall(&previous)?;
+            self.backend.remove_routes(&previous)?;
+            self.backend
+                .reconcile_routes(&declaration, &retained_failed_prefixes)?;
+            self.backend.prepare_firewall(&declaration)
+        })();
+        if let Err(error) = applied {
+            return match self.restore_policy_after_update(&previous_record, &declaration) {
+                Ok(()) => Err(error),
+                Err(recovery_error) => Err(recovery_error),
+            };
+        }
+        let mut updated = previous_record.clone();
+        updated.declaration = declaration;
+        updated.failed_prefixes = retained_failed_prefixes;
+        updated.recovery_candidate = None;
+        updated.recovery_candidate_owner = None;
+        if let Err(error) = self.journal.store(&updated) {
+            return match self.restore_policy_after_update(&previous_record, &updated.declaration) {
+                Ok(()) => Err(error),
+                Err(recovery_error) => Err(recovery_error),
+            };
+        }
+        self.record = Some(updated);
+        Ok(())
+    }
+
+    fn restore_policy_after_update(
+        &mut self,
+        previous_record: &TransactionRecord,
+        candidate: &PrepareDeclaration,
+    ) -> Result<(), NetworkError> {
+        let mut first_error = None;
+        for result in [
+            self.backend.remove_firewall(candidate),
+            self.backend.remove_routes(candidate),
+            self.backend.reconcile_routes(
+                &previous_record.declaration,
+                &previous_record.failed_prefixes,
+            ),
+            self.backend.prepare_firewall(&previous_record.declaration),
+        ] {
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        self.journal.store(previous_record)?;
+        self.record = Some(previous_record.clone());
         Ok(())
     }
 
@@ -1115,6 +1276,14 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkController for NetworkTransact
         Self::reconfigure(self, owner, declaration)
     }
 
+    fn update_policy(
+        &mut self,
+        owner: LeaseOwner,
+        declaration: PrepareDeclaration,
+    ) -> Result<(), NetworkError> {
+        Self::update_policy(self, owner, declaration)
+    }
+
     fn resume(&mut self, owner: LeaseOwner) -> Result<(), NetworkError> {
         Self::resume(self, owner)
     }
@@ -1149,6 +1318,13 @@ fn ensure_reconfigure_owner(retained: LeaseOwner, request: LeaseOwner) -> Result
     } else {
         Err(NetworkError::Conflict)
     }
+}
+
+fn same_tunnel_declaration(current: &PrepareDeclaration, candidate: &PrepareDeclaration) -> bool {
+    current.table_id == candidate.table_id
+        && current.overlay_router_ipv4 == candidate.overlay_router_ipv4
+        && current.effective_mtu == candidate.effective_mtu
+        && current.exclusions == candidate.exclusions
 }
 
 pub fn restore_sysctl_value<'a>(

@@ -499,6 +499,119 @@ fn commit_installs_policy_rule_only_after_all_prepared_state() {
 }
 
 #[test]
+fn policy_update_replaces_only_routes_and_firewall_and_keeps_active_owner() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let journal = MemoryJournal::default();
+    let mut transaction =
+        NetworkTransaction::new(RecordingBackend(events.clone()), journal.clone()).unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+    events.borrow_mut().clear();
+
+    let mut policy = declaration();
+    policy.routes[1] = RouteDeclaration {
+        prefix: Ipv4Prefix::new([10, 9, 0, 0], 16).unwrap(),
+        kind: RouteKind::Remote,
+    };
+    policy.firewall.allow_forward = false;
+    transaction.update_policy(owner(), policy.clone()).unwrap();
+
+    assert_eq!(
+        *events.borrow(),
+        [
+            "remove_firewall",
+            "remove_routes",
+            "reconcile_routes",
+            "prepare_firewall"
+        ]
+    );
+    let record = journal.load().unwrap().unwrap();
+    assert_eq!(record.phase, TransactionPhase::Active);
+    assert_eq!(record.owner, owner());
+    assert_eq!(record.declaration, policy);
+    assert!(record.recovery_candidate.is_none());
+}
+
+#[test]
+fn failed_policy_update_restores_last_good_active_policy() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let armed = Rc::new(Cell::new(false));
+    let journal = MemoryJournal::default();
+    let mut transaction = NetworkTransaction::new(
+        ReconfigureRecoveryFailingBackend {
+            inner: RecordingBackend(events.clone()),
+            armed: armed.clone(),
+            fail_restore: false,
+        },
+        journal.clone(),
+    )
+    .unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+
+    let mut policy = declaration();
+    policy.routes[1] = RouteDeclaration {
+        prefix: Ipv4Prefix::new([10, 3, 0, 0], 16).unwrap(),
+        kind: RouteKind::Remote,
+    };
+    armed.set(true);
+    assert!(transaction.update_policy(owner(), policy).is_err());
+
+    let record = journal.load().unwrap().unwrap();
+    assert_eq!(record.phase, TransactionPhase::Active);
+    assert_eq!(record.owner, owner());
+    assert_eq!(record.declaration, declaration());
+    assert!(record.recovery_candidate.is_none());
+    events.borrow_mut().clear();
+    transaction.renew_lease(owner()).unwrap();
+    assert!(events.borrow().is_empty());
+}
+
+#[test]
+fn kill9_during_policy_update_restores_policy_without_tearing_down_tunnel() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut journal = MemoryJournal::default();
+    let mut transaction =
+        NetworkTransaction::new(RecordingBackend(events.clone()), journal.clone()).unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+
+    let mut candidate = declaration();
+    candidate.routes[1] = RouteDeclaration {
+        prefix: Ipv4Prefix::new([10, 9, 0, 0], 16).unwrap(),
+        kind: RouteKind::Remote,
+    };
+    let mut interrupted = journal.load().unwrap().unwrap();
+    interrupted.phase = TransactionPhase::RollingBack;
+    interrupted.recovery_candidate = Some(candidate);
+    interrupted.recovery_candidate_owner = Some(owner());
+    journal.store(&interrupted).unwrap();
+    drop(transaction);
+    events.borrow_mut().clear();
+
+    let mut recovered =
+        NetworkTransaction::new(RecordingBackend(events.clone()), journal.clone()).unwrap();
+    assert!(recovered.recover_orphan(false, 0).unwrap());
+
+    assert_eq!(
+        *events.borrow(),
+        [
+            "remove_firewall",
+            "remove_routes",
+            "reconcile_routes",
+            "prepare_firewall"
+        ]
+    );
+    assert!(!events.borrow().contains(&"deactivate_link"));
+    assert!(!events.borrow().contains(&"remove_link"));
+    assert!(!events.borrow().contains(&"remove_policy_rule"));
+    let restored = journal.load().unwrap().unwrap();
+    assert_eq!(restored.phase, TransactionPhase::Active);
+    assert_eq!(restored.declaration, declaration());
+    assert!(restored.recovery_candidate.is_none());
+}
+
+#[test]
 fn failed_prefix_updates_are_scoped_persisted_and_restore_only_healthy_routes() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let journal = MemoryJournal::default();

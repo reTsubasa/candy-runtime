@@ -175,6 +175,21 @@ impl NetdClient {
         Ok(effective_mtu)
     }
 
+    /// Atomically replace Candy-owned policy routes and firewall rules without
+    /// changing the active tunnel generation or lease owner.
+    pub fn update_policy(&mut self, declaration: PrepareDeclaration) -> Result<u64, IpcError> {
+        if !matches!(self.phase, ClientPhase::Active | ClientPhase::Suspended) {
+            return Err(IpcError::InvalidTransition);
+        }
+        self.exchange_generation(
+            NetdOperation::PolicyUpdate(declaration),
+            |body| match body {
+                ResponseBody::PolicyUpdated { generation } => Some(generation),
+                _ => None,
+            },
+        )
+    }
+
     pub fn suspend(&mut self) -> Result<u64, IpcError> {
         if self.phase != ClientPhase::Active {
             return Err(IpcError::InvalidTransition);

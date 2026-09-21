@@ -84,6 +84,7 @@ fn transaction_requires_exact_responses_and_preserves_lifecycle_order() {
                 }
                 NetdOperation::Suspend
                 | NetdOperation::Reconfigure(_)
+                | NetdOperation::PolicyUpdate(_)
                 | NetdOperation::Resume
                 | NetdOperation::Drain { .. } => {
                     panic!("unexpected hot transition operation")

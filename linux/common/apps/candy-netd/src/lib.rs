@@ -395,6 +395,7 @@ impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
             NetdOperation::Resume => "resume",
             NetdOperation::Drain { .. } => "drain",
             NetdOperation::WithdrawPrefixes { .. } => "withdraw_prefixes",
+            NetdOperation::PolicyUpdate(_) => "policy_update",
         };
         let (response, descriptor) = self.process(request, peer)?;
         let duration_ms = started.elapsed().as_millis();
@@ -404,6 +405,9 @@ impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
             ),
             ResponseBody::PrefixesWithdrawn { count, .. } => eprintln!(
                 "level=info component=candy-netd event=request_completed request_id={request_id} generation={generation} operation={operation} duration_ms={duration_ms} withdrawn_prefix_count={count}"
+            ),
+            ResponseBody::PolicyUpdated { .. } => eprintln!(
+                "level=info component=candy-netd event=request_completed request_id={request_id} generation={generation} operation={operation} duration_ms={duration_ms}"
             ),
             _ if !matches!(operation, "status" | "lease_renew") => eprintln!(
                 "level=info component=candy-netd event=request_completed request_id={request_id} generation={generation} operation={operation} duration_ms={duration_ms}"
@@ -569,6 +573,20 @@ impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
                     ));
                 }
                 ResponseBody::Reconfigured {
+                    generation: request.owner.generation,
+                }
+            }
+            NetdOperation::PolicyUpdate(declaration) => {
+                if let Err(error) = self
+                    .network
+                    .update_policy(request.owner, declaration.clone())
+                {
+                    return Ok((
+                        error_response(request.request_id, network_error_code(error)),
+                        None,
+                    ));
+                }
+                ResponseBody::PolicyUpdated {
                     generation: request.owner.generation,
                 }
             }
