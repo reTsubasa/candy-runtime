@@ -551,14 +551,14 @@ mod backend {
                 RuleAttribute::Destination(std::net::IpAddr::V4(value)) => Some(*value),
                 _ => None,
             });
-            let source = match (source, rule.header.source_prefix_length) {
+            let source = match (source, rule.header.src_len) {
                 (Some(value), prefix_len) => {
                     Some(Ipv4Prefix::new(value.octets(), prefix_len).ok()?)
                 }
                 (None, 0) => None,
                 _ => return None,
             };
-            let destination = match (destination, rule.header.destination_prefix_length) {
+            let destination = match (destination, rule.header.dst_len) {
                 (Some(value), prefix_len) => Ipv4Prefix::new(value.octets(), prefix_len).ok()?,
                 (None, 0) => Ipv4Prefix::new([0, 0, 0, 0], 0).ok()?,
                 _ => return None,
