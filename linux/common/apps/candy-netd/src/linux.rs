@@ -52,6 +52,14 @@ mod backend {
         )
     }
 
+    fn rule_add_is_idempotent(error: &rtnetlink::Error) -> bool {
+        matches!(
+            error,
+            rtnetlink::Error::NetlinkError(message)
+                if message.to_io().raw_os_error() == Some(nix::libc::EEXIST)
+        )
+    }
+
     fn log_route_backend_error(
         stage: &str,
         table: u32,
@@ -514,15 +522,130 @@ mod backend {
                     RuleAttribute::Priority(value) => Some(*value),
                     _ => None,
                 });
-                let table = rule.attributes.iter().find_map(|value| match value {
-                    RuleAttribute::Table(value) => Some(*value),
-                    _ => None,
-                });
+                let table = rule
+                    .attributes
+                    .iter()
+                    .find_map(|value| match value {
+                        RuleAttribute::Table(value) => Some(*value),
+                        _ => None,
+                    })
+                    .or_else(|| (rule.header.table != 0).then_some(u32::from(rule.header.table)));
                 if priority == Some(plan.policy_priority) && table == Some(plan.route_table) {
                     found.push(rule);
                 }
             }
             Ok(found)
+        }
+
+        fn policy_rule_selector(
+            rule: &netlink_packet_route::rule::RuleMessage,
+        ) -> Option<(Option<Ipv4Prefix>, Ipv4Prefix)> {
+            if rule.header.action != RuleAction::ToTable {
+                return None;
+            }
+            let source = rule.attributes.iter().find_map(|value| match value {
+                RuleAttribute::Source(std::net::IpAddr::V4(value)) => Some(*value),
+                _ => None,
+            });
+            let destination = rule.attributes.iter().find_map(|value| match value {
+                RuleAttribute::Destination(std::net::IpAddr::V4(value)) => Some(*value),
+                _ => None,
+            });
+            let source = match (source, rule.header.source_prefix_length) {
+                (Some(value), prefix_len) => {
+                    Some(Ipv4Prefix::new(value.octets(), prefix_len).ok()?)
+                }
+                (None, 0) => None,
+                _ => return None,
+            };
+            let destination = match (destination, rule.header.destination_prefix_length) {
+                (Some(value), prefix_len) => Ipv4Prefix::new(value.octets(), prefix_len).ok()?,
+                (None, 0) => Ipv4Prefix::new([0, 0, 0, 0], 0).ok()?,
+                _ => return None,
+            };
+            Some((source, destination))
+        }
+
+        async fn add_policy_rule(
+            handle: &Handle,
+            plan: &LinuxNetworkPlan,
+            source: Option<Ipv4Prefix>,
+            destination: Ipv4Prefix,
+        ) -> Result<(), NetworkError> {
+            let request = handle
+                .rule()
+                .add()
+                .v4()
+                .destination_prefix(Ipv4Addr::from(destination.network), destination.prefix_len);
+            let request = match source {
+                Some(source) => {
+                    request.source_prefix(Ipv4Addr::from(source.network), source.prefix_len)
+                }
+                None => request,
+            };
+            match request
+                .table_id(plan.route_table)
+                .priority(plan.policy_priority)
+                .action(RuleAction::ToTable)
+                .execute()
+                .await
+            {
+                Ok(()) => Ok(()),
+                Err(error) if rule_add_is_idempotent(&error) => Ok(()),
+                Err(error) => {
+                    eprintln!(
+                        "level=error component=candy-netd event=network_backend_failed stage=policy_rule_add table={} priority={} source={} destination={}/{} cause={error}",
+                        plan.route_table,
+                        plan.policy_priority,
+                        source.map(|value| format!("{}/{}", Ipv4Addr::from(value.network), value.prefix_len)).unwrap_or_else(|| "all".to_string()),
+                        Ipv4Addr::from(destination.network),
+                        destination.prefix_len
+                    );
+                    Err(NetworkError::Backend)
+                }
+            }
+        }
+
+        /// Reconcile the complete Candy-owned selector set for this table.
+        /// This repairs legacy source-restricted egress rules without flushing
+        /// unrelated host policy rules and is safe to replay after a crash.
+        async fn reconcile_policy_rules(
+            handle: &Handle,
+            plan: &LinuxNetworkPlan,
+        ) -> Result<(), NetworkError> {
+            let expected = plan
+                .policy_selectors()
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>();
+            let rules = Self::find_policy_rules(handle, plan).await?;
+            let mut present = std::collections::HashSet::new();
+            let mut stale = Vec::new();
+            for rule in rules {
+                let selector = Self::policy_rule_selector(&rule);
+                if selector.is_some_and(|value| expected.contains(&value) && present.insert(value))
+                {
+                    continue;
+                }
+                stale.push(rule);
+            }
+
+            // Add before deleting stale selectors so an Active policy update
+            // never creates a forwarding gap in the return path.
+            for (source, destination) in expected.difference(&present).copied() {
+                Self::add_policy_rule(handle, plan, source, destination).await?;
+            }
+            for rule in stale {
+                if let Err(error) = handle.rule().del(rule).execute().await {
+                    if !object_missing_is_idempotent(&error) {
+                        eprintln!(
+                            "level=error component=candy-netd event=network_backend_failed stage=policy_rule_stale_delete table={} priority={} cause={error}",
+                            plan.route_table, plan.policy_priority
+                        );
+                        return Err(NetworkError::Backend);
+                    }
+                }
+            }
+            Ok(())
         }
     }
 
@@ -667,28 +790,7 @@ mod backend {
         ) -> Result<(), NetworkError> {
             let plan = Self::plan(declaration)?;
             let handle = self.handle.clone();
-            self.with_async(async move {
-                for (source, destination) in plan.policy_selectors() {
-                    let request = handle.rule().add().v4().destination_prefix(
-                        Ipv4Addr::from(destination.network),
-                        destination.prefix_len,
-                    );
-                    let request = match source {
-                        Some(source) => {
-                            request.source_prefix(Ipv4Addr::from(source.network), source.prefix_len)
-                        }
-                        None => request,
-                    };
-                    request
-                        .table_id(plan.route_table)
-                        .priority(plan.policy_priority)
-                        .action(RuleAction::ToTable)
-                        .execute()
-                        .await
-                        .map_err(|_| NetworkError::Backend)?;
-                }
-                Ok(())
-            })
+            self.with_async(async move { Self::reconcile_policy_rules(&handle, &plan).await })
         }
 
         fn remove_policy_rule(

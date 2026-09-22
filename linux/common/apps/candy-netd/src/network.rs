@@ -543,6 +543,7 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             return Err(NetworkError::InvalidTransition);
         }
         let declaration = record.declaration.clone();
+        let policy_is_active = record.phase == TransactionPhase::Active;
         let mut desired = prefixes.to_vec();
         desired.sort();
         desired.dedup();
@@ -567,6 +568,9 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         // route set so an orphan throw can be replaced even when the journal
         // already records an empty failed-prefix set.
         self.backend.reconcile_routes(&declaration, &desired)?;
+        if policy_is_active {
+            self.backend.install_policy_rule(&declaration)?;
+        }
         let record = self
             .record
             .as_mut()
@@ -669,6 +673,9 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         self.backend
             .reconcile_routes(&record.declaration, &record.failed_prefixes)?;
         self.backend.prepare_firewall(&record.declaration)?;
+        if record.completed_steps & STEP_POLICY_RULE != 0 {
+            self.backend.install_policy_rule(&record.declaration)?;
+        }
         let mut restored = record;
         restored.recovery_candidate = None;
         restored.recovery_candidate_owner = None;
@@ -858,9 +865,16 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             return Err(NetworkError::InvalidTransition);
         }
         if record.declaration == declaration {
+            // A declaration replay is also the low-cost integrity pass for
+            // kernel policy rules. Repair selector drift while keeping a
+            // Suspended transaction fail-closed.
+            if record.phase == TransactionPhase::Active {
+                self.backend.install_policy_rule(&declaration)?;
+            }
             return Ok(());
         }
         let previous_record = record.clone();
+        let policy_is_active = previous_record.phase == TransactionPhase::Active;
         let previous = previous_record.declaration.clone();
         let retained_failed_prefixes: Vec<_> = previous_record
             .failed_prefixes
@@ -893,7 +907,11 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             self.backend.remove_routes(&previous)?;
             self.backend
                 .reconcile_routes(&declaration, &retained_failed_prefixes)?;
-            self.backend.prepare_firewall(&declaration)
+            self.backend.prepare_firewall(&declaration)?;
+            if policy_is_active {
+                self.backend.install_policy_rule(&declaration)?;
+            }
+            Ok(())
         })();
         if let Err(error) = applied {
             return match self.restore_policy_after_update(&previous_record, &declaration) {
@@ -934,6 +952,10 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             if let Err(error) = result {
                 first_error.get_or_insert(error);
             }
+        }
+        if previous_record.completed_steps & STEP_POLICY_RULE != 0 {
+            self.backend
+                .install_policy_rule(&previous_record.declaration)?;
         }
         if let Some(error) = first_error {
             return Err(error);

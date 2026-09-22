@@ -522,7 +522,8 @@ fn policy_update_replaces_only_routes_and_firewall_and_keeps_active_owner() {
             "remove_firewall",
             "remove_routes",
             "reconcile_routes",
-            "prepare_firewall"
+            "prepare_firewall",
+            "install_policy_rule"
         ]
     );
     let record = journal.load().unwrap().unwrap();
@@ -599,7 +600,8 @@ fn kill9_during_policy_update_restores_policy_without_tearing_down_tunnel() {
             "remove_firewall",
             "remove_routes",
             "reconcile_routes",
-            "prepare_firewall"
+            "prepare_firewall",
+            "install_policy_rule"
         ]
     );
     assert!(!events.borrow().contains(&"deactivate_link"));
@@ -609,6 +611,24 @@ fn kill9_during_policy_update_restores_policy_without_tearing_down_tunnel() {
     assert_eq!(restored.phase, TransactionPhase::Active);
     assert_eq!(restored.declaration, declaration());
     assert!(restored.recovery_candidate.is_none());
+}
+
+#[test]
+fn active_policy_replay_reconciles_rules_without_touching_tunnel() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let journal = MemoryJournal::default();
+    let mut transaction =
+        NetworkTransaction::new(RecordingBackend(events.clone()), journal).unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+    events.borrow_mut().clear();
+
+    transaction.update_policy(owner(), declaration()).unwrap();
+
+    assert_eq!(*events.borrow(), ["install_policy_rule"]);
+    assert!(!events.borrow().contains(&"activate_link"));
+    assert!(!events.borrow().contains(&"deactivate_link"));
+    assert!(!events.borrow().contains(&"remove_link"));
 }
 
 #[test]
@@ -635,13 +655,19 @@ fn failed_prefix_updates_are_scoped_persisted_and_restore_only_healthy_routes() 
         journal.load().unwrap().unwrap().failed_prefixes,
         vec![second, first]
     );
-    assert_eq!(*events.borrow(), ["reconcile_routes"]);
+    assert_eq!(
+        *events.borrow(),
+        ["reconcile_routes", "install_policy_rule"]
+    );
 
     // Recovering one prefix must rebuild the route table and immediately
     // withdraw the sibling that is still failed.
     events.borrow_mut().clear();
     transaction.set_failed_prefixes(owner(), &[second]).unwrap();
-    assert_eq!(*events.borrow(), ["reconcile_routes"]);
+    assert_eq!(
+        *events.borrow(),
+        ["reconcile_routes", "install_policy_rule"]
+    );
     assert_eq!(
         journal.load().unwrap().unwrap().failed_prefixes,
         vec![second]
@@ -675,7 +701,10 @@ fn initial_empty_failed_prefix_report_reconciles_routes() {
     events.borrow_mut().clear();
 
     transaction.set_failed_prefixes(owner(), &[]).unwrap();
-    assert_eq!(*events.borrow(), ["reconcile_routes"]);
+    assert_eq!(
+        *events.borrow(),
+        ["reconcile_routes", "install_policy_rule"]
+    );
 }
 
 #[test]
@@ -696,7 +725,11 @@ fn empty_journal_state_replaces_a_kernel_stale_throw_with_healthy_unicast() {
     assert!(!stale_throw.get());
     assert_eq!(
         *events.borrow(),
-        ["remove_stale_throw", "install_missing_unicast"]
+        [
+            "remove_stale_throw",
+            "install_missing_unicast",
+            "install_policy_rule"
+        ]
     );
 }
 
