@@ -36,7 +36,7 @@ mod upgrade;
 
 const MAX_PROFILE_BYTES: u64 = 64 * 1024;
 const MAX_CONFIGURATION_BYTES: u64 = 3 * 1024 * 1024;
-const MAX_ROUTE_ENVELOPE_BYTES: usize = 1024 * 1024;
+const MAX_ROUTE_ENVELOPE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_LOCAL_ROUTE_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_LOCAL_NETWORKS: usize = 64;
 const MAX_COMPATIBILITY_GENERATIONS: usize = 1;
@@ -4355,8 +4355,8 @@ fn validate_discovered_control(
         || report.route_policy.content_hash != configuration.projection_content_hash
         || !(20_000..=20_999).contains(&report.netd.table_id)
         || report.netd.max_inner_mtu < 576
-        || report.netd.local_prefixes.len() > 4096
-        || report.netd.remote_routes.len() > 4096
+        || report.netd.local_prefixes.len() > 65_536
+        || report.netd.remote_routes.len() > 65_536
         || report.netd.underlay_ipv4_exclusions.len() > 512
         || report.outbound_candidates.len() > 256
         || report.inbound_expected.len() > 256
