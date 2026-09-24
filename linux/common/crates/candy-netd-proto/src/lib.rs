@@ -7,8 +7,8 @@ pub const NETD_PROTOCOL_VERSION: u64 = 1;
 pub const CANDY_INTERFACE_NAME: &str = "candy0";
 pub const CANDY_TABLE_MIN: u32 = 20_000;
 pub const CANDY_TABLE_MAX: u32 = 20_999;
-pub const MAX_NETD_FRAME_LEN: usize = 64 * 1024;
-pub const MAX_ROUTES: usize = 4096;
+pub const MAX_NETD_FRAME_LEN: usize = 2 * 1024 * 1024;
+pub const MAX_ROUTES: usize = 65_536;
 pub const MAX_EXCLUSIONS: usize = 64;
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
@@ -208,12 +208,23 @@ fn strictly_sorted_by<T, K: Ord>(values: &[T], key: impl Fn(&T) -> K) -> bool {
 }
 
 fn has_prefix_overlap(prefixes: impl IntoIterator<Item = Ipv4Prefix>) -> bool {
-    let values: Vec<Ipv4Prefix> = prefixes.into_iter().collect();
-    values.iter().enumerate().any(|(index, prefix)| {
-        values[index + 1..]
-            .iter()
-            .any(|other| prefix.overlaps(*other))
-    })
+    let mut ranges: Vec<(u32, u32)> = prefixes
+        .into_iter()
+        .map(|prefix| {
+            let start = u32::from_be_bytes(prefix.network);
+            let end = start | !prefix_mask(prefix.prefix_len);
+            (start, end)
+        })
+        .collect();
+    ranges.sort_unstable();
+    let mut furthest_end = None;
+    for (start, end) in ranges {
+        if furthest_end.is_some_and(|previous_end| start <= previous_end) {
+            return true;
+        }
+        furthest_end = Some(end);
+    }
+    false
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -1139,6 +1150,63 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod scoped_prefix_tests {
     use super::*;
+
+    #[test]
+    fn large_geo_sized_declaration_round_trips_beyond_legacy_frame_limit() {
+        let routes = (0..30_000_u32)
+            .map(|index| RouteDeclaration {
+                prefix: Ipv4Prefix::new(
+                    (u32::from_be_bytes([10, 0, 0, 0]) + index).to_be_bytes(),
+                    32,
+                )
+                .unwrap(),
+                kind: RouteKind::Remote,
+            })
+            .collect();
+        let request = NetdRequest {
+            request_id: 1,
+            owner: LeaseOwner {
+                instance_id: [1; 16],
+                pid: 1,
+                generation: 1,
+                lease_deadline_mono_ms: 1,
+            },
+            operation: NetdOperation::Prepare(PrepareDeclaration {
+                table_id: CANDY_TABLE_MIN,
+                overlay_router_ipv4: [100, 64, 0, 2],
+                effective_mtu: 1200,
+                routes,
+                exclusions: vec![UnderlayExclusion {
+                    prefix: Ipv4Prefix::new([192, 0, 2, 0], 24).unwrap(),
+                    kind: UnderlayKind::Management,
+                }],
+                firewall: FirewallPolicy {
+                    allow_forward: true,
+                    clamp_tcp_mss: true,
+                    require_ipv4_forwarding: true,
+                    manage_rp_filter: true,
+                },
+            }),
+        };
+
+        let encoded = request.encode().unwrap();
+        assert!(encoded.len() > 64 * 1024);
+        assert!(encoded.len() < MAX_NETD_FRAME_LEN);
+        assert_eq!(NetdRequest::decode(&encoded).unwrap(), request);
+    }
+
+    #[test]
+    fn route_overlap_check_is_correct_for_nested_and_adjacent_prefixes() {
+        let prefixes = [
+            Ipv4Prefix::new([10, 0, 0, 0], 24).unwrap(),
+            Ipv4Prefix::new([10, 0, 0, 128], 25).unwrap(),
+        ];
+        assert!(has_prefix_overlap(prefixes));
+        assert!(!has_prefix_overlap([
+            Ipv4Prefix::new([10, 0, 0, 0], 24).unwrap(),
+            Ipv4Prefix::new([10, 0, 1, 0], 24).unwrap(),
+        ]));
+    }
 
     #[test]
     fn scopes_routes_and_exclusions_by_exact_prefix() {

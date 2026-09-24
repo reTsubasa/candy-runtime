@@ -28,7 +28,7 @@ use netlink_packet_route::route::{
 #[cfg(target_os = "linux")]
 use rtnetlink::RouteMessageBuilder;
 
-const MAX_DECLARATION_BYTES: u64 = 1024 * 1024;
+const MAX_DECLARATION_BYTES: u64 = 8 * 1024 * 1024;
 const MIN_LEASE_MS: u64 = 5_000;
 const MAX_LEASE_MS: u64 = 120_000;
 const MIN_READINESS_TIMEOUT_MS: u64 = 1_000;
