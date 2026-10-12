@@ -28,6 +28,16 @@ PRESERVE_CLOUD_UPGRADE_WORKER=${CANDY_UPDATE_PRESERVE_CLOUD_UPGRADE_WORKER:-0}
 RUNTIME_VERSION=${CANDY_RUNTIME_VERSION:-0.4.0}
 RUNTIME_RELEASE=${CANDY_RUNTIME_RELEASE:-2}
 SUPPORTED_OPENWRT_RELEASE=25.12.4
+
+supported_openwrt_series() {
+	case "$1" in
+		25.12.*)
+			local patch="${1#25.12.}"
+			case "$patch" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac
+			;;
+		*) return 1 ;;
+	esac
+}
 SUPPORTED_TARGET=
 SUPPORTED_ARCH=
 RUNTIME_TARGET_KEY=
@@ -292,7 +302,7 @@ require_supported_platform() {
 	release=$(platform_release)
 	target=$(platform_target)
 	arch=$(platform_arch)
-	[ "$release" = "$SUPPORTED_OPENWRT_RELEASE" ] || return 1
+	supported_openwrt_series "$release" || return 1
 	case "$target:$arch" in
 		x86/64:x86_64|x86/64:amd64)
 			SUPPORTED_TARGET=x86/64
@@ -419,7 +429,7 @@ validate_core_entry() {
 }
 
 validate_catalog() {
-	local catalog="$1" schema sequence channel runtime_latest core_latest
+	local catalog="$1" schema sequence channel runtime_latest core_latest entry_target compatible=0
 	schema=$(catalog_field "$catalog" '@.schema_version')
 	sequence=$(catalog_field "$catalog" '@.sequence')
 	channel=$(catalog_field "$catalog" '@.channel')
@@ -427,8 +437,22 @@ validate_catalog() {
 	[ -n "$(catalog_field "$catalog" '@.published_at')" ] || return 1
 	runtime_latest=$(catalog_field "$catalog" '@.runtime.latest')
 	core_latest=$(catalog_field "$catalog" '@.core.latest')
-	validate_runtime_entry "$catalog" "$runtime_latest" || return 1
-	validate_core_entry "$catalog" "$core_latest" || return 1
+	valid_version_key "$runtime_latest" && valid_version_key "$core_latest" || return 1
+	[ "$runtime_latest" = "$(expected_runtime_key "$(runtime_entry_field "$catalog" "$runtime_latest" version)" "$(runtime_entry_field "$catalog" "$runtime_latest" revision)")" ] || return 1
+	[ "$core_latest" = "$(expected_core_key "$(core_entry_field "$catalog" "$core_latest" version)")" ] || return 1
+	# Each install/candidate path validates its own platform entry. A missing
+	# Runtime target must not hide a compatible, independently signed Core.
+	entry_target=$(runtime_entry_field "$catalog" "$runtime_latest" "targets.$RUNTIME_TARGET_KEY.target")
+	case "$entry_target" in
+		''|null) ;;
+		*) validate_runtime_entry "$catalog" "$runtime_latest" || return 1; compatible=1 ;;
+	esac
+	entry_target=$(core_entry_field "$catalog" "$core_latest" "targets.$CORE_TARGET_KEY.target")
+	case "$entry_target" in
+		''|null) ;;
+		*) validate_core_entry "$catalog" "$core_latest" || return 1; compatible=1 ;;
+	esac
+	[ "$compatible" = 1 ]
 }
 
 cached_catalog_valid() {
@@ -442,7 +466,7 @@ cached_catalog_valid() {
 
 check_catalog() {
 	local downloaded_ref downloaded_catalog downloaded_signature catalog_commit catalog_url signature_url new_sequence old_sequence old_hash new_hash checked_at attempt verified cache_key
-	require_supported_platform || fail "this Runtime package does not support the current OpenWrt platform"
+	require_supported_platform || fail_stage platform platform_incompatible "Unsupported OpenWrt release=$(platform_release) target=$(platform_target) package_abi=$(platform_arch); required=25.12.x with x86_64 or IPQ40xx Cortex-A7 NEON/VFPv4"
 	[ -f "$CATALOG_KEY" ] && [ ! -L "$CATALOG_KEY" ] || fail "catalog signing key is unavailable"
 	mkdir -p "$STATE_ROOT" || fail "cannot create update state directory"
 	[ ! -L "$STATE_ROOT" ] || fail "update state directory must not be a symbolic link"
@@ -980,6 +1004,8 @@ status_json() {
 	printf ',"target":'; json_string "$target"
 	printf ',"arch":'; json_string "$arch"
 	printf '},"runtime_current":'; json_string "$RUNTIME_VERSION-r$RUNTIME_RELEASE"
+	printf ',"runtime_compatible":'
+	if [ "$catalog_valid" = 1 ] && validate_runtime_entry "$CATALOG_FILE" "$(catalog_field "$CATALOG_FILE" '@.runtime.latest')"; then printf true; else printf false; fi
 	printf ',"core_current":'; if [ -n "$core_current" ]; then json_string "$core_current"; else printf null; fi
 	printf ',"core":'; if [ -n "$core_status" ]; then printf '%s' "$core_status"; else printf null; fi
 	printf ',"core_candidates":'

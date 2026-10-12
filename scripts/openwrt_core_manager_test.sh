@@ -40,6 +40,7 @@ case "$expression" in
 	'@.core.target_os') sed -n 's/.*"core":{[^}]*"target_os":"\([^"]*\)".*/\1/p' "$file"; exit ;;
 	'@.core.target_arch') sed -n 's/.*"core":{[^}]*"target_arch":"\([^"]*\)".*/\1/p' "$file"; exit ;;
 	'@.artifact.target_os') key=target_os ;;
+	'@.artifact.target') key=target ;;
 	'@.artifact.target_arch') key=target_arch ;;
 	'@.artifact.libc') key=libc ;;
 	'@.artifact.executable') key=executable ;;
@@ -138,14 +139,14 @@ make_bundle() {
 # $flavor
 case "\${1:-}" in
 	runtime-api-version) printf '%s\n' 1 ;;
-	core-info) printf '%s\n' '{"schema_version":1,"process_api_version":1,"core_api_version":$api,"core_version":"$version","target_os":"linux","target_arch":"$TEST_CORE_ARCH","protocol_version":{"major":0,"minor":3},"features":[]}' ;;
+	core-info) printf '%s\n' '{"schema_version":1,"process_api_version":1,"core_api_version":$api,"core_version":"$version","target_os":"linux","target_arch":"${TEST_PROCESS_ARCH:-$TEST_CORE_ARCH}","protocol_version":{"major":0,"minor":3},"features":[]}' ;;
 	*) exit 64 ;;
 esac
 EOF
 	chmod 0755 "$stage/candy-core"
 	executable_sha=$(sha256sum "$stage/candy-core" | awk '{ print $1 }')
 	cat > "$stage/manifest.json" <<EOF
-{"schema_version":1,"process_api_version":1,"core":{"schema_version":1,"core_api_version":$api,"core_version":"$version","target_os":"linux","target_arch":"$TEST_CORE_ARCH","protocol_version":{"major":0,"minor":3},"features":[]},"artifact":{"target_os":"linux","target_arch":"$TEST_CORE_ARCH","libc":"musl","executable":"candy-core","executable_sha256":"$executable_sha"}}
+{"schema_version":1,"process_api_version":1,"core":{"schema_version":1,"core_api_version":$api,"core_version":"$version","target_os":"linux","target_arch":"$TEST_CORE_ARCH","protocol_version":{"major":0,"minor":3},"features":[]},"artifact":{"target":"armv7-unknown-linux-musleabihf","target_os":"linux","target_arch":"$TEST_CORE_ARCH","libc":"musl","executable":"candy-core","executable_sha256":"$executable_sha"}}
 EOF
 	printf '%s\n' trusted-test-signature > "$stage/manifest.sig"
 	# A protected signer can create a correct bundle under umask 077. Runtime
@@ -366,6 +367,13 @@ make_bundle 0.4.10 1 "$tmp/core-0.4.10-armv7.tar.gz"
 CANDY_OPENWRT_RELEASE_FILE="$tmp/openwrt-ipq40xx-release" \
 	"$manager" install-local "$tmp/core-0.4.10-armv7.tar.gz" >/dev/null
 [ -x "$cores/0.4.10/candy-core" ]
+
+# Published legacy manifests said armv7 while their actual binary said arm.
+TEST_PROCESS_ARCH=arm make_bundle 0.4.11 1 "$tmp/core-0.4.11-legacy-arm.tar.gz"
+unset TEST_PROCESS_ARCH
+CANDY_OPENWRT_RELEASE_FILE="$tmp/openwrt-ipq40xx-release" \
+	"$manager" install-local "$tmp/core-0.4.11-legacy-arm.tar.gz" >/dev/null
+[ -x "$cores/0.4.11/candy-core" ]
 
 # A broad ARM-family or unrelated package ABI must not authorize the IPQ40xx
 # hard-float Core merely because its kernel reports an ARM-compatible ISA.

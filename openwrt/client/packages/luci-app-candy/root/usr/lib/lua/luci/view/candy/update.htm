@@ -290,7 +290,7 @@ function candyUpdateRender(data) {
 	var catalog = data.catalog || {}, runtime = catalog.runtime || {};
 	var runtimeEntry = (runtime.releases || {})[runtime.latest] || {};
 	var operation = data.operation || {}, busy = operation.state === "running", operationNode = document.getElementById("candy-update-operation");
-	var runtimeNewer = candyUpdateCompare(runtimeEntry.display_version, data.runtime_current) > 0;
+	var runtimeNewer = data.runtime_compatible !== false && candyUpdateCompare(runtimeEntry.display_version, data.runtime_current) > 0;
 	candyUpdateSet("candy-update-catalog-valid", data.catalog_valid ? candyUpdateLabels.valid : candyUpdateLabels.invalid);
 	candyUpdateSet("candy-update-sequence", catalog.sequence);
 	candyUpdateSet("candy-update-published", catalog.published_at);
