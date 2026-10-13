@@ -4,7 +4,7 @@ PKG_NAME:=candy-client
 PKG_VERSION:=0.4.0
 # OpenWrt requires a package revision. This is internal metadata, not part of
 # the Candy product version shown to users.
-PKG_RELEASE:=153
+PKG_RELEASE:=154
 CANDY_RUNTIME_BIN_DIR?=
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
@@ -15,7 +15,7 @@ define Package/candy-client
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Candy OpenWrt client runtime
-  DEPENDS:=+libgcc +ca-bundle +uclient-fetch +jsonfilter +usign +kmod-tun +kmod-nft-tproxy +kmod-nf-tproxy
+  DEPENDS:=+libgcc +ca-bundle +uclient-fetch +jsonfilter +usign +coreutils-stat +kmod-tun +kmod-nft-tproxy +kmod-nf-tproxy
   USERID:=candy-sdwan=789:candy-sdwan=789
 endef
 

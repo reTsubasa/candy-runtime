@@ -1377,8 +1377,6 @@ function action_status_json()
 	status.sdwan.performance = read_sdwan_performance()
 	status.fault = read_fault_status()
 	status.core = read_core_status()
-	status.version = status.version or "0.4.0"
-	status.release = status.release or "1"
 	status.nodes = status.nodes or {}
 	status.candy_nodes = {}
 	for _, node in ipairs(status.nodes) do
