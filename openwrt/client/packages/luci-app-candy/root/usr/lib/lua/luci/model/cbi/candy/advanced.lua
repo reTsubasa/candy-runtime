@@ -91,6 +91,8 @@ o.datatype = "range(1,168)"
 o.default = "24"
 o.rmempty = false
 
+s:option(DummyValue, "_provider_manual_update", translate("Manual update")).template = "candy/provider_update"
+
 s = m:section(NamedSection, "client", "candy", translate("Transport and TProxy"))
 s.description = translate("Choose one of three Candy BBR profiles. Saving a change restarts Candy so new QUIC connections use the selected parameters.")
 s.addremove = false
