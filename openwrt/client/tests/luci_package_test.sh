@@ -757,7 +757,7 @@ assert_contains "$lifecycle_view" '<%:Software updates%>'
 assert_contains "$lifecycle_view" '<%\+candy/update%>'
 assert_contains "$lifecycle_view" '<%\+candy/core%>'
 assert_contains "$update_view" '<%:Runtime updates%>'
-assert_contains "$core_view" '<%:Core lifecycle%>'
+assert_contains "$lifecycle_view" '<%:Installed versions and technical details%>'
 assert_contains "$sdwan" 'Candy SD-WAN connects sites through encrypted links'
 assert_contains "$sdwan" 'local function usable_string\(value\)'
 assert_contains "$sdwan" 'value == "unavailable" or value == "unknown" or value == "not-configured"'
@@ -942,7 +942,7 @@ for view in "$status" "$diagnostics" "$rules"; do
 done
 
 
-assert_contains "$core_view" 'core_status'
+assert_contains "$core_view" 'candy-update-status'
 assert_contains "$core_view" 'core_install'
 assert_not_contains "$core_view" 'Install Core bundle'
 assert_not_contains "$core_view" 'Bundle URL'
@@ -966,7 +966,7 @@ assert_not_contains "$update_view" 'data\.core && data\.core\.installed'
 assert_not_contains "$update_view" 'candy-update-core-installed'
 assert_contains "$update_view" 'candyUpdateCorePageUrl'
 assert_contains "$update_view" 'updates.*#candy-core-lifecycle'
-assert_contains "$core_view" 'id="candy-core-lifecycle"'
+assert_contains "$lifecycle_view" 'id="candy-core-lifecycle"'
 assert_contains "$update_view" 'data\.core_candidates'
 assert_contains "$update_view" 'candidate\.update_available === true'
 assert_contains "$update_view" 'candidates\.slice\(0, 5\)'
@@ -978,7 +978,7 @@ assert_not_contains "$update_view" 'installedLocally'
 assert_not_contains "$update_view" 'candidate\.active === true \|\|'
 assert_contains "$update_view" 'candyUpdateLink'
 assert_not_contains "$update_view" 'rollbackAvailable'
-assert_not_contains "$update_view" 'candyUpdateLabels\.incompatible'
+assert_contains "$update_view" 'candyUpdateLabels\.incompatible'
 assert_contains "$status" 'status_json'
 assert_contains "$status" '<%:Function coverage%>'
 assert_contains "$status" '<%:Nodes and performance%>'
@@ -1382,8 +1382,8 @@ local process = dofile(helper_path)
 local ok, output = process.capture({ "/bin/example", "safe" })
 os.time = original_time
 
-assert(ok, "pipe capture did not report child success")
-assert(#output == 1048576, "capture output was not bounded to 1 MiB")
+assert(not ok, "oversized output must not be returned as a successful truncated response")
+assert(output == "Process output exceeds the capture limit", "capture must explain the output limit failure")
 assert(not temp_accessed, "capture accessed a predictable temporary path")
 local victim_file = assert(io.open(victim, "r"))
 assert(victim_file:read("*a") == "untouched", "capture modified symlink target")
@@ -1415,7 +1415,7 @@ class Element {
 const elements = {};
 for (const id of ["candy-core-operation", "candy-core-rollback", "candy-core-installed", "candy-core-current", "candy-core-previous", "candy-core-process-api", "candy-core-api", "candy-core-protocol", "candy-core-architecture"]) elements[id] = new Element("div");
 const context = {
-	document: { createElement: (tag) => new Element(tag), getElementById: (id) => elements[id] || null },
+	document: { createElement: (tag) => new Element(tag), getElementById: (id) => elements[id] || null, addEventListener: () => {} },
 	window: { confirm: () => true }, console, Date, JSON, Array, String,
 	XMLHttpRequest: class {}, setTimeout: () => 1, clearTimeout: () => {}
 };

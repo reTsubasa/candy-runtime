@@ -406,13 +406,15 @@ end
 
 local function read_core_update_status()
 	local jsonc = require "luci.jsonc"
-	local ok, output = process.capture({ CORE_UPDATE_MANAGER, "status" }, { timeout = 5 })
+	local ok, output, error_code = process.capture({ CORE_UPDATE_MANAGER, "status" }, { timeout = 10 })
 	if not ok or not output or #output > MAX_UPDATE_STATUS_BYTES then
 		return {
 			schema_version = 1,
 			core = read_core_status(),
 			core_candidates = {},
-			error = "Update manager is unavailable"
+			error = "Update manager is unavailable",
+			error_code = error_code or "status_unavailable",
+			detail = output
 		}
 	end
 	local status = jsonc.parse(output)

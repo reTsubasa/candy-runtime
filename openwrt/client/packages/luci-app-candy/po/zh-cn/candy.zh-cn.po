@@ -2410,3 +2410,26 @@ msgstr "不可用"
 
 msgid "Checking"
 msgstr "检查中"
+msgid "Download Core"
+msgstr "下载 Core"
+
+msgid "No compatible release"
+msgstr "无兼容版本"
+
+msgid "Update status failed"
+msgstr "更新状态获取失败"
+
+msgid "Update request failed"
+msgstr "更新请求失败"
+
+msgid "Request timed out"
+msgstr "请求超时"
+
+msgid "Release source and platform"
+msgstr "发布来源与平台"
+
+msgid "Other versions and local installation"
+msgstr "其他版本与本地安装"
+
+msgid "Installed versions and technical details"
+msgstr "已安装版本与技术信息"

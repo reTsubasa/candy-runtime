@@ -2,7 +2,6 @@
 
 <div class="candy-lifecycle-head">
 	<h2 name="content"><%:Software updates%></h2>
-	<p><%:Update Runtime and manage installed Core versions from one page.%></p>
 </div>
 
 <style>
@@ -13,7 +12,9 @@
 </style>
 
 <%+candy/update%>
-<hr class="candy-lifecycle-divider" />
-<%+candy/core%>
+<details class="candy-update-advanced" id="candy-core-lifecycle">
+	<summary><%:Installed versions and technical details%></summary>
+	<%+candy/core%>
+</details>
 
 <%+footer%>

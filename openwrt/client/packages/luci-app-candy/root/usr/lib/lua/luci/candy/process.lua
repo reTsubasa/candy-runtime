@@ -22,6 +22,29 @@ local function exec_with_timeout(argv, timeout_seconds)
 			nixio.exec(unpack_args(args))
 			return
 		end
+		-- Minimal OpenWrt images may omit the timeout applet. Supervise a
+		-- separate process group so the deadline also stops its descendants.
+		local pid = nixio.fork()
+		if pid == 0 then
+			nixio.setsid()
+			nixio.exec(unpack_args(argv))
+			os.exit(127)
+		end
+		if not pid then os.exit(127) end
+		local deadline = nixio.sysinfo().uptime + math.ceil(timeout)
+		while true do
+			local finished, status, code = nixio.waitpid(pid, "nohang")
+			if finished and finished > 0 then
+				os.exit(status == "exited" and code or 1)
+			end
+			if nixio.sysinfo().uptime >= deadline then
+				nixio.kill(-pid, 9)
+				nixio.kill(pid, 9)
+				nixio.waitpid(pid)
+				os.exit(124)
+			end
+			nixio.nanosleep(0, 100000000)
+		end
 	end
 	nixio.exec(unpack_args(argv))
 end
@@ -80,11 +103,13 @@ function M.capture(argv, options)
 
 	local chunks = {}
 	local captured = 0
+	local oversized = false
 	while true do
 		local chunk = reader:read(4096)
 		if not chunk or chunk == "" then
 			break
 		end
+		if captured + #chunk > CAPTURE_MAX_BYTES then oversized = true end
 		if captured < CAPTURE_MAX_BYTES then
 			local keep = math.min(#chunk, CAPTURE_MAX_BYTES - captured)
 			chunks[#chunks + 1] = chunk:sub(1, keep)
@@ -93,6 +118,8 @@ function M.capture(argv, options)
 	end
 	reader:close()
 	local _, status, code = nixio.waitpid(pid)
+	if oversized then return false, "Process output exceeds the capture limit", "output_limit_exceeded" end
+	if status == "exited" and code == 124 then return false, "Process deadline exceeded", "process_timeout" end
 	return status == "exited" and code == 0, table.concat(chunks)
 end
 

@@ -766,6 +766,23 @@ mv "$FAKE_CATALOG.next" "$FAKE_CATALOG"
 status=$($manager status)
 printf '%s\n' "$status" | jq -e '.core_candidates | length == 5 and .[0].version == "0.3.9" and .[4].version == "0.3.5"' >/dev/null
 
+# Release history can exceed LuCI's capture limit. Only display data may be
+# projected; download authorization must still use the signed original.
+jq '.sequence=9 | .unrelated_history=("x" * 1300000)' "$FAKE_CATALOG" > "$FAKE_CATALOG.next"
+mv "$FAKE_CATALOG.next" "$FAKE_CATALOG"
+"$manager" check >/dev/null
+status=$("$manager" status)
+[ "${#status}" -lt 65536 ] || { echo "status returned full catalog history" >&2; exit 1; }
+printf '%s\n' "$status" | jq -e '.catalog.sequence == 9 and .core_candidates[0].version == "0.3.9" and (.catalog | has("unrelated_history") | not)' >/dev/null
+printf '%s\n' corrupt > "$state/status-catalog.json"
+"$manager" status | jq -e '.catalog_valid == false' >/dev/null
+"$manager" check >/dev/null
+"$manager" status | jq -e '.catalog_valid == true and .catalog.sequence == 9' >/dev/null
+cp "$state/stable.json.sig" "$tmp/trusted-status.sig"
+printf '%s\n' bad-signature > "$state/stable.json.sig"
+"$manager" status | jq -e '.catalog_valid == false and (.core_candidates | length == 0)' >/dev/null
+cp "$tmp/trusted-status.sig" "$state/stable.json.sig"
+
 if "$manager" install-core '../../bad' >/dev/null 2>&1; then
 	echo "invalid version key was accepted" >&2
 	exit 1

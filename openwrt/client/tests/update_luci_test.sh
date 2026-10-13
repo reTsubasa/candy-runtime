@@ -41,9 +41,9 @@ grep -F 'candy-update-section' "$view" >/dev/null
 ! grep -F 'installedLocally' "$view" >/dev/null
 ! grep -F 'candidate.active === true ||' "$view" >/dev/null
 grep -F 'Review Core' "$view" "$po" >/dev/null
-grep -F 'setTimeout(refreshCandyUpdateStatus, 2000)' "$view" >/dev/null
-grep -F 'never activated automatically' "$view" >/dev/null
-grep -F 'Update checks and installations are manual' "$view" >/dev/null
+grep -F 'busy ? 2000 : 10000' "$view" >/dev/null
+grep -F 'xhr.timeout = 15000' "$view" >/dev/null
+grep -F 'candy-update-core-summary' "$view" >/dev/null
 grep -F 'msgid "Software updates"' "$po" >/dev/null
 grep -F 'template("candy/lifecycle"), nil' "$controller" >/dev/null || {
 	printf '%s\n' 'OpenWrt Candy update page must remain under the Settings menu' >&2
@@ -180,7 +180,7 @@ source = source.replace(/"<%=[\s\S]*?%>"/g, '"/test"').replace(/<%=[\s\S]*?%>/g,
 source = source.replace(/\nrefreshCandyUpdateStatus\(\);\s*$/, "");
 
 class Element {
-	constructor(tag) { this.tagName = tag; this.children = []; this.style = {}; this.disabled = false; this._value = ""; this.selectedIndex = -1; this._text = ""; this.files = []; this.listeners = {}; this.action = "/upload"; }
+	constructor(tag) { this.tagName = tag; this.children = []; this.style = {}; this.disabled = false; this._value = ""; this.selectedIndex = -1; this._text = ""; this.files = []; this.listeners = {}; this.dataset = {}; this.action = "/upload"; }
 	appendChild(child) {
 		this.children.push(child);
 		if (this.tagName === "select" && this.selectedIndex < 0) { this.selectedIndex = 0; this._value = child.value; }
@@ -196,10 +196,12 @@ class Element {
 	get value() { return this._value; }
 	get options() { return this.children; }
 	addEventListener(name, handler) { this.listeners[name] = handler; }
+	querySelectorAll() { return []; }
+	querySelector(tag) { return this.children.find(child => child.tagName === tag) || null; }
 }
 
 const elements = {};
-for (const id of ["candy-update-core", "candy-update-core-select", "candy-update-core-install", "candy-update-core-upload", "candy-update-core-upload-form", "candy-update-core-upload-file", "candy-update-core-upload-progress", "candy-update-core-upload-status", "candy-update-runtime", "candy-update-operation", "candy-update-catalog-valid", "candy-update-sequence", "candy-update-published", "candy-update-checked", "candy-update-platform", "candy-update-check"]) {
+for (const id of ["candy-update-core", "candy-update-core-select", "candy-update-core-install", "candy-update-core-upload", "candy-update-core-upload-form", "candy-update-core-upload-file", "candy-update-core-upload-progress", "candy-update-core-upload-status", "candy-update-runtime", "candy-update-core-summary", "candy-update-error", "candy-update-operation", "candy-update-catalog-valid", "candy-update-sequence", "candy-update-published", "candy-update-checked", "candy-update-platform", "candy-update-check"]) {
 	elements[id] = new Element(id === "candy-update-core-select" ? "select" : "div");
 }
 const requests = [];
@@ -210,10 +212,12 @@ class FakeXMLHttpRequest {
 	send(body) { this.body = body; }
 	respond(status, body) { this.status = status; this.responseText = body || ""; this.readyState = 4; this.onreadystatechange(); }
 }
+const timers = [], events = [];
 const context = {
-	document: { createElement: (tag) => new Element(tag), getElementById: (id) => elements[id] || null },
+	document: { createElement: (tag) => new Element(tag), getElementById: (id) => elements[id] || null, querySelectorAll: () => [], dispatchEvent: event => events.push(event) },
 	console, Date, JSON, Array, String, Number, XMLHttpRequest: FakeXMLHttpRequest,
-	FormData: class { constructor(form) { this.form = form; } }, setTimeout: () => 1, clearTimeout: () => {}
+	CustomEvent: class { constructor(name, options) { this.type = name; this.detail = options.detail; } },
+	FormData: class { constructor(form) { this.form = form; } }, setTimeout: (callback, delay) => { timers.push({callback, delay}); return timers.length; }, clearTimeout: () => {}
 };
 vm.createContext(context); vm.runInContext(source, context);
 Object.assign(context.candyUpdateLabels, {
@@ -262,6 +266,30 @@ assert.equal(Number(elements["candy-update-core-upload-progress"].value), 50);
 uploadRequest.respond(202, '{"accepted":true}');
 assert.equal(context.candyUpdateUploading, false);
 assert.equal(elements["candy-update-core-upload-status"].className, "candy-update-upload-status success");
+
+const requestCount = requests.length;
+context.refreshCandyUpdateStatus();
+assert.equal(requests.length, requestCount, "in-flight status requests must not overlap");
+assert.equal(requests.at(-1).timeout, 15000);
+requests.at(-1).respond(200, JSON.stringify({schema_version:1, catalog_valid:true, runtime_current:"0.4.0-r152", runtime_compatible:true, core_candidates:[], catalog:{runtime:{latest:"v0_4_0_r152",releases:{v0_4_0_r152:{display_version:"0.4.0-r152"}}}}}));
+assert.equal(timers.at(-1).delay, 10000, "idle polling must back off");
+assert.equal(events.at(-1).type, "candy-update-status", "Core panel must share the status response");
+const installed = elements["candy-update-runtime"].children[0].children[0].textContent;
+context.refreshCandyUpdateStatus();
+requests.at(-1).respond(502, '{"error":"invalid status","error_code":"status_invalid"}');
+assert.match(elements["candy-update-error"].textContent, /status_invalid/);
+assert.equal(elements["candy-update-runtime"].children[0].children[0].textContent, installed, "failure must preserve displayed versions");
+context.refreshCandyUpdateStatus();
+requests.at(-1).respond(200, '{broken');
+assert.notEqual(elements["candy-update-error"].style.display, "none", "malformed status must show an error");
+context.refreshCandyUpdateStatus();
+requests.at(-1).respond(0, '');
+assert.match(elements["candy-update-error"].textContent, /translated/, "request timeout must be visible");
+context.refreshCandyUpdateStatus();
+requests.at(-1).respond(200, JSON.stringify({schema_version:1, operation:{state:"running"}, catalog:{}}));
+assert.equal(timers.at(-1).delay, 2000, "running operations need faster progress polling");
+context.candyUpdateRender({schema_version:1, catalog_valid:false, runtime_current:"0.4.0-r152", catalog:{}});
+assert.notEqual(elements["candy-update-runtime"].children[0].children[2].textContent, "Current", "unknown must not be shown as current");
 NODE
 
 printf '%s\n' "OpenWrt Candy update LuCI contract passed"
