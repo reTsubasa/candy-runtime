@@ -26,6 +26,10 @@ pub trait InfrastructureBackend: NetworkBackend {
     fn ensure_infrastructure(&mut self, spec: &InfraSpec) -> Result<u32, NetworkError>;
     fn retire_infrastructure(&mut self) -> Result<(), NetworkError>;
     fn reject_forwarding(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError>;
+    /// Quiesce a live owner without changing its route-to-TUN path.
+    fn guard_forwarding(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.restore_forwarding_with_failures(declaration, &[])
+    }
     fn restore_forwarding(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError>;
     fn restore_forwarding_with_failures(
         &mut self,
@@ -771,8 +775,10 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
                             "generation or fencing token does not advance",
                         ));
                     }
-                    if !matches!(previous.phase, Phase::Active | Phase::Revoked)
-                        && !retry_preparation
+                    if !matches!(
+                        previous.phase,
+                        Phase::Active | Phase::Guarded | Phase::Revoked
+                    ) && !retry_preparation
                     {
                         return Err(reject(
                             "forward_preparation_pending",
@@ -973,6 +979,30 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
                 }
                 current.phase = Phase::Active;
             }
+            Operation::ForwardGuard { owner } => {
+                self.administrator(&request)?;
+                ensure_live(owner, now)?;
+                let declaration = {
+                    let current = same_owner(next.forward.as_mut(), owner)?;
+                    if current.phase == Phase::Guarded {
+                        return Ok((Body::Ack, None));
+                    }
+                    if current.phase != Phase::Active {
+                        return Err(reject(
+                            "invalid_forward_phase",
+                            "only active forwarding may be guarded",
+                        ));
+                    }
+                    current.declaration.clone()
+                };
+                // Persist intent before touching routes. Recovery restores the exact
+                // declaration and never turns a transient handoff into a reject route.
+                self.persist(next.clone())?;
+                self.backend.guard_forwarding(&declaration)?;
+                next.forward.as_mut().unwrap().phase = Phase::Guarded;
+                self.persist(next)?;
+                return Ok((Body::Ack, None));
+            }
             Operation::ForwardRevoke { owner } => {
                 self.administrator(&request)?;
                 if let Some(candidate) = &next.candidate {
@@ -1139,7 +1169,11 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
         }
         if let Err(error) = self.persist(next) {
             if let Some(forward) = &self.state.forward {
-                let _ = self.backend.reject_forwarding(&forward.declaration);
+                if forward.phase == Phase::Guarded {
+                    let _ = self.backend.guard_forwarding(&forward.declaration);
+                } else {
+                    let _ = self.backend.reject_forwarding(&forward.declaration);
+                }
             }
             return Err(error);
         }
@@ -1205,6 +1239,14 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
             self.restart_recovery_pending = false;
             return Ok(candidate_recovered);
         }
+        if forward.phase == Phase::Guarded
+            && !boot_changed
+            && clock::owner_is_live(&forward.owner, now)
+        {
+            self.backend.guard_forwarding(&forward.declaration)?;
+            self.restart_recovery_pending = false;
+            return Ok(true);
+        }
         self.backend.reject_forwarding(&forward.declaration)?;
         self.backend.remove_firewall(&forward.declaration)?;
         let mut next = self.state.clone();
@@ -1222,12 +1264,21 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
         candidate: &ForwardRecord,
         sysctls: &[SysctlChange],
     ) -> Result<(), InfrastructureError> {
-        self.backend
-            .reject_forwarding(&previous.declaration)
-            .map_err(|cause| InfrastructureError::Transition {
-                stage: "guard_previous",
-                cause,
-            })?;
+        if previous.phase == Phase::Guarded {
+            self.backend
+                .guard_forwarding(&previous.declaration)
+                .map_err(|cause| InfrastructureError::Transition {
+                    stage: "guard_previous",
+                    cause,
+                })?;
+        } else {
+            self.backend
+                .reject_forwarding(&previous.declaration)
+                .map_err(|cause| InfrastructureError::Transition {
+                    stage: "guard_previous",
+                    cause,
+                })?;
+        }
         self.backend
             .reject_forwarding(&candidate.declaration)
             .map_err(|cause| InfrastructureError::Transition {
@@ -1276,10 +1327,17 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
     ) -> Result<(), InfrastructureError> {
         // Keep durable commit intent until every repair succeeds. Later requests retry recovery.
         self.backend.reject_forwarding(&candidate.declaration)?;
-        self.backend.reject_forwarding(&previous.declaration)?;
+        if previous.phase == Phase::Guarded
+            && ensure_live(&previous.owner, now).is_ok()
+            && self.state.boot_id == current_boot_id()?
+        {
+            self.backend.guard_forwarding(&previous.declaration)?;
+        } else {
+            self.backend.reject_forwarding(&previous.declaration)?;
+        }
         self.backend.remove_firewall(&candidate.declaration)?;
         let mut retained = previous.clone();
-        let old_live = previous.phase == Phase::Active
+        let old_live = matches!(previous.phase, Phase::Active | Phase::Guarded)
             && ensure_live(&previous.owner, now).is_ok()
             && self.state.boot_id == current_boot_id()?;
         if old_live {

@@ -369,6 +369,7 @@ impl DomainIdentity {
             | Operation::ForwardAuthorize { owner, .. }
             | Operation::ForwardCommitAuthorized { owner, .. }
             | Operation::ForwardRevoke { owner }
+            | Operation::ForwardGuard { owner }
             | Operation::ForwardLeaseRenew { owner }
             | Operation::ForwardFailedPrefixes { owner, .. } => {
                 if owner.domain_id != self.config.domain_id {

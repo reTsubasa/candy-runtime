@@ -152,6 +152,11 @@ pub enum Operation {
     ForwardRevoke {
         owner: ForwardOwner,
     },
+    /// Temporarily quiesce packet IO while retaining the route-to-TUN path.
+    /// Unlike revoke, this must not install kernel reject routes.
+    ForwardGuard {
+        owner: ForwardOwner,
+    },
     ForwardLeaseRenew {
         owner: ForwardOwner,
     },
@@ -238,6 +243,7 @@ impl Request {
             }
             Operation::ForwardCommit { owner }
             | Operation::ForwardRevoke { owner }
+            | Operation::ForwardGuard { owner }
             | Operation::ForwardLeaseRenew { owner } => owner.validate()?,
             Operation::ForwardAuthorize { owner, authority } => {
                 owner.validate()?;
@@ -293,6 +299,7 @@ pub enum Phase {
     Preparing,
     Prepared,
     Active,
+    Guarded,
     Revoked,
 }
 

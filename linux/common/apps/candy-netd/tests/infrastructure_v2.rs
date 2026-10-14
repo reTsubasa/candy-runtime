@@ -27,6 +27,7 @@ struct Observed {
     fail_prefix_update_once: bool,
     fail_prefix_update: bool,
     fail_stamp_once: bool,
+    guarded: bool,
 }
 
 struct Backend(Arc<Mutex<Observed>>);
@@ -158,6 +159,13 @@ impl InfrastructureBackend for Backend {
     }
     fn reject_forwarding(&mut self, _: &PrepareDeclaration) -> Result<(), NetworkError> {
         self.event("reject_routes")
+    }
+    fn guard_forwarding(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        let mut observed = self.0.lock().unwrap();
+        observed.guarded = true;
+        observed.active_declaration = Some(declaration.clone());
+        observed.events.push("guard_routes_preserve_tun");
+        Ok(())
     }
     fn restore_forwarding(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
         let mut observed = self.0.lock().unwrap();
@@ -588,6 +596,93 @@ fn prepared_then_commit_is_valid_and_stale_or_cross_domain_owners_are_rejected()
         .call(Operation::ForwardCommit { owner: next }, 6)
         .unwrap();
     assert_eq!(fixture.observed.lock().unwrap().ifindex, Some(17));
+}
+
+#[test]
+fn live_forward_guard_preserves_tun_route_and_allows_exact_fenced_replacement() {
+    let mut fixture = Fixture::new("guard");
+    fixture.ensure();
+    fixture.prepare();
+    fixture.commit();
+    let exact = owner();
+    fixture
+        .call(
+            Operation::ForwardGuard {
+                owner: exact.clone(),
+            },
+            4,
+        )
+        .unwrap();
+    assert!(
+        matches!(fixture.call(Operation::ForwardStatus, 5).unwrap().0,
+        Body::ForwardStatus { owner: Some(current), phase: Some(Phase::Guarded), .. } if current == exact)
+    );
+    {
+        let observed = fixture.observed.lock().unwrap();
+        assert!(observed.guarded);
+        assert_eq!(observed.active_declaration.as_ref(), Some(&declaration()));
+        assert!(observed.events.contains(&"guard_routes_preserve_tun"));
+        assert!(!observed
+            .events
+            .iter()
+            .rev()
+            .take(2)
+            .any(|event| *event == "reject_routes"));
+    }
+    let (next_owner, next_policy) = candidate();
+    fixture
+        .call(
+            Operation::ForwardPrepare {
+                infra_id: [2; 16],
+                infra_generation: 1,
+                owner: next_owner.clone(),
+                declaration: next_policy.clone(),
+            },
+            6,
+        )
+        .unwrap();
+    fixture
+        .call(
+            Operation::ForwardCommit {
+                owner: next_owner.clone(),
+            },
+            7,
+        )
+        .unwrap();
+    assert!(
+        matches!(fixture.call(Operation::ForwardStatus, 8).unwrap().0,
+        Body::ForwardStatus { owner: Some(current), phase: Some(Phase::Active), .. } if current == next_owner)
+    );
+    assert_eq!(
+        fixture.observed.lock().unwrap().active_declaration.as_ref(),
+        Some(&next_policy)
+    );
+}
+
+#[test]
+fn forward_guard_rejects_stale_owner_and_expired_authority() {
+    let mut fixture = Fixture::new("guard-owner");
+    fixture.ensure();
+    fixture.prepare();
+    fixture.commit();
+    let mut stale = owner();
+    stale.worker_epoch += 1;
+    assert!(fixture
+        .call(Operation::ForwardGuard { owner: stale }, 4)
+        .is_err());
+    let mut expired = owner();
+    expired.lease_deadline_mono_ms = 2;
+    expired.auth_deadline_mono_ms = 2;
+    assert!(fixture
+        .call(Operation::ForwardGuard { owner: expired }, 5)
+        .is_err());
+    assert!(matches!(
+        fixture.call(Operation::ForwardStatus, 6).unwrap().0,
+        Body::ForwardStatus {
+            phase: Some(Phase::Active),
+            ..
+        }
+    ));
 }
 
 #[test]
