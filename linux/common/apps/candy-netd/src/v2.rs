@@ -995,12 +995,11 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
                     }
                     current.declaration.clone()
                 };
-                // Persist intent before touching routes. Recovery restores the exact
-                // declaration and never turns a transient handoff into a reject route.
+                // Persist the guarded phase before the backend call. A crash must
+                // not recover this transient handoff as an ordinary active owner.
+                next.forward.as_mut().unwrap().phase = Phase::Guarded;
                 self.persist(next.clone())?;
                 self.backend.guard_forwarding(&declaration)?;
-                next.forward.as_mut().unwrap().phase = Phase::Guarded;
-                self.persist(next)?;
                 return Ok((Body::Ack, None));
             }
             Operation::ForwardRevoke { owner } => {
@@ -1328,13 +1327,15 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
         now: u64,
     ) -> Result<(), InfrastructureError> {
         // Keep durable commit intent until every repair succeeds. Later requests retry recovery.
-        self.backend.reject_forwarding(&candidate.declaration)?;
-        if previous.phase == Phase::Guarded
+        let guarded_live = previous.phase == Phase::Guarded
             && ensure_live(&previous.owner, now).is_ok()
-            && self.state.boot_id == current_boot_id()?
-        {
+            && self.state.boot_id == current_boot_id()?;
+        if guarded_live {
+            // Candidate and previous declarations may share destinations. Never
+            // inject a transient reject route before restoring the retained plan.
             self.backend.guard_forwarding(&previous.declaration)?;
         } else {
+            self.backend.reject_forwarding(&candidate.declaration)?;
             self.backend.reject_forwarding(&previous.declaration)?;
         }
         self.backend.remove_firewall(&candidate.declaration)?;
