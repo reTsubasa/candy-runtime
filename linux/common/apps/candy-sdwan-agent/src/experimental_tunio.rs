@@ -8,7 +8,7 @@ use candy_netd_proto::v2::{Body, ForwardOwner, InfraSpec, Operation};
 use candy_netd_proto::Ipv4Prefix;
 use candy_netd_proto::PrepareDeclaration;
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -55,6 +55,64 @@ struct Plan {
     authorization_snapshot_sha256: Option<String>,
     #[serde(default)]
     pair_recovery: Option<PairRecovery>,
+    #[serde(default)]
+    placement: Option<WorkerPlacement>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WorkerPlacement {
+    revision: u64,
+    target_worker_id: u64,
+    pool_directory: PathBuf,
+}
+
+impl WorkerPlacement {
+    fn slot_file(&self) -> PathBuf {
+        self.pool_directory
+            .join(format!("worker-{}.lock", self.target_worker_id))
+    }
+}
+
+fn placement_changed(
+    current: Option<&WorkerPlacement>,
+    desired: Option<&WorkerPlacement>,
+) -> Result<bool> {
+    if current == desired {
+        return Ok(false);
+    }
+    let desired = desired.context("code=worker_placement_downgrade module=runtime_agent detail=committed placement cannot be removed")?;
+    if current.is_some_and(|current| desired.revision <= current.revision) {
+        bail!("code=worker_placement_stale module=runtime_agent detail=target slot change requires a strictly newer local placement revision");
+    }
+    Ok(true)
+}
+
+fn validate_worker_placement(
+    plan: &Plan,
+    record: &crate::process_record::ManagedProcessRecord,
+    status: &serde_json::Value,
+) -> Result<()> {
+    let Some(placement) = &plan.placement else {
+        return Ok(());
+    };
+    let expected = fs::symlink_metadata(placement.slot_file())?;
+    let actual = &status["worker_placement"];
+    let fd = actual["slot_fd"].as_i64().filter(|fd| *fd > 2 && *fd <= i32::MAX as i64)
+        .context("code=worker_slot_proof_missing module=runtime_agent detail=Core live inherited OS slot descriptor absent")?;
+    let inherited = fs::metadata(format!("/proc/{}/fd/{fd}", record.pid))?;
+    if !expected.is_file()
+        || expected.uid() != nix::unistd::geteuid().as_raw()
+        || expected.mode() & 0o777 != 0o600
+        || actual["worker_id"] != placement.target_worker_id
+        || actual["revision"] != placement.revision
+        || actual["slot_device"] != expected.dev()
+        || actual["slot_inode"] != expected.ino()
+        || (inherited.dev(), inherited.ino()) != (expected.dev(), expected.ino())
+    {
+        bail!("code=worker_slot_proof_mismatch module=runtime_agent detail=actual Core PID descriptor or authenticated live slot/revision differs from selected worker");
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -151,6 +209,18 @@ pub(super) fn recovery_disposition(path: &Path) -> Result<RecoveryDisposition> {
             }
         }
         if let Ok(record) = crate::process_record::read(&worker.process_record) {
+            if let Some(effective) = &record.effective_plan_file {
+                let current = read_plan(effective)?;
+                if current.infrastructure != plan.infrastructure
+                    || current.domain_id != plan.domain_id
+                    || !same_io_lineage(&current, &plan)
+                {
+                    bail!("code=worker_placement_scope_mismatch module=runtime_agent detail=committed local worker scope differs from verified desired infrastructure");
+                }
+                if placement_changed(current.placement.as_ref(), plan.placement.as_ref())? {
+                    return Ok(RecoveryDisposition::RenewAuthority);
+                }
+            }
             if let Some(hash) = record.authorization_snapshot_sha256 {
                 let (_, report) = compile_verified_plan(plan.clone())?;
                 if report["authorization_snapshot_sha256"] != hash {
@@ -406,6 +476,25 @@ fn read_plan(path: &Path) -> Result<Plan> {
             bail!("independent worker requires independent TUN I/O and absolute private paths");
         }
     }
+    if let Some(placement) = &plan.placement {
+        if !cfg!(all(
+            feature = "experimental-tunio-rebind",
+            target_os = "linux"
+        )) || plan.independent_worker.is_none()
+            || placement.revision == 0
+            || placement.target_worker_id == 0
+            || !placement.pool_directory.is_absolute()
+        {
+            bail!("code=worker_placement_invalid module=runtime_agent detail=Linux independent domain worker, nonzero slot/revision and private absolute pool directory required");
+        }
+        let directory = fs::symlink_metadata(&placement.pool_directory)?;
+        if !directory.is_dir()
+            || directory.uid() != nix::unistd::geteuid().as_raw()
+            || directory.mode() & 0o077 != 0
+        {
+            bail!("code=worker_pool_directory_invalid module=runtime_agent detail=worker slot manager requires current-user private directory");
+        }
+    }
     if plan.infrastructure.overlay_router_ipv4 != plan.declaration.overlay_router_ipv4
         || plan.infrastructure.mtu != plan.declaration.effective_mtu
     {
@@ -611,7 +700,11 @@ fn publish_worker_record(plan: &Plan, pid: u32, token: &str) -> Result<()> {
     record.effective_plan_file = plan.effective_plan_file.clone();
     record.authorization_snapshot_sha256 = plan.authorization_snapshot_sha256.clone();
     crate::process_record::publish(&worker.process_record, &record)?;
-    confirm_registration(&record, &worker.control_socket, plan.auth_deadline_unix)
+    confirm_registration(&record, &worker.control_socket, plan.auth_deadline_unix)?;
+    if plan.placement.is_some() {
+        validate_worker_placement(plan, &record, &record.private_status()?)?;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -687,7 +780,45 @@ fn inherit_packet_socket(command: &mut Command, socket: &UnixDatagram) {
     }
 }
 
+fn reserve_worker_slot(plan: &Plan) -> Result<Option<File>> {
+    let Some(placement) = &plan.placement else {
+        return Ok(None);
+    };
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(placement.slot_file())?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.mode() & 0o777 != 0o600
+    {
+        bail!("code=worker_slot_file_invalid module=runtime_agent detail=selected OS worker slot is not a private regular file");
+    }
+    // The child inherits this same open file description; it owns the lock
+    // after the manager drops its copy, until the actual process exits.
+    let locked =
+        unsafe { nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_EX | nix::libc::LOCK_NB) };
+    if locked != 0 {
+        return Err(std::io::Error::last_os_error()).context("code=worker_slot_busy module=runtime_agent detail=selected worker already belongs to another live domain");
+    }
+    Ok(Some(file))
+}
+
 fn spawn_business_worker(plan: &Plan, socket: &UnixDatagram, token: &str) -> Result<Child> {
+    spawn_business_worker_with_slot(plan, socket, token, reserve_worker_slot(plan)?)
+}
+
+fn spawn_business_worker_with_slot(
+    plan: &Plan,
+    socket: &UnixDatagram,
+    token: &str,
+    slot: Option<File>,
+) -> Result<Child> {
     let mut command = Command::new(&plan.core);
     enter_routing_namespace(&mut command, plan)?;
     protect_child_lifetime(&mut command);
@@ -725,6 +856,29 @@ fn spawn_business_worker(plan: &Plan, socket: &UnixDatagram, token: &str) -> Res
                 .arg("--worker-transaction-id")
                 .arg(&authority.transaction_id);
         }
+    }
+    if let Some(placement) = &plan.placement {
+        let slot = slot.as_ref().context("reserved worker slot absent")?;
+        let fd = slot.as_raw_fd();
+        unsafe {
+            command.pre_exec(move || {
+                nix::fcntl::fcntl(
+                    fd,
+                    nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
+                )
+                .map(|_| ())
+                .map_err(|error| std::io::Error::from_raw_os_error(error as i32))
+            });
+        }
+        command
+            .arg("--worker-id")
+            .arg(placement.target_worker_id.to_string())
+            .arg("--worker-placement-revision")
+            .arg(placement.revision.to_string())
+            .arg("--worker-slot-fd")
+            .arg(fd.to_string())
+            .arg("--worker-slot-file")
+            .arg(placement.slot_file());
     }
     command.spawn().context("spawn packet-port business worker")
 }
@@ -994,6 +1148,9 @@ fn effective_worker_plan(
         || !same_io_lineage(&current, &desired)
         || current.auth_deadline_unix != desired.auth_deadline_unix
     {
+        return Err(DesiredStateChanged.into());
+    }
+    if placement_changed(current.placement.as_ref(), desired.placement.as_ref())? {
         return Err(DesiredStateChanged.into());
     }
     Ok(current)
@@ -1610,6 +1767,7 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
         .context("effective independent Core plan absent")?;
     record.validate_current(&plan.core, unix_time()?)?;
     let status = record.private_status()?;
+    validate_worker_placement(&plan, &record, &status)?;
     if record.status_path != plan.core_status
         || record.policy_generation != plan.signed_generation
         || record.auth_deadline_unix != plan.auth_deadline_unix
@@ -2598,6 +2756,24 @@ mod tests {
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
+    #[test]
+    fn local_placement_rotation_is_independent_monotonic_and_cannot_downgrade() {
+        let current = WorkerPlacement {
+            revision: 3,
+            target_worker_id: 1,
+            pool_directory: "/private/pool".into(),
+        };
+        assert!(!placement_changed(Some(&current), Some(&current)).unwrap());
+        let mut next = current.clone();
+        next.target_worker_id = 2;
+        assert!(placement_changed(Some(&current), Some(&next)).is_err());
+        next.revision = 4;
+        assert!(placement_changed(Some(&current), Some(&next)).unwrap());
+        assert!(placement_changed(Some(&current), None).is_err());
+        assert!(placement_changed(None, Some(&current)).unwrap());
+        next.target_worker_id = 1;
+        assert!(placement_changed(Some(&current), Some(&next)).unwrap());
+    }
     #[test]
     fn io_death_takes_priority_even_when_new_authority_is_waiting() {
         assert!(pair_recovery_precedes_renewal(false, true));
