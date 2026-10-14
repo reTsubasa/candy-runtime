@@ -1,5 +1,55 @@
 use super::*;
 
+#[cfg(any(test, all(feature = "experimental-tunio-rebind", target_os = "linux")))]
+fn next_authority_epochs(binding_epoch: u64, epochs: &[u64], fences: &[u64]) -> Result<(u64, u64)> {
+    Ok((
+        next_recovery_epoch(std::iter::once(binding_epoch).chain(epochs.iter().copied()))?,
+        next_recovery_epoch(fences.iter().copied())?,
+    ))
+}
+
+#[cfg(test)]
+mod epoch_tests {
+    use super::*;
+
+    #[test]
+    fn signed_renewal_advances_all_consumed_identity_receipts() {
+        for (name, binding, epochs, fences, expected) in [
+            ("fresh grant", 1, [1, 1, 0], [1, 1, 0], (2, 2)),
+            ("ordinary renewal", 2, [1, 1, 2], [1, 1, 3], (3, 4)),
+            (
+                "pair recovery after revoked candidate",
+                3,
+                [3, 3, 2],
+                [4, 4, 2],
+                (4, 5),
+            ),
+            (
+                "first reconciliation after recovery",
+                4,
+                [4, 4, 4],
+                [5, 5, 5],
+                (5, 6),
+            ),
+            (
+                "restart retaining failed journal",
+                4,
+                [4, 7, 4],
+                [5, 9, 5],
+                (8, 10),
+            ),
+        ] {
+            assert_eq!(
+                next_authority_epochs(binding, &epochs, &fences).unwrap(),
+                expected,
+                "{name}"
+            );
+        }
+        assert!(next_authority_epochs(u64::MAX, &[1], &[1]).is_err());
+        assert!(next_authority_epochs(1, &[1], &[u64::MAX]).is_err());
+    }
+}
+
 #[cfg(not(all(feature = "experimental-tunio-rebind", target_os = "linux")))]
 pub(super) fn run(_: &Path) -> Result<()> {
     bail!("code=signed_renewal_feature_required module=sdwan_activation detail=signed authority renewal requires Linux experimental-tunio-rebind");
@@ -520,11 +570,15 @@ mod linux {
         let journal_path = original_worker
             .process_record
             .with_extension("renewal.json");
+        let mut consumed_epoch = desired.worker_epoch;
+        let mut consumed_fence = desired.fencing_token;
         if journal_path.try_exists()? {
             let mut previous_journal: Journal = read_private(&journal_path)?;
             if previous_journal.schema_version != 1 {
                 bail!("renewal journal schema differs");
             }
+            consumed_epoch = consumed_epoch.max(previous_journal.owner.worker_epoch);
+            consumed_fence = consumed_fence.max(previous_journal.owner.fencing_token);
             if previous_journal.phase == "committed" {
                 retire_candidate_record(&previous_journal, &original_worker.process_record)?;
                 retire_old_worker(&previous_journal, &desired, parent)?;
@@ -732,7 +786,7 @@ mod linux {
                             io_identity,
                             &request(
                                 AuthorityControlOperation::RevokeExact,
-                                Some(envelope.clone()),
+                                None,
                                 envelope.transaction_id.clone(),
                             ),
                             None,
@@ -810,18 +864,19 @@ mod linux {
         }) {
             bail!("new signed authority cannot downgrade existing owner");
         }
-        let epoch = previous
-            .as_ref()
-            .map_or(binding.owner_epoch, |owner| {
-                owner.worker_epoch.max(binding.owner_epoch)
-            })
-            .checked_add(1)
-            .context("owner epoch exhausted")?;
-        let fence = previous
-            .as_ref()
-            .map_or(0, |owner| owner.fencing_token)
-            .checked_add(1)
-            .context("fence exhausted")?;
+        let (epoch, fence) = next_authority_epochs(
+            binding.owner_epoch,
+            &[
+                desired.worker_epoch,
+                consumed_epoch,
+                previous.as_ref().map_or(0, |owner| owner.worker_epoch),
+            ],
+            &[
+                desired.fencing_token,
+                consumed_fence,
+                previous.as_ref().map_or(0, |owner| owner.fencing_token),
+            ],
+        )?;
         let revision = actual
             .highest_revision
             .checked_add(1)
@@ -1184,11 +1239,7 @@ mod linux {
         let _ = exchange_authority(
             &authority_path,
             io_identity,
-            &request(
-                operation,
-                if attached { Some(envelope) } else { None },
-                transaction,
-            ),
+            &request(operation, None, transaction),
             None,
             Instant::now() + Duration::from_secs(2),
         );
