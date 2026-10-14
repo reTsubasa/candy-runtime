@@ -667,15 +667,16 @@ mod linux {
                                             | candy_netd_proto::v2::Phase::Guarded
                                     )
                                 ) {
-                                    if expect_ack(
+                                    if let Err(error) = expect_ack(
                                         &mut netd,
                                         Operation::ForwardGuard {
                                             owner: owner.clone(),
                                         },
-                                    )
-                                    .is_err()
-                                    {
-                                        expect_ack(&mut netd, Operation::ForwardRevoke { owner })?;
+                                    ) {
+                                        eprintln!("level=warn code=forward_guard_failed module=sdwan_activation detail={error:#} action=preserve_live_owner_abort_recovery_retry");
+                                        return Err(error.context(
+                                            "live forwarding owner could not be guarded; preserving it and retrying recovery",
+                                        ));
                                     }
                                 } else {
                                     expect_ack(&mut netd, Operation::ForwardRevoke { owner })?;
@@ -1015,12 +1016,17 @@ mod linux {
                 previous_phase,
                 Some(candy_netd_proto::v2::Phase::Active | candy_netd_proto::v2::Phase::Guarded)
             ) {
-                expect_ack(
+                if let Err(error) = expect_ack(
                     &mut netd,
                     Operation::ForwardGuard {
                         owner: previous.clone(),
                     },
-                )?;
+                ) {
+                    eprintln!("level=warn code=forward_guard_failed module=sdwan_activation owner_epoch={} detail={error:#} action=preserve_live_owner_abort_handoff_retry", previous.worker_epoch);
+                    return Err(error.context(
+                        "live forwarding owner could not be guarded; preserving it and retrying handoff",
+                    ));
+                }
                 journal.phase = "old_worker_guarded".into();
                 publish(&journal_path, &journal)?;
             }
