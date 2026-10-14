@@ -1077,7 +1077,12 @@ mod budget_tests {
             thread_stack_bytes: MIN_CONTROL_THREAD_STACK_BYTES,
             max_total_stack_bytes: 6 * MIN_CONTROL_THREAD_STACK_BYTES,
             max_pending_control_requests: 2,
-            max_pending_control_bytes: 1024 * 1024,
+            // The front dispatcher reserves one full worst-case frame per
+            // front-control thread. Keep the fixture aligned with the
+            // protocol's 2 MiB frame cap (and the two-thread front budget),
+            // otherwise every dispatch test is rejected before exercising the
+            // domain lifecycle.
+            max_pending_control_bytes: 2 * FRONT_REQUEST_BYTES,
             max_reserved_fds: 4096,
         }
     }
