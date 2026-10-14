@@ -46,6 +46,16 @@ impl Drop for FailedStateEvidence {
                 let _ = fs::copy(&path, destination.join(entry.file_name()));
             }
         }
+        for file in [
+            "requests.jsonl",
+            "issuance.jsonl",
+            "publication-status.jsonl",
+        ] {
+            let path = self.0.join("cloud-mtls").join(file);
+            if path.is_file() {
+                let _ = fs::copy(path, destination.join(file));
+            }
+        }
     }
 }
 struct Namespace(String);
@@ -294,6 +304,21 @@ fn signed_cli_mtls_cloud_outage_preserves_real_tun_peer_recovery() {
 }
 
 #[test]
+#[ignore = "actual mTLS Cloud publication and signed Grant renewal across outage/expiry; isolated privileged namespace only"]
+fn signed_cli_mtls_cloud_renewal_preserves_original_tun() {
+    run_signed_cli(
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        FaultMode::CloudRenewal,
+    );
+}
+
+#[test]
 #[ignore = "authenticated original-Grant Core replacement and Agent takeover; isolated privileged namespace only"]
 fn signed_cli_unified_agent_rebinds_crashed_core_preserving_original_tun() {
     run_signed_cli(
@@ -420,6 +445,7 @@ enum FaultMode {
     NetdIo,
     PublicListener,
     CloudMtls,
+    CloudRenewal,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -442,21 +468,6 @@ fn run_signed_cli(
     let root = temp.path();
     let _failed_state = FailedStateEvidence(root.to_path_buf());
     fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
-    let _cloud_fixture = if fault_mode == FaultMode::CloudMtls {
-        let script = root.join("cloud_mtls_outage.py");
-        fs::write(&script, include_str!("fixtures/cloud_mtls_outage.py")).unwrap();
-        let child = Process(
-            Command::new("python3")
-                .arg(script)
-                .arg(root.join("cloud-mtls"))
-                .spawn()
-                .unwrap(),
-        );
-        wait_socket(&root.join("cloud-mtls/ready.json"));
-        Some(child)
-    } else {
-        None
-    };
     let ns = Namespace(format!("candy-signed-{}", std::process::id()));
     ip(&["netns", "add", &ns.0]);
     ip(&[
@@ -583,6 +594,34 @@ fn run_signed_cli(
         "tampered Grant accepted by real Core compile-control"
     );
     fs::write(root.join("fixture/grant.bin"), original_grant).unwrap();
+    let _cloud_fixture = if matches!(fault_mode, FaultMode::CloudMtls | FaultMode::CloudRenewal) {
+        let script = root.join("cloud_mtls_outage.py");
+        fs::write(&script, include_str!("fixtures/cloud_mtls_outage.py")).unwrap();
+        let mut command = Command::new("python3");
+        command.arg(script).arg(root.join("cloud-mtls"));
+        if fault_mode == FaultMode::CloudRenewal {
+            // The Cloud signer owns its fixture copy; client authority changes only via HTTPS.
+            fs::create_dir(root.join("cloud-signer")).unwrap();
+            for entry in fs::read_dir(root.join("fixture")).unwrap().flatten() {
+                if entry.path().is_file() {
+                    fs::copy(
+                        entry.path(),
+                        root.join("cloud-signer").join(entry.file_name()),
+                    )
+                    .unwrap();
+                }
+            }
+            command
+                .arg(root.join("cloud-signer"))
+                .arg(core())
+                .arg(std::env::var("CANDY_SIGNED_FIXTURE_BINARY").unwrap());
+        }
+        let child = Process(command.spawn().unwrap());
+        wait_socket(&root.join("cloud-mtls/ready.json"));
+        Some(child)
+    } else {
+        None
+    };
     if rebind {
         verify_unregistered_core_cannot_outlive_agent(root);
     }
@@ -666,7 +705,7 @@ fn run_signed_cli(
         mtu: 1180,
     };
     let prefix = |ip: [u8; 4], len| Ipv4Prefix::new(ip, len).unwrap();
-    let declaration = PrepareDeclaration {
+    let mut declaration = PrepareDeclaration {
         table_id: compiled["netd"]["table_id"].as_u64().unwrap() as u32,
         overlay_router_ipv4: spec.overlay_router_ipv4,
         effective_mtu: 1180,
@@ -691,9 +730,18 @@ fn run_signed_cli(
             manage_rp_filter: true,
         },
     };
+    if fault_mode == FaultMode::CloudRenewal {
+        declaration.exclusions.push(UnderlayExclusion {
+            prefix: prefix([127, 0, 0, 1], 32),
+            kind: UnderlayKind::CloudApi,
+        });
+    }
     let mut plan = serde_json::json!({"schema_version":1,"netd_socket":root.join("netd.sock"),"tunio":env!("CARGO_BIN_EXE_candy-tunio"),"core":core(),"core_config":root.join("fixture/client.toml"),"core_status":root.join("client-status.json"),"binding_file":root.join("binding.json"),"instance_id":vec![1;16],"infrastructure":spec,"domain_id":vec![2;16],"io_epoch":1,"worker_epoch":1,"fencing_token":1,"signed_generation":1,"auth_deadline_unix":expiry+3600,"declaration":declaration,"independent_supervision":{"control_socket":root.join("io-control.sock"),"status":root.join("io-status.json"),"process_record":root.join("io-process.json")}});
-    if independent || rebind || renewal || pair_recovery {
+    if independent || rebind || renewal || pair_recovery || fault_mode == FaultMode::CloudRenewal {
         plan["independent_worker"] = serde_json::json!({"control_socket":root.join("worker-control.sock"),"process_record":root.join("worker-process.json")});
+    }
+    if fault_mode == FaultMode::CloudRenewal {
+        plan["core_config"] = serde_json::json!(root.join("cloud-state/candidate/core.toml"));
     }
     if let Some(path) = &namespace_path {
         plan["routing_namespace"] = serde_json::json!(path);
@@ -704,11 +752,16 @@ fn run_signed_cli(
         fs::create_dir(root.join("cloud-state")).unwrap();
         fs::set_permissions(root.join("cloud-state"), fs::Permissions::from_mode(0o700)).unwrap();
         let mut runtime_config = serde_json::json!({"schema_version":1,"status":root.join("runtime-agent-status.json"),"budgets":{"max_domain_supervisors":1,"max_managed_threads":2,"thread_stack_bytes":1048576,"max_managed_stack_bytes":2097152,"event_capacity":1,"cloud_iteration_deadline_ms":1000,"shutdown_timeout_ms":5000},"cloud":{"state_dir":root.join("cloud-state"),"run_dir":root,"interval_ms":100,"retry_initial_ms":100,"retry_max_ms":200},"domain_plans":[root.join("plan.json")]});
-        if fault_mode == FaultMode::CloudMtls {
+        if matches!(fault_mode, FaultMode::CloudMtls | FaultMode::CloudRenewal) {
             runtime_config["cloud"]["identity_dir"] =
                 serde_json::json!(root.join("cloud-mtls/identity"));
             runtime_config["cloud"]["ca_certificate"] =
                 serde_json::json!(root.join("cloud-mtls/ca.pem"));
+        }
+        if fault_mode == FaultMode::CloudRenewal {
+            runtime_config["cloud"]["core"] = serde_json::json!(core());
+            runtime_config["budgets"]["cloud_iteration_deadline_ms"] = serde_json::json!(10000);
+            runtime_config["cloud"]["interval_ms"] = serde_json::json!(500);
         }
         private_json(&root.join("runtime-agent.json"), &runtime_config);
         agent_command
@@ -760,7 +813,9 @@ fn run_signed_cli(
     let initial = status(&root.join("client-status.json")).unwrap();
     let pid = initial["pid"].clone();
     let io = status(&root.join("io-status.json")).unwrap();
-    assert_eq!(io["auth_deadline_unix"], expiry);
+    if fault_mode != FaultMode::CloudRenewal {
+        assert_eq!(io["auth_deadline_unix"], expiry);
+    }
     let link_state = || {
         let mut command = Command::new("ip");
         if let Some(namespace) = &client_ns {
@@ -788,6 +843,25 @@ fn run_signed_cli(
             .success()
     };
     assert!(ping(), "signed real TUN traffic failed before fault");
+    if fault_mode == FaultMode::CloudRenewal {
+        verify_cloud_renewal(root, &mut agent, &ping, &link_state, &link);
+        unsafe {
+            nix::libc::kill(agent.0.id() as i32, nix::libc::SIGTERM);
+        }
+        assert!(agent.0.wait().unwrap().success());
+        assert!(matches!(
+            client
+                .exchange(Operation::InfraRetire {
+                    infra_id: [3; 16],
+                    generation: infra_generation
+                })
+                .unwrap()
+                .0,
+            Body::Ack
+        ));
+        drop(server);
+        return;
+    }
     if fault_mode == FaultMode::CloudMtls {
         let stderr = root.join("duplicate-agent.stderr");
         let mut duplicate = Process(
@@ -1006,6 +1080,121 @@ fn run_signed_cli(
     } else {
         ip(&["link", "del", "candy-test-lan"]);
     }
+}
+
+fn verify_cloud_renewal(
+    root: &Path,
+    agent: &mut Process,
+    ping: &impl Fn() -> bool,
+    link_state: &impl Fn() -> Vec<u8>,
+    original_link: &[u8],
+) {
+    use candy_process_control::{process_identity, process_is_current};
+    let first_io = status(&root.join("io-process.json")).unwrap();
+    let io_identity = process_identity(first_io["pid"].as_u64().unwrap() as u32).unwrap();
+    let first_worker = status(&root.join("worker-process.json")).unwrap();
+    let original_expiry = first_worker["auth_deadline_unix"].as_u64().unwrap();
+    let first_candidate = fs::read_link(root.join("cloud-state/candidate")).unwrap();
+    fs::write(root.join("cloud-mtls/mode"), "outage").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        <= original_expiry + 1
+    {
+        assert!(
+            Instant::now() < deadline,
+            "Cloud-issued authority did not expire within fixture deadline"
+        );
+        assert!(agent.0.try_wait().unwrap().is_none());
+        assert!(process_is_current(io_identity));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !ping(),
+        "traffic continued after real Cloud-issued Grant expired"
+    );
+    assert_eq!(link_state(), original_link);
+    assert!(process_is_current(io_identity));
+    assert_eq!(
+        status(&root.join("io-process.json")).unwrap()["pid"],
+        first_io["pid"]
+    );
+    fs::write(root.join("cloud-mtls/mode"), "healthy").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let renewed = loop {
+        if let Some(worker) = status(&root.join("worker-process.json")) {
+            if worker["pid"] != first_worker["pid"]
+                && worker["auth_deadline_unix"].as_u64().unwrap_or(0) > original_expiry
+                && ping()
+            {
+                break worker;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Cloud recovered but signed authority/ICMP did not recover"
+        );
+        assert!(agent.0.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(link_state(), original_link);
+    assert!(process_is_current(io_identity));
+    assert_eq!(
+        status(&root.join("io-process.json")).unwrap()["pid"],
+        first_io["pid"]
+    );
+    let renewed_candidate = fs::read_link(root.join("cloud-state/candidate")).unwrap();
+    assert_ne!(first_candidate, renewed_candidate);
+    assert!(renewed["authorization_snapshot_sha256"].is_string());
+    assert_ne!(
+        first_worker["authorization_snapshot_sha256"],
+        renewed["authorization_snapshot_sha256"]
+    );
+    assert!(
+        renewed["worker_epoch"].as_u64().unwrap() > first_worker["worker_epoch"].as_u64().unwrap()
+    );
+    let requests: Vec<serde_json::Value> =
+        fs::read_to_string(root.join("cloud-mtls/requests.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    assert!(requests
+        .iter()
+        .all(|request| request["authenticated_client_certificate"] == true));
+    for expected in [200, 500] {
+        assert!(requests.iter().any(
+            |request| request["path"] == "/auth/v1/runtime/configuration"
+                && request["response"] == expected
+        ));
+    }
+    let grants: Vec<serde_json::Value> = fs::read_to_string(root.join("cloud-mtls/issuance.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(grants.len() >= 2);
+    assert!(grants
+        .iter()
+        .any(|grant| grant["expires_at_unix"].as_u64().unwrap() > original_expiry));
+    let evidence = serde_json::json!({"scope":"isolated test Cloud using production Runtime HTTPS/verification/publication and Agent renewal", "same_agent_pid":agent.0.id(),"original_core_pid":first_worker["pid"],"renewed_core_pid":renewed["pid"],"same_io_pid":first_io["pid"],"original_expiry":original_expiry,"renewed_expiry":renewed["auth_deadline_unix"],"first_candidate":first_candidate,"renewed_candidate":renewed_candidate,"mtls_verified_requests":requests.len(),"actual_cloud_grant_issuances":grants.len(),"expired_traffic_denied":true,"same_tun":true,"actual_icmp_recovered":true});
+    if let Some(destination) = std::env::var_os("CANDY_SIGNED_EVIDENCE_DIR") {
+        let destination = PathBuf::from(destination);
+        private_json(
+            &destination.join("signed-mtls-cloud-renewal-evidence.json"),
+            &evidence,
+        );
+        for file in [
+            "requests.jsonl",
+            "issuance.jsonl",
+            "publication-status.jsonl",
+        ] {
+            fs::copy(root.join("cloud-mtls").join(file), destination.join(file)).unwrap();
+        }
+    }
+    eprintln!("signed_mtls_cloud_renewal_evidence {evidence}");
 }
 
 #[allow(clippy::too_many_arguments)]
