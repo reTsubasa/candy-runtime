@@ -38,6 +38,13 @@ struct OutputMetrics {
     backpressure_drops: AtomicU64,
     deadline_drops: AtomicU64,
     stale_drops: AtomicU64,
+    /// Queue admission failures split by the resource that was exhausted.
+    queue_slot_exhausted: AtomicU64,
+    queue_byte_exhausted: AtomicU64,
+    queue_channel_full: AtomicU64,
+    queue_high_watermark: AtomicU64,
+    /// Number of nonblocking writes that observed a non-writable packet fd.
+    write_blocked_events: AtomicU64,
 }
 
 #[derive(Default)]
@@ -47,6 +54,12 @@ pub struct OutputDelta {
     pub backpressure_drops: u64,
     pub deadline_drops: u64,
     pub stale_drops: u64,
+    pub queue_slot_exhausted: u64,
+    pub queue_byte_exhausted: u64,
+    pub queue_channel_full: u64,
+    pub queue_depth: u64,
+    pub queue_high_watermark: u64,
+    pub write_blocked_events: u64,
 }
 
 struct QueuedPacket {
@@ -56,12 +69,14 @@ struct QueuedPacket {
     _slot_credit: OwnedSemaphorePermit,
     deadline: tokio::time::Instant,
     outstanding: Arc<AtomicUsize>,
+    queue_depth: Arc<AtomicUsize>,
     failure: Option<io::Error>,
 }
 
 impl Drop for QueuedPacket {
     fn drop(&mut self) {
         self.outstanding.fetch_sub(1, Ordering::Release);
+        self.queue_depth.fetch_sub(1, Ordering::Release);
     }
 }
 
@@ -79,6 +94,7 @@ pub struct PacketOutput {
     task: JoinHandle<io::Result<()>>,
     joined: bool,
     outstanding: Arc<AtomicUsize>,
+    queue_depth: Arc<AtomicUsize>,
     try_send: Box<NonblockingPacketWrite>,
     max_packet_size: usize,
 }
@@ -93,6 +109,7 @@ impl PacketOutput {
         let credit = Arc::new(Semaphore::new(OUTPUT_BYTE_LIMIT));
         let metrics = Arc::new(OutputMetrics::default());
         let task_metrics = metrics.clone();
+        let queue_depth = Arc::new(AtomicUsize::new(0));
         let task = tokio::spawn(async move {
             loop {
                 let mut packet = tokio::select! {
@@ -169,6 +186,7 @@ impl PacketOutput {
             task,
             joined: false,
             outstanding: Arc::new(AtomicUsize::new(0)),
+            queue_depth,
             try_send: Box::new(move |packet| try_port.try_send_packet(packet)),
             max_packet_size,
         }
@@ -190,7 +208,11 @@ impl PacketOutput {
                         .fetch_add(packet.len() as u64, Ordering::Relaxed);
                     return Ok(());
                 }
-                Ok(false) => (),
+                Ok(false) => {
+                    self.metrics
+                        .write_blocked_events
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 Err(error) if is_packet_scoped_write_error(&error) => {
                     self.metrics
                         .backpressure_drops
@@ -201,20 +223,43 @@ impl PacketOutput {
                 Err(error) => failure = Some(error),
             }
         }
-        let slot_credit = self
-            .slot_credit
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| "tun_output_queue_full")?;
+        let slot_credit = self.slot_credit.clone().try_acquire_owned().map_err(|_| {
+            self.metrics
+                .queue_slot_exhausted
+                .fetch_add(1, Ordering::Relaxed);
+            "tun_output_queue_full"
+        })?;
         let credit = self
             .credit
             .clone()
-            .try_acquire_many_owned(
-                u32::try_from(packet.capacity().max(packet.len()))
-                    .map_err(|_| "tun_output_queue_full")?,
-            )
-            .map_err(|_| "tun_output_queue_full")?;
+            .try_acquire_many_owned(u32::try_from(packet.capacity().max(packet.len())).map_err(
+                |_| {
+                    self.metrics
+                        .queue_byte_exhausted
+                        .fetch_add(1, Ordering::Relaxed);
+                    "tun_output_queue_full"
+                },
+            )?)
+            .map_err(|_| {
+                self.metrics
+                    .queue_byte_exhausted
+                    .fetch_add(1, Ordering::Relaxed);
+                "tun_output_queue_full"
+            })?;
         self.outstanding.fetch_add(1, Ordering::Release);
+        let depth = self.queue_depth.fetch_add(1, Ordering::AcqRel) + 1;
+        let mut high = self.metrics.queue_high_watermark.load(Ordering::Relaxed);
+        while depth as u64 > high {
+            match self.metrics.queue_high_watermark.compare_exchange_weak(
+                high,
+                depth as u64,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => high = observed,
+            }
+        }
         self.queue
             .try_send(QueuedPacket {
                 epoch: *self.epoch.borrow(),
@@ -223,10 +268,16 @@ impl PacketOutput {
                 _slot_credit: slot_credit,
                 deadline: tokio::time::Instant::now() + OUTPUT_WRITE_TIMEOUT,
                 outstanding: self.outstanding.clone(),
+                queue_depth: self.queue_depth.clone(),
                 failure,
             })
             .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => "tun_output_queue_full",
+                mpsc::error::TrySendError::Full(_) => {
+                    self.metrics
+                        .queue_channel_full
+                        .fetch_add(1, Ordering::Relaxed);
+                    "tun_output_queue_full"
+                }
                 mpsc::error::TrySendError::Closed(_) => "tun_output_closed",
             })
     }
@@ -254,6 +305,12 @@ impl PacketOutput {
             backpressure_drops: self.metrics.backpressure_drops.swap(0, Ordering::Relaxed),
             deadline_drops: self.metrics.deadline_drops.swap(0, Ordering::Relaxed),
             stale_drops: self.metrics.stale_drops.swap(0, Ordering::Relaxed),
+            queue_slot_exhausted: self.metrics.queue_slot_exhausted.swap(0, Ordering::Relaxed),
+            queue_byte_exhausted: self.metrics.queue_byte_exhausted.swap(0, Ordering::Relaxed),
+            queue_channel_full: self.metrics.queue_channel_full.swap(0, Ordering::Relaxed),
+            queue_depth: self.queue_depth.load(Ordering::Acquire) as u64,
+            queue_high_watermark: self.metrics.queue_high_watermark.swap(0, Ordering::Relaxed),
+            write_blocked_events: self.metrics.write_blocked_events.swap(0, Ordering::Relaxed),
         }
     }
 
