@@ -1,26 +1,26 @@
 {
   "files": {
-    "Cargo.toml": "c1c297950c36b9f3457eff19eb1645e3e114add6beec0a492e20366fb5c41105",
+    "Cargo.toml": "f1f9ded3ada35cf1ac6abb3bfd066e21a4d9871826e708de4e261a927bbcfa82",
     "src/fd.rs": "4e08796effc340169a7de21974dfba13b0bc2d65813aec6b6e308db5c9dbc8ba",
     "src/lib.rs": "1ffb422cb562f15d265a0c27e6f6b8d025b61f81dd3236b97039c23c6dbd7d13",
-    "src/packet_port.rs": "77bc9254386232c6de7e0f71a41fe5e882b3e97968b70acb0fe0c2373e3e50d4",
-    "src/packet_port_ipc.rs": "9674534d6e0a4283b6557e66a86e460caa552b3eb819b161fe7463f5a394dc98",
-    "src/packet_port_manager.rs": "e4d57d5114b9e79bc02dbf8b91ce06f77e570a30e0ccfda7e668fa101994468d"
+    "src/packet_port.rs": "b9974f25ebe097144a32318a490d935c71e3966df4030bb2dd2fc0d3e6043551",
+    "src/packet_port_ipc.rs": "0020287a971ec190d1ea51415e695e21bda0604a99b521475f6f2de8058b14f8",
+    "src/packet_port_manager.rs": "40a28cd7dc2f30ab876e86d36f7329fd3f99d24442bac10e0956facded6015d9"
   },
   "note": "Fixed public source package from a development worktree; base commit alone is not its content identity.",
   "origin": "https://github.com/reTsubasa/candy-core",
-  "origin_base_commit": "efab73c12dc28411d8b34e91d1d332a7f9609e83",
+  "origin_base_commit": "d9a25f5978de2a2e2ea6bf726ebf2851b9516100",
   "origin_path": "crates/candy-packet-port",
-  "origin_worktree_content_sha256": "9996d8f027d6c14475d747a86615df5ae1307e6bf336ad6d19cd199028b78168",
+  "origin_worktree_content_sha256": "0b7f3ac4b45a34704b15070428ff224e8d4502a59f175adff5f8e79360a3f487",
   "package": "candy-packet-port",
-  "package_content_sha256": "e918b4201600d026c09b03add18d70db79aebfcaea0649031267d07234b7937d",
+  "package_content_sha256": "6d9401d5310bf5de7bcd1f3e8cd6186e9d31d6383522da0dee247a3a2f13a3ba",
   "schema_version": 1,
   "source_files": {
     "Cargo.toml": "7be1c63650c39ceb702a14b9d869013a86728dc2196f4883880836ac7f539be8",
     "src/fd.rs": "4e08796effc340169a7de21974dfba13b0bc2d65813aec6b6e308db5c9dbc8ba",
     "src/lib.rs": "1ffb422cb562f15d265a0c27e6f6b8d025b61f81dd3236b97039c23c6dbd7d13",
-    "src/packet_port.rs": "77bc9254386232c6de7e0f71a41fe5e882b3e97968b70acb0fe0c2373e3e50d4",
-    "src/packet_port_ipc.rs": "9674534d6e0a4283b6557e66a86e460caa552b3eb819b161fe7463f5a394dc98",
-    "src/packet_port_manager.rs": "e4d57d5114b9e79bc02dbf8b91ce06f77e570a30e0ccfda7e668fa101994468d"
+    "src/packet_port.rs": "b9974f25ebe097144a32318a490d935c71e3966df4030bb2dd2fc0d3e6043551",
+    "src/packet_port_ipc.rs": "0020287a971ec190d1ea51415e695e21bda0604a99b521475f6f2de8058b14f8",
+    "src/packet_port_manager.rs": "40a28cd7dc2f30ab876e86d36f7329fd3f99d24442bac10e0956facded6015d9"
   }
 }

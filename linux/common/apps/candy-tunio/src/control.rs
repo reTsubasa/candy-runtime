@@ -28,12 +28,14 @@ pub(crate) struct Controller {
     pub(crate) registered: bool,
     pub(crate) registration: Option<watch::Sender<bool>>,
     pub(crate) authority: crate::authority_control::AuthorityState,
+    pub(crate) bridge_outputs:
+        Option<watch::Receiver<candy_packet_port::packet_port_manager::PacketBridgeOutputStatus>>,
 }
 
 impl Controller {
     pub(crate) fn publish(&self) -> Result<()> {
         let bytes = serde_json::to_vec(
-            &json!({"schema_version":3,"pid":self.process.pid,"generation":self.generation,"infrastructure_generation":self.binding.infrastructure_generation,"policy_generation":self.binding.policy_generation,"readiness_token":self.token,"lifecycle":if self.registered {"active"} else {"starting"},"process_start_ticks":self.process.start_ticks,"controller":self.controller,"controller_epoch":self.epoch,"auth_deadline_unix":self.auth_deadline_unix,"packet_binding":self.binding,"owner_active":self.owner_active,"authority":self.authority}),
+            &json!({"schema_version":3,"pid":self.process.pid,"generation":self.generation,"infrastructure_generation":self.binding.infrastructure_generation,"policy_generation":self.binding.policy_generation,"readiness_token":self.token,"lifecycle":if self.registered {"active"} else {"starting"},"process_start_ticks":self.process.start_ticks,"controller":self.controller,"controller_epoch":self.epoch,"auth_deadline_unix":self.auth_deadline_unix,"packet_binding":self.binding,"owner_active":self.owner_active,"authority":self.authority,"bridge_outputs":self.bridge_outputs.as_ref().map(|receiver| receiver.borrow().clone())}),
         )?;
         let temporary = self
             .status
@@ -154,6 +156,35 @@ pub fn install_startup_guard() -> Result<()> {
 }
 
 impl ControlRegistration {
+    /// Publish low-frequency queue diagnostics outside the packet executor.
+    pub fn observe_bridge(
+        &self,
+        outputs: watch::Receiver<candy_packet_port::packet_port_manager::PacketBridgeOutputStatus>,
+        shutdown: watch::Receiver<bool>,
+    ) -> Result<()> {
+        self.state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("controller state poisoned"))?
+            .bridge_outputs = Some(outputs);
+        let state = Arc::clone(&self.state);
+        thread::spawn(move || {
+            while !*shutdown.borrow() {
+                thread::sleep(Duration::from_secs(1));
+                if *shutdown.borrow() {
+                    break;
+                }
+                let result = state
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("controller state poisoned"))
+                    .and_then(|state| state.publish());
+                if let Err(error) = result {
+                    eprintln!("level=warn code=bridge_status_publish_failed module=tunio_control detail={error:#} action=keep_packet_service");
+                }
+            }
+        });
+        Ok(())
+    }
+
     pub async fn wait(mut self) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -243,6 +274,7 @@ pub fn start(
         registered: false,
         registration: Some(registration),
         authority: crate::authority_control::AuthorityState::default(),
+        bridge_outputs: None,
     };
     let listener = UnixListener::bind(&socket).with_context(|| {
         format!("code=control_bind_failed module=tunio_control path={} detail=bind supervision endpoint", socket.display())

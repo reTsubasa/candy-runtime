@@ -10,6 +10,76 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct PacketOutputStatus {
+    pub sent_packets: u64,
+    pub sent_bytes: u64,
+    pub queue_slot_exhausted: u64,
+    pub queue_byte_exhausted: u64,
+    pub queue_channel_full: u64,
+    pub backpressure_drops: u64,
+    pub deadline_drops: u64,
+    pub stale_drops: u64,
+    pub queue_depth: u64,
+    pub queue_high_watermark: u64,
+    pub write_blocked_events: u64,
+    pub queued_write_attempts: u64,
+    pub queue_wait_micros: u64,
+    pub queue_wait_max_micros: u64,
+    pub send_elapsed_micros: u64,
+    pub send_elapsed_max_micros: u64,
+}
+
+impl PacketOutputStatus {
+    fn accumulate(&mut self, delta: &crate::packet_port::OutputDelta) {
+        self.sent_packets = self.sent_packets.saturating_add(delta.sent_packets);
+        self.sent_bytes = self.sent_bytes.saturating_add(delta.sent_bytes);
+        self.queue_slot_exhausted = self
+            .queue_slot_exhausted
+            .saturating_add(delta.queue_slot_exhausted);
+        self.queue_byte_exhausted = self
+            .queue_byte_exhausted
+            .saturating_add(delta.queue_byte_exhausted);
+        self.queue_channel_full = self
+            .queue_channel_full
+            .saturating_add(delta.queue_channel_full);
+        self.backpressure_drops = self
+            .backpressure_drops
+            .saturating_add(delta.backpressure_drops);
+        self.deadline_drops = self.deadline_drops.saturating_add(delta.deadline_drops);
+        self.stale_drops = self.stale_drops.saturating_add(delta.stale_drops);
+        self.queue_depth = delta.queue_depth;
+        self.queue_high_watermark = self.queue_high_watermark.max(delta.queue_high_watermark);
+        self.write_blocked_events = self
+            .write_blocked_events
+            .saturating_add(delta.write_blocked_events);
+        self.queued_write_attempts = self
+            .queued_write_attempts
+            .saturating_add(delta.queued_write_attempts);
+        self.queue_wait_micros = self
+            .queue_wait_micros
+            .saturating_add(delta.queue_wait_micros);
+        self.queue_wait_max_micros = self.queue_wait_max_micros.max(delta.queue_wait_max_micros);
+        self.send_elapsed_micros = self
+            .send_elapsed_micros
+            .saturating_add(delta.send_elapsed_micros);
+        self.send_elapsed_max_micros = self
+            .send_elapsed_max_micros
+            .max(delta.send_elapsed_max_micros);
+    }
+}
+
+/// Lifetime counters are retained across worker replacement; binding identifies
+/// the current owner. These direction diagnostics overlap aggregate counters.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct PacketBridgeOutputStatus {
+    pub binding: Option<PacketPortBinding>,
+    pub revision: u64,
+    pub sampled_elapsed_millis: u64,
+    pub to_worker: PacketOutputStatus,
+    pub to_tun: PacketOutputStatus,
+}
+
 pub type AuthorizationCheck = Arc<dyn Fn() -> io::Result<()> + Send + Sync>;
 
 #[derive(Debug)]
@@ -130,7 +200,11 @@ async fn owner_expiry(deadline: Option<Instant>) {
     }
 }
 
-fn collect(owner: &Owner, counters: &mut PacketBridgeCounters) {
+fn collect(
+    owner: &Owner,
+    counters: &mut PacketBridgeCounters,
+    outputs: &mut PacketBridgeOutputStatus,
+) {
     let tx = owner.to_worker.take_delta();
     let rx = owner.to_tun.take_delta();
     counters.to_worker_packets += tx.sent_packets;
@@ -140,6 +214,8 @@ fn collect(owner: &Owner, counters: &mut PacketBridgeCounters) {
     counters.backpressure_drops += tx.backpressure_drops + rx.backpressure_drops;
     counters.deadline_drops += tx.deadline_drops + rx.deadline_drops;
     counters.stale_drops += tx.stale_drops + rx.stale_drops;
+    outputs.to_worker.accumulate(&tx);
+    outputs.to_tun.accumulate(&rx);
 }
 
 fn receipt(
@@ -155,12 +231,17 @@ fn receipt(
     }
 }
 
-async fn revoke(owner: &mut Option<Owner>, counters: &mut PacketBridgeCounters) {
+async fn revoke(
+    owner: &mut Option<Owner>,
+    counters: &mut PacketBridgeCounters,
+    outputs: &mut PacketBridgeOutputStatus,
+) {
     if let Some(mut previous) = owner.take() {
         previous.to_worker.stop().await;
         previous.to_tun.stop().await;
-        collect(&previous, counters);
+        collect(&previous, counters, outputs);
     }
+    outputs.binding = None;
 }
 
 struct DeadlinePort<P> {
@@ -224,8 +305,18 @@ impl<P: PacketPort> PacketPort for DeadlinePort<P> {
 pub async fn run_managed_packet_port_bridge<P: PacketPort>(
     tun: P,
     infrastructure: PacketPortBinding,
+    updates: mpsc::Receiver<PacketPortOwnerUpdate>,
+    shutdown: watch::Receiver<bool>,
+) -> io::Result<PacketBridgeCounters> {
+    run_observed_packet_port_bridge(tun, infrastructure, updates, shutdown, None).await
+}
+
+pub async fn run_observed_packet_port_bridge<P: PacketPort>(
+    tun: P,
+    infrastructure: PacketPortBinding,
     mut updates: mpsc::Receiver<PacketPortOwnerUpdate>,
     mut shutdown: watch::Receiver<bool>,
+    diagnostics: Option<watch::Sender<PacketBridgeOutputStatus>>,
 ) -> io::Result<PacketBridgeCounters> {
     let tun = Arc::new(tun);
     let mut owner: Option<Owner> = None;
@@ -235,6 +326,11 @@ pub async fn run_managed_packet_port_bridge<P: PacketPort>(
     let mut control_available = true;
     let mut prefer_worker = false;
     let mut counters = PacketBridgeCounters::default();
+    let mut outputs = PacketBridgeOutputStatus::default();
+    let started = Instant::now();
+    let period = std::time::Duration::from_secs(1);
+    let mut sample_tick = tokio::time::interval_at(started + period, period);
+    sample_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
         if *shutdown.borrow() {
             break Ok(());
@@ -249,7 +345,7 @@ pub async fn run_managed_packet_port_bridge<P: PacketPort>(
             _ = owner_expiry(expiry) => {
                 tracing::warn!(code = "packet_port_owner_expired", module = "sdwan_tun_io",
                     owner_epoch = highest_owner_epoch, action = "revoke_domain_keep_infrastructure");
-                revoke(&mut owner, &mut counters).await;
+                revoke(&mut owner, &mut counters, &mut outputs).await;
             }
             update = updates.recv(), if control_available => {
                 let Some(update) = update else {
@@ -281,7 +377,7 @@ pub async fn run_managed_packet_port_bridge<P: PacketPort>(
                             || binding.policy_generation < highest_policy_generation {
                             Err("expired authorization or stale owner/policy epoch".into())
                         } else {
-                            revoke(&mut owner, &mut counters).await;
+                            revoke(&mut owner, &mut counters, &mut outputs).await;
                             if auth_deadline <= Instant::now()
                                 || authorization.as_ref().is_some_and(|check| check().is_err()) {
                                 Err("authorization expired while stopping prior owner".into())
@@ -295,6 +391,7 @@ pub async fn run_managed_packet_port_bridge<P: PacketPort>(
                                     to_tun: PacketOutput::new(Arc::new(DeadlinePort { port: tun.clone(), deadline: deadline_rx.clone(), authorization })),
                                     port, auth_deadline,
                                 });
+                                outputs.binding = Some(binding);
                                 Ok(())
                             }
                         }
@@ -315,7 +412,7 @@ pub async fn run_managed_packet_port_bridge<P: PacketPort>(
                         if owner_epoch != highest_owner_epoch {
                             Err("revocation refers to stale owner epoch".into())
                         } else {
-                            revoke(&mut owner, &mut counters).await;
+                            revoke(&mut owner, &mut counters, &mut outputs).await;
                             Ok(())
                         }
                     }
@@ -341,7 +438,15 @@ pub async fn run_managed_packet_port_bridge<P: PacketPort>(
                     owner_epoch = highest_owner_epoch, detail = %error,
                     action = "revoke_domain_keep_infrastructure");
                 counters.worker_failures += 1;
-                revoke(&mut owner, &mut counters).await;
+                revoke(&mut owner, &mut counters, &mut outputs).await;
+            }
+            _ = sample_tick.tick(), if diagnostics.is_some() => {
+                if let Some(owner) = &owner {
+                    collect(owner, &mut counters, &mut outputs);
+                }
+                outputs.revision = outputs.revision.saturating_add(1);
+                outputs.sampled_elapsed_millis = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                if let Some(sender) = &diagnostics { sender.send_replace(outputs.clone()); }
             }
             packet = next_data_packet(tun.as_ref(), worker.as_deref(), prefer_worker) => {
                 prefer_worker = matches!(&packet, DataPacket::FromTun(_));
@@ -361,13 +466,16 @@ pub async fn run_managed_packet_port_bridge<P: PacketPort>(
                             owner_epoch = highest_owner_epoch, detail = %error,
                             action = "revoke_domain_keep_infrastructure");
                         counters.worker_failures += 1;
-                        revoke(&mut owner, &mut counters).await;
+                        revoke(&mut owner, &mut counters, &mut outputs).await;
                     }
                 }
             },
         }
     };
-    revoke(&mut owner, &mut counters).await;
+    revoke(&mut owner, &mut counters, &mut outputs).await;
+    if let Some(sender) = diagnostics {
+        sender.send_replace(outputs);
+    }
     result.map(|_| counters)
 }
 
@@ -379,6 +487,85 @@ mod tests {
     use std::os::fd::OwnedFd;
     use std::time::Duration;
     use tokio::net::UnixDatagram;
+
+    #[test]
+    fn output_status_keeps_lifetime_counters_without_counting_admission_twice() {
+        let mut status = PacketOutputStatus::default();
+        status.accumulate(&crate::packet_port::OutputDelta {
+            sent_packets: 2,
+            queue_slot_exhausted: 3,
+            deadline_drops: 1,
+            queue_depth: 4,
+            queue_high_watermark: 7,
+            queued_write_attempts: 2,
+            queue_wait_micros: 10,
+            queue_wait_max_micros: 6,
+            send_elapsed_micros: 8,
+            send_elapsed_max_micros: 5,
+            ..Default::default()
+        });
+        status.accumulate(&crate::packet_port::OutputDelta {
+            sent_packets: 1,
+            queue_slot_exhausted: 2,
+            queue_high_watermark: 5,
+            queue_wait_max_micros: 4,
+            send_elapsed_max_micros: 3,
+            ..Default::default()
+        });
+        assert_eq!(status.sent_packets, 3);
+        assert_eq!(status.queue_slot_exhausted, 5);
+        assert_eq!(status.deadline_drops, 1);
+        assert_eq!(status.queue_depth, 0);
+        assert_eq!(status.queue_high_watermark, 7);
+        assert_eq!(status.queue_wait_max_micros, 6);
+        assert_eq!(status.send_elapsed_max_micros, 5);
+    }
+
+    #[tokio::test]
+    async fn observed_bridge_reports_actual_output_and_final_counters_once() {
+        let (tun_socket, host) = UnixDatagram::pair().unwrap();
+        let tun = InheritedPacketFd::new(OwnedFd::from(tun_socket.into_std().unwrap())).unwrap();
+        let (io, worker) = ports(1);
+        let (updates, receiver) = mpsc::channel(4);
+        let (stop, shutdown) = watch::channel(false);
+        let (diagnostics, mut snapshots) = watch::channel(PacketBridgeOutputStatus::default());
+        let task = tokio::spawn(run_observed_packet_port_bridge(
+            tun,
+            binding(1),
+            receiver,
+            shutdown,
+            Some(diagnostics),
+        ));
+        update(
+            &updates,
+            PacketPortOwnerChange::Attach {
+                port: io,
+                auth_deadline: Instant::now() + Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+        worker.send_packet(&[0x45; 64]).await.unwrap();
+        let mut packet = [0; 64];
+        tokio::time::timeout(Duration::from_secs(2), host.recv(&mut packet))
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), snapshots.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let snapshot = snapshots.borrow().clone();
+        assert_eq!(snapshot.to_tun.sent_packets, 1);
+        assert_eq!(snapshot.to_tun.sent_bytes, 64);
+        assert_eq!(snapshot.to_worker.sent_packets, 0);
+        assert_eq!(snapshot.binding, Some(binding(1)));
+        stop.send_replace(true);
+        let counters = task.await.unwrap().unwrap();
+        assert_eq!(counters.to_tun_packets, 1);
+        assert_eq!(snapshots.borrow().to_tun.sent_packets, 1);
+        assert_eq!(snapshots.borrow().binding, None);
+    }
 
     struct FloodTun {
         reads: Arc<std::sync::atomic::AtomicUsize>,

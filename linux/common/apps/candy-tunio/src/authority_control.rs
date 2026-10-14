@@ -957,6 +957,7 @@ mod tests {
                 registered: true,
                 registration: None,
                 authority: AuthorityState::default(),
+                bridge_outputs: None,
             }));
             state.lock().unwrap().publish().unwrap();
             let supervision = dir.path().join("control.sock");

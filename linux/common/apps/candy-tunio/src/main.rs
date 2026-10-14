@@ -211,6 +211,7 @@ async fn main() -> Result<()> {
                 return Err(error);
             }
         };
+        registration.observe_bridge(managed.output_status, stop.subscribe())?;
         if let Err(error) = registration.wait().await {
             let _ = stop.send(true);
             let _ = managed.task.await;

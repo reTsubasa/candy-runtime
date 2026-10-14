@@ -16,6 +16,8 @@ pub struct ManagedInfrastructure {
     pub updates:
         tokio::sync::mpsc::Sender<candy_packet_port::packet_port_manager::PacketPortOwnerUpdate>,
     pub task: tokio::task::JoinHandle<io::Result<PacketBridgeCounters>>,
+    pub output_status:
+        watch::Receiver<candy_packet_port::packet_port_manager::PacketBridgeOutputStatus>,
 }
 
 /// Opt-in rebind loop. The initial attachment must be active before publishing
@@ -27,13 +29,18 @@ pub async fn start_managed_infrastructure<P: PacketPort>(
     auth_deadline: Instant,
 ) -> io::Result<ManagedInfrastructure> {
     use candy_packet_port::packet_port_manager::{
-        run_managed_packet_port_bridge, PacketPortOwnerChange, PacketPortOwnerUpdate,
+        run_observed_packet_port_bridge, PacketPortOwnerChange, PacketPortOwnerUpdate,
     };
     let binding = worker.binding();
     let authorization = authority_control::bootstrap_check(auth_deadline)?;
     let (updates, receiver) = tokio::sync::mpsc::channel(8);
-    let task = tokio::spawn(run_managed_packet_port_bridge(
-        tun, binding, receiver, shutdown,
+    let (diagnostics, output_status) = watch::channel(Default::default());
+    let task = tokio::spawn(run_observed_packet_port_bridge(
+        tun,
+        binding,
+        receiver,
+        shutdown,
+        Some(diagnostics),
     ));
     let (acknowledgement, applied) = tokio::sync::oneshot::channel();
     if updates
@@ -64,7 +71,11 @@ pub async fn start_managed_infrastructure<P: PacketPort>(
     }
     let applied = tokio::time::timeout(std::time::Duration::from_secs(2), applied).await;
     match applied {
-        Ok(Ok(Ok(()))) => Ok(ManagedInfrastructure { updates, task }),
+        Ok(Ok(Ok(()))) => Ok(ManagedInfrastructure {
+            updates,
+            task,
+            output_status,
+        }),
         result => {
             task.abort();
             let _ = task.await;
