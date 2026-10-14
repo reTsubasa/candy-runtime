@@ -8,6 +8,27 @@ fn next_authority_epochs(binding_epoch: u64, epochs: &[u64], fences: &[u64]) -> 
     ))
 }
 
+#[cfg(any(test, all(feature = "experimental-tunio-rebind", target_os = "linux")))]
+fn authorization_clock_sample(
+    expiry_unix: u64,
+    verified_mono_ms: u64,
+    verified_wall: Duration,
+) -> Result<(u64, u64)> {
+    let remaining = Duration::from_secs(expiry_unix)
+        .checked_sub(verified_wall)
+        .filter(|value| !value.is_zero())
+        .context("new signed authority expired")?;
+    if remaining > Duration::from_secs(3600) {
+        bail!("experimental detached authority is limited to one hour");
+    }
+    let cap = verified_mono_ms
+        .checked_add(u64::try_from(remaining.as_millis())?)
+        .context("authority deadline overflow")?;
+    // Keep the wall timestamp associated with this exact monotonic cap. The
+    // stop/spawn barrier can cross a wall second before the envelope is sent.
+    Ok((verified_wall.as_secs(), cap))
+}
+
 #[cfg(not(all(feature = "experimental-tunio-rebind", target_os = "linux")))]
 pub(super) fn run(_: &Path) -> Result<()> {
     bail!("code=signed_renewal_feature_required module=sdwan_activation detail=signed authority renewal requires Linux experimental-tunio-rebind");
@@ -898,16 +919,13 @@ mod linux {
             .context("authority revision exhausted")?;
         let transaction = uuid::Uuid::new_v4().simple().to_string();
         let now = candy_tunio::authority_control::monotonic_ms()?;
-        let remaining = Duration::from_secs(plan.auth_deadline_unix)
-            .checked_sub(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?)
-            .filter(|value| !value.is_zero())
-            .context("new signed authority expired")?;
-        if remaining > Duration::from_secs(3600) {
-            bail!("experimental detached authority is limited to one hour");
-        }
-        let mut cap = now
-            .checked_add(u64::try_from(remaining.as_millis())?)
-            .context("authority deadline overflow")?;
+        // Sample monotonic time before wall time so descheduling can only
+        // shorten the deadline; never resample either clock after the barrier.
+        let (verified_at_unix, mut cap) = authorization_clock_sample(
+            plan.auth_deadline_unix,
+            now,
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?,
+        )?;
         if let Some(active) = &actual.active {
             if active.signed_control_hash == signed_hash {
                 cap = cap.min(active.effective_deadline_mono_ms);
@@ -1072,7 +1090,7 @@ mod linux {
                 .as_u64()
                 .context("signed expiry absent")?,
             effective_expiry_unix: plan.auth_deadline_unix,
-            verified_at_unix: unix_time()?,
+            verified_at_unix,
             verified_at_mono_ms: now,
             effective_deadline_mono_ms: cap,
             boot_id: fs::read_to_string("/proc/sys/kernel/random/boot_id")?
@@ -1335,6 +1353,39 @@ pub(super) fn commit_authorized(
 #[cfg(test)]
 mod epoch_tests {
     use super::*;
+
+    #[test]
+    fn signed_renewal_clock_sample_survives_stop_spawn_crossing_wall_seconds() {
+        let expiry = 2_000;
+        let verification_mono = 50_000;
+        let verification_wall = Duration::from_millis(1_000_975);
+        let (verified_unix, sampled_cap) =
+            authorization_clock_sample(expiry, verification_mono, verification_wall).unwrap();
+        // The old worker stop and fresh Core spawn complete 75 ms later,
+        // crossing a wall second. This must not change the verified duration.
+        let envelope_wall = verification_wall + Duration::from_millis(75);
+        let duration_with_late_wall = (expiry - envelope_wall.as_secs()) * 1_000;
+        assert!(sampled_cap - verification_mono > duration_with_late_wall);
+        assert!(sampled_cap - verification_mono <= (expiry - verified_unix) * 1_000);
+        assert_eq!(sampled_cap, 1_049_025);
+        // Any receipt retained from the previous owner can only shorten it.
+        for retained_cap in [sampled_cap - 500, sampled_cap, sampled_cap + 500] {
+            let effective = sampled_cap.min(retained_cap);
+            assert!(effective <= sampled_cap);
+            assert!(effective <= retained_cap);
+        }
+        assert!(
+            authorization_clock_sample(expiry, verification_mono, Duration::from_secs(expiry))
+                .is_err()
+        );
+        assert!(authorization_clock_sample(
+            expiry + 3_601,
+            verification_mono,
+            Duration::from_secs(expiry)
+        )
+        .is_err());
+        assert!(authorization_clock_sample(expiry, u64::MAX, verification_wall).is_err());
+    }
 
     #[test]
     fn signed_renewal_advances_all_consumed_identity_receipts() {

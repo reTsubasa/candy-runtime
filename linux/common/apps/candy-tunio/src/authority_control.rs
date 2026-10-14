@@ -173,30 +173,93 @@ fn validate_envelope(state: &Controller, authority: &AuthorityEnvelope) -> Resul
         .checked_sub(authority.verified_at_unix)
         .and_then(|v| v.checked_mul(1000))
         .context("invalid verified authorization duration")?;
-    if !hex(&authority.transaction_id, 32)
-        || authority.authority_revision == 0
-        || !infrastructure_matches(authority.binding, state.binding)
-        || authority.binding.policy_generation == 0
-        || authority.binding.owner_epoch == 0
-        || authority.controller != state.controller
-        || authority.controller_epoch != state.epoch
-        || !process_is_current(authority.candidate)
-        || authority.candidate == state.process
-        || authority.candidate == state.controller
-        || !hex(&authority.signed_control_hash, 64)
-        || !hex(&authority.declaration_hash, 64)
-        || !hex(&authority.verification_report_hash, 64)
-        || !hex(&authority.snapshot_closure_hash, 64)
-        || authority.effective_expiry_unix > authority.signed_min_expiry_unix
-        || authority.effective_expiry_unix <= now_unix
-        || authority.verified_at_unix > now_unix
-        || authority.verified_at_mono_ms > now_mono
-        || authority.effective_deadline_mono_ms <= now_mono
-        || authority.effective_deadline_mono_ms <= authority.verified_at_mono_ms
-        || authority.effective_deadline_mono_ms - authority.verified_at_mono_ms > verified_duration
-        || authority.boot_id != boot_id()?
-    {
-        bail!("code=authority_envelope_rejected module=tunio_authority detail=scope/identity/hash/verified deadline mismatch");
+    let candidate_current = process_is_current(authority.candidate);
+    let boot_matches = authority.boot_id == boot_id()?;
+    let checks = [
+        (hex(&authority.transaction_id, 32), "transaction_id_invalid"),
+        (authority.authority_revision != 0, "authority_revision_zero"),
+        (
+            infrastructure_matches(authority.binding, state.binding),
+            "infrastructure_binding_mismatch",
+        ),
+        (
+            authority.binding.policy_generation != 0,
+            "policy_generation_zero",
+        ),
+        (authority.binding.owner_epoch != 0, "owner_epoch_zero"),
+        (
+            authority.controller == state.controller,
+            "controller_identity_mismatch",
+        ),
+        (
+            authority.controller_epoch == state.epoch,
+            "controller_epoch_mismatch",
+        ),
+        (candidate_current, "candidate_process_not_current"),
+        (
+            authority.candidate != state.process && authority.candidate != state.controller,
+            "candidate_identity_not_independent",
+        ),
+        (
+            hex(&authority.signed_control_hash, 64),
+            "signed_control_hash_invalid",
+        ),
+        (
+            hex(&authority.declaration_hash, 64),
+            "declaration_hash_invalid",
+        ),
+        (
+            hex(&authority.verification_report_hash, 64),
+            "verification_report_hash_invalid",
+        ),
+        (
+            hex(&authority.snapshot_closure_hash, 64),
+            "snapshot_closure_hash_invalid",
+        ),
+        (
+            authority.effective_expiry_unix <= authority.signed_min_expiry_unix,
+            "wall_cap_exceeds_signed_expiry",
+        ),
+        (
+            authority.effective_expiry_unix > now_unix,
+            "wall_cap_expired",
+        ),
+        (
+            authority.verified_at_unix <= now_unix,
+            "verified_wall_time_in_future",
+        ),
+        (
+            authority.verified_at_mono_ms <= now_mono,
+            "verified_monotonic_time_in_future",
+        ),
+        (
+            authority.effective_deadline_mono_ms > now_mono,
+            "monotonic_cap_expired",
+        ),
+        (
+            authority.effective_deadline_mono_ms > authority.verified_at_mono_ms,
+            "monotonic_cap_precedes_verification",
+        ),
+        (
+            authority
+                .effective_deadline_mono_ms
+                .checked_sub(authority.verified_at_mono_ms)
+                .is_some_and(|duration| duration <= verified_duration),
+            "monotonic_cap_exceeds_verified_wall_duration",
+        ),
+        (boot_matches, "boot_identity_mismatch"),
+    ];
+    if let Some((_, reason)) = checks.iter().find(|(valid, _)| !valid) {
+        bail!("code=authority_envelope_rejected module=tunio_authority reason={} detail=scope/identity/hash/verified_deadline_mismatch transaction_id={} authority_revision={} infrastructure_matches={} controller_matches={} controller_epoch_matches={} candidate_current={} now_unix={} verified_at_unix={} effective_expiry_unix={} signed_min_expiry_unix={} now_mono_ms={} verified_at_mono_ms={} effective_deadline_mono_ms={} deadline_span_ms={} verified_duration_ms={} boot_matches={}",
+            reason,
+            authority.transaction_id, authority.authority_revision,
+            infrastructure_matches(authority.binding, state.binding),
+            authority.controller == state.controller, authority.controller_epoch == state.epoch,
+            candidate_current, now_unix, authority.verified_at_unix,
+            authority.effective_expiry_unix, authority.signed_min_expiry_unix, now_mono,
+            authority.verified_at_mono_ms, authority.effective_deadline_mono_ms,
+            authority.effective_deadline_mono_ms.saturating_sub(authority.verified_at_mono_ms),
+            verified_duration, boot_matches);
     }
     Ok(())
 }
