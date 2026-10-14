@@ -1,0 +1,225 @@
+{
+  "schema_version": 1,
+  "overall": "FAIL",
+  "results": [
+    {
+      "name": "runtime:packaging/openwrt/tests/package_gate_test.sh",
+      "scope": "fixture contract",
+      "status": "PASS",
+      "evidence": {
+        "script_sha256": "e4ead7d5184ff7b08b1b11d4c5bbc5776d9ba952477d5403c1644fb9d50838d2",
+        "log": "runtime-package_gate_test.log",
+        "fixture_only": true
+      },
+      "elapsed_seconds": 3.21
+    },
+    {
+      "name": "runtime:packaging/openwrt/tests/sdk_container_profile_test.sh",
+      "scope": "fixture contract",
+      "status": "PASS",
+      "evidence": {
+        "script_sha256": "5af4d6aef92cc1799d7d95811e6e6fbf13052791e3ad57f72994bd6821099eb0",
+        "log": "runtime-sdk_container_profile_test.log",
+        "fixture_only": true
+      },
+      "elapsed_seconds": 0.597
+    },
+    {
+      "name": "runtime:packaging/openwrt/tests/runtime_release_test.sh",
+      "scope": "fixture contract",
+      "status": "PASS",
+      "evidence": {
+        "script_sha256": "1361c869b2c6ca883ab3c84b98ce54488247f20d1d1dc47b6f604f42337fa3bc",
+        "log": "runtime-runtime_release_test.log",
+        "fixture_only": true
+      },
+      "elapsed_seconds": 4.423
+    },
+    {
+      "name": "runtime:scripts/openwrt_core_manager_test.sh",
+      "scope": "fixture contract",
+      "status": "PASS",
+      "evidence": {
+        "script_sha256": "c819f7851e67c3e26907abee725038cc8f81cc6f3fceb9004643c809fc667ebb",
+        "log": "runtime-openwrt_core_manager_test.log",
+        "fixture_only": true
+      },
+      "elapsed_seconds": 69.638
+    },
+    {
+      "name": "runtime:scripts/openwrt_update_manager_test.sh",
+      "scope": "fixture contract",
+      "status": "FAIL",
+      "evidence": {
+        "error": "Command '['bash', '/Users/hyc/Documents/candy/candy-runtime/scripts/openwrt_update_manager_test.sh']' timed out after 180 seconds"
+      },
+      "elapsed_seconds": 180.016
+    },
+    {
+      "name": "runtime:scripts/openwrt_runtime_health_check_test.sh",
+      "scope": "fixture contract",
+      "status": "PASS",
+      "evidence": {
+        "script_sha256": "e822d9a233a95b439f4e7463aeb1cb326590e81931cbf4ed598aa575114a9bee",
+        "log": "runtime-openwrt_runtime_health_check_test.log",
+        "fixture_only": true
+      },
+      "elapsed_seconds": 3.767
+    },
+    {
+      "name": "runtime:openwrt/client/tests/update_luci_test.sh",
+      "scope": "fixture contract",
+      "status": "PASS",
+      "evidence": {
+        "script_sha256": "bcafe90dac36f8c76601a59e322052011ea2257ae535aa1f03b4f9301982c723",
+        "log": "runtime-update_luci_test.log",
+        "fixture_only": true
+      },
+      "elapsed_seconds": 1.52
+    },
+    {
+      "name": "release:.github/scripts/catalog-policy-test.sh",
+      "scope": "fixture contract",
+      "status": "PASS",
+      "evidence": {
+        "script_sha256": "27ccc178ea9017cac48786eba633109c8b984a51ec6612ab40de8379c9bac1f3",
+        "log": "release-catalog-policy-test.log",
+        "fixture_only": true
+      },
+      "elapsed_seconds": 1.984
+    },
+    {
+      "name": "release:.github/scripts/catalog-update-test.sh",
+      "scope": "fixture contract",
+      "status": "PASS",
+      "evidence": {
+        "script_sha256": "cbc746538c3b3debac6482a62fcd14c30f532ce1d58ff6bd350246e9df7095ae",
+        "log": "release-catalog-update-test.log",
+        "fixture_only": true
+      },
+      "elapsed_seconds": 0.679
+    },
+    {
+      "name": "release:.github/scripts/sign-core-candidate-test.sh",
+      "scope": "fixture contract",
+      "status": "PASS",
+      "evidence": {
+        "script_sha256": "587a9678d744e6bcb29d1f34002a159160737e38cc4c33640de5c96ce20f5250",
+        "log": "release-sign-core-candidate-test.log",
+        "fixture_only": true
+      },
+      "elapsed_seconds": 10.059
+    },
+    {
+      "name": "release:.github/scripts/sign-core-candidate-workflow-test.sh",
+      "scope": "fixture contract",
+      "status": "PASS",
+      "evidence": {
+        "script_sha256": "99ea89a18c582f9b39f04d327e6b7cb8795561187d3c2ad2879b591c6fc12745",
+        "log": "release-sign-core-candidate-workflow-test.log",
+        "fixture_only": true
+      },
+      "elapsed_seconds": 0.215
+    },
+    {
+      "name": "release:.github/scripts/verify-core-release-metadata-test.sh",
+      "scope": "fixture contract",
+      "status": "PASS",
+      "evidence": {
+        "script_sha256": "83f98364e626dfcc56a69216cc617224ae8875eb64ef63cbe62213684903c90f",
+        "log": "release-verify-core-release-metadata-test.log",
+        "fixture_only": true
+      },
+      "elapsed_seconds": 0.667
+    },
+    {
+      "name": "release:.github/scripts/verify-linux-runtime-bundle-test.sh",
+      "scope": "fixture contract",
+      "status": "PASS",
+      "evidence": {
+        "script_sha256": "934eaed685990b517c8efd1931f22f63aa01dc61abcf6bad2242814a94203ab7",
+        "log": "release-verify-linux-runtime-bundle-test.log",
+        "fixture_only": true
+      },
+      "elapsed_seconds": 2.142
+    },
+    {
+      "name": "existing catalog signature and tamper rejection",
+      "scope": "real cryptographic verification",
+      "status": "PASS",
+      "evidence": {
+        "catalog_sha256": "21319808efbb0e7cebf1581c110f958d6c77fc228f35c3413922f0bc6bacee96",
+        "public_key_sha256": "28c93053f816f12bb9b2d9b5f8c101c0abe701176043c742787affa74ac032de",
+        "tampered_catalog_rejected": true,
+        "does_not_validate_new_candidates": true
+      },
+      "elapsed_seconds": 0.186
+    },
+    {
+      "name": "APK signature/package/version/ABI upgrade compatibility",
+      "scope": "artifact metadata",
+      "status": "PASS",
+      "evidence": {
+        "previous": {
+          "package": "com.github.metacubex.clash.meta",
+          "version_code": 300004,
+          "version_name": "0.3.4",
+          "certificate_sha256": "2f3578febd2c24c835e00b3e44aa7b2fabe6c217eb72f03ea7b10f23494d0a15",
+          "native_abis": [
+            "arm64-v8a",
+            "armeabi-v7a",
+            "x86",
+            "x86_64"
+          ],
+          "sha256": "3be1c3fd88fd23504c7d65880c6bd37539fa0367f01082fc90fdb664bbc580c4",
+          "path": "/Users/hyc/Downloads/cmfa-0.3.4-meta-universal-release.apk",
+          "alignment_16k": true
+        },
+        "candidate": {
+          "package": "com.github.metacubex.clash.meta",
+          "version_code": 300006,
+          "version_name": "0.3.6",
+          "certificate_sha256": "2f3578febd2c24c835e00b3e44aa7b2fabe6c217eb72f03ea7b10f23494d0a15",
+          "native_abis": [
+            "arm64-v8a",
+            "armeabi-v7a",
+            "x86",
+            "x86_64"
+          ],
+          "sha256": "de837490166e444c677f33629f0de013340518e189d4d6ad9a3ce1ee9dd6870c",
+          "path": "/Users/hyc/Documents/candy/candy-android/app/build/outputs/apk/meta/release/cmfa-0.3.6-meta-universal-release.apk",
+          "alignment_16k": true
+        },
+        "device_install_not_run": true
+      },
+      "elapsed_seconds": 15.929
+    },
+    {
+      "name": "APK required release signer",
+      "scope": "artifact signing policy",
+      "status": "FAIL",
+      "evidence": {
+        "error": "release signer differs from candidate: required=28e56315d42d3960958d7d5f550596209c37db75fa51e6fb53f25687f8a8bc7f, candidate=2f3578febd2c24c835e00b3e44aa7b2fabe6c217eb72f03ea7b10f23494d0a15; migration required for differently signed installed APK"
+      },
+      "elapsed_seconds": 0.001
+    }
+  ],
+  "not_run": [
+    "current frozen OpenWrt x86_64 and IPQ40xx release build with matching Core, Runtime and provenance",
+    "real signed candidate bundles and complete extracted-payload verification before release",
+    "OpenWrt x86_64 procd boot/install/upgrade/failed-activation rollback and persistent configuration",
+    "IPQ40xx ARMv7 kernel ABI/TUN/procd boot/install/upgrade/rollback on physical device",
+    "Android device or isolated emulator install-over-old, VPN service, TUN data path and recovery",
+    "Android rollback policy: preserve exported config; ordinary production APK downgrade is not guaranteed"
+  ],
+  "tools": {
+    "docker": "/usr/local/bin/docker",
+    "qemu-system-x86_64": "/usr/local/bin/qemu-system-x86_64",
+    "qemu-system-arm": "/usr/local/bin/qemu-system-arm",
+    "qemu-arm": null,
+    "adb": null,
+    "usign": "/Users/hyc/.local/bin/usign",
+    "jq": "/usr/local/bin/jq",
+    "node": "/usr/local/bin/node"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "previous": {
+    "package": "com.github.metacubex.clash.meta",
+    "version_code": 300004,
+    "version_name": "0.3.4",
+    "certificate_sha256": "2f3578febd2c24c835e00b3e44aa7b2fabe6c217eb72f03ea7b10f23494d0a15",
+    "native_abis": [
+      "arm64-v8a",
+      "armeabi-v7a",
+      "x86",
+      "x86_64"
+    ],
+    "sha256": "3be1c3fd88fd23504c7d65880c6bd37539fa0367f01082fc90fdb664bbc580c4",
+    "path": "/Users/hyc/Downloads/cmfa-0.3.4-meta-universal-release.apk",
+    "alignment_16k": true
+  },
+  "candidate": {
+    "package": "com.github.metacubex.clash.meta",
+    "version_code": 300006,
+    "version_name": "0.3.6",
+    "certificate_sha256": "2f3578febd2c24c835e00b3e44aa7b2fabe6c217eb72f03ea7b10f23494d0a15",
+    "native_abis": [
+      "arm64-v8a",
+      "armeabi-v7a",
+      "x86",
+      "x86_64"
+    ],
+    "sha256": "de837490166e444c677f33629f0de013340518e189d4d6ad9a3ce1ee9dd6870c",
+    "path": "/Users/hyc/Documents/candy/candy-android/app/build/outputs/apk/meta/release/cmfa-0.3.6-meta-universal-release.apk",
+    "alignment_16k": true
+  }
+}

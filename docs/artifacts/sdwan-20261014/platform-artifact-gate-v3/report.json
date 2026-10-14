@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "overall": "INCOMPLETE",
+  "sources_at_report": {
+    "runtime": {
+      "head": "3ff7fc56c84bfb9e5c19f4b57b36ebda4edbcf80",
+      "worktree_modified": true
+    },
+    "release": {
+      "head": "011b7a2e175366785fcae412db8caa5e8f0d612f",
+      "worktree_modified": true
+    }
+  },
+  "gate_runner_sha256_at_start": "f0ee57c53fccd72bb3d5d62174cb7f2e8e3adbbff834722b32b107d4378da979",
+  "results": [
+    {
+      "name": "existing catalog signature and tamper rejection",
+      "scope": "real cryptographic verification",
+      "status": "PASS",
+      "evidence": {
+        "catalog_sha256": "21319808efbb0e7cebf1581c110f958d6c77fc228f35c3413922f0bc6bacee96",
+        "public_key_sha256": "28c93053f816f12bb9b2d9b5f8c101c0abe701176043c742787affa74ac032de",
+        "tampered_catalog_rejected": true,
+        "does_not_validate_new_candidates": true
+      },
+      "elapsed_seconds": 0.141
+    },
+    {
+      "name": "ELF:x86_64=dist/runtime/openwrt-client/x86_64/candy-netd",
+      "scope": "artifact metadata",
+      "status": "PASS",
+      "evidence": {
+        "class": 64,
+        "machine": 62,
+        "flags": 0,
+        "profile": "x86_64",
+        "sha256": "3ccc79d84033c3d57a8329cac86a43ea90b29579bd778b909ba4380eb94af335",
+        "size": 4033896
+      },
+      "elapsed_seconds": 0.019
+    },
+    {
+      "name": "ELF:x86_64=dist/runtime/openwrt-client/x86_64/candy-sdwan-agent",
+      "scope": "artifact metadata",
+      "status": "PASS",
+      "evidence": {
+        "class": 64,
+        "machine": 62,
+        "flags": 0,
+        "profile": "x86_64",
+        "sha256": "d7ce39ed49cd8874041022fb318f224300e24d5acffa3432b2c22c8d56ecec3e",
+        "size": 4173792
+      },
+      "elapsed_seconds": 0.017
+    },
+    {
+      "name": "ELF:x86_64=dist/runtime/openwrt-client/x86_64/candy-cloud-enroll",
+      "scope": "artifact metadata",
+      "status": "PASS",
+      "evidence": {
+        "class": 64,
+        "machine": 62,
+        "flags": 0,
+        "profile": "x86_64",
+        "sha256": "8ce28b0546df3828b225201371c714b2f0b7b36c71c3475f55ed8e39c9e73254",
+        "size": 6266520
+      },
+      "elapsed_seconds": 0.023
+    },
+    {
+      "name": "ELF:x86_64=dist/runtime/openwrt-client/x86_64/candy-cloud-sync",
+      "scope": "artifact metadata",
+      "status": "PASS",
+      "evidence": {
+        "class": 64,
+        "machine": 62,
+        "flags": 0,
+        "profile": "x86_64",
+        "sha256": "6d5501785fce9ed6bb591bf3d04b62a805f50f093dd450a9561a2e084960d062",
+        "size": 8317096
+      },
+      "elapsed_seconds": 0.029
+    }
+  ],
+  "not_run": [
+    "current frozen OpenWrt x86_64 and IPQ40xx release build with matching Core, Runtime and provenance",
+    "real signed candidate bundles and complete extracted-payload verification before release",
+    "OpenWrt x86_64 procd boot/install/upgrade/failed-activation rollback and persistent configuration",
+    "IPQ40xx ARMv7 kernel ABI/TUN/procd boot/install/upgrade/rollback on physical device",
+    "Android device or isolated emulator install-over-old, VPN service, TUN data path and recovery",
+    "Android rollback policy: preserve exported config; ordinary production APK downgrade is not guaranteed"
+  ],
+  "tools": {
+    "docker": "/usr/local/bin/docker",
+    "qemu-system-x86_64": "/usr/local/bin/qemu-system-x86_64",
+    "qemu-system-arm": "/usr/local/bin/qemu-system-arm",
+    "qemu-arm": null,
+    "adb": null,
+    "usign": "/Users/hyc/.local/bin/usign",
+    "jq": "/usr/local/bin/jq",
+    "node": "/usr/local/bin/node"
+  }
+}
