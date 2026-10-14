@@ -2001,7 +2001,15 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
         .checked_add(u64::try_from(remaining.as_millis())?)
         .context("pair recovery deadline overflow")?;
     let cap = if new_grant {
-        verified_cap
+        recovered
+            .pair_recovery
+            .as_ref()
+            .filter(|recovery| {
+                recovery.authorization_snapshot_sha256.as_deref() == Some(desired_hash.as_str())
+            })
+            .map_or(verified_cap, |recovery| {
+                verified_cap.min(recovery.auth_deadline_mono_ms)
+            })
     } else {
         verified_cap.min(old_cap)
     };
