@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[path = "fixtures/candidate_failover.rs"]
+mod candidate_failover;
 #[path = "fixtures/slot_rotation.rs"]
 mod slot_rotation;
 
@@ -456,6 +458,21 @@ fn signed_cli_loaded_domain_slot_rotation_preserves_signed_authority_and_tun() {
     );
 }
 
+#[test]
+#[ignore = "two signed distinct UDP candidates, actual QUIC failover under validated load; isolated privileged Linux only"]
+fn signed_cli_two_candidate_loss_and_recovery_keep_tun() {
+    run_signed_cli(
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        FaultMode::CandidateFailover,
+    );
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FaultMode {
     None,
@@ -465,6 +482,7 @@ enum FaultMode {
     CloudMtls,
     CloudRenewal,
     Placement,
+    CandidateFailover,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -560,6 +578,10 @@ fn run_signed_cli(
     let fixture = Command::new(std::env::var("CANDY_SIGNED_FIXTURE_BINARY").unwrap())
         .arg(root.join("fixture"))
         .env("CANDY_SIGNED_FIXTURE_ENDPOINT", "10.200.0.2:18443")
+        .envs((fault_mode == FaultMode::CandidateFailover).then_some((
+            "CANDY_SIGNED_FIXTURE_ALTERNATE_ENDPOINT",
+            "10.200.0.2:18444",
+        )))
         .env(
             "CANDY_SIGNED_FIXTURE_GRANT_TTL_SECS",
             if independent || renewal {
@@ -681,7 +703,7 @@ fn run_signed_cli(
     if let Some(path) = &namespace_path {
         private_json(
             &root.join("domains.json"),
-            &serde_json::json!({"budgets":{"max_domains":1,"front_control_threads":2,"max_control_threads":3,"thread_stack_bytes":262144,"max_total_stack_bytes":786432,"max_pending_control_requests":4,"max_pending_control_bytes":1048576,"max_reserved_fds":128},"domains":[{"domain_id":vec![2;16],"infra_id":vec![3;16],"namespace_path":path,"journal_path":root.join("domain.journal"),"table_id":compiled["netd"]["table_id"]}]}),
+            &serde_json::json!({"budgets":{"max_domains":1,"front_control_threads":2,"max_control_threads":3,"thread_stack_bytes":262144,"max_total_stack_bytes":786432,"max_pending_control_requests":4,"max_pending_control_bytes":16777216,"max_reserved_fds":128},"domains":[{"domain_id":vec![2;16],"infra_id":vec![3;16],"namespace_path":path,"journal_path":root.join("domain.journal"),"table_id":compiled["netd"]["table_id"]}]}),
         );
         client_netd_command
             .arg("--domain-config")
@@ -708,6 +730,9 @@ fn run_signed_cli(
         )
     };
     let mut server = spawn_server(1);
+    if fault_mode == FaultMode::CandidateFailover {
+        candidate_failover::install_alternate_endpoint(&ns.0);
+    }
     let namespace = fs::metadata(
         namespace_path
             .as_deref()
@@ -877,6 +902,25 @@ fn run_signed_cli(
             .success()
     };
     assert!(ping(), "signed real TUN traffic failed before fault");
+    if fault_mode == FaultMode::CandidateFailover {
+        candidate_failover::verify(root, &ns.0, &ping, &link_state, &link);
+        unsafe {
+            nix::libc::kill(agent.0.id() as i32, nix::libc::SIGTERM);
+        }
+        assert!(agent.0.wait().unwrap().success());
+        assert!(matches!(
+            client
+                .exchange(Operation::InfraRetire {
+                    infra_id: [3; 16],
+                    generation: infra_generation
+                })
+                .unwrap()
+                .0,
+            Body::Ack
+        ));
+        drop(server);
+        return;
+    }
     if fault_mode == FaultMode::Placement {
         slot_rotation::verify(
             root,

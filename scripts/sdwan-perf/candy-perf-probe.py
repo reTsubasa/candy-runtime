@@ -38,7 +38,12 @@ def serve_tcp(listener):
 def serve_udp(listener):
     while True:
         payload, address = listener.recvfrom(65535)
-        listener.sendto(payload, address)
+        try:
+            listener.sendto(payload, address)
+        except OSError:
+            # A route can disappear briefly during the fault window. Keep the
+            # echo process alive so post-failover probes still measure recovery.
+            continue
 
 
 def percentile(samples, percent):
@@ -81,8 +86,8 @@ def tcp_client(args):
 
 def udp_client(args):
     body = bytes(index % 251 for index in range(args.size - 8))
-    seen, sent, send_errors, corrupt, duplicates, reordered = set(), 0, 0, 0, 0, 0
-    largest, rate = -1, 2000
+    seen, sent, send_errors, recv_errors, corrupt, duplicates, reordered = set(), 0, 0, 0, 0, 0, 0
+    largest, rate = -1, args.pps
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as stream:
         # Explicitly exercise IPv4 fragmentation when payload + IP/UDP exceeds the TUN MTU.
         stream.setsockopt(socket.IPPROTO_IP, 10, 0)  # IP_MTU_DISCOVER / IP_PMTUDISC_DONT
@@ -108,6 +113,11 @@ def udp_client(args):
                         payload = stream.recv(65535)
                     except BlockingIOError:
                         break
+                    except OSError:
+                        # Connected UDP may report ICMP unreachable/refused
+                        # while the path changes; count it and keep probing.
+                        recv_errors += 1
+                        break
                     if len(payload) != args.size or payload[8:] != body:
                         corrupt += 1
                         continue
@@ -124,6 +134,7 @@ def udp_client(args):
                 break
     write_result(args, {"sent_packets": sent, "received_unique_packets": len(seen),
                         "lost_packets": sent - len(seen), "send_errors": send_errors,
+                        "recv_errors": recv_errors,
                         "corrupt_packets": corrupt, "duplicate_packets": duplicates,
                         "out_of_order_packets": reordered, "offered_pps": rate,
                         "fragmentation_enabled": True, "expected_ipv4_packet_bytes": args.size + 28,
@@ -138,6 +149,7 @@ parser.add_argument("--output")
 parser.add_argument("--seconds", type=float, default=5)
 parser.add_argument("--warm", type=float, default=0)
 parser.add_argument("--size", type=int, default=64)
+parser.add_argument("--pps", type=int, default=2000)
 args = parser.parse_args()
 if args.mode == "server":
     tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
