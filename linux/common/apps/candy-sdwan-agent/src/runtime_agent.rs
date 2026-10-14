@@ -86,7 +86,10 @@ struct Config {
     status: PathBuf,
     budgets: Budgets,
     cloud: CloudConfig,
+    #[serde(default)]
     domain_plans: Vec<PathBuf>,
+    #[serde(default)]
+    cloud_activation_bindings: Vec<crate::cloud_plan_bridge::Binding>,
 }
 
 fn private_parent(path: &Path) -> Result<()> {
@@ -123,16 +126,18 @@ fn read_config(path: &Path) -> Result<Config> {
     if bytes.len() > 64 * 1024 {
         bail!("runtime Agent config exceeds size budget");
     }
-    let config: Config = serde_json::from_slice(&bytes)?;
+    let mut config: Config = serde_json::from_slice(&bytes)?;
     if config.schema_version != 1
-        || config.domain_plans.is_empty()
+        || (config.domain_plans.is_empty() && config.cloud_activation_bindings.is_empty())
         || config.cloud.interval_ms == 0
         || config.cloud.retry_initial_ms == 0
         || config.cloud.retry_initial_ms > config.cloud.retry_max_ms
     {
         bail!("runtime Agent requires valid static domain plans and Cloud retry intervals");
     }
-    config.budgets.admit(config.domain_plans.len())?;
+    config
+        .budgets
+        .admit(config.domain_plans.len() + config.cloud_activation_bindings.len())?;
     private_parent(&config.status)?;
     for path in [&config.cloud.state_dir, &config.cloud.run_dir]
         .into_iter()
@@ -155,7 +160,22 @@ fn read_config(path: &Path) -> Result<Config> {
     let mut domains = HashSet::new();
     let mut infrastructures = HashSet::new();
     let mut process_paths = HashSet::new();
-    for plan in &config.domain_plans {
+    let mut plan_paths = HashSet::new();
+    for (plan, published) in config.domain_plans.iter().map(|plan| (plan, None)).chain(
+        config
+            .cloud_activation_bindings
+            .iter()
+            .map(|binding| (&binding.template_plan, Some(&binding.published_plan))),
+    ) {
+        if !plan_paths.insert(plan.clone()) {
+            bail!("runtime Agent domain plan paths cannot overlap");
+        }
+        if let Some(published) = published {
+            private_parent(published)?;
+            if plan == published || !plan_paths.insert(published.clone()) {
+                bail!("Cloud template and published plan paths cannot overlap");
+            }
+        }
         let (domain, infra, paths) = crate::experimental_tunio::static_identity(plan)?;
         if !domains.insert(domain) || !infrastructures.insert(infra) {
             bail!("runtime Agent static domain/infrastructure identities must be unique");
@@ -166,6 +186,12 @@ fn read_config(path: &Path) -> Result<Config> {
             }
         }
     }
+    config.domain_plans.extend(
+        config
+            .cloud_activation_bindings
+            .iter()
+            .map(|binding| binding.published_plan.clone()),
+    );
     Ok(config)
 }
 
@@ -271,8 +297,37 @@ fn interruptible_wait(duration: Duration) {
 }
 
 type CloudInvocation = Arc<Mutex<Option<SyncControl>>>;
+fn reconcile_cloud_plans(
+    config: &CloudConfig,
+    bindings: &[crate::cloud_plan_bridge::Binding],
+    deadline: Instant,
+) -> Result<()> {
+    let mut first_error = None;
+    for binding in bindings {
+        if Instant::now() >= deadline || crate::shutdown_requested() {
+            if first_error.is_none() {
+                first_error = Some(anyhow::anyhow!("code=cloud_plan_deadline module=cloud_plan_bridge detail=iteration budget exhausted; preserve previous plan"));
+            }
+            break;
+        }
+        if let Err(error) =
+            crate::cloud_plan_bridge::reconcile(&config.state_dir, binding, deadline)
+        {
+            eprintln!("level=warn code=cloud_plan_rejected module=cloud_plan_bridge plan={} detail={error:#} action=preserve_previous_plan_and_other_domains", binding.published_plan.display());
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 fn cloud_loop(
     config: CloudConfig,
+    bindings: Vec<crate::cloud_plan_bridge::Binding>,
     states: States,
     notifications: SyncSender<()>,
     invocation: CloudInvocation,
@@ -288,6 +343,7 @@ fn cloud_loop(
             state.code = None;
         });
         let result = catch_unwind(AssertUnwindSafe(|| {
+            let deadline = Instant::now() + timeout;
             let control = SyncControl::new(timeout)?;
             *invocation
                 .lock()
@@ -295,7 +351,14 @@ fn cloud_loop(
             if crate::shutdown_requested() {
                 control.cancel();
             }
-            candy_cloud_sync::synchronize_once_controlled(config.options(), control)
+            // Restore cached verified authority before a stalled/offline Cloud can consume the budget.
+            if config.state_dir.join("candidate").symlink_metadata().is_ok() {
+                let _ = reconcile_cloud_plans(&config, &bindings, deadline);
+            }
+            let sync_result = candy_cloud_sync::synchronize_once_controlled(config.options(), control);
+            let plans_result = reconcile_cloud_plans(&config, &bindings, deadline);
+            sync_result?;
+            plans_result
         }))
         .unwrap_or_else(|_| Err(anyhow::anyhow!("code=cloud_iteration_panicked module=runtime_agent detail=unwound Cloud invocation; retry after collecting cancellation state")));
         if let Some(control) = invocation
@@ -511,7 +574,16 @@ pub(super) fn run(path: &Path, gate: bool) -> Result<()> {
                 let notifications = notifications.clone();
                 let invocation = invocation.clone();
                 let timeout = Duration::from_millis(config.budgets.cloud_iteration_deadline_ms);
-                move || cloud_loop(config.cloud, states, notifications, invocation, timeout)
+                move || {
+                    cloud_loop(
+                        config.cloud,
+                        config.cloud_activation_bindings,
+                        states,
+                        notifications,
+                        invocation,
+                        timeout,
+                    )
+                }
             },
         )?,
     ));

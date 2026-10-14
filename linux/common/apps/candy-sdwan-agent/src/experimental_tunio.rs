@@ -909,7 +909,16 @@ fn unix_time() -> Result<u64> {
         .as_secs())
 }
 
+#[cfg(test)]
 fn bounded_compile_control(command: &mut Command, timeout: Duration) -> Result<Output> {
+    bounded_compile_control_inner(command, timeout, false)
+}
+
+fn bounded_compile_control_inner(
+    command: &mut Command,
+    timeout: Duration,
+    cancel_shutdown: bool,
+) -> Result<Output> {
     const MAX_OUTPUT: usize = MAX_SIGNED_CONFIG_BYTES as usize;
     fn drain(pipe: &mut impl Read, bytes: &mut Vec<u8>) -> Result<()> {
         let mut chunk = [0_u8; 8192];
@@ -962,6 +971,9 @@ fn bounded_compile_control(command: &mut Command, timeout: Duration) -> Result<O
             }
             if Instant::now() >= deadline {
                 bail!("code=signed_control_compile_timeout module=sdwan_activation detail=Core signature verification exceeded its deadline");
+            }
+            if cancel_shutdown && shutdown_requested() {
+                bail!("code=signed_control_compile_cancelled module=sdwan_activation detail=supervisor shutdown cancelled signature verification");
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -1235,12 +1247,21 @@ fn project_recovered_io(mut desired: Plan, candidate: Plan) -> Result<Plan> {
     Ok(desired)
 }
 
-fn compile_verified_plan(mut plan: Plan) -> Result<(Plan, serde_json::Value)> {
-    let compiled = bounded_compile_control(
+fn compile_verified_plan(plan: Plan) -> Result<(Plan, serde_json::Value)> {
+    compile_verified_plan_bounded(plan, Duration::from_secs(10), false)
+}
+
+fn compile_verified_plan_bounded(
+    mut plan: Plan,
+    timeout: Duration,
+    cancel_shutdown: bool,
+) -> Result<(Plan, serde_json::Value)> {
+    let compiled = bounded_compile_control_inner(
         Command::new(&plan.core)
             .args(["client", "sdwan", "compile-control", "--config"])
             .arg(&plan.core_config),
-        Duration::from_secs(10),
+        timeout.min(Duration::from_secs(10)),
+        cancel_shutdown,
     )
     .context("verify signed control before infrastructure activation")?;
     if !compiled.status.success() || compiled.stdout.len() as u64 > MAX_SIGNED_CONFIG_BYTES {
@@ -1260,6 +1281,81 @@ fn compile_verified_plan(mut plan: Plan) -> Result<(Plan, serde_json::Value)> {
     }
     plan.auth_deadline_unix = plan.auth_deadline_unix.min(verified_deadline);
     Ok((plan, report))
+}
+
+pub(super) fn cloud_activation_plan(
+    template: &Path,
+    core_config: &Path,
+    declaration: PrepareDeclaration,
+    generation: u64,
+    private_parent: &Path,
+    deadline: Instant,
+) -> Result<Vec<u8>> {
+    #[cfg(not(all(feature = "experimental-tunio-rebind", target_os = "linux")))]
+    {
+        let _ = (
+            template,
+            core_config,
+            declaration,
+            generation,
+            private_parent,
+            deadline,
+        );
+        bail!("code=cloud_plan_feature_required module=cloud_plan_bridge detail=verified Cloud plans require Linux experimental-tunio-rebind");
+    }
+    #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+    {
+        let mut plan = read_plan(template)?;
+        if plan.independent_worker.is_none()
+            || plan.independent_supervision.is_none()
+            || plan.authority.is_some()
+            || plan.pair_recovery.is_some()
+            || plan.effective_plan_file.is_some()
+            || plan.authorization_snapshot_sha256.is_some()
+        {
+            bail!("code=cloud_plan_template_rejected module=cloud_plan_bridge detail=template must declare independent Core/IO and contain no consumed authority receipts");
+        }
+        if declaration.table_id != plan.declaration.table_id
+            || declaration.overlay_router_ipv4 != plan.infrastructure.overlay_router_ipv4
+            || declaration.effective_mtu != plan.infrastructure.mtu
+            || declaration.firewall != plan.declaration.firewall
+        {
+            bail!("code=cloud_plan_infrastructure_mismatch module=cloud_plan_bridge detail=Cloud declaration cannot replace local table, TUN address/MTU or firewall contract");
+        }
+        let mut declaration = declaration;
+        for local in &plan.declaration.exclusions {
+            if !declaration
+                .exclusions
+                .iter()
+                .any(|entry| entry.prefix == local.prefix)
+            {
+                declaration.exclusions.push(*local);
+            }
+        }
+        declaration
+            .exclusions
+            .sort_by_key(|entry| (entry.prefix, entry.kind as u64));
+        plan.declaration = declaration;
+        plan.signed_generation = generation;
+        // Verify an immutable copy before publishing a plan pinned to Cloud's immutable generation.
+        let snapshot = crate::signed_snapshot::Snapshot::capture(core_config, private_parent)?;
+        let _cleanup = crate::signed_snapshot::CleanupGuard::new(&snapshot);
+        plan.core_config = snapshot.config.clone();
+        plan.auth_deadline_unix = u64::MAX;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .context("Cloud plan iteration deadline reached")?;
+        let (mut verified, _) = compile_verified_plan_bounded(plan, remaining, true)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        if verified.auth_deadline_unix <= now {
+            bail!("code=cloud_plan_authority_expired module=cloud_plan_bridge detail=verified signed authority is already expired");
+        }
+        verified.core_config = core_config.to_path_buf();
+        Ok(serde_json::to_vec(&verified)?)
+    }
 }
 
 pub fn run(path: &Path, gate: bool) -> Result<()> {

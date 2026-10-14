@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+mod cloud_plan_bridge;
 mod experimental_tunio;
 mod process_record;
 mod runtime_agent;
