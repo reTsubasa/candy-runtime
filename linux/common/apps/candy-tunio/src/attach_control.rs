@@ -575,7 +575,6 @@ mod tests {
                 registered: true,
                 registration: None,
                 authority: crate::authority_control::AuthorityState::default(),
-                bridge_outputs: None,
             }));
             state.lock().unwrap().publish().unwrap();
             let supervision = directory.path().join("ctl.sock");

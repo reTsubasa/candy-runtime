@@ -28,14 +28,12 @@ pub(crate) struct Controller {
     pub(crate) registered: bool,
     pub(crate) registration: Option<watch::Sender<bool>>,
     pub(crate) authority: crate::authority_control::AuthorityState,
-    pub(crate) bridge_outputs:
-        Option<watch::Receiver<candy_packet_port::packet_port_manager::PacketBridgeOutputStatus>>,
 }
 
 impl Controller {
     pub(crate) fn publish(&self) -> Result<()> {
         let bytes = serde_json::to_vec(
-            &json!({"schema_version":3,"pid":self.process.pid,"generation":self.generation,"infrastructure_generation":self.binding.infrastructure_generation,"policy_generation":self.binding.policy_generation,"readiness_token":self.token,"lifecycle":if self.registered {"active"} else {"starting"},"process_start_ticks":self.process.start_ticks,"controller":self.controller,"controller_epoch":self.epoch,"auth_deadline_unix":self.auth_deadline_unix,"packet_binding":self.binding,"owner_active":self.owner_active,"authority":self.authority,"bridge_outputs":self.bridge_outputs.as_ref().map(|receiver| receiver.borrow().clone())}),
+            &json!({"schema_version":3,"pid":self.process.pid,"generation":self.generation,"infrastructure_generation":self.binding.infrastructure_generation,"policy_generation":self.binding.policy_generation,"readiness_token":self.token,"lifecycle":if self.registered {"active"} else {"starting"},"process_start_ticks":self.process.start_ticks,"controller":self.controller,"controller_epoch":self.epoch,"auth_deadline_unix":self.auth_deadline_unix,"packet_binding":self.binding,"owner_active":self.owner_active,"authority":self.authority}),
         )?;
         let temporary = self
             .status
@@ -132,6 +130,49 @@ impl Controller {
     }
 }
 
+fn publish_bridge_snapshot(
+    status: &Path,
+    process: ProcessIdentity,
+    outputs: &candy_packet_port::packet_port_manager::PacketBridgeOutputStatus,
+) -> Result<()> {
+    let mut monotonic = nix::libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_MONOTONIC, &mut monotonic) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("read snapshot monotonic clock");
+    }
+    let report_monotonic_millis = (monotonic.tv_sec.max(0) as u64)
+        .saturating_mul(1_000)
+        .saturating_add(monotonic.tv_nsec.max(0) as u64 / 1_000_000);
+    let bytes = serde_json::to_vec(&json!({
+        "schema_version": 1,
+        "pid": process.pid,
+        "process_start_ticks": process.start_ticks,
+        "report_monotonic_millis": report_monotonic_millis,
+        "bridge_outputs": outputs,
+    }))?;
+    if bytes.len() > 16 * 1024 {
+        bail!("bridge snapshot exceeds bounded status size");
+    }
+    let temporary = status.with_extension(format!("{}.tmp", process.pid));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    let result = (|| {
+        file.write_all(&bytes)?;
+        // Diagnostic snapshots are volatile, independent of durable authority records.
+        fs::rename(&temporary, status)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+
 pub struct ControlRegistration {
     state: Arc<Mutex<Controller>>,
     registered: watch::Receiver<bool>,
@@ -162,21 +203,21 @@ impl ControlRegistration {
         outputs: watch::Receiver<candy_packet_port::packet_port_manager::PacketBridgeOutputStatus>,
         shutdown: watch::Receiver<bool>,
     ) -> Result<()> {
-        self.state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("controller state poisoned"))?
-            .bridge_outputs = Some(outputs);
-        let state = Arc::clone(&self.state);
+        let (status, process) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("controller state poisoned"))?;
+            (state.status.with_extension("outputs.json"), state.process)
+        };
         thread::spawn(move || {
             while !*shutdown.borrow() {
                 thread::sleep(Duration::from_secs(1));
                 if *shutdown.borrow() {
                     break;
                 }
-                let result = state
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("controller state poisoned"))
-                    .and_then(|state| state.publish());
+                let snapshot = outputs.borrow().clone();
+                let result = publish_bridge_snapshot(&status, process, &snapshot);
                 if let Err(error) = result {
                     eprintln!("level=warn code=bridge_status_publish_failed module=tunio_control detail={error:#} action=keep_packet_service");
                 }
@@ -274,7 +315,6 @@ pub fn start(
         registered: false,
         registration: Some(registration),
         authority: crate::authority_control::AuthorityState::default(),
-        bridge_outputs: None,
     };
     let listener = UnixListener::bind(&socket).with_context(|| {
         format!("code=control_bind_failed module=tunio_control path={} detail=bind supervision endpoint", socket.display())
@@ -327,4 +367,39 @@ pub fn start(
         let _ = fs::remove_file(socket);
     });
     Ok(ControlRegistration { state, registered })
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn bridge_sidecar_is_private_atomic_bounded_and_has_process_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let status = directory.path().join("tunio-status.outputs.json");
+        let process = ProcessIdentity {
+            pid: std::process::id(),
+            start_ticks: 123,
+        };
+        let mut snapshot =
+            candy_packet_port::packet_port_manager::PacketBridgeOutputStatus::default();
+        snapshot.to_tun.sent_packets = 42;
+        publish_bridge_snapshot(&status, process, &snapshot).unwrap();
+        snapshot.to_tun.sent_packets = 43;
+        publish_bridge_snapshot(&status, process, &snapshot).unwrap();
+        let bytes = fs::read(&status).unwrap();
+        assert!(bytes.len() < 16 * 1024);
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["pid"], process.pid);
+        assert_eq!(value["process_start_ticks"], process.start_ticks);
+        assert!(value["report_monotonic_millis"].as_u64().unwrap() > 0);
+        assert_eq!(value["bridge_outputs"]["to_tun"]["sent_packets"], 43);
+        assert!(value.get("readiness_token").is_none());
+        assert_eq!(
+            fs::metadata(&status).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
 }

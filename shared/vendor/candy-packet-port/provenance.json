@@ -5,15 +5,15 @@
     "src/lib.rs": "1ffb422cb562f15d265a0c27e6f6b8d025b61f81dd3236b97039c23c6dbd7d13",
     "src/packet_port.rs": "b9974f25ebe097144a32318a490d935c71e3966df4030bb2dd2fc0d3e6043551",
     "src/packet_port_ipc.rs": "0020287a971ec190d1ea51415e695e21bda0604a99b521475f6f2de8058b14f8",
-    "src/packet_port_manager.rs": "40a28cd7dc2f30ab876e86d36f7329fd3f99d24442bac10e0956facded6015d9"
+    "src/packet_port_manager.rs": "33ff6065f60571868360ce53e65b30de58b1cb51ecdff94a7e78cf0966dc10f9"
   },
   "note": "Fixed public source package from a development worktree; base commit alone is not its content identity.",
   "origin": "https://github.com/reTsubasa/candy-core",
-  "origin_base_commit": "d9a25f5978de2a2e2ea6bf726ebf2851b9516100",
+  "origin_base_commit": "33b11021f45912eccd558f7f051de990520f24e8",
   "origin_path": "crates/candy-packet-port",
-  "origin_worktree_content_sha256": "0b7f3ac4b45a34704b15070428ff224e8d4502a59f175adff5f8e79360a3f487",
+  "origin_worktree_content_sha256": "41a6d31c30471eae77d29bc22ef5d9e26333139fd88089c5bb5667bd1dd6e442",
   "package": "candy-packet-port",
-  "package_content_sha256": "6d9401d5310bf5de7bcd1f3e8cd6186e9d31d6383522da0dee247a3a2f13a3ba",
+  "package_content_sha256": "257bd42acfb522e8f26826dd16197bc1ff1f92bd0a5cc52010b7a612703574e2",
   "schema_version": 1,
   "source_files": {
     "Cargo.toml": "7be1c63650c39ceb702a14b9d869013a86728dc2196f4883880836ac7f539be8",
@@ -21,6 +21,6 @@
     "src/lib.rs": "1ffb422cb562f15d265a0c27e6f6b8d025b61f81dd3236b97039c23c6dbd7d13",
     "src/packet_port.rs": "b9974f25ebe097144a32318a490d935c71e3966df4030bb2dd2fc0d3e6043551",
     "src/packet_port_ipc.rs": "0020287a971ec190d1ea51415e695e21bda0604a99b521475f6f2de8058b14f8",
-    "src/packet_port_manager.rs": "40a28cd7dc2f30ab876e86d36f7329fd3f99d24442bac10e0956facded6015d9"
+    "src/packet_port_manager.rs": "33ff6065f60571868360ce53e65b30de58b1cb51ecdff94a7e78cf0966dc10f9"
   }
 }

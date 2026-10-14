@@ -567,6 +567,54 @@ mod tests {
         assert_eq!(snapshots.borrow().binding, None);
     }
 
+    #[tokio::test]
+    async fn owner_replacement_retains_output_not_yet_sampled() {
+        let (tun_socket, host) = UnixDatagram::pair().unwrap();
+        let tun = InheritedPacketFd::new(OwnedFd::from(tun_socket.into_std().unwrap())).unwrap();
+        let (updates, receiver) = mpsc::channel(4);
+        let (stop, shutdown) = watch::channel(false);
+        let (diagnostics, snapshots) = watch::channel(PacketBridgeOutputStatus::default());
+        let task = tokio::spawn(run_observed_packet_port_bridge(
+            tun,
+            binding(1),
+            receiver,
+            shutdown,
+            Some(diagnostics),
+        ));
+        for epoch in 1..=2 {
+            let (io, worker) = ports(epoch);
+            update(
+                &updates,
+                PacketPortOwnerChange::Attach {
+                    port: io,
+                    auth_deadline: Instant::now() + Duration::from_secs(60),
+                },
+            )
+            .await
+            .unwrap();
+            worker.send_packet(&[0x45; 64]).await.unwrap();
+            let mut packet = [0; 64];
+            tokio::time::timeout(Duration::from_secs(2), host.recv(&mut packet))
+                .await
+                .unwrap()
+                .unwrap();
+            update(
+                &updates,
+                PacketPortOwnerChange::Revoke { owner_epoch: epoch },
+            )
+            .await
+            .unwrap();
+        }
+        stop.send_replace(true);
+        let counters = task.await.unwrap().unwrap();
+        let final_status = snapshots.borrow();
+        assert_eq!(counters.to_tun_packets, 2);
+        assert_eq!(final_status.to_tun.sent_packets, 2);
+        assert_eq!(final_status.to_tun.sent_bytes, 128);
+        assert_eq!(final_status.to_tun.queue_depth, 0);
+        assert_eq!(final_status.binding, None);
+    }
+
     struct FloodTun {
         reads: Arc<std::sync::atomic::AtomicUsize>,
         writes: Arc<std::sync::atomic::AtomicUsize>,
