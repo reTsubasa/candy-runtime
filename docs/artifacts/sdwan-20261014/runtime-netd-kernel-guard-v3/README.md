@@ -24,7 +24,19 @@ These results do not close the loaded placement gate. Existing v10/v11 continuou
 - The cross-second reproduction passes on macOS and native Linux. Native Linux TUNIO authority-control regression passes 5/5, including invalid envelope recovery and deadline non-extension checks. Native Linux Agent compilation after `93fd6ec` and host Agent library tests (92/92 at that revision) also pass.
 - A prepared transport's probes travel directly over the negotiated authenticated packet stream and do not require TUNIO authority activation or netd commit. No evidence supports disabling the carrier watchdog merely while the local forwarding transaction is pending. Candidate death after a rejected authority must be distinguished from a live prepared lane incorrectly retired by a watchdog.
 
-The loaded placement gate remains open after v14; neither the above narrow tests nor the route-gap fix establish full loaded handoff, convergence, throughput, or release readiness. v14's other two test failures are fixed-name veth collisions after the first panic, so their product results must come from fresh isolated namespaces.
+The loaded placement gate remained open after v14; neither the above narrow tests nor the route-gap fix established full loaded handoff, convergence, throughput, or release readiness. v14's other two test failures were fixed-name veth collisions after the first panic.
+
+## v16 loaded handoff result
+
+The parent project's `docs/artifacts/sdwan-20261014/signed-handoff-gate-v16/` records loaded slot rotation PASS (24.07 seconds) and actual mTLS Cloud renewal PASS (36.97 seconds) after the adoption Guard and paired-clock fixes.
+
+- All seven slot stages retain one active peer and healthy readiness proof: initial load, different slot, occupied slot isolation, occupied slot retry, same slot new revision, stale/removed placement rejection, and Agent restart adoption.
+- Both continuously running 8 Mbps UDP application processes survive. Client route monitoring records no unreachable transition during the gate. TUN and TUNIO identities remain fixed; the signed snapshot hash and expiry remain fixed; the netd authorization cap only shortens from 91319302 to 91319299 ms.
+- Downloads still lose 80, 73 and 69 packets around the three business stop/spawn barriers, approximately 69–80 ms at the test's 1000 packets/second. This is bounded packet loss and must not be reported as zero-loss handoff. Sampled replacement Core counters being zero do not account for those retired-lane drops.
+- The stale-forward-owner warnings correspond to intentional old-owner rejection assertions. They preserve fencing evidence and should remain distinguishable from unexpected transaction errors.
+- Cloud renewal uses production Runtime HTTPS verification/publication with an isolated test Cloud: 243 verified mTLS requests, two grant issuances, renewed Core, same Agent/TUNIO/TUN, expired traffic denied and ICMP recovered.
+
+This closes the demonstrated one-domain-per-exclusive-slot loaded handoff regression. The evidence explicitly excludes shared multi-domain F08; 800 Mbps performance, full convergence/fault matrix and overall release readiness require their separate gates.
 
 Commands:
 
