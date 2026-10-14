@@ -36,7 +36,9 @@ pub struct TransactionRecord {
     pub failed_prefixes: Vec<Ipv4Prefix>,
 }
 
-#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 #[repr(u8)]
 pub enum SysctlKey {
     Ipv4Forward = 1,
@@ -59,7 +61,7 @@ impl TryFrom<u8> for SysctlKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SysctlChange {
     pub key: SysctlKey,
     pub original: u8,

@@ -1,19 +1,38 @@
 #![cfg(unix)]
 
+pub mod v2;
+
 use candy_netd_proto::{
     ErrorCode, LeaseOwner, NetdOperation, NetdProtocolError, NetdRequest, NetdResponse,
     PrepareDeclaration, ResponseBody, SessionPhase, MAX_NETD_FRAME_LEN,
 };
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, FdFlag};
-use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
-use std::io::{IoSlice, IoSliceMut, Read, Write};
+use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
+use std::io::{IoSlice, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 const LENGTH_PREFIX_LEN: usize = 4;
+
+/// Bounded descriptor framing; callers authenticate the peer before receiving.
+pub fn send_descriptor_frame_until(
+    stream: &UnixStream,
+    payload: &[u8],
+    descriptor: Option<RawFd>,
+    deadline: std::time::Instant,
+) -> Result<(), IpcError> {
+    send_frame_until(stream, payload, descriptor, Some(deadline))
+}
+
+pub fn receive_descriptor_frame_until(
+    stream: &UnixStream,
+    deadline: std::time::Instant,
+) -> Result<(Vec<u8>, Vec<OwnedFd>), IpcError> {
+    recv_frame_until(stream, Some(deadline))
+}
 
 #[derive(Debug, Error)]
 pub enum IpcError {
@@ -434,6 +453,15 @@ fn send_frame(
     payload: &[u8],
     descriptor: Option<RawFd>,
 ) -> Result<(), IpcError> {
+    send_frame_until(stream, payload, descriptor, None)
+}
+
+fn send_frame_until(
+    stream: &UnixStream,
+    payload: &[u8],
+    descriptor: Option<RawFd>,
+    deadline: Option<std::time::Instant>,
+) -> Result<(), IpcError> {
     if payload.is_empty() || payload.len() > MAX_NETD_FRAME_LEN {
         return Err(IpcError::FrameLength);
     }
@@ -447,6 +475,18 @@ fn send_frame(
         .map(|fds| vec![ControlMessage::ScmRights(fds)])
         .unwrap_or_default();
     let sent = loop {
+        if let Some(deadline) = deadline {
+            let remaining = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "netd IPC response deadline exceeded",
+                    )
+                })?;
+            stream.set_write_timeout(Some(remaining))?;
+        }
         match sendmsg::<()>(
             stream.as_raw_fd(),
             &slices,
@@ -466,57 +506,181 @@ fn send_frame(
         )));
     }
     if sent < frame_len {
-        let mut stream = stream;
         if sent < LENGTH_PREFIX_LEN {
-            stream.write_all(&length[sent..])?;
-            stream.write_all(payload)?;
+            write_all_until(stream, &length[sent..], deadline)?;
+            write_all_until(stream, payload, deadline)?;
         } else {
-            stream.write_all(&payload[sent - LENGTH_PREFIX_LEN..])?;
+            write_all_until(stream, &payload[sent - LENGTH_PREFIX_LEN..], deadline)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_all_until(
+    mut stream: &UnixStream,
+    mut bytes: &[u8],
+    deadline: Option<std::time::Instant>,
+) -> Result<(), IpcError> {
+    while !bytes.is_empty() {
+        if let Some(deadline) = deadline {
+            let remaining = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "netd IPC response deadline exceeded",
+                    )
+                })?;
+            stream.set_write_timeout(Some(remaining))?;
+        }
+        match stream.write(bytes) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "netd IPC write made no progress",
+                )
+                .into())
+            }
+            Ok(count) => bytes = &bytes[count..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
         }
     }
     Ok(())
 }
 
 fn recv_frame(stream: &UnixStream) -> Result<(Vec<u8>, Vec<OwnedFd>), IpcError> {
+    recv_frame_until(stream, None)
+}
+
+fn read_exact_until(
+    mut stream: &UnixStream,
+    mut bytes: &mut [u8],
+    deadline: Option<std::time::Instant>,
+) -> Result<(), IpcError> {
+    while !bytes.is_empty() {
+        apply_read_deadline(stream, deadline)?;
+        match stream.read(bytes) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "netd IPC peer closed during frame",
+                )
+                .into())
+            }
+            Ok(count) => bytes = &mut bytes[count..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn apply_read_deadline(
+    stream: &UnixStream,
+    deadline: Option<std::time::Instant>,
+) -> Result<(), IpcError> {
+    if let Some(deadline) = deadline {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "netd IPC frame deadline exceeded",
+                )
+            })?;
+        stream.set_read_timeout(Some(remaining))?;
+    }
+    Ok(())
+}
+
+fn recv_frame_until(
+    stream: &UnixStream,
+    deadline: Option<std::time::Instant>,
+) -> Result<(Vec<u8>, Vec<OwnedFd>), IpcError> {
     let mut length = [0_u8; LENGTH_PREFIX_LEN];
     let mut first = [0_u8; LENGTH_PREFIX_LEN];
-    let mut slices = [IoSliceMut::new(&mut first)];
-    let mut control_space = nix::cmsg_space!([RawFd; 2]);
-    let message = loop {
-        match recvmsg::<()>(
-            stream.as_raw_fd(),
-            &mut slices,
-            Some(&mut control_space),
-            MsgFlags::empty(),
-        ) {
-            Err(Errno::EINTR) => continue,
-            result => break result?,
+    // nix refuses cmsg iteration on MSG_CTRUNC, but partially delivered rights
+    // are already installed in this process and must still be closed.
+    // Darwin externalizes all rights before truncating copyout. Its control
+    // mbuf is <=2048 bytes (UIPC_MAX_CMSG_FD=512); receive it in full so no
+    // installed FD number is hidden from cleanup. Linux closes undisclosed FDs.
+    #[cfg(target_vendor = "apple")]
+    let mut control_space = [0_usize; 512];
+    #[cfg(not(target_vendor = "apple"))]
+    let mut control_space = [0_usize; 8];
+    let mut iov = nix::libc::iovec {
+        iov_base: first.as_mut_ptr().cast(),
+        iov_len: first.len(),
+    };
+    let mut message: nix::libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = &mut iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control_space.as_mut_ptr().cast();
+    let received = loop {
+        apply_read_deadline(stream, deadline)?;
+        message.msg_controllen = std::mem::size_of_val(&control_space) as _;
+        let count = unsafe { nix::libc::recvmsg(stream.as_raw_fd(), &mut message, 0) };
+        if count >= 0 {
+            break count as usize;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error.into());
         }
     };
-    if message.bytes == 0 {
+    let mut descriptors = Vec::new();
+    // Kernel-generated cmsgs contain complete descriptor integers even when
+    // their list was truncated. Adopt every delivered FD before any rejection.
+    unsafe {
+        let mut header = nix::libc::CMSG_FIRSTHDR(&message);
+        #[allow(clippy::unnecessary_cast)] // libc length types vary across Unix platforms.
+        let control_bytes =
+            (message.msg_controllen as usize).min(std::mem::size_of_val(&control_space));
+        let data_offset = nix::libc::CMSG_LEN(0) as usize;
+        while !header.is_null() {
+            let offset = header as usize - message.msg_control as usize;
+            let available = control_bytes.saturating_sub(offset);
+            if available < data_offset {
+                break;
+            }
+            #[allow(clippy::unnecessary_cast)] // Darwin uses socklen_t, Linux uses size_t.
+            let declared = (*header).cmsg_len as usize;
+            if (*header).cmsg_level == nix::libc::SOL_SOCKET
+                && (*header).cmsg_type == nix::libc::SCM_RIGHTS
+            {
+                let bytes = declared.min(available).saturating_sub(data_offset);
+                let data = nix::libc::CMSG_DATA(header).cast::<RawFd>();
+                for index in 0..bytes / std::mem::size_of::<RawFd>() {
+                    descriptors.push(OwnedFd::from_raw_fd(data.add(index).read_unaligned()));
+                }
+            }
+            if declared < data_offset || declared > available {
+                break;
+            }
+            header = nix::libc::CMSG_NXTHDR(&message, header);
+        }
+    }
+    if message.msg_flags & nix::libc::MSG_CTRUNC != 0 || descriptors.len() > 2 {
+        return Err(IpcError::DescriptorMismatch);
+    }
+    for descriptor in &descriptors {
+        fcntl(
+            descriptor.as_raw_fd(),
+            FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC),
+        )?;
+    }
+    if received == 0 {
         return Err(IpcError::Io(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             "netd IPC peer closed before frame",
         )));
     }
-    if message.flags.contains(MsgFlags::MSG_CTRUNC) {
-        return Err(IpcError::DescriptorMismatch);
-    }
-    let received = message.bytes;
-    let mut descriptors = Vec::new();
-    for control in message.cmsgs()? {
-        if let ControlMessageOwned::ScmRights(fds) = control {
-            for fd in fds {
-                fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
-                // SCM_RIGHTS creates a new descriptor owned by this process.
-                descriptors.push(unsafe { OwnedFd::from_raw_fd(fd) });
-            }
-        }
-    }
     length[..received].copy_from_slice(&first[..received]);
     if received < LENGTH_PREFIX_LEN {
-        let mut stream = stream;
-        stream.read_exact(&mut length[received..])?;
+        read_exact_until(stream, &mut length[received..], deadline)?;
     }
     let payload_len =
         usize::try_from(u32::from_be_bytes(length)).map_err(|_| IpcError::FrameLength)?;
@@ -524,7 +688,106 @@ fn recv_frame(stream: &UnixStream) -> Result<(Vec<u8>, Vec<OwnedFd>), IpcError> 
         return Err(IpcError::FrameLength);
     }
     let mut payload = vec![0_u8; payload_len];
-    let mut stream = stream;
-    stream.read_exact(&mut payload)?;
+    read_exact_until(stream, &mut payload, deadline)?;
     Ok((payload, descriptors))
+}
+
+#[cfg(test)]
+mod frame_deadline_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn rejected_frame_closes_received_rights(count: usize, length: u32) {
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        let (mut probe, writer) = UnixStream::pair().unwrap();
+        probe.set_nonblocking(true).unwrap();
+        let rights = vec![writer.as_raw_fd(); count];
+        sendmsg::<()>(
+            sender.as_raw_fd(),
+            &[IoSlice::new(&length.to_be_bytes())],
+            &[ControlMessage::ScmRights(&rights)],
+            MsgFlags::empty(),
+            None,
+        )
+        .unwrap();
+        drop(writer);
+        let error = recv_frame_until(&receiver, Some(Instant::now() + Duration::from_millis(100)))
+            .unwrap_err();
+        if count > 2 {
+            assert!(matches!(error, IpcError::DescriptorMismatch));
+        } else {
+            assert!(matches!(error, IpcError::FrameLength));
+        }
+        assert_eq!(probe.read(&mut [0]).unwrap(), 0, "received FD leaked");
+    }
+
+    #[test]
+    fn truncated_rights_are_closed_before_rejecting_frame() {
+        rejected_frame_closes_received_rights(32, 1);
+    }
+
+    #[test]
+    fn invalid_length_closes_received_rights() {
+        rejected_frame_closes_received_rights(1, 0);
+    }
+
+    #[test]
+    fn valid_descriptor_is_close_on_exec() {
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        let (_probe, descriptor) = UnixStream::pair().unwrap();
+        send_frame(&sender, &[1], Some(descriptor.as_raw_fd())).unwrap();
+        let (payload, descriptors) = recv_frame(&receiver).unwrap();
+        assert_eq!(payload, [1]);
+        assert_eq!(descriptors.len(), 1);
+        assert_ne!(
+            fcntl(descriptors[0].as_raw_fd(), FcntlArg::F_GETFD).unwrap()
+                & FdFlag::FD_CLOEXEC.bits(),
+            0
+        );
+    }
+
+    #[test]
+    fn slowly_arriving_header_cannot_renew_total_frame_deadline() {
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        let writer = std::thread::spawn(move || {
+            for byte in [0, 0, 0, 1, 1] {
+                if sender.write_all(&[byte]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        });
+        let started = Instant::now();
+        assert!(recv_frame_until(&receiver, Some(started + Duration::from_millis(100))).is_err());
+        assert!(started.elapsed() < Duration::from_millis(200));
+        drop(receiver);
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn undrained_socket_has_a_total_response_write_deadline() {
+        let (sender, _receiver) = UnixStream::pair().unwrap();
+        let size: nix::libc::c_int = 1024;
+        assert_eq!(
+            unsafe {
+                nix::libc::setsockopt(
+                    sender.as_raw_fd(),
+                    nix::libc::SOL_SOCKET,
+                    nix::libc::SO_SNDBUF,
+                    (&size as *const nix::libc::c_int).cast(),
+                    std::mem::size_of_val(&size) as nix::libc::socklen_t,
+                )
+            },
+            0
+        );
+        let started = Instant::now();
+        assert!(send_frame_until(
+            &sender,
+            &vec![1; MAX_NETD_FRAME_LEN],
+            None,
+            Some(started + Duration::from_millis(100))
+        )
+        .is_err());
+        assert!(started.elapsed() < Duration::from_millis(300));
+    }
 }

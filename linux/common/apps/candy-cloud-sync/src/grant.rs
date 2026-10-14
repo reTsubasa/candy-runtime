@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -345,18 +345,15 @@ pub enum FetchFailure {
 }
 
 pub fn fetch_from_cloud(
-    client: &reqwest::blocking::Client,
+    client: &super::SyncClient,
     endpoint: Url,
     request: &GrantIssueRequest<'_>,
 ) -> std::result::Result<GrantIssueResponse, FetchFailure> {
     let response = client
-        .post(endpoint)
-        .json(request)
-        .send()
+        .send(client.post(endpoint).json(request))
         .map_err(|error| {
             FetchFailure::Transient(
-                anyhow::Error::from(error)
-                    .context(failure("grant_http_request", "grant_transport_failed")),
+                error.context(failure("grant_http_request", "grant_transport_failed")),
             )
         })?;
     let status = response.status();
@@ -405,12 +402,16 @@ pub fn fetch_from_cloud(
                 .context(failure("grant_http_response", "grant_response_too_large")),
         ));
     }
-    let bytes = response.bytes().map_err(|error| {
-        FetchFailure::Transient(
-            anyhow::Error::from(error)
-                .context(failure("grant_http_body", "grant_response_read_failed")),
-        )
-    })?;
+    let mut bytes = Vec::new();
+    response
+        .take(MAX_GRANT_STATE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            FetchFailure::Transient(
+                anyhow::Error::from(error)
+                    .context(failure("grant_http_body", "grant_response_read_failed")),
+            )
+        })?;
     if bytes.is_empty() || bytes.len() as u64 > MAX_GRANT_STATE_BYTES {
         return Err(FetchFailure::Transient(
             anyhow::anyhow!("Cloud Grant response has an invalid size")

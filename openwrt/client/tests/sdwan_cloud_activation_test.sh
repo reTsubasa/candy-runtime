@@ -37,6 +37,7 @@ CANDY_SDWAN_CANDIDATE=$CANDY_SDWAN_STATE_DIR/candidate
 CANDY_SDWAN_ACTIVE=$CANDY_SDWAN_STATE_DIR/active
 CANDY_SDWAN_ACTIVE_PROOF=$CANDY_SDWAN_STATE_DIR/active-activation-v1.json
 CANDY_SDWAN_WITHDRAWAL_REQUEST=$CANDY_SDWAN_STATE_DIR/withdrawal-request-v1.json
+CANDY_SDWAN_USER_STOPPED_FILE=$CANDY_SDWAN_STATE_DIR/user-stopped-v1
 LOG_FILE=$test_root/candy.log
 RUNTIME_DIR=$test_root/run/candy
 CANDY_SDWAN_STATUS_FILE=$RUNTIME_DIR/sdwan-status.json
@@ -123,6 +124,20 @@ chmod 0755 "$status_inspector"
 CANDY_SDWAN_STATUS_INSPECTOR=$status_inspector
 CANDY_TEST_STATUS_CALLS=$test_root/status-inspector.calls
 export CANDY_TEST_STATUS_CALLS
+CANDY_INIT_SELF=$test_root/candy-init
+CANDY_TEST_INIT_CALLS=$test_root/candy-init.calls
+export CANDY_TEST_INIT_CALLS
+cat >"$CANDY_INIT_SELF" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$CANDY_TEST_INIT_CALLS"
+[ "${CANDY_TEST_INIT_FAIL:-0}" != 1 ]
+EOF
+chmod 0755 "$CANDY_INIT_SELF"
+: >"$CANDY_TEST_INIT_CALLS"
+sdwan_agent_present=1
+sdwan_netd_present=1
+sdwan_process_pids() { [ "$sdwan_agent_present" = 0 ] || printf '%s\n' 1001; }
+sdwan_netd_pids() { [ "$sdwan_netd_present" = 0 ] || printf '%s\n' 1002; }
 projected_state=untouched
 sdwan_runtime_state() { projected_state=$1; }
 sdwan_fail_open() { projected_state=fail-open; }
@@ -152,6 +167,40 @@ fi
 [ "$projected_state" = fail-open ] || fail "invalid active Core status did not trigger fail-open"
 unset CANDY_TEST_STATUS_FAIL
 export CANDY_TEST_VERIFIED_STATE=running
+
+# A missing process requires a recovery request, not a fabricated running state.
+status_calls_before=$(wc -l <"$CANDY_TEST_STATUS_CALLS")
+for missing in agent netd; do
+	sdwan_agent_present=1
+	sdwan_netd_present=1
+	case "$missing" in
+		agent) sdwan_agent_present=0 ;;
+		netd) sdwan_netd_present=0 ;;
+	esac
+	projected_state=untouched
+	init_calls_before=$(wc -l <"$CANDY_TEST_INIT_CALLS")
+	sdwan_reconcile || fail "missing $missing process did not request isolated recovery"
+	[ "$projected_state" = reconnect ] || fail "missing $missing process projected running state"
+	[ "$(wc -l <"$CANDY_TEST_INIT_CALLS")" -eq "$((init_calls_before + 1))" ] ||
+		fail "missing $missing process did not issue exactly one recovery request"
+	[ "$(tail -n 1 "$CANDY_TEST_INIT_CALLS")" = 'start sdwan-only' ] ||
+		fail "missing $missing process restarted ordinary Candy"
+	[ "$(wc -l <"$CANDY_TEST_STATUS_CALLS")" -eq "$status_calls_before" ] ||
+		fail "missing $missing process was treated as a running data plane"
+	[ "$(readlink "$CANDY_SDWAN_ACTIVE")" = "activations/$hash" ] ||
+		fail "missing $missing process discarded active activation evidence"
+done
+sdwan_agent_present=0
+sdwan_netd_present=1
+export CANDY_TEST_INIT_FAIL=1
+if sdwan_reconcile; then
+	fail "failed isolated recovery unexpectedly reconciled"
+fi
+[ "$(readlink "$CANDY_SDWAN_ACTIVE")" = "activations/$hash" ] ||
+	fail "failed isolated recovery discarded active activation evidence"
+unset CANDY_TEST_INIT_FAIL
+sdwan_agent_present=1
+sdwan_netd_present=1
 
 rm -f "$CANDY_SDWAN_CANDIDATE"
 ln -s "../activations/$hash" "$CANDY_SDWAN_CANDIDATE"

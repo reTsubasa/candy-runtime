@@ -1,0 +1,549 @@
+//! Packet boundary between routing workers and network I/O infrastructure.
+
+use std::future::Future;
+use std::io;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinHandle;
+
+/// Implementations must preserve packet boundaries. Cancelling a pending send
+/// must never deliver a partial packet. Only the infrastructure adapter owns
+/// kernel descriptors; routing workers can also use an IPC implementation.
+pub trait PacketPort: Send + Sync + 'static {
+    fn max_packet_size(&self) -> usize {
+        65_535
+    }
+    /// Complete one nonblocking packet write, or return false without writing.
+    /// Implementations that cannot do this safely keep the queued async path.
+    fn try_send_packet(&self, _packet: &[u8]) -> io::Result<bool> {
+        Ok(false)
+    }
+    fn recv_packet(&self) -> impl Future<Output = io::Result<Vec<u8>>> + Send;
+    fn send_packet<'a>(
+        &'a self,
+        packet: &'a [u8],
+    ) -> impl Future<Output = io::Result<()>> + Send + 'a;
+}
+
+const OUTPUT_PACKET_LIMIT: usize = 256;
+const OUTPUT_BYTE_LIMIT: usize = 512 * 1024;
+const OUTPUT_WRITE_TIMEOUT: Duration = Duration::from_millis(100);
+
+#[derive(Default)]
+struct OutputMetrics {
+    sent_packets: AtomicU64,
+    sent_bytes: AtomicU64,
+    backpressure_drops: AtomicU64,
+    deadline_drops: AtomicU64,
+    stale_drops: AtomicU64,
+}
+
+#[derive(Default)]
+pub struct OutputDelta {
+    pub sent_packets: u64,
+    pub sent_bytes: u64,
+    pub backpressure_drops: u64,
+    pub deadline_drops: u64,
+    pub stale_drops: u64,
+}
+
+struct QueuedPacket {
+    epoch: u64,
+    packet: Vec<u8>,
+    _credit: OwnedSemaphorePermit,
+    _slot_credit: OwnedSemaphorePermit,
+    deadline: tokio::time::Instant,
+    outstanding: Arc<AtomicUsize>,
+    failure: Option<io::Error>,
+}
+
+impl Drop for QueuedPacket {
+    fn drop(&mut self) {
+        self.outstanding.fetch_sub(1, Ordering::Release);
+    }
+}
+
+type NonblockingPacketWrite = dyn Fn(&[u8]) -> io::Result<bool> + Send + Sync;
+
+/// A domain-local bounded queue. Credits cover both queued and in-flight bytes;
+/// overload rejects the current packet without blocking the routing actor.
+pub struct PacketOutput {
+    queue: mpsc::Sender<QueuedPacket>,
+    credit: Arc<Semaphore>,
+    slot_credit: Arc<Semaphore>,
+    epoch: watch::Sender<u64>,
+    observed_epoch: watch::Receiver<u64>,
+    metrics: Arc<OutputMetrics>,
+    task: JoinHandle<io::Result<()>>,
+    joined: bool,
+    outstanding: Arc<AtomicUsize>,
+    try_send: Box<NonblockingPacketWrite>,
+    max_packet_size: usize,
+}
+
+impl PacketOutput {
+    pub fn new<P: PacketPort>(port: Arc<P>) -> Self {
+        let max_packet_size = port.max_packet_size().min(65_535);
+        let try_port = port.clone();
+        let (queue, mut receiver) = mpsc::channel::<QueuedPacket>(OUTPUT_PACKET_LIMIT);
+        let (epoch, mut epoch_rx) = watch::channel(1_u64);
+        let (observed_tx, observed_epoch) = watch::channel(1_u64);
+        let credit = Arc::new(Semaphore::new(OUTPUT_BYTE_LIMIT));
+        let metrics = Arc::new(OutputMetrics::default());
+        let task_metrics = metrics.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let mut packet = tokio::select! {
+                    biased;
+                    changed = epoch_rx.changed() => {
+                        if changed.is_err() { return Ok(()); }
+                        observed_tx.send_replace(*epoch_rx.borrow_and_update());
+                        continue;
+                    }
+                    packet = receiver.recv() => match packet {
+                        Some(packet) => packet,
+                        None => return Ok(()),
+                    },
+                };
+                if let Some(error) = packet.failure.take() {
+                    return Err(error);
+                }
+                if packet.epoch != *epoch_rx.borrow() {
+                    task_metrics.stale_drops.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                let result = tokio::select! {
+                    biased;
+                    changed = epoch_rx.changed() => {
+                        if changed.is_err() { return Ok(()); }
+                        observed_tx.send_replace(*epoch_rx.borrow_and_update());
+                        task_metrics.stale_drops.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    result = tokio::time::timeout_at(packet.deadline,
+                        port.send_packet(&packet.packet)) => result,
+                };
+                match result {
+                    Ok(Ok(())) => {
+                        task_metrics.sent_packets.fetch_add(1, Ordering::Relaxed);
+                        task_metrics
+                            .sent_bytes
+                            .fetch_add(packet.packet.len() as u64, Ordering::Relaxed);
+                    }
+                    Ok(Err(error)) if is_packet_scoped_write_error(&error) => {
+                        let count = task_metrics
+                            .backpressure_drops
+                            .fetch_add(1, Ordering::Relaxed)
+                            + 1;
+                        if count.is_power_of_two() {
+                            tracing::warn!(code = "tun_write_backpressure", module = "sdwan_packet_output",
+                                os_code = error.raw_os_error(), detail = %error,
+                                action = "drop_packet_keep_port", dropped_packets = count);
+                        }
+                    }
+                    Ok(Err(error)) => return Err(error),
+                    Err(_) => {
+                        let count = task_metrics.deadline_drops.fetch_add(1, Ordering::Relaxed) + 1;
+                        if count.is_power_of_two() {
+                            tracing::warn!(
+                                code = "tun_write_deadline",
+                                module = "sdwan_packet_output",
+                                timeout_ms = OUTPUT_WRITE_TIMEOUT.as_millis() as u64,
+                                action = "drop_packet_keep_port",
+                                dropped_packets = count
+                            );
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            queue,
+            credit,
+            slot_credit: Arc::new(Semaphore::new(OUTPUT_PACKET_LIMIT)),
+            epoch,
+            observed_epoch,
+            metrics,
+            task,
+            joined: false,
+            outstanding: Arc::new(AtomicUsize::new(0)),
+            try_send: Box::new(move |packet| try_port.try_send_packet(packet)),
+            max_packet_size,
+        }
+    }
+
+    pub fn enqueue(&self, packet: Vec<u8>) -> Result<(), &'static str> {
+        if packet.is_empty() || packet.len() > self.max_packet_size {
+            return Err("tun_output_invalid_packet");
+        }
+        // The routing actor is the only enqueuer. Never bypass queued/in-flight
+        // packets; the nonblocking fast path performs no await or task handoff.
+        let mut failure = None;
+        if self.outstanding.load(Ordering::Acquire) == 0 {
+            match (self.try_send)(&packet) {
+                Ok(true) => {
+                    self.metrics.sent_packets.fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .sent_bytes
+                        .fetch_add(packet.len() as u64, Ordering::Relaxed);
+                    return Ok(());
+                }
+                Ok(false) => (),
+                Err(error) if is_packet_scoped_write_error(&error) => {
+                    self.metrics
+                        .backpressure_drops
+                        .fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
+                // Report without retrying a possibly short packet write.
+                Err(error) => failure = Some(error),
+            }
+        }
+        let slot_credit = self
+            .slot_credit
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "tun_output_queue_full")?;
+        let credit = self
+            .credit
+            .clone()
+            .try_acquire_many_owned(
+                u32::try_from(packet.capacity().max(packet.len()))
+                    .map_err(|_| "tun_output_queue_full")?,
+            )
+            .map_err(|_| "tun_output_queue_full")?;
+        self.outstanding.fetch_add(1, Ordering::Release);
+        self.queue
+            .try_send(QueuedPacket {
+                epoch: *self.epoch.borrow(),
+                packet,
+                _credit: credit,
+                _slot_credit: slot_credit,
+                deadline: tokio::time::Instant::now() + OUTPUT_WRITE_TIMEOUT,
+                outstanding: self.outstanding.clone(),
+                failure,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => "tun_output_queue_full",
+                mpsc::error::TrySendError::Closed(_) => "tun_output_closed",
+            })
+    }
+
+    /// Fence pending output before acknowledging a successful policy change.
+    pub async fn invalidate(&mut self) -> io::Result<()> {
+        self.epoch
+            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+        let epoch = *self.epoch.borrow();
+        while *self.observed_epoch.borrow_and_update() != epoch {
+            self.observed_epoch.changed().await.map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "packet output stopped before fencing acknowledgement",
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn take_delta(&self) -> OutputDelta {
+        OutputDelta {
+            sent_packets: self.metrics.sent_packets.swap(0, Ordering::Relaxed),
+            sent_bytes: self.metrics.sent_bytes.swap(0, Ordering::Relaxed),
+            backpressure_drops: self.metrics.backpressure_drops.swap(0, Ordering::Relaxed),
+            deadline_drops: self.metrics.deadline_drops.swap(0, Ordering::Relaxed),
+            stale_drops: self.metrics.stale_drops.swap(0, Ordering::Relaxed),
+        }
+    }
+
+    pub async fn failed(&mut self) -> io::Error {
+        let result = (&mut self.task).await;
+        self.joined = true;
+        match result {
+            Ok(Err(error)) => error,
+            Ok(Ok(())) => io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "packet output task exited unexpectedly",
+            ),
+            Err(error) => io::Error::other(format!("packet output task failed: {error}")),
+        }
+    }
+
+    pub async fn stop(&mut self) {
+        if !self.joined {
+            self.task.abort();
+            let _ = (&mut self.task).await;
+            self.joined = true;
+        }
+    }
+}
+
+impl Drop for PacketOutput {
+    fn drop(&mut self) {
+        if !self.joined {
+            self.task.abort();
+        }
+    }
+}
+
+fn is_packet_scoped_write_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted | io::ErrorKind::TimedOut
+    ) || matches!(error.raw_os_error(), Some(code) if code == libc::ENOBUFS
+            || code == libc::ENOMEM || code == libc::EMSGSIZE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tokio::sync::Notify;
+
+    struct TestPort {
+        blocked: AtomicU64,
+        attempts: AtomicU64,
+        entered: Notify,
+        unblock: Notify,
+        packets: Mutex<Vec<Vec<u8>>>,
+        fail_once: Option<i32>,
+    }
+
+    impl TestPort {
+        fn new(blocked: bool, fail_once: Option<i32>) -> Arc<Self> {
+            Arc::new(Self {
+                blocked: AtomicU64::new(u64::from(blocked)),
+                attempts: AtomicU64::new(0),
+                entered: Notify::new(),
+                unblock: Notify::new(),
+                packets: Mutex::new(Vec::new()),
+                fail_once,
+            })
+        }
+    }
+
+    impl PacketPort for TestPort {
+        async fn recv_packet(&self) -> io::Result<Vec<u8>> {
+            std::future::pending().await
+        }
+        async fn send_packet(&self, packet: &[u8]) -> io::Result<()> {
+            let attempt = self.attempts.fetch_add(1, Ordering::Relaxed);
+            self.entered.notify_one();
+            if attempt == 0 {
+                if let Some(code) = self.fail_once {
+                    return Err(io::Error::from_raw_os_error(code));
+                }
+            }
+            while self.blocked.load(Ordering::Relaxed) != 0 {
+                self.unblock.notified().await;
+            }
+            self.packets.lock().unwrap().push(packet.to_vec());
+            Ok(())
+        }
+    }
+
+    async fn wait_packet(port: &TestPort, count: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while port.packets.lock().unwrap().len() < count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn enobufs_drops_only_current_packet_then_writes_next() {
+        let port = TestPort::new(false, Some(libc::ENOBUFS));
+        let mut output = PacketOutput::new(port.clone());
+        output.enqueue(vec![1; 100]).unwrap();
+        output.enqueue(vec![2; 200]).unwrap();
+        wait_packet(&port, 1).await;
+        assert_eq!(*port.packets.lock().unwrap(), vec![vec![2; 200]]);
+        let delta = output.take_delta();
+        assert_eq!(delta.backpressure_drops, 1);
+        assert_eq!((delta.sent_packets, delta.sent_bytes), (1, 200));
+        output.stop().await;
+    }
+
+    #[tokio::test]
+    async fn blocked_output_is_byte_bounded_and_policy_fences_inflight_and_queued_packets() {
+        let port = TestPort::new(true, None);
+        let mut output = PacketOutput::new(port.clone());
+        output.enqueue(vec![1; 65_535]).unwrap();
+        port.entered.notified().await;
+        for _ in 0..7 {
+            output.enqueue(vec![2; 65_535]).unwrap();
+        }
+        assert_eq!(
+            output.enqueue(vec![3; 65_535]),
+            Err("tun_output_queue_full")
+        );
+        assert!(output.credit.available_permits() < 65_535);
+        output.invalidate().await.unwrap();
+        port.blocked.store(0, Ordering::Relaxed);
+        port.unblock.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while output.credit.available_permits() != OUTPUT_BYTE_LIMIT {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(port.packets.lock().unwrap().is_empty());
+        output.enqueue(vec![4; 100]).unwrap();
+        wait_packet(&port, 1).await;
+        assert_eq!(output.take_delta().stale_drops, 8);
+        output.stop().await;
+    }
+
+    #[tokio::test]
+    async fn short_packets_with_large_allocations_cannot_bypass_byte_credit() {
+        let port = TestPort::new(true, None);
+        let mut output = PacketOutput::new(port.clone());
+        let mut packet = Vec::with_capacity(OUTPUT_BYTE_LIMIT);
+        packet.push(1);
+        output.enqueue(packet).unwrap();
+        port.entered.notified().await;
+        assert_eq!(output.credit.available_permits(), 0);
+        assert_eq!(output.enqueue(vec![2]), Err("tun_output_queue_full"));
+        output.invalidate().await.unwrap();
+        output.stop().await;
+        assert_eq!(output.credit.available_permits(), OUTPUT_BYTE_LIMIT);
+        assert!(port.packets.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn packet_limit_includes_inflight_and_all_credits_return_after_cancellation() {
+        let port = TestPort::new(true, None);
+        let mut output = PacketOutput::new(port.clone());
+        output.enqueue(vec![1]).unwrap();
+        port.entered.notified().await;
+        for _ in 1..OUTPUT_PACKET_LIMIT {
+            output.enqueue(vec![2]).unwrap();
+        }
+        assert_eq!(
+            output.outstanding.load(Ordering::Acquire),
+            OUTPUT_PACKET_LIMIT
+        );
+        assert_eq!(output.slot_credit.available_permits(), 0);
+        assert_eq!(output.queue.capacity(), 1);
+        assert_eq!(output.enqueue(vec![3]), Err("tun_output_queue_full"));
+        assert_eq!(
+            output.outstanding.load(Ordering::Acquire),
+            OUTPUT_PACKET_LIMIT
+        );
+        output.stop().await;
+        assert_eq!(output.outstanding.load(Ordering::Acquire), 0);
+        assert_eq!(output.slot_credit.available_permits(), OUTPUT_PACKET_LIMIT);
+        assert_eq!(output.credit.available_permits(), OUTPUT_BYTE_LIMIT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn write_deadline_drops_stalled_packet_and_keeps_writer() {
+        let port = TestPort::new(true, None);
+        let mut output = PacketOutput::new(port.clone());
+        output.enqueue(vec![1; 100]).unwrap();
+        port.entered.notified().await;
+        tokio::time::advance(OUTPUT_WRITE_TIMEOUT + Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(output.take_delta().deadline_drops, 1);
+        port.blocked.store(0, Ordering::Relaxed);
+        output.enqueue(vec![2; 100]).unwrap();
+        wait_packet(&port, 1).await;
+        output.stop().await;
+    }
+
+    #[tokio::test]
+    async fn fatal_fd_error_is_reported_and_stop_cancels_blocked_writer() {
+        let port = TestPort::new(false, Some(libc::EBADF));
+        let mut output = PacketOutput::new(port);
+        output.enqueue(vec![1; 100]).unwrap();
+        assert_eq!(output.failed().await.raw_os_error(), Some(libc::EBADF));
+        output.stop().await;
+        let port = TestPort::new(true, None);
+        let mut output = PacketOutput::new(port.clone());
+        output.enqueue(vec![1; 100]).unwrap();
+        port.entered.notified().await;
+        tokio::time::timeout(Duration::from_millis(50), output.stop())
+            .await
+            .unwrap();
+        assert!(port.packets.lock().unwrap().is_empty());
+        assert_eq!(output.credit.available_permits(), OUTPUT_BYTE_LIMIT);
+    }
+
+    struct NonblockingTestPort {
+        attempts: AtomicU64,
+        error: Option<i32>,
+    }
+
+    impl PacketPort for NonblockingTestPort {
+        fn max_packet_size(&self) -> usize {
+            1400
+        }
+        fn try_send_packet(&self, _: &[u8]) -> io::Result<bool> {
+            let attempt = self.attempts.fetch_add(1, Ordering::Relaxed);
+            if attempt == 0 {
+                if let Some(code) = self.error {
+                    return Err(io::Error::from_raw_os_error(code));
+                }
+            }
+            Ok(true)
+        }
+        async fn recv_packet(&self) -> io::Result<Vec<u8>> {
+            std::future::pending().await
+        }
+        async fn send_packet(&self, _: &[u8]) -> io::Result<()> {
+            panic!("a completed or failed nonblocking write must not be retried");
+        }
+    }
+
+    #[tokio::test]
+    async fn nonblocking_fast_path_preserves_packet_errors_and_never_retries_fatal_writes() {
+        let port = Arc::new(NonblockingTestPort {
+            attempts: AtomicU64::new(0),
+            error: Some(libc::ENOBUFS),
+        });
+        let mut output = PacketOutput::new(port.clone());
+        output.enqueue(vec![1; 100]).unwrap();
+        output.enqueue(vec![2; 200]).unwrap();
+        let delta = output.take_delta();
+        assert_eq!(
+            (
+                delta.backpressure_drops,
+                delta.sent_packets,
+                delta.sent_bytes
+            ),
+            (1, 1, 200)
+        );
+        assert_eq!(port.attempts.load(Ordering::Relaxed), 2);
+        output.stop().await;
+        let port = Arc::new(NonblockingTestPort {
+            attempts: AtomicU64::new(0),
+            error: Some(libc::EBADF),
+        });
+        let mut output = PacketOutput::new(port.clone());
+        output.enqueue(vec![1; 100]).unwrap();
+        assert_eq!(output.failed().await.raw_os_error(), Some(libc::EBADF));
+        assert_eq!(port.attempts.load(Ordering::Relaxed), 1);
+        output.stop().await;
+    }
+
+    #[tokio::test]
+    async fn oversized_packet_is_rejected_without_invoking_or_failing_port() {
+        let port = Arc::new(NonblockingTestPort {
+            attempts: AtomicU64::new(0),
+            error: None,
+        });
+        let mut output = PacketOutput::new(port.clone());
+        assert_eq!(
+            output.enqueue(vec![1; 1401]),
+            Err("tun_output_invalid_packet")
+        );
+        output.enqueue(vec![2; 1400]).unwrap();
+        assert_eq!(port.attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(output.take_delta().sent_packets, 1);
+        output.stop().await;
+    }
+}

@@ -3,6 +3,8 @@
 use std::cmp::Ordering;
 use thiserror::Error;
 
+pub mod v2;
+
 pub const NETD_PROTOCOL_VERSION: u64 = 1;
 pub const CANDY_INTERFACE_NAME: &str = "candy0";
 pub const CANDY_TABLE_MIN: u32 = 20_000;
@@ -11,7 +13,7 @@ pub const MAX_NETD_FRAME_LEN: usize = 64 * 1024;
 pub const MAX_ROUTES: usize = 4096;
 pub const MAX_EXCLUSIONS: usize = 64;
 
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Ipv4Prefix {
     pub network: [u8; 4],
     pub prefix_len: u8,
@@ -63,7 +65,7 @@ impl PartialOrd for Ipv4Prefix {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[repr(u64)]
 pub enum RouteKind {
     Local = 1,
@@ -91,13 +93,13 @@ impl TryFrom<u64> for RouteKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RouteDeclaration {
     pub prefix: Ipv4Prefix,
     pub kind: RouteKind,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[repr(u64)]
 pub enum UnderlayKind {
     CloudApi = 1,
@@ -118,13 +120,13 @@ impl TryFrom<u64> for UnderlayKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UnderlayExclusion {
     pub prefix: Ipv4Prefix,
     pub kind: UnderlayKind,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FirewallPolicy {
     pub allow_forward: bool,
     pub clamp_tcp_mss: bool,
@@ -132,7 +134,7 @@ pub struct FirewallPolicy {
     pub manage_rp_filter: bool,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PrepareDeclaration {
     pub table_id: u32,
     pub overlay_router_ipv4: [u8; 4],

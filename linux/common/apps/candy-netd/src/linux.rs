@@ -649,6 +649,78 @@ mod backend {
         }
     }
 
+    impl LinuxNetworkBackend {
+        fn apply_v2_forward_routes(
+            &mut self,
+            declaration: &PrepareDeclaration,
+            failed: &[Ipv4Prefix],
+            changed: Option<Vec<Ipv4Prefix>>,
+        ) -> Result<(), NetworkError> {
+            let plan = Self::plan(declaration)?;
+            let failed = failed
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            let changed = changed.map(|prefixes| {
+                prefixes
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>()
+            });
+            let handle = self.handle.clone();
+            self.with_async(async move {
+                let index = Self::link_index(&handle).await?;
+                for prefix in &plan.remote_routes {
+                    if changed
+                        .as_ref()
+                        .is_some_and(|changed| !changed.contains(prefix))
+                    {
+                        continue;
+                    }
+                    let route = if failed.contains(prefix) {
+                        RouteMessageBuilder::<Ipv4Addr>::new()
+                            .destination_prefix(Ipv4Addr::from(prefix.network), prefix.prefix_len)
+                            .table_id(plan.route_table)
+                            .protocol(RouteProtocol::Static)
+                            .kind(RouteType::Unreachable)
+                            .build()
+                    } else {
+                        let mut route = RouteMessageBuilder::<Ipv4Addr>::new()
+                            .destination_prefix(Ipv4Addr::from(prefix.network), prefix.prefix_len)
+                            .output_interface(index)
+                            .table_id(plan.route_table)
+                            .protocol(RouteProtocol::Static)
+                            .scope(RouteScope::Link)
+                            .build();
+                        route.attributes.push(RouteAttribute::Metrics(vec![
+                            RouteMetric::Mtu(u32::from(plan.route_mtu)),
+                            RouteMetric::Advmss(u32::from(plan.tcp_advmss)),
+                        ]));
+                        route
+                    };
+                    handle
+                        .route()
+                        .add(route)
+                        .replace()
+                        .execute()
+                        .await
+                        .map_err(|error| {
+                            log_route_backend_error(
+                                "forward_prefix_route_replace",
+                                plan.route_table,
+                                Some(*prefix),
+                                &error,
+                            );
+                            NetworkError::Backend
+                        })?;
+                }
+                if changed.is_none() {
+                    Self::reconcile_policy_rules(&handle, &plan).await?;
+                }
+                Ok(())
+            })
+        }
+    }
+
     impl NetworkBackend for LinuxNetworkBackend {
         fn preflight(
             &mut self,
@@ -919,6 +991,316 @@ mod backend {
         }
     }
 
+    impl crate::v2::InfrastructureBackend for LinuxNetworkBackend {
+        fn interface_ownership_marker(&mut self) -> Result<Option<String>, NetworkError> {
+            let handle = self.handle.clone();
+            self.with_async(async move {
+                let Some(link) = Self::candy_link(&handle).await? else {
+                    return Ok(None);
+                };
+                if !Self::link_is_tun(&link) {
+                    return Err(NetworkError::Conflict);
+                }
+                Ok(link
+                    .attributes
+                    .iter()
+                    .find_map(|attribute| match attribute {
+                        LinkAttribute::IfAlias(marker) => Some(marker.clone()),
+                        _ => None,
+                    }))
+            })
+        }
+
+        fn stamp_infrastructure_ownership(&mut self, marker: &str) -> Result<(), NetworkError> {
+            let handle = self.handle.clone();
+            let marker = marker.to_owned();
+            self.with_async(async move {
+                let index = Self::link_index(&handle).await?;
+                let mut message = LinkUnspec::new_with_index(index).build();
+                message.attributes.push(LinkAttribute::IfAlias(marker));
+                handle
+                    .link()
+                    .set(message)
+                    .execute()
+                    .await
+                    .map_err(|_| NetworkError::Backend)
+            })
+        }
+
+        fn interface_identity(&mut self) -> Result<Option<u32>, NetworkError> {
+            let handle = self.handle.clone();
+            self.with_async(async move {
+                let Some(link) = Self::candy_link(&handle).await? else {
+                    return Ok(None);
+                };
+                if !Self::link_is_tun(&link) {
+                    return Err(NetworkError::Conflict);
+                }
+                Ok(Some(link.header.index))
+            })
+        }
+
+        fn ensure_infrastructure(
+            &mut self,
+            spec: &candy_netd_proto::v2::InfraSpec,
+        ) -> Result<u32, NetworkError> {
+            // IPv4 packet mode is an interface property, never a forwarding lease mutation.
+            if sysctl_path(SysctlKey::CandyDisableIpv6).exists() {
+                write_sysctl(SysctlKey::CandyDisableIpv6, 1)?;
+            }
+            let handle = self.handle.clone();
+            let spec = spec.clone();
+            self.with_async(async move {
+                let link = Self::candy_link(&handle)
+                    .await?
+                    .ok_or(NetworkError::Backend)?;
+                if !Self::link_is_tun(&link) {
+                    return Err(NetworkError::Conflict);
+                }
+                handle
+                    .link()
+                    .set(
+                        LinkUnspec::new_with_index(link.header.index)
+                            .mtu(u32::from(spec.mtu))
+                            .up()
+                            .build(),
+                    )
+                    .execute()
+                    .await
+                    .map_err(|_| NetworkError::Backend)?;
+                match handle
+                    .address()
+                    .add(
+                        link.header.index,
+                        Ipv4Addr::from(spec.overlay_router_ipv4).into(),
+                        32,
+                    )
+                    .execute()
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(error) if address_add_is_idempotent(&error) => {}
+                    Err(_) => return Err(NetworkError::Backend),
+                }
+                Ok(link.header.index)
+            })
+        }
+
+        fn retire_infrastructure(&mut self) -> Result<(), NetworkError> {
+            let handle = self.handle.clone();
+            self.with_async(async move {
+                let Some(link) = Self::candy_link(&handle).await? else {
+                    return Ok(());
+                };
+                if !Self::link_is_tun(&link) {
+                    return Err(NetworkError::Conflict);
+                }
+                handle
+                    .link()
+                    .del(link.header.index)
+                    .execute()
+                    .await
+                    .map_err(|_| NetworkError::Backend)
+            })
+        }
+
+        fn reject_forwarding(
+            &mut self,
+            declaration: &PrepareDeclaration,
+        ) -> Result<(), NetworkError> {
+            let plan = Self::plan(declaration)?;
+            let handle = self.handle.clone();
+            self.with_async(async move {
+                // Atomic route replacement retains fail-closed steering instead of falling through main.
+                for prefix in &plan.remote_routes {
+                    let route = RouteMessageBuilder::<Ipv4Addr>::new()
+                        .destination_prefix(Ipv4Addr::from(prefix.network), prefix.prefix_len)
+                        .table_id(plan.route_table)
+                        .protocol(RouteProtocol::Static)
+                        .kind(RouteType::Unreachable)
+                        .build();
+                    handle
+                        .route()
+                        .add(route)
+                        .replace()
+                        .execute()
+                        .await
+                        .map_err(|_| NetworkError::Backend)?;
+                }
+                for prefix in plan.throw_prefixes() {
+                    let route = RouteMessageBuilder::<Ipv4Addr>::new()
+                        .destination_prefix(Ipv4Addr::from(prefix.network), prefix.prefix_len)
+                        .table_id(plan.route_table)
+                        .protocol(RouteProtocol::Static)
+                        .kind(RouteType::Throw)
+                        .build();
+                    handle
+                        .route()
+                        .add(route)
+                        .replace()
+                        .execute()
+                        .await
+                        .map_err(|_| NetworkError::Backend)?;
+                }
+                // Retain existing selectors while guarding a candidate; commit reconciles them.
+                for (source, destination) in plan.policy_selectors() {
+                    Self::add_policy_rule(&handle, &plan, source, destination).await?;
+                }
+                Ok(())
+            })
+        }
+
+        fn restore_forwarding(
+            &mut self,
+            declaration: &PrepareDeclaration,
+        ) -> Result<(), NetworkError> {
+            self.apply_v2_forward_routes(declaration, &[], None)
+        }
+
+        fn restore_forwarding_with_failures(
+            &mut self,
+            declaration: &PrepareDeclaration,
+            failed: &[Ipv4Prefix],
+        ) -> Result<(), NetworkError> {
+            self.apply_v2_forward_routes(declaration, failed, None)
+        }
+
+        fn update_failed_forward_prefixes(
+            &mut self,
+            declaration: &PrepareDeclaration,
+            previous: &[Ipv4Prefix],
+            failed: &[Ipv4Prefix],
+        ) -> Result<(), NetworkError> {
+            let previous_set = previous
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            let failed_set = failed
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            let mut changed = previous_set
+                .symmetric_difference(&failed_set)
+                .copied()
+                .collect::<Vec<_>>();
+            changed.sort_unstable();
+            changed.dedup();
+            let mut guarded = previous_set.union(&failed_set).copied().collect::<Vec<_>>();
+            guarded.sort_unstable();
+            // Guard every changed prefix before any recovery route becomes reachable.
+            self.apply_v2_forward_routes(declaration, &guarded, Some(changed.clone()))?;
+            if let Err(error) =
+                self.apply_v2_forward_routes(declaration, failed, Some(changed.clone()))
+            {
+                if let Err(rollback_error) =
+                    self.apply_v2_forward_routes(declaration, &guarded, Some(changed))
+                {
+                    crate::eprintln!("level=error code=forward_prefix_guard_repair_failed module=netd_v2 reason={rollback_error}");
+                }
+                return Err(error);
+            }
+            Ok(())
+        }
+
+        fn validate_forwarding_replacement(
+            &mut self,
+            previous: &PrepareDeclaration,
+            candidate: &PrepareDeclaration,
+        ) -> Result<(), NetworkError> {
+            let old_plan = Self::plan(previous)?;
+            let new_plan = Self::plan(candidate)?;
+            if old_plan.route_table != new_plan.route_table {
+                return Err(NetworkError::Backend);
+            }
+            let handle = self.handle.clone();
+            self.with_async(async move {
+                let interface_index = Self::link_index(&handle).await?;
+                let query = RouteMessageBuilder::<Ipv4Addr>::new().table_id(old_plan.route_table).build();
+                let mut routes = handle.route().get(query).execute();
+                while let Some(route) = routes.try_next().await.map_err(|_| NetworkError::Backend)? {
+                    let in_table = route.attributes.iter().any(|value| matches!(value, RouteAttribute::Table(table) if *table == old_plan.route_table));
+                    let owned_guard = route.header.kind == RouteType::Unreachable
+                        && route.header.protocol == RouteProtocol::Static
+                        && Self::route_prefix(&route).is_some_and(|prefix| old_plan.remote_routes.contains(&prefix));
+                    let owned_existing = Self::is_owned_residual_route(&route, &old_plan)
+                        && (route.header.kind != RouteType::Unicast || route.attributes.iter().any(|value| matches!(value, RouteAttribute::Oif(index) if *index == interface_index)));
+                    if in_table && !owned_guard && !owned_existing {
+                        return Err(NetworkError::Backend);
+                    }
+                }
+                let expected = old_plan.policy_selectors();
+                let mut rules = handle.rule().get(rtnetlink::IpVersion::V4).execute();
+                while let Some(rule) = rules.try_next().await.map_err(|_| NetworkError::Backend)? {
+                    let priority = rule.attributes.iter().find_map(|value| match value { RuleAttribute::Priority(value) => Some(*value), _ => None });
+                    let table = rule.attributes.iter().find_map(|value| match value { RuleAttribute::Table(value) => Some(*value), _ => None });
+                    if (priority == Some(old_plan.policy_priority) || table == Some(old_plan.route_table))
+                        && (priority != Some(old_plan.policy_priority) || table != Some(old_plan.route_table)
+                            || !Self::policy_rule_selector(&rule).is_some_and(|selector| expected.contains(&selector))) {
+                        return Err(NetworkError::Backend);
+                    }
+                }
+                Ok(())
+            })
+        }
+
+        fn remove_stale_forwarding(
+            &mut self,
+            old: &PrepareDeclaration,
+            retained: &PrepareDeclaration,
+        ) -> Result<(), NetworkError> {
+            let old_plan = Self::plan(old)?;
+            let retained_plan = Self::plan(retained)?;
+            if old_plan.route_table != retained_plan.route_table {
+                return Err(NetworkError::Backend);
+            }
+            let retained_prefixes = retained_plan.cleanup_throw_prefixes();
+            let stale = old_plan
+                .cleanup_throw_prefixes()
+                .into_iter()
+                .filter(|prefix| !retained_prefixes.contains(prefix))
+                .collect::<std::collections::HashSet<_>>();
+            let handle = self.handle.clone();
+            self.with_async(async move {
+                let query = RouteMessageBuilder::<Ipv4Addr>::new().table_id(old_plan.route_table).build();
+                let mut routes = handle.route().get(query).execute();
+                while let Some(route) = routes.try_next().await.map_err(|_| NetworkError::Backend)? {
+                    let in_table = route.attributes.iter().any(|value| matches!(value, RouteAttribute::Table(table) if *table == old_plan.route_table));
+                    if in_table && route.header.protocol == RouteProtocol::Static
+                        && Self::route_prefix(&route).is_some_and(|prefix| stale.contains(&prefix)) {
+                        if let Err(error) = handle.route().del(route).execute().await {
+                            if !route_delete_is_idempotent(&error) { return Err(NetworkError::Backend); }
+                        }
+                    }
+                }
+                Ok(())
+            })
+        }
+
+        fn retire_forwarding(
+            &mut self,
+            declaration: &PrepareDeclaration,
+        ) -> Result<(), NetworkError> {
+            self.remove_policy_rule(declaration)?;
+            self.remove_routes(declaration)?;
+            let plan = Self::plan(declaration)?;
+            let handle = self.handle.clone();
+            self.with_async(async move {
+                let query = RouteMessageBuilder::<Ipv4Addr>::new().table_id(plan.route_table).build();
+                let mut routes = handle.route().get(query).execute();
+                while let Some(route) = routes.try_next().await.map_err(|_| NetworkError::Backend)? {
+                    let in_table = route.attributes.iter().any(|value| matches!(value, RouteAttribute::Table(table) if *table == plan.route_table));
+                    if in_table && route.header.kind == RouteType::Unreachable && route.header.protocol == RouteProtocol::Static
+                        && Self::route_prefix(&route).is_some_and(|prefix| plan.remote_routes.contains(&prefix)) {
+                        if let Err(error) = handle.route().del(route).execute().await {
+                            if !route_delete_is_idempotent(&error) { return Err(NetworkError::Backend); }
+                        }
+                    }
+                }
+                Ok(())
+            })
+        }
+    }
+
     fn snapshot_sysctls(
         declaration: &PrepareDeclaration,
     ) -> Result<Vec<SysctlChange>, NetworkError> {
@@ -1011,14 +1393,22 @@ mod backend {
             .write(true)
             .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
             .open(sysctl_path(key))
-            .map_err(|_| NetworkError::Backend)?;
+            .map_err(|error| {
+                eprintln!("level=error code=sysctl_open_failed module=netd_backend path={} value={value} reason={error}", sysctl_path(key).display());
+                NetworkError::Backend
+            })?;
         let metadata = file.metadata().map_err(|_| NetworkError::Backend)?;
         if !metadata.file_type().is_file() {
             return Err(NetworkError::Backend);
         }
         file.write_all(value.to_string().as_bytes())
-            .map_err(|_| NetworkError::Backend)
+            .map_err(|error| {
+                eprintln!("level=error code=sysctl_write_failed module=netd_backend path={} value={value} reason={error}", sysctl_path(key).display());
+                NetworkError::Backend
+            })
     }
+
+    pub use LinuxNetworkBackend as ExportedLinuxNetworkBackend;
 
     #[cfg(test)]
     mod tests {
@@ -1063,8 +1453,6 @@ mod backend {
             );
         }
     }
-
-    pub use LinuxNetworkBackend as ExportedLinuxNetworkBackend;
 }
 
 #[cfg(target_os = "linux")]

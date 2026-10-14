@@ -7,6 +7,7 @@ mod linux;
 mod network;
 #[cfg(target_os = "linux")]
 mod nft;
+pub mod v2;
 
 pub use journal::FileNetworkJournal;
 #[cfg(target_os = "linux")]
@@ -23,6 +24,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+#[cfg(not(target_os = "linux"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -249,6 +251,18 @@ pub fn peer_credentials(_stream: &UnixStream) -> Result<PeerCredentials, Platfor
 
 pub trait TunFactory {
     fn create(&mut self) -> Result<OwnedFd, PlatformError>;
+
+    fn create_exclusive(&mut self) -> Result<OwnedFd, PlatformError> {
+        Err(PlatformError::Unsupported)
+    }
+
+    fn enable_persistence(&mut self, _fd: &OwnedFd) -> Result<(), PlatformError> {
+        Err(PlatformError::Unsupported)
+    }
+
+    fn create_persistent(&mut self) -> Result<OwnedFd, PlatformError> {
+        Err(PlatformError::Unsupported)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -258,10 +272,53 @@ impl TunFactory for SystemTunFactory {
     fn create(&mut self) -> Result<OwnedFd, PlatformError> {
         create_candy_tun()
     }
+
+    fn create_persistent(&mut self) -> Result<OwnedFd, PlatformError> {
+        #[cfg(target_os = "linux")]
+        {
+            let fd = create_candy_tun()?;
+            // Persistence permits netd recovery without closing a healthy I/O owner.
+            if unsafe { nix::libc::ioctl(fd.as_raw_fd(), nix::libc::TUNSETPERSIST, 1) } < 0 {
+                return Err(PlatformError::Io(std::io::Error::last_os_error()));
+            }
+            Ok(fd)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err(PlatformError::Unsupported)
+    }
+
+    fn create_exclusive(&mut self) -> Result<OwnedFd, PlatformError> {
+        #[cfg(target_os = "linux")]
+        {
+            create_candy_tun_with_flags(nix::libc::IFF_TUN_EXCL)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err(PlatformError::Unsupported)
+    }
+
+    fn enable_persistence(&mut self, fd: &OwnedFd) -> Result<(), PlatformError> {
+        #[cfg(target_os = "linux")]
+        {
+            if unsafe { nix::libc::ioctl(fd.as_raw_fd(), nix::libc::TUNSETPERSIST, 1) } < 0 {
+                return Err(PlatformError::Io(std::io::Error::last_os_error()));
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = fd;
+            Err(PlatformError::Unsupported)
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
 pub fn create_candy_tun() -> Result<OwnedFd, PlatformError> {
+    create_candy_tun_with_flags(0)
+}
+
+#[cfg(target_os = "linux")]
+fn create_candy_tun_with_flags(extra_flags: nix::libc::c_int) -> Result<OwnedFd, PlatformError> {
     use std::fs::OpenOptions;
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -279,7 +336,7 @@ pub fn create_candy_tun() -> Result<OwnedFd, PlatformError> {
         .open("/dev/net/tun")?;
     let mut request = TunIfReq {
         name: [0; nix::libc::IFNAMSIZ],
-        flags: (nix::libc::IFF_TUN | nix::libc::IFF_NO_PI) as nix::libc::c_short,
+        flags: (nix::libc::IFF_TUN | nix::libc::IFF_NO_PI | extra_flags) as nix::libc::c_short,
         padding: [0; 22],
     };
     for (target, source) in request.name.iter_mut().zip(b"candy0\0") {

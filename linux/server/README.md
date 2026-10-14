@@ -195,6 +195,25 @@ activation rejection remains fail-closed even while ordinary Proxy is enabled.
 The Core rejects overlapping primary or hopping ports, zero ports, missing
 Proxy users, and Cloud authentication or SD-WAN settings in the Proxy file.
 
+Site keys and terminal keys are separate trust domains. The SD-WAN listener
+learns the Cloud key that signs a Site's Access Grant from its signed activation.
+A terminal (end-user device) Grant is signed under a different domain, so its
+Cloud signing keys are listed explicitly and never inherited from the Site
+activation:
+
+```toml
+[cloud_auth]
+enabled = true
+
+[[cloud_auth.client_verification_keys]]
+key_id = "cloud-client-grant-2026-01"
+public_key = "<32 bytes, 64 hex characters or base64>"
+```
+
+At most 8 keys are accepted; `key_id` must be unique and at most 64 characters.
+Leave the list empty on a Site-only listener: terminal handshakes are then
+refused with `terminal_grant_not_configured` instead of trusting anything.
+
 Before migration, back up both service states, the current signed Core and
 Runtime versions, configuration files and Cloud endpoint advertisement. Check
 host and provider firewall rules and pick an unused UDP port for SD-WAN. Keep

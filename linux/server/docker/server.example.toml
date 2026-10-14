@@ -53,6 +53,21 @@ features = ["recommended"]
 # enabled = true
 # cloud_signing_public_key = "CLOUD_ED25519_PUBLIC_KEY"
 #
+# `cloud_signing_public_key` above is the *node* trust domain: it is the Cloud
+# key that signs an Access Grant for a Site. A terminal (end-user device) is a
+# different subject signed under a different domain, so its signing keys are
+# listed separately. An operator who rotates only one domain cannot silently
+# widen the other. Each entry holds the Cloud key id and its Ed25519 public key
+# (32 bytes, 64 hex characters or base64). At most 8 keys; ids must be unique.
+#
+# [[cloud_auth.client_verification_keys]]
+# key_id = "cloud-client-grant-2026-01"
+# public_key = "CLOUD_CLIENT_GRANT_ED25519_PUBLIC_KEY"
+#
+# Leave the list empty on a listener that serves Sites only. An empty list is
+# not an error: the listener rejects terminal handshakes with
+# `terminal_grant_not_configured` instead of trusting anything.
+#
 # [sdwan_private_transit]
 # enabled = true
 # route_signing_key_id = "route-key-1"

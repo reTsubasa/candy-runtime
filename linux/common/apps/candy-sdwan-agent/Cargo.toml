@@ -5,17 +5,24 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+experimental-tunio-rebind = ["dep:candy-tunio"]
+
 [dependencies]
 anyhow.workspace = true
 candy-netd-client = { path = "../../crates/candy-netd-client" }
 candy-netd-proto = { path = "../../crates/candy-netd-proto" }
 candy-runtime-log.workspace = true
+candy-process-control = { path = "../../crates/candy-process-control" }
+candy-cloud-sync = { path = "../candy-cloud-sync" }
+candy-tunio = { path = "../candy-tunio", optional = true }
 clap.workspace = true
 nix = { workspace = true, features = ["fs"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 uuid.workspace = true
+toml_edit = { version = "0.22", features = ["serde"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 futures-util.workspace = true

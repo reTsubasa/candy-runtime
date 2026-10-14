@@ -47,10 +47,16 @@ fi
 [ ! -e "$root/linux/common/crates/candy-runtime-linux" ] ||
   fail "obsolete Core-coupled candy-runtime-linux crate remains"
 
-if rg -n 'candy-core|candy-proto|candy-tun|carrier-(client|crypto|runtime|server|transport)' \
+if rg -n '(^|[^[:alnum:]_-])(candy-core|candy-proto|candy-tun|candy-carrier-(client|crypto|runtime|server|transport)|carrier-(client|crypto|runtime|server|transport))([^[:alnum:]_-]|$)' \
   "$root" -g Cargo.toml >/dev/null 2>&1; then
   fail "Runtime Cargo workspace still references a private Core crate"
 fi
+
+# TUNIO is Runtime infrastructure, not the private candy-tun routing crate.
+# Its only data-boundary dependency is a fixed public package in this checkout.
+# This guard also verifies exact source hashes and rejects private/path/git deps.
+python3 "$root/scripts/packet_port_package.py"
+python3 -B "$root/scripts/packet_port_package_test.py"
 
 for forbidden in crates/candy-core crates/candy-proto crates/carrier-crypto vendor/quinn-proto; do
   [ ! -e "$root/$forbidden" ] || fail "private Core source leaked into Runtime: $forbidden"
@@ -61,7 +67,7 @@ for obsolete in migration bindings platform; do
 done
 
 client_makefile="$root/openwrt/client/packages/candy-client/Makefile"
-common_sync="$root/linux/common/apps/candy-cloud-sync/src/main.rs"
+common_sync="$root/linux/common/apps/candy-cloud-sync/src/lib.rs"
 common_runtime="$root/linux/common/apps/candy-sdwan-runtime/candy-sdwan-runtime"
 openwrt_init="$root/openwrt/client/packages/candy-client/candy.init"
 openwrt_sync_loop="$root/openwrt/client/packages/candy-client/candy-cloud-sync-loop"

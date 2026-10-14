@@ -1,0 +1,7449 @@
+use anyhow::{bail, Context, Result};
+mod experimental_tunio;
+mod process_record;
+mod runtime_agent;
+#[cfg(any(all(feature = "experimental-tunio-rebind", target_os = "linux"), test))]
+mod signed_snapshot;
+use candy_netd_client::{IpcError, NetdClient};
+use candy_netd_proto::{
+    ErrorCode, FirewallPolicy, Ipv4Prefix, LeaseOwner, PrepareDeclaration, RouteDeclaration,
+    RouteKind, UnderlayExclusion, UnderlayKind,
+};
+use candy_runtime_log::structured_eprintln as eprintln;
+use clap::{Parser, ValueEnum};
+use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Component, Path, PathBuf};
+use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(target_os = "linux")]
+use futures_util::TryStreamExt;
+#[cfg(target_os = "linux")]
+use netlink_packet_route::route::{
+    RouteAddress, RouteAttribute, RouteMetric, RouteProtocol, RouteScope, RouteType,
+};
+#[cfg(target_os = "linux")]
+use rtnetlink::RouteMessageBuilder;
+
+const MAX_DECLARATION_BYTES: u64 = 1024 * 1024;
+const MIN_LEASE_MS: u64 = 5_000;
+const MAX_LEASE_MS: u64 = 120_000;
+const MIN_READINESS_TIMEOUT_MS: u64 = 1_000;
+const MAX_READINESS_TIMEOUT_MS: u64 = 120_000;
+const MAX_STATUS_BYTES: u64 = 256 * 1024;
+// A connected QUIC lane can briefly rewrite/remove its readiness report while
+// reconnecting.  Once netd has committed SD-WAN, keep the Core and its dialers
+// alive during that hand-off instead of tearing down the whole data plane.
+const CORE_READINESS_RECOVERY_GRACE: Duration = Duration::from_secs(20);
+const PARTIAL_ROUTE_RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
+const ROUTE_RECONCILE_INTERVAL: Duration = Duration::from_secs(10);
+const MAX_ACTIVATION_BYTES: u64 = 64 * 1024;
+const CORE_TERMINATION_GRACE: Duration = Duration::from_secs(15);
+const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+const RETRY_STABLE_RESET: Duration = Duration::from_secs(60);
+const RETRY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const NETD_DRAIN_RETRY_WINDOW: Duration = Duration::from_secs(5);
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+fn sanitize_log_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '\n' | '\r' | '\t' => ' ',
+            character if character.is_control() => '?',
+            character => character,
+        })
+        .collect()
+}
+
+#[derive(Debug)]
+struct CoreReadinessFailure {
+    code: String,
+    lifecycle: String,
+    detail: Option<String>,
+}
+
+impl std::fmt::Display for CoreReadinessFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Core reported failed readiness: lifecycle={} code={}",
+            self.lifecycle, self.code
+        )?;
+        if let Some(detail) = &self.detail {
+            write!(f, " detail={detail}")?;
+        }
+        Ok(())
+    }
+}
+impl std::error::Error for CoreReadinessFailure {}
+
+#[derive(Debug)]
+struct ReadinessBindingFailure(&'static str);
+
+impl std::fmt::Display for ReadinessBindingFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SD-WAN Core readiness binding rejected: {}", self.0)
+    }
+}
+impl std::error::Error for ReadinessBindingFailure {}
+
+fn runtime_cause_code(error: &anyhow::Error) -> &str {
+    if let Some(binding) = error.downcast_ref::<ReadinessBindingFailure>() {
+        return binding.0;
+    }
+    if let Some(status) = error.downcast_ref::<CoreReadinessFailure>() {
+        return &status.code;
+    }
+    if let Some(ipc) = error.downcast_ref::<IpcError>() {
+        return match ipc {
+            IpcError::Io(error) => io_cause_code(error),
+            IpcError::Socket(_) => "ipc_descriptor_transfer_failed",
+            IpcError::FrameLength => "ipc_frame_length_invalid",
+            IpcError::Protocol(_) => "ipc_frame_decode_failed",
+            IpcError::DescriptorMismatch => "ipc_descriptor_mismatch",
+            IpcError::RequestIdExhausted => "ipc_request_id_exhausted",
+            IpcError::UnexpectedResponse => "ipc_response_type_mismatch",
+            IpcError::InvalidTransition => "local_transaction_phase_invalid",
+            IpcError::Remote(code) => match code {
+                ErrorCode::UnauthorizedPeer => "netd_peer_unauthorized",
+                ErrorCode::InvalidRequest => "netd_request_invalid",
+                ErrorCode::GenerationConflict => "netd_generation_conflict",
+                ErrorCode::PreflightFailed => "netd_preflight_failed",
+                ErrorCode::SystemFailure => "netd_system_failure",
+                ErrorCode::DrainPending => "netd_drain_pending",
+                ErrorCode::LinkPrepareFailed => "netd_link_prepare_failed",
+                ErrorCode::RoutePrepareFailed => "netd_route_prepare_failed",
+                ErrorCode::FirewallPrepareFailed => "netd_firewall_prepare_failed",
+                ErrorCode::SysctlPrepareFailed => "netd_sysctl_prepare_failed",
+                ErrorCode::LinkActivateFailed => "netd_link_activate_failed",
+                ErrorCode::PolicyActivateFailed => "netd_policy_activate_failed",
+            },
+        };
+    }
+    if let Some(error) = error.downcast_ref::<std::io::Error>() {
+        return io_cause_code(error);
+    }
+    "unclassified"
+}
+
+fn io_cause_code(error: &std::io::Error) -> &'static str {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => "io_not_found",
+        std::io::ErrorKind::PermissionDenied => "io_permission_denied",
+        std::io::ErrorKind::ConnectionRefused => "io_connection_refused",
+        std::io::ErrorKind::ConnectionReset => "io_connection_reset",
+        std::io::ErrorKind::ConnectionAborted => "io_connection_aborted",
+        std::io::ErrorKind::BrokenPipe => "io_broken_pipe",
+        std::io::ErrorKind::UnexpectedEof => "io_unexpected_eof",
+        std::io::ErrorKind::TimedOut => "io_timed_out",
+        std::io::ErrorKind::WouldBlock => "io_would_block",
+        std::io::ErrorKind::Interrupted => "io_interrupted",
+        _ => "io_unclassified",
+    }
+}
+
+fn log_runtime_failure(event: &str, stage: &str, error: &anyhow::Error) {
+    eprintln!(
+        "level=error event={} stage={} error_code={} cause_code={} retryable={} error={}",
+        event,
+        stage.strip_suffix("_failed").unwrap_or(stage),
+        stage,
+        sanitize_log_value(runtime_cause_code(error)),
+        transient_runtime_error(error),
+        sanitize_log_value(&format!("{error:#}"))
+    );
+}
+
+fn netd_reconfigure_error_code(error: &IpcError) -> &'static str {
+    match error {
+        IpcError::Remote(ErrorCode::InvalidRequest) | IpcError::InvalidTransition => {
+            "netd_reconfigure_invalid_transition"
+        }
+        IpcError::Remote(ErrorCode::GenerationConflict) => "netd_reconfigure_owner_conflict",
+        IpcError::Remote(ErrorCode::PreflightFailed) => "netd_reconfigure_platform_failed",
+        IpcError::Remote(ErrorCode::UnauthorizedPeer) => "netd_reconfigure_unauthorized",
+        IpcError::Remote(ErrorCode::SystemFailure) => "netd_reconfigure_system_failed",
+        IpcError::Remote(ErrorCode::DrainPending) => "netd_reconfigure_drain_pending",
+        IpcError::Remote(ErrorCode::LinkPrepareFailed) => "netd_reconfigure_link_prepare_failed",
+        IpcError::Remote(ErrorCode::RoutePrepareFailed) => "netd_reconfigure_route_prepare_failed",
+        IpcError::Remote(ErrorCode::FirewallPrepareFailed) => {
+            "netd_reconfigure_firewall_prepare_failed"
+        }
+        IpcError::Remote(ErrorCode::SysctlPrepareFailed) => {
+            "netd_reconfigure_sysctl_prepare_failed"
+        }
+        IpcError::Remote(ErrorCode::LinkActivateFailed) => "netd_reconfigure_link_activate_failed",
+        IpcError::Remote(ErrorCode::PolicyActivateFailed) => {
+            "netd_reconfigure_policy_activate_failed"
+        }
+        // netd closes the per-request Unix socket after a daemon restart or
+        // transaction rollback.  Keep this distinct from a platform failure;
+        // callers can safely retry the same generation after reconnecting.
+        IpcError::Io(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::UnexpectedEof
+            ) =>
+        {
+            "netd_reconfigure_peer_closed"
+        }
+        _ => "netd_reconfigure_ipc_failed",
+    }
+}
+
+#[cfg(test)]
+static RUN_TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "candy-sdwan-agent",
+    version,
+    about = "Candy SD-WAN transaction agent"
+)]
+struct Args {
+    #[command(subcommand)]
+    command: Option<CommandKind>,
+    #[arg(long, global = true, default_value = "/var/run/candy-netd/netd.sock")]
+    socket: PathBuf,
+    #[arg(long, global = true)]
+    core: Option<PathBuf>,
+    /// Cloud-published candidate symlink. When present, all security-critical
+    /// launch values are derived from its immutable activation descriptor.
+    #[arg(long, global = true)]
+    activation: Option<PathBuf>,
+    #[arg(long, global = true)]
+    activation_ready: Option<PathBuf>,
+    #[arg(long, global = true)]
+    ordinary_config: Option<PathBuf>,
+    #[arg(long, global = true, value_enum)]
+    core_role: Option<CoreRole>,
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+    #[arg(long, global = true)]
+    declaration: Option<PathBuf>,
+    /// Runtime-owned status file passed through to the Core process.
+    #[arg(long, global = true)]
+    status: Option<PathBuf>,
+    #[arg(long, global = true)]
+    instance_id: Option<String>,
+    #[arg(long, global = true)]
+    generation: Option<u64>,
+    #[arg(long, global = true, default_value_t = 30_000)]
+    lease_ms: u64,
+    #[arg(long, global = true, default_value_t = 20_000)]
+    readiness_timeout_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+enum CoreRole {
+    ClientSdwan,
+    Server,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ActivationDescriptor {
+    schema_version: u8,
+    activation_id: String,
+    delivery_etag: String,
+    delivery_sha256: String,
+    projection_publication_id: String,
+    projection_content_hash: String,
+    segment_generation: u64,
+    projection_generation: u64,
+    core_role: CoreRole,
+    core_config: String,
+    netd_declaration: String,
+    grant_refresh_after_unix: u64,
+    grant_expires_at_unix: u64,
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeArgs {
+    socket: PathBuf,
+    core: PathBuf,
+    core_role: CoreRole,
+    config: PathBuf,
+    declaration: PathBuf,
+    status: PathBuf,
+    instance_id: String,
+    generation: u64,
+    lease_ms: u64,
+    readiness_timeout_ms: u64,
+    activation_link: Option<PathBuf>,
+    activation_target: Option<PathBuf>,
+    activation_descriptor: Option<ActivationDescriptor>,
+    activation_config_sha256: Option<[u8; 32]>,
+    activation_declaration_sha256: Option<[u8; 32]>,
+    activation_ready: Option<PathBuf>,
+    ordinary_config: Option<PathBuf>,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct CoreReloadRequest<'a> {
+    schema_version: u16,
+    action: CoreReloadAction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<&'a Path>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<&'a Path>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transaction_id: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CoreReloadAction {
+    Prepare,
+    Commit,
+    Abort,
+    Suspend,
+    Resume,
+    PolicyUpdate,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoreReloadResponse {
+    schema_version: u16,
+    ok: bool,
+    generation: Option<u64>,
+    error: Option<String>,
+    #[serde(default)]
+    policy_generation: Option<u64>,
+    #[serde(default)]
+    replacement_required: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ActivationReadyReceipt {
+    schema_version: u8,
+    activation_id: String,
+    candidate_target: String,
+    generation: u64,
+    agent_pid: u32,
+    state: &'static str,
+    error_code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    core_proof: Option<ReceiptCoreProof>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ReceiptCoreProof {
+    pid: u32,
+    status_path: PathBuf,
+    readiness_token_sha256: String,
+    process_start_ticks: Option<u64>,
+}
+
+fn receipt_core_proof(args: &RuntimeArgs, pid: u32, token: &str) -> Result<ReceiptCoreProof> {
+    #[cfg(target_os = "linux")]
+    let process_start_ticks = {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+        Some(
+            stat.rsplit_once(')')
+                .context("invalid Core process stat")?
+                .1
+                .split_whitespace()
+                .nth(19)
+                .context("missing Core process start time")?
+                .parse()?,
+        )
+    };
+    #[cfg(not(target_os = "linux"))]
+    let process_start_ticks = None;
+    Ok(ReceiptCoreProof {
+        pid,
+        status_path: args.status.clone(),
+        readiness_token_sha256: format!("{:x}", Sha256::digest(token.as_bytes())),
+        process_start_ticks,
+    })
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct RuntimeFailureMarker {
+    schema_version: u8,
+    generation: u64,
+    error_code: String,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum CommandKind {
+    Run,
+    ExperimentalPacketPortRun {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        experimental_packet_port_ipc: bool,
+    },
+    ExperimentalRuntimeAgent {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        experimental_packet_port_ipc: bool,
+    },
+    AdoptTunio {
+        #[arg(long)]
+        record: PathBuf,
+        #[arg(long)]
+        expected_executable: PathBuf,
+        #[arg(long)]
+        control_socket: PathBuf,
+        #[arg(long)]
+        experimental_packet_port_ipc: bool,
+    },
+    AdoptPacketPortWorker {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        experimental_packet_port_ipc: bool,
+    },
+    /// Validate managed process evidence without adopting or signaling it.
+    InspectManagedProcess {
+        #[arg(long)]
+        record: PathBuf,
+        #[arg(long)]
+        expected_executable: PathBuf,
+    },
+    ValidateActivation {
+        #[arg(long)]
+        activation: PathBuf,
+        #[arg(long, value_enum)]
+        expected_core_role: CoreRole,
+        #[arg(long)]
+        ordinary_config: Option<PathBuf>,
+    },
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+struct JsonDeclaration {
+    table_id: u32,
+    overlay_router_ipv4: String,
+    effective_mtu: u16,
+    routes: Vec<JsonRoute>,
+    exclusions: Vec<JsonExclusion>,
+    firewall: JsonFirewall,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+struct JsonRoute {
+    prefix: String,
+    kind: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+struct JsonExclusion {
+    prefix: String,
+    kind: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+struct JsonFirewall {
+    allow_forward: bool,
+    clamp_tcp_mss: bool,
+    require_ipv4_forwarding: bool,
+    manage_rp_filter: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RouteDiagnosticsFile {
+    schema_version: u8,
+    generation: u64,
+    integrity: String,
+    expected_snapshot_sha256: String,
+    observed_snapshot_sha256: String,
+    expected_routes: u32,
+    observed_routes: u32,
+    orphaned_routes: u32,
+    reconcile_attempts: u64,
+    reconcile_successes: u64,
+    last_checked_at_unix: u64,
+    last_reconciled_at_unix: Option<u64>,
+    last_recovered_at_unix: Option<u64>,
+    last_recovery_duration_ms: Option<u64>,
+    last_error_code: Option<String>,
+    probe_state: String,
+    probe_targets: u32,
+    probe_successes: u32,
+    probe_rtt_ms: Option<u32>,
+    probe_checked_at_unix: Option<u64>,
+    #[serde(default)]
+    active_issues: Vec<RouteDiagnosticIssue>,
+    #[serde(default)]
+    last_recovered_issues: Vec<RouteDiagnosticIssue>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RouteDiagnosticIssue {
+    prefix: String,
+    table_id: u32,
+    expected_kind: String,
+    observed_kind: String,
+    reason: String,
+    action: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct RouteSnapshot {
+    expected_snapshot_sha256: String,
+    observed_snapshot_sha256: String,
+    expected_routes: u32,
+    observed_routes: u32,
+    orphaned_routes: u32,
+    issues: Vec<RouteDiagnosticIssue>,
+}
+
+impl RouteDiagnosticsFile {
+    fn new(generation: u64) -> Self {
+        Self {
+            schema_version: 2,
+            generation,
+            integrity: "reconciling".into(),
+            expected_snapshot_sha256: "0".repeat(64),
+            observed_snapshot_sha256: "0".repeat(64),
+            expected_routes: 0,
+            observed_routes: 0,
+            orphaned_routes: 0,
+            reconcile_attempts: 0,
+            reconcile_successes: 0,
+            last_checked_at_unix: 1,
+            last_reconciled_at_unix: None,
+            last_recovered_at_unix: None,
+            last_recovery_duration_ms: None,
+            last_error_code: None,
+            probe_state: "unreported".into(),
+            probe_targets: 0,
+            probe_successes: 0,
+            probe_rtt_ms: None,
+            probe_checked_at_unix: None,
+            active_issues: Vec::new(),
+            last_recovered_issues: Vec::new(),
+        }
+    }
+
+    fn record_snapshot(
+        &mut self,
+        before: Option<RouteSnapshot>,
+        snapshot: RouteSnapshot,
+        now: u64,
+        duration_ms: u64,
+    ) {
+        let was_unhealthy = self.integrity != "consistent";
+        let detected_issues = before
+            .as_ref()
+            .map(|value| value.issues.clone())
+            .unwrap_or_default();
+        self.expected_snapshot_sha256 = snapshot.expected_snapshot_sha256;
+        self.observed_snapshot_sha256 = snapshot.observed_snapshot_sha256;
+        self.expected_routes = snapshot.expected_routes;
+        self.observed_routes = snapshot.observed_routes;
+        self.orphaned_routes = snapshot.orphaned_routes;
+        self.last_checked_at_unix = now;
+        self.last_reconciled_at_unix = Some(now);
+        self.last_recovery_duration_ms = Some(duration_ms.min(300_000));
+        if self.expected_snapshot_sha256 == self.observed_snapshot_sha256
+            && self.orphaned_routes == 0
+        {
+            self.integrity = "consistent".into();
+            self.active_issues.clear();
+            self.reconcile_successes = self.reconcile_successes.saturating_add(1);
+            self.last_error_code = None;
+            if !detected_issues.is_empty() {
+                self.last_recovered_issues = detected_issues;
+                self.last_recovered_at_unix = Some(now);
+            } else if was_unhealthy {
+                self.last_recovered_at_unix = Some(now);
+            }
+        } else {
+            self.integrity = "drifted".into();
+            self.active_issues = snapshot.issues;
+            self.last_error_code = Some("route_snapshot_mismatch".into());
+        }
+    }
+
+    fn record_error(&mut self, now: u64, duration_ms: u64, code: &str) {
+        self.integrity = "failed".into();
+        self.last_checked_at_unix = now;
+        self.last_reconciled_at_unix = Some(now);
+        self.last_recovery_duration_ms = Some(duration_ms.min(300_000));
+        self.last_error_code = Some(code.into());
+    }
+
+    fn record_probe(&mut self, status: &CoreReadinessStatus, now: u64) {
+        let probe_reported = status.paths.as_ref().is_some_and(|paths| {
+            paths.iter().any(|path| {
+                path.streams
+                    .iter()
+                    .any(|stream| stream.packet_probe_state.is_some())
+            })
+        });
+        if !probe_reported || status.required_route_owners == 0 {
+            self.probe_state = "unreported".into();
+            self.probe_targets = 0;
+            self.probe_successes = 0;
+            self.probe_rtt_ms = None;
+            self.probe_checked_at_unix = None;
+            return;
+        }
+
+        let targets = u32::try_from(status.required_route_owners).unwrap_or(u32::MAX);
+        let successes = u32::try_from(status.ready_route_owners)
+            .unwrap_or(u32::MAX)
+            .min(targets);
+        let max_rtt_micros = status
+            .paths
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .flat_map(|path| &path.streams)
+            .filter(|stream| {
+                stream.packet_probe_state.as_deref() == Some("ready")
+                    // A packet probe attests the negotiated tunnel. A
+                    // policy-only reload must not invalidate that evidence or
+                    // transiently report the unchanged tunnel as offline.
+                    && stream.packet_probe_generation == Some(status.generation)
+            })
+            .filter_map(|stream| stream.packet_probe_rtt_micros)
+            .max();
+        self.probe_targets = targets;
+        self.probe_successes = successes;
+        self.probe_rtt_ms = max_rtt_micros
+            .map(|micros| u32::try_from(micros.saturating_add(999) / 1_000).unwrap_or(u32::MAX));
+        if successes == targets {
+            self.probe_state = "succeeded".into();
+            self.probe_checked_at_unix = Some(now);
+        } else if matches!(
+            status.last_error_code.as_deref(),
+            Some("tun_route_probe_timeout" | "tun_route_probe_no_reply")
+        ) {
+            self.probe_state = "failed".into();
+            self.probe_checked_at_unix = Some(now);
+        } else {
+            self.probe_state = "pending".into();
+            self.probe_checked_at_unix = None;
+        }
+    }
+}
+
+#[derive(Deserialize, Debug)]
+struct CoreReadinessStatus {
+    schema_version: u16,
+    generation: u64,
+    #[serde(default)]
+    policy_generation: u64,
+    pid: u32,
+    readiness_token: String,
+    lifecycle: String,
+    configured_peers: usize,
+    active_peers: usize,
+    required_route_owners: usize,
+    ready_route_owners: usize,
+    /// Exact route prefixes whose authenticated owner is currently missing.
+    /// `None` means an older Core that cannot safely support scoped recovery.
+    #[serde(default)]
+    failed_prefixes: Option<Vec<String>>,
+    #[serde(default)]
+    failure_revision: Option<u64>,
+    #[serde(default)]
+    reported_at_mono_ms: Option<u64>,
+    #[serde(default)]
+    ready_report_verified: bool,
+    #[serde(default)]
+    inbound_listener_configured: bool,
+    #[serde(default)]
+    inbound_listener_ready: bool,
+    #[serde(default)]
+    inbound_listener_endpoints: Vec<String>,
+    fail_open_required: bool,
+    #[serde(default)]
+    last_error_code: Option<String>,
+    #[serde(default)]
+    last_error_detail: Option<String>,
+    #[serde(default)]
+    paths: Option<Vec<CoreReadinessPath>>,
+}
+
+fn parse_failed_prefixes(
+    status: &CoreReadinessStatus,
+    declaration: &PrepareDeclaration,
+) -> Result<Option<Vec<Ipv4Prefix>>> {
+    let Some(values) = &status.failed_prefixes else {
+        return Ok(None);
+    };
+    let mut prefixes = Vec::with_capacity(values.len());
+    for value in values {
+        let prefix = parse_prefix(value)
+            .with_context(|| format!("Core reported invalid failed prefix {value}"))?;
+        if !declaration.routes.iter().any(|route| {
+            route.prefix == prefix
+                && matches!(
+                    route.kind,
+                    RouteKind::Remote | RouteKind::RemoteEgress | RouteKind::RemoteEgressGateway
+                )
+        }) {
+            bail!("Core reported failed prefix {value} outside remote route declaration")
+        }
+        if !prefixes.contains(&prefix) {
+            prefixes.push(prefix);
+        }
+    }
+    Ok(Some(prefixes))
+}
+
+fn desired_failed_prefixes(
+    status: &CoreReadinessStatus,
+    declaration: &PrepareDeclaration,
+) -> Result<Option<Vec<Ipv4Prefix>>> {
+    parse_failed_prefixes(status, declaration)
+}
+
+fn route_diagnostics_path(status: &Path) -> Result<PathBuf> {
+    Ok(status
+        .parent()
+        .context("Core status path has no parent")?
+        .join("route-diagnostics-v1.json"))
+}
+
+fn unix_seconds() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("read wall clock for route diagnostics")?
+        .as_secs()
+        .max(1))
+}
+
+fn load_route_diagnostics(path: &Path, generation: u64) -> RouteDiagnosticsFile {
+    let value = (|| -> Result<RouteDiagnosticsFile> {
+        let metadata = fs::symlink_metadata(path).context("inspect route diagnostics")?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 64 * 1024 {
+            bail!("route diagnostics file is unsafe")
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
+            .open(path)
+            .context("open route diagnostics")?;
+        serde_json::from_reader(file).context("parse route diagnostics")
+    })();
+    match value {
+        Ok(value) if value.schema_version == 2 && value.generation == generation => value,
+        _ => RouteDiagnosticsFile::new(generation),
+    }
+}
+
+fn write_route_diagnostics(path: &Path, value: &RouteDiagnosticsFile) -> Result<()> {
+    let parent = path.parent().context("route diagnostics has no parent")?;
+    let metadata = fs::symlink_metadata(parent).context("inspect route diagnostics directory")?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        bail!("route diagnostics directory must be a real directory")
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("route diagnostics has no file name")?;
+    let temporary = parent.join(format!(".{name}.{}.tmp", std::process::id()));
+    let _ = fs::remove_file(&temporary);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
+        .open(&temporary)
+        .context("create route diagnostics")?;
+    let result = (|| {
+        serde_json::to_writer(&mut file, value).context("write route diagnostics")?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        fs::rename(&temporary, path).context("publish route diagnostics")?;
+        File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn canonical_prefix(prefix: Ipv4Prefix) -> String {
+    format!(
+        "{}.{}.{}.{}/{}",
+        prefix.network[0],
+        prefix.network[1],
+        prefix.network[2],
+        prefix.network[3],
+        prefix.prefix_len
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn snapshot_hash(entries: &[String]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"candy/netd-route-snapshot/v1\0");
+    for entry in entries {
+        digest.update((entry.len() as u64).to_be_bytes());
+        digest.update(entry.as_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn snapshot_entry_prefix(entry: &str) -> Option<&str> {
+    entry
+        .strip_prefix("orphan|")
+        .unwrap_or(entry)
+        .split('|')
+        .next()
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn snapshot_entry_kind(entry: &str) -> &'static str {
+    let entry = entry.strip_prefix("orphan|").unwrap_or(entry);
+    match entry.split('|').nth(1) {
+        Some("link") => "link",
+        Some("throw") => "throw",
+        _ => "unrecognized",
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn route_snapshot_issues(
+    table_id: u32,
+    expected: &[String],
+    observed: &[String],
+) -> Vec<RouteDiagnosticIssue> {
+    const MAX_ISSUES: usize = 64;
+    let mut issues = Vec::new();
+    for expected_entry in expected {
+        if observed.contains(expected_entry) {
+            continue;
+        }
+        let Some(prefix) = snapshot_entry_prefix(expected_entry) else {
+            continue;
+        };
+        let expected_kind = snapshot_entry_kind(expected_entry);
+        let observed_entry = observed
+            .iter()
+            .find(|entry| snapshot_entry_prefix(entry) == Some(prefix));
+        let observed_kind = observed_entry
+            .map(|entry| snapshot_entry_kind(entry))
+            .unwrap_or("missing");
+        let reason = match (expected_kind, observed_kind) {
+            (_, "missing") => "missing_route",
+            ("link", "throw") => "stale_failed_prefix_throw",
+            ("throw", "link") => "stale_active_route",
+            ("link", "link") => "route_metrics_mismatch",
+            _ => "route_attributes_mismatch",
+        };
+        issues.push(RouteDiagnosticIssue {
+            prefix: prefix.to_owned(),
+            table_id,
+            expected_kind: expected_kind.into(),
+            observed_kind: observed_kind.into(),
+            reason: reason.into(),
+            action: "restore_signed_route".into(),
+        });
+        if issues.len() == MAX_ISSUES {
+            return issues;
+        }
+    }
+    for observed_entry in observed {
+        if expected.contains(observed_entry) {
+            continue;
+        }
+        let Some(prefix) = snapshot_entry_prefix(observed_entry) else {
+            continue;
+        };
+        if issues.iter().any(|issue| issue.prefix == prefix) {
+            continue;
+        }
+        let expected_entry = expected
+            .iter()
+            .find(|entry| snapshot_entry_prefix(entry) == Some(prefix));
+        let observed_kind = snapshot_entry_kind(observed_entry);
+        let expected_kind = expected_entry
+            .map(|entry| snapshot_entry_kind(entry))
+            .unwrap_or("absent");
+        let (reason, action) = match (expected_kind, observed_kind) {
+            ("link", "throw") => ("stale_failed_prefix_throw", "restore_signed_route"),
+            ("throw", "link") => ("stale_active_route", "restore_signed_route"),
+            ("link", "link") => ("route_metrics_mismatch", "restore_signed_route"),
+            ("absent", _) => ("undeclared_route", "suspend_steering_and_require_review"),
+            _ => ("route_attributes_mismatch", "restore_signed_route"),
+        };
+        issues.push(RouteDiagnosticIssue {
+            prefix: prefix.to_owned(),
+            table_id,
+            expected_kind: expected_kind.into(),
+            observed_kind: observed_kind.into(),
+            reason: reason.into(),
+            action: action.into(),
+        });
+        if issues.len() == MAX_ISSUES {
+            break;
+        }
+    }
+    issues
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_kernel_routes(
+    declaration: &PrepareDeclaration,
+    failed_prefixes: &[Ipv4Prefix],
+) -> Result<RouteSnapshot> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .context("create route diagnostics runtime")?;
+    let guard = runtime.enter();
+    let (connection, handle, _) = rtnetlink::new_connection().context("open route netlink")?;
+    drop(guard);
+    runtime.spawn(connection);
+    runtime.block_on(async move {
+        let mut links = handle
+            .link()
+            .get()
+            .match_name(candy_netd_proto::CANDY_INTERFACE_NAME.to_string())
+            .execute();
+        let link = links
+            .try_next()
+            .await
+            .context("read Candy interface")?
+            .context("Candy interface is missing")?;
+        if links
+            .try_next()
+            .await
+            .context("read Candy interface")?
+            .is_some()
+        {
+            bail!("multiple Candy interfaces exist")
+        }
+        let link_index = link.header.index;
+        let failed = failed_prefixes
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let mut expected = Vec::new();
+        for route in &declaration.routes {
+            match route.kind {
+                RouteKind::Remote | RouteKind::RemoteEgress | RouteKind::RemoteEgressGateway
+                    if !failed.contains(&route.prefix) =>
+                {
+                    expected.push(format!(
+                        "{}|link|mtu={}|advmss={}",
+                        canonical_prefix(route.prefix),
+                        declaration.effective_mtu,
+                        declaration.effective_mtu.saturating_sub(40)
+                    ));
+                }
+                RouteKind::Local
+                | RouteKind::Remote
+                | RouteKind::RemoteEgress
+                | RouteKind::RemoteEgressGateway => {
+                    expected.push(format!("{}|throw", canonical_prefix(route.prefix)));
+                }
+            }
+        }
+        expected.extend(
+            declaration
+                .exclusions
+                .iter()
+                .map(|value| format!("{}|throw", canonical_prefix(value.prefix))),
+        );
+        expected.sort_unstable();
+        expected.dedup();
+
+        let expected_set = expected
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let mut observed = Vec::new();
+        let query = RouteMessageBuilder::<std::net::Ipv4Addr>::new()
+            .table_id(declaration.table_id)
+            .build();
+        let mut routes = handle.route().get(query).execute();
+        while let Some(route) = routes.try_next().await.context("read Candy route table")? {
+            let table = route
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    RouteAttribute::Table(value) => Some(*value),
+                    _ => None,
+                });
+            let in_table = table == Some(declaration.table_id)
+                || (declaration.table_id <= u8::MAX.into()
+                    && u32::from(route.header.table) == declaration.table_id);
+            if !in_table {
+                continue;
+            }
+            let destination = route
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    RouteAttribute::Destination(RouteAddress::Inet(value)) => Some(*value),
+                    _ => None,
+                });
+            let destination = destination.unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+            let prefix =
+                Ipv4Prefix::new(destination.octets(), route.header.destination_prefix_length).ok();
+            let oif = route
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    RouteAttribute::Oif(value) => Some(*value),
+                    _ => None,
+                });
+            let metrics = route
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    RouteAttribute::Metrics(value) => Some(value),
+                    _ => None,
+                });
+            let mtu = metrics.and_then(|values| {
+                values.iter().find_map(|metric| match metric {
+                    RouteMetric::Mtu(value) => Some(*value),
+                    _ => None,
+                })
+            });
+            let advmss = metrics.and_then(|values| {
+                values.iter().find_map(|metric| match metric {
+                    RouteMetric::Advmss(value) => Some(*value),
+                    _ => None,
+                })
+            });
+            let canonical = prefix.and_then(|prefix| {
+                if route.header.protocol == RouteProtocol::Static
+                    && route.header.kind == RouteType::Throw
+                {
+                    Some(format!("{}|throw", canonical_prefix(prefix)))
+                } else if route.header.protocol == RouteProtocol::Static
+                    && route.header.kind == RouteType::Unicast
+                    && route.header.scope == RouteScope::Link
+                    && oif == Some(link_index)
+                {
+                    Some(format!(
+                        "{}|link|mtu={}|advmss={}",
+                        canonical_prefix(prefix),
+                        mtu.unwrap_or_default(),
+                        advmss.unwrap_or_default()
+                    ))
+                } else {
+                    None
+                }
+            });
+            observed.push(canonical.unwrap_or_else(|| {
+                format!(
+                    "orphan|{destination}/{}|{:?}|{:?}|{:?}|oif={}",
+                    route.header.destination_prefix_length,
+                    route.header.protocol,
+                    route.header.kind,
+                    route.header.scope,
+                    oif.unwrap_or_default()
+                )
+            }));
+        }
+        observed.sort_unstable();
+        let orphaned_routes = observed
+            .iter()
+            .filter(|entry| !expected_set.contains(*entry))
+            .count() as u32;
+        let issues = route_snapshot_issues(declaration.table_id, &expected, &observed);
+        Ok(RouteSnapshot {
+            expected_snapshot_sha256: snapshot_hash(&expected),
+            observed_snapshot_sha256: snapshot_hash(&observed),
+            expected_routes: expected.len() as u32,
+            observed_routes: observed.len() as u32,
+            orphaned_routes,
+            issues,
+        })
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn inspect_kernel_routes(
+    _declaration: &PrepareDeclaration,
+    _failed_prefixes: &[Ipv4Prefix],
+) -> Result<RouteSnapshot> {
+    bail!("kernel route inspection is supported only on Linux")
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreReadinessPath {
+    rtt_sample_count: u64,
+    #[serde(rename = "rx_bytes")]
+    _rx_bytes: u64,
+    #[serde(rename = "rx_idle_ms")]
+    _rx_idle_ms: u64,
+    #[serde(default)]
+    streams: Vec<CoreReadinessStream>,
+    #[serde(default)]
+    probe_misses: u8,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreReadinessStream {
+    #[serde(default)]
+    packet_probe_state: Option<String>,
+    #[serde(default)]
+    packet_probe_generation: Option<u64>,
+    #[serde(default)]
+    packet_probe_rtt_micros: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadinessState {
+    Waiting,
+    ListenerReady,
+    Degraded,
+    Ready,
+    RecoverablePeerLoss,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadinessPolicy {
+    Strict,
+    /// The activation has already committed netd steering. Losing all
+    /// authenticated peers is recoverable: keep the Core/dialers alive while
+    /// steering is suspended, then resume when a peer returns.
+    Committed,
+    CommittedServer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadinessWait {
+    Ready,
+    ShutdownRequested,
+}
+
+fn parse_ipv4(value: &str) -> Result<[u8; 4]> {
+    let mut octets = value.split('.');
+    let result = [
+        octets.next().context("invalid IPv4 address")?,
+        octets.next().context("invalid IPv4 address")?,
+        octets.next().context("invalid IPv4 address")?,
+        octets.next().context("invalid IPv4 address")?,
+    ];
+    if octets.next().is_some() {
+        bail!("invalid IPv4 address")
+    }
+    let mut out = [0; 4];
+    for (idx, part) in result.into_iter().enumerate() {
+        if part.is_empty() || (part.len() > 1 && part.starts_with('0')) {
+            bail!("non-canonical IPv4 address")
+        }
+        out[idx] = part.parse::<u8>().context("invalid IPv4 octet")?;
+    }
+    Ok(out)
+}
+
+fn parse_prefix(value: &str) -> Result<Ipv4Prefix> {
+    let (address, length) = value.split_once('/').context("CIDR prefix is required")?;
+    let prefix_len: u8 = length.parse().context("invalid CIDR prefix length")?;
+    let address = parse_ipv4(address)?;
+    Ipv4Prefix::new(address, prefix_len)
+        .map_err(|_| anyhow::anyhow!("CIDR is not canonical or is invalid"))
+}
+
+fn route_kind(value: &str) -> Result<RouteKind> {
+    match value {
+        "local" => Ok(RouteKind::Local),
+        "remote" => Ok(RouteKind::Remote),
+        "remote-egress" => Ok(RouteKind::RemoteEgress),
+        "remote-egress-gateway" => Ok(RouteKind::RemoteEgressGateway),
+        _ => bail!("unknown route kind"),
+    }
+}
+
+fn underlay_kind(value: &str) -> Result<UnderlayKind> {
+    match value {
+        "cloud-api" | "cloud_api" => Ok(UnderlayKind::CloudApi),
+        "hub-endpoint" | "hub_endpoint" => Ok(UnderlayKind::HubEndpoint),
+        "management" => Ok(UnderlayKind::Management),
+        _ => bail!("unknown underlay kind"),
+    }
+}
+
+fn parse_declaration(path: &PathBuf) -> Result<PrepareDeclaration> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("SD-WAN declaration is unavailable: {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!("SD-WAN declaration must be a regular file")
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_DECLARATION_BYTES {
+        bail!("SD-WAN declaration size is invalid")
+    }
+    let bytes = fs::read(path).context("read SD-WAN declaration")?;
+    let input: JsonDeclaration =
+        serde_json::from_slice(&bytes).context("parse SD-WAN declaration")?;
+    let declaration = PrepareDeclaration {
+        table_id: input.table_id,
+        overlay_router_ipv4: parse_ipv4(&input.overlay_router_ipv4)?,
+        effective_mtu: input.effective_mtu,
+        routes: input
+            .routes
+            .into_iter()
+            .map(|route| {
+                Ok(RouteDeclaration {
+                    prefix: parse_prefix(&route.prefix)?,
+                    kind: route_kind(&route.kind)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        exclusions: input
+            .exclusions
+            .into_iter()
+            .map(|item| {
+                Ok(UnderlayExclusion {
+                    prefix: parse_prefix(&item.prefix)?,
+                    kind: underlay_kind(&item.kind)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        firewall: FirewallPolicy {
+            allow_forward: input.firewall.allow_forward,
+            clamp_tcp_mss: input.firewall.clamp_tcp_mss,
+            require_ipv4_forwarding: input.firewall.require_ipv4_forwarding,
+            manage_rp_filter: input.firewall.manage_rp_filter,
+        },
+    };
+    declaration
+        .validate()
+        .map_err(|_| anyhow::anyhow!("SD-WAN declaration failed protocol validation"))?;
+    Ok(declaration)
+}
+
+fn parse_instance_id(value: &str) -> Result<[u8; 16]> {
+    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("instance id must be exactly 32 hexadecimal characters")
+    }
+    let mut result = [0_u8; 16];
+    for index in 0..16 {
+        result[index] = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)?;
+    }
+    if result == [0; 16] {
+        bail!("instance id cannot be zero")
+    }
+    Ok(result)
+}
+
+fn validate_lower_hex(value: &str, bytes: usize, label: &str) -> Result<()> {
+    if value.len() != bytes * 2
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("{label} must be exactly {bytes} bytes of lowercase hexadecimal")
+    }
+    Ok(())
+}
+
+fn validate_activation_file(path: &Path, maximum: u64) -> Result<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect activation file {}", path.display()))?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > maximum {
+        bail!(
+            "activation file must be a bounded regular file: {}",
+            path.display()
+        )
+    }
+    if metadata.permissions().mode() & 0o777 != 0o600 {
+        bail!("activation file must have mode 0600: {}", path.display())
+    }
+    let effective_uid = unsafe { nix::libc::geteuid() };
+    if metadata.uid() != effective_uid {
+        bail!(
+            "activation file has an unexpected owner: {}",
+            path.display()
+        )
+    }
+    fs::read(path).with_context(|| format!("read activation file {}", path.display()))
+}
+
+fn validate_ordinary_config(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect ordinary Candy Server config {}", path.display()))?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > 1024 * 1024 {
+        bail!("ordinary Candy Server config must be a bounded regular file")
+    }
+    let mode = metadata.permissions().mode() & 0o777;
+    let effective_uid = unsafe { nix::libc::geteuid() };
+    if !matches!(metadata.uid(), 0) && metadata.uid() != effective_uid {
+        bail!("ordinary Candy Server config has an unexpected owner")
+    }
+    if !matches!(mode, 0o600 | 0o640) {
+        bail!("ordinary Candy Server config must have mode 0600 or 0640")
+    }
+    File::open(path)
+        .context("ordinary Candy Server config is not readable by the service identity")?;
+    Ok(())
+}
+
+fn relative_activation_file(directory: &Path, value: &str, label: &str) -> Result<PathBuf> {
+    let relative = Path::new(value);
+    let mut components = relative.components();
+    let name = match (components.next(), components.next()) {
+        (Some(Component::Normal(name)), None) => name,
+        _ => bail!("{label} must be a single relative file name"),
+    };
+    let path = directory.join(name);
+    validate_activation_file(&path, MAX_DECLARATION_BYTES)?;
+    Ok(path)
+}
+
+fn sha256_file(path: &Path) -> Result<[u8; 32]> {
+    Ok(Sha256::digest(
+        fs::read(path).with_context(|| format!("read activation file {}", path.display()))?,
+    )
+    .into())
+}
+
+fn resolve_activation(link: &Path) -> Result<(ActivationDescriptor, PathBuf, PathBuf, PathBuf)> {
+    let metadata = fs::symlink_metadata(link)
+        .with_context(|| format!("inspect activation pointer {}", link.display()))?;
+    if !metadata.file_type().is_symlink() {
+        bail!("activation pointer must be a symbolic link")
+    }
+    let relative_target = fs::read_link(link).context("read activation pointer")?;
+    let components = relative_target.components().collect::<Vec<_>>();
+    if components.len() != 2
+        || components[0] != Component::Normal("activations".as_ref())
+        || !matches!(components[1], Component::Normal(_))
+    {
+        bail!("activation pointer must target activations/<activation-id>")
+    }
+    let target_name = components[1]
+        .as_os_str()
+        .to_str()
+        .context("activation id is not UTF-8")?;
+    validate_lower_hex(target_name, 32, "activation pointer id")?;
+    let parent = link.parent().context("activation pointer has no parent")?;
+    let directory = parent.join(&relative_target);
+    let directory_metadata =
+        fs::symlink_metadata(&directory).context("inspect immutable activation directory")?;
+    if !directory_metadata.is_dir() || directory_metadata.file_type().is_symlink() {
+        bail!("activation target must be a real directory")
+    }
+    if directory_metadata.permissions().mode() & 0o777 != 0o700 {
+        bail!("activation target must have mode 0700")
+    }
+    let effective_uid = unsafe { nix::libc::geteuid() };
+    if directory_metadata.uid() != effective_uid {
+        bail!("activation target has an unexpected owner")
+    }
+    let descriptor_path = directory.join("activation-v1.json");
+    let descriptor: ActivationDescriptor = serde_json::from_slice(&validate_activation_file(
+        &descriptor_path,
+        MAX_ACTIVATION_BYTES,
+    )?)
+    .context("parse activation descriptor")?;
+    validate_lower_hex(&descriptor.activation_id, 32, "activation id")?;
+    validate_lower_hex(&descriptor.delivery_sha256, 32, "delivery digest")?;
+    validate_lower_hex(
+        &descriptor.projection_content_hash,
+        32,
+        "projection content hash",
+    )?;
+    if descriptor.schema_version != 1
+        || descriptor.activation_id != target_name
+        || descriptor.delivery_etag != format!("\"sha256-{}\"", descriptor.delivery_sha256)
+        || uuid::Uuid::parse_str(&descriptor.projection_publication_id).is_err()
+        || descriptor.segment_generation == 0
+        || descriptor.projection_generation == 0
+        || descriptor.grant_refresh_after_unix > descriptor.grant_expires_at_unix
+    {
+        bail!("activation descriptor metadata is invalid")
+    }
+    let config = relative_activation_file(&directory, &descriptor.core_config, "Core config")?;
+    let declaration =
+        relative_activation_file(&directory, &descriptor.netd_declaration, "netd declaration")?;
+    Ok((descriptor, relative_target, config, declaration))
+}
+
+fn resolve_runtime_args(args: Args) -> Result<RuntimeArgs> {
+    let core = args.core.context("--core is required")?;
+    if let Some(requested_activation) = args.activation.as_deref() {
+        let link = if requested_activation
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some("activation-v1.json")
+        {
+            requested_activation
+                .parent()
+                .context("activation descriptor has no candidate pointer parent")?
+        } else {
+            requested_activation
+        };
+        let (descriptor, relative_target, config, declaration) = resolve_activation(link)?;
+        let config_sha256 = sha256_file(&config)?;
+        let declaration_sha256 = sha256_file(&declaration)?;
+        let ordinary_config = args.ordinary_config.clone();
+        if descriptor.core_role == CoreRole::Server {
+            if let Some(ordinary) = ordinary_config.as_deref() {
+                validate_ordinary_config(ordinary)?;
+            }
+        } else if args.ordinary_config.is_some() {
+            bail!("ordinary-config is only valid for the server Core role")
+        }
+        return Ok(RuntimeArgs {
+            socket: args.socket,
+            core,
+            core_role: descriptor.core_role,
+            config,
+            declaration,
+            status: args.status.unwrap_or_else(|| {
+                PathBuf::from(format!(
+                    "/run/candy/sdwan-{}.status.json",
+                    descriptor.activation_id
+                ))
+            }),
+            instance_id: descriptor.activation_id[..32].to_owned(),
+            generation: descriptor.projection_generation,
+            lease_ms: args.lease_ms,
+            readiness_timeout_ms: args.readiness_timeout_ms,
+            activation_link: Some(link.to_path_buf()),
+            activation_target: Some(relative_target),
+            activation_descriptor: Some(descriptor),
+            activation_config_sha256: Some(config_sha256),
+            activation_declaration_sha256: Some(declaration_sha256),
+            activation_ready: args.activation_ready,
+            ordinary_config,
+        });
+    }
+    Ok(RuntimeArgs {
+        socket: args.socket,
+        core,
+        core_role: args.core_role.unwrap_or(CoreRole::ClientSdwan),
+        config: args
+            .config
+            .context("--config or --activation is required")?,
+        declaration: args
+            .declaration
+            .context("--declaration or --activation is required")?,
+        status: args
+            .status
+            .context("--status or --activation is required")?,
+        instance_id: args
+            .instance_id
+            .context("--instance-id or --activation is required")?,
+        generation: args
+            .generation
+            .context("--generation or --activation is required")?,
+        lease_ms: args.lease_ms,
+        readiness_timeout_ms: args.readiness_timeout_ms,
+        activation_link: None,
+        activation_target: None,
+        activation_descriptor: None,
+        activation_config_sha256: None,
+        activation_declaration_sha256: None,
+        activation_ready: args.activation_ready,
+        ordinary_config: None,
+    })
+}
+
+fn monotonic_ms() -> Result<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let uptime = fs::read_to_string("/proc/uptime").context("read monotonic clock")?;
+        let seconds = uptime
+            .split_whitespace()
+            .next()
+            .context("invalid monotonic clock")?
+            .parse::<f64>()?;
+        Ok((seconds * 1000.0) as u64)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("read fallback clock")?
+            .as_millis()
+            .try_into()
+            .context("fallback clock overflow")
+    }
+}
+
+fn clear_cloexec(fd: &OwnedFd) -> Result<()> {
+    fcntl(fd.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::empty()))
+        .context("clear TUN close-on-exec flag")?;
+    Ok(())
+}
+
+/// Set OS resource limits appropriate for a constrained OpenWRT device.
+/// Prevents the Core process from exhausting file descriptors or memory
+/// and taking down the entire router.
+fn set_resource_limits() -> Result<()> {
+    // Only raise NOFILE's soft limit, and only as far as the inherited hard
+    // limit allows. Setting rlim_max to 4096 needs privilege on many OpenWrt
+    // builds and used to emit a misleading startup warning.
+    let mut current = nix::libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { nix::libc::getrlimit(nix::libc::RLIMIT_NOFILE, &mut current) } != 0 {
+        let error = std::io::Error::last_os_error();
+        eprintln!(
+            "level=warn event=sdwan_rlimit_nofile_inspect_failed error_code=rlimit_inspect_failed error={}",
+            sanitize_log_value(&error.to_string())
+        );
+        return Ok(());
+    }
+    let requested = 4096.min(current.rlim_max);
+    if current.rlim_cur < requested {
+        let updated = nix::libc::rlimit {
+            rlim_cur: requested,
+            rlim_max: current.rlim_max,
+        };
+        if unsafe { nix::libc::setrlimit(nix::libc::RLIMIT_NOFILE, &updated) } != 0 {
+            let error = std::io::Error::last_os_error();
+            eprintln!(
+                "level=warn event=sdwan_rlimit_nofile_raise_failed error_code=rlimit_raise_failed requested={} hard_limit={} error={}",
+                requested,
+                current.rlim_max,
+                sanitize_log_value(&error.to_string())
+            );
+        }
+    }
+
+    // Core does not require locked memory. Do not try to raise RLIMIT_MEMLOCK:
+    // an unprivileged setrlimit failure was noisy and unrelated to the actual
+    // Core resource validation error. Log the inherited limit for diagnostics.
+    let mut memlock = nix::libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { nix::libc::getrlimit(nix::libc::RLIMIT_MEMLOCK, &mut memlock) } == 0 {
+        eprintln!(
+            "level=info event=sdwan_rlimit_memlock_inherited soft={} hard={}",
+            memlock.rlim_cur, memlock.rlim_max
+        );
+    }
+
+    Ok(())
+}
+
+fn spawn_core(args: &RuntimeArgs, tun: &OwnedFd, readiness_token: &str) -> Result<Child> {
+    set_resource_limits()?;
+    clear_cloexec(tun)?;
+    let fd = tun.as_raw_fd().to_string();
+    let mut command = Command::new(&args.core);
+    protect_child_lifetime(&mut command);
+    match args.core_role {
+        CoreRole::ClientSdwan => {
+            command.args(["client", "sdwan", "run"]);
+        }
+        CoreRole::Server => {
+            command.arg("server");
+        }
+    }
+    eprintln!(
+        "level=info event=core_spawn stage=process_start error_code=none generation={} role={:?} status={} activation={}",
+        args.generation,
+        args.core_role,
+        args.status.display(),
+        args.activation_target
+            .as_deref()
+            .map_or("", |path| path.to_str().unwrap_or("<invalid>"))
+    );
+    command
+        .env(
+            "CANDY_FENCING_TOKEN_PATH",
+            core_fencing_token_path(args)?,
+        )
+        .arg("--config")
+        .arg(&args.config)
+        .arg("--tun-fd")
+        .arg(fd)
+        .arg("--status")
+        .arg(&args.status)
+        .arg("--readiness-token")
+        .arg(readiness_token)
+        .arg("--reload-socket")
+        .arg(core_reload_socket(args)?)
+        .spawn()
+        .inspect(|child| {
+            eprintln!(
+                "level=info event=core_spawned stage=process_start error_code=none pid={} generation={}",
+                child.id(), args.generation
+            );
+        })
+        .with_context(|| format!("start Candy Core: {}", args.core.display()))
+}
+
+fn core_fencing_token_path(args: &RuntimeArgs) -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("CANDY_FENCING_TOKEN_PATH") {
+        let path = PathBuf::from(path);
+        anyhow::ensure!(
+            path.is_absolute(),
+            "CANDY_FENCING_TOKEN_PATH must be absolute"
+        );
+        return Ok(path);
+    }
+    let activation_link = args
+        .activation_link
+        .as_deref()
+        .context("Cloud SD-WAN activation link is required for fencing state")?;
+    let state_dir = activation_link
+        .parent()
+        .context("Cloud SD-WAN activation link has no state directory")?;
+    Ok(state_dir.join("fencing.token"))
+}
+
+fn protect_child_lifetime(command: &mut Command) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        let parent = unsafe { nix::libc::getpid() };
+        // Only async-signal-safe calls between fork and exec. SIGKILL prevents
+        // an orphan status writer even when the agent is killed during stop.
+        unsafe {
+            command.pre_exec(move || {
+                if nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if nix::libc::getppid() != parent {
+                    return Err(std::io::Error::from_raw_os_error(nix::libc::ESRCH));
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = command;
+}
+
+fn core_reload_socket(args: &RuntimeArgs) -> Result<PathBuf> {
+    Ok(args
+        .status
+        .parent()
+        .context("Core status path has no parent")?
+        .join("sdwan-core-reload.sock"))
+}
+
+fn reload_runtime_args(current: &RuntimeArgs) -> Result<RuntimeArgs> {
+    let link = current
+        .activation_link
+        .as_deref()
+        .context("hot reload requires a Cloud activation pointer")?;
+    let (descriptor, relative_target, config, declaration) = resolve_activation(link)?;
+    anyhow::ensure!(
+        descriptor.core_role == current.core_role,
+        "hot reload cannot change the Core role"
+    );
+    Ok(RuntimeArgs {
+        socket: current.socket.clone(),
+        core: current.core.clone(),
+        core_role: current.core_role,
+        activation_config_sha256: Some(sha256_file(&config)?),
+        activation_declaration_sha256: Some(sha256_file(&declaration)?),
+        config,
+        declaration,
+        status: current
+            .status
+            .parent()
+            .context("Core status path has no parent")?
+            .join(format!("sdwan-{}.status.json", descriptor.activation_id)),
+        instance_id: descriptor.activation_id[..32].to_owned(),
+        generation: descriptor.projection_generation,
+        lease_ms: current.lease_ms,
+        readiness_timeout_ms: current.readiness_timeout_ms,
+        activation_link: current.activation_link.clone(),
+        activation_target: Some(relative_target),
+        activation_descriptor: Some(descriptor),
+        activation_ready: current.activation_ready.clone(),
+        ordinary_config: current.ordinary_config.clone(),
+    })
+}
+
+fn request_core_control(
+    args: &RuntimeArgs,
+    child: &mut Child,
+    netd: &mut NetdClient,
+    action: CoreReloadAction,
+) -> Result<()> {
+    let mut next = Instant::now();
+    request_core_transaction(args, child, action, None, || {
+        renew_transition_lease(args, netd, &mut next)
+    })
+}
+
+fn request_core_transaction(
+    args: &RuntimeArgs,
+    child: &mut Child,
+    action: CoreReloadAction,
+    transaction_id: Option<&str>,
+    mut progress: impl FnMut() -> Result<()>,
+) -> Result<()> {
+    use std::io::{Read as _, Write as _};
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+
+    if child.try_wait()?.is_some() {
+        return Err(anyhow::Error::new(TransientReadinessFailure(
+            "Candy Core exited before hot reload".into(),
+        )));
+    }
+    let mut stream = UnixStream::connect(core_reload_socket(args)?)
+        .context("connect Candy Core hot reload socket")?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .context("configure Core reload response read timeout")?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .context("configure Core reload request write timeout")?;
+    let request = CoreReloadRequest {
+        schema_version: 1,
+        action,
+        config: matches!(
+            action,
+            CoreReloadAction::Prepare | CoreReloadAction::PolicyUpdate
+        )
+        .then_some(args.config.as_path()),
+        status: matches!(
+            action,
+            CoreReloadAction::Prepare | CoreReloadAction::PolicyUpdate
+        )
+        .then_some(args.status.as_path()),
+        transaction_id,
+    };
+    let encoded = serde_json::to_vec(&request).context("encode Core reload request")?;
+    stream
+        .write_all(&encoded)
+        .context("write Core reload request")?;
+    stream
+        .shutdown(Shutdown::Write)
+        .context("finish Core reload request write")?;
+    let mut response = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        progress()?;
+        if Instant::now() >= deadline {
+            return Err(anyhow::Error::new(TransientReadinessFailure(
+                "Candy Core reload response timed out".into(),
+            )));
+        }
+        let mut buffer = [0_u8; 4096];
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                anyhow::ensure!(
+                    response.len() + count <= 64 * 1024,
+                    "Core reload response too large"
+                );
+                response.extend_from_slice(&buffer[..count]);
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => return Err(error).context("read Core reload response"),
+        }
+    }
+    if response.is_empty() {
+        return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+            .context("Core reload socket closed before response");
+    }
+    let response: CoreReloadResponse =
+        serde_json::from_slice(&response).context("parse Candy Core reload response")?;
+    anyhow::ensure!(
+        response.schema_version == 1,
+        "Core reload response schema mismatch: expected=1 received={}",
+        response.schema_version
+    );
+    let generation_matches = !matches!(
+        action,
+        CoreReloadAction::Prepare | CoreReloadAction::Commit | CoreReloadAction::PolicyUpdate
+    ) || response.generation == Some(args.generation);
+    if matches!(action, CoreReloadAction::Prepare) && !response.ok {
+        if let Some(detail) = response
+            .error
+            .as_deref()
+            .and_then(|error| error.strip_prefix("peer_preparation_pending:"))
+        {
+            return Err(anyhow::Error::new(CorePreparationPending(
+                detail.trim().to_owned(),
+            )));
+        }
+    }
+    if !response.ok {
+        return Err(anyhow::Error::new(CoreReloadRejected {
+            message: response.error.unwrap_or_else(|| "unknown error".to_owned()),
+            replacement_required: response.replacement_required,
+        }));
+    }
+    anyhow::ensure!(
+        generation_matches,
+        "Core reload succeeded but response generation mismatched: expected={} received={:?}",
+        args.generation,
+        response.generation
+    );
+    if matches!(action, CoreReloadAction::PolicyUpdate) {
+        let expected_policy_generation = runtime_policy_generation(args);
+        anyhow::ensure!(
+            response.policy_generation == Some(expected_policy_generation),
+            "Core policy update succeeded with mismatched policy generation: expected={} received={:?}",
+            expected_policy_generation,
+            response.policy_generation
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PolicyUpdateOutcome {
+    Applied,
+    RequiresTunnelReplacement,
+    Rejected,
+    Retry,
+    CommitPending,
+}
+
+fn tunnel_declaration_changed(current: &RuntimeArgs, replacement: &RuntimeArgs) -> Result<bool> {
+    let current = parse_declaration(&current.declaration)?;
+    let replacement = parse_declaration(&replacement.declaration)?;
+    Ok(current.table_id != replacement.table_id
+        || current.overlay_router_ipv4 != replacement.overlay_router_ipv4
+        || current.effective_mtu != replacement.effective_mtu
+        || current.exclusions != replacement.exclusions)
+}
+
+fn policy_update_activation(
+    current: &RuntimeArgs,
+    replacement: &RuntimeArgs,
+    child: &mut Child,
+    netd: &mut NetdClient,
+) -> Result<PolicyUpdateOutcome> {
+    policy_update_activation_inner(current, replacement, child, netd, false)
+}
+
+fn policy_update_activation_inner(
+    current: &RuntimeArgs,
+    replacement: &RuntimeArgs,
+    child: &mut Child,
+    netd: &mut NetdClient,
+    commit_uncertain: bool,
+) -> Result<PolicyUpdateOutcome> {
+    if runtime_policy_generation(replacement) < runtime_policy_generation(current) {
+        return Ok(PolicyUpdateOutcome::Rejected);
+    }
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    if replacement
+        .activation_descriptor
+        .as_ref()
+        .is_some_and(|descriptor| !grant_retry_eligible(descriptor, now))
+    {
+        return Ok(PolicyUpdateOutcome::Rejected);
+    }
+    // netd declarations are compared as validated protocol values. JSON
+    // whitespace and object-key order are delivery details and must never turn
+    // a policy publication into a data-plane transaction.
+    if tunnel_declaration_changed(current, replacement)? {
+        return Ok(PolicyUpdateOutcome::RequiresTunnelReplacement);
+    }
+    let current_declaration = parse_declaration(&current.declaration)?;
+    let replacement_declaration = parse_declaration(&replacement.declaration)?;
+    let netd_policy_changed = current_declaration.routes != replacement_declaration.routes
+        || current_declaration.firewall != replacement_declaration.firewall;
+    if netd_policy_changed {
+        if let Err(error) = netd.update_policy(replacement_declaration) {
+            eprintln!(
+                "level=warn event=sdwan_policy_netd_update_retry error_code=netd_policy_update_failed error={}",
+                sanitize_log_value(&format!("{error:?}"))
+            );
+            return Ok(PolicyUpdateOutcome::Retry);
+        }
+    }
+    let mut request_args = replacement.clone();
+    request_args.generation = current.generation;
+    request_args.declaration = current.declaration.clone();
+    // Core may wait for its routing actor for up to 30 seconds. Renew the
+    // active netd lease during that wait so a successful hot reload cannot
+    // race an expired lease and trigger an unnecessary fail-open.
+    let mut next_renewal = Instant::now();
+    match request_core_transaction(
+        &request_args,
+        child,
+        CoreReloadAction::PolicyUpdate,
+        None,
+        || renew_transition_lease(current, netd, &mut next_renewal),
+    ) {
+        Ok(()) => {
+            eprintln!(
+                "level=info event=sdwan_policy_hot_updated tunnel_generation={} policy_source_generation={} core_pid={} netd=unchanged",
+                current.generation,
+                replacement
+                    .activation_descriptor
+                    .as_ref()
+                    .map(|descriptor| descriptor.projection_generation)
+                    .unwrap_or(current.generation),
+                child.id()
+            );
+            Ok(PolicyUpdateOutcome::Applied)
+        }
+        Err(error)
+            if error
+                .downcast_ref::<CoreReloadRejected>()
+                .is_some_and(|rejected| rejected.replacement_required) =>
+        {
+            if commit_uncertain {
+                return Ok(PolicyUpdateOutcome::CommitPending);
+            }
+            if netd_policy_changed {
+                if let Err(error) = netd.update_policy(current_declaration.clone()) {
+                    log_runtime_failure(
+                        "sdwan_policy_restore_pending",
+                        "netd_policy_restore_failed",
+                        &error.into(),
+                    );
+                    return Ok(PolicyUpdateOutcome::CommitPending);
+                }
+            }
+            Ok(PolicyUpdateOutcome::RequiresTunnelReplacement)
+        }
+        Err(error) if error.downcast_ref::<CoreReloadRejected>().is_some() => {
+            if commit_uncertain {
+                return Ok(PolicyUpdateOutcome::CommitPending);
+            }
+            if netd_policy_changed {
+                if let Err(error) = netd.update_policy(current_declaration.clone()) {
+                    log_runtime_failure(
+                        "sdwan_policy_restore_pending",
+                        "netd_policy_restore_failed",
+                        &error.into(),
+                    );
+                    return Ok(PolicyUpdateOutcome::CommitPending);
+                }
+            }
+            eprintln!(
+                "level=warn event=sdwan_policy_hot_update_rejected error_code=policy_update_rejected error={}",
+                sanitize_log_value(&format!("{error:#}"))
+            );
+            Ok(PolicyUpdateOutcome::Rejected)
+        }
+        Err(error) => {
+            eprintln!(
+                "level=warn event=sdwan_policy_hot_update_pending code=policy_update_commit_unresolved module=sdwan_activation action=query_or_retry_same_policy error={}",
+                sanitize_log_value(&format!("{error:#}"))
+            );
+            // The write may already have applied the policy. Restoring the
+            // old netd policy here would pair it with a newer Core generation.
+            Ok(PolicyUpdateOutcome::CommitPending)
+        }
+    }
+}
+
+fn adopt_policy_activation(current: &RuntimeArgs, replacement: &RuntimeArgs) -> RuntimeArgs {
+    let mut applied = replacement.clone();
+    applied.generation = current.generation;
+    applied
+}
+
+fn runtime_policy_generation(args: &RuntimeArgs) -> u64 {
+    args.activation_descriptor
+        .as_ref()
+        .map(|descriptor| descriptor.projection_generation)
+        .unwrap_or(args.generation)
+}
+
+fn renew_transition_lease(
+    args: &RuntimeArgs,
+    netd: &mut NetdClient,
+    next: &mut Instant,
+) -> Result<()> {
+    if Instant::now() >= *next {
+        let deadline = monotonic_ms()?
+            .checked_add(args.lease_ms)
+            .context("transition lease overflow")?;
+        netd.renew_lease(deadline)
+            .context("renew netd lease during policy transition")?;
+        *next = Instant::now() + Duration::from_millis((args.lease_ms / 3).max(1_000));
+    }
+    Ok(())
+}
+
+fn abort_core_preparation(args: &RuntimeArgs, child: &mut Child, id: &str) {
+    // Abort is best effort and has a Core-side TTL. Do not spend another
+    // response timeout here without renewing the still-active old lease.
+    let result: Result<()> = (|| {
+        anyhow::ensure!(child.try_wait()?.is_none(), "Core exited before abort");
+        let mut stream = std::os::unix::net::UnixStream::connect(core_reload_socket(args)?)?;
+        stream.set_write_timeout(Some(Duration::from_millis(250)))?;
+        stream.write_all(&serde_json::to_vec(&CoreReloadRequest {
+            schema_version: 1,
+            action: CoreReloadAction::Abort,
+            config: None,
+            status: None,
+            transaction_id: Some(id),
+        })?)?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        eprintln!("level=warn event=sdwan_policy_abort_pending transaction_id={} generation={} error={} action=expire_candidate",
+            id, args.generation, sanitize_log_value(&format!("{error:#}")));
+    }
+}
+
+fn generate_readiness_token() -> Result<String> {
+    let mut bytes = [0_u8; 16];
+    File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .context("generate SD-WAN Core readiness token")?;
+    let mut output = String::with_capacity(32);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(output)
+}
+
+fn remove_stale_status(path: &PathBuf) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() {
+                bail!("SD-WAN Core status path must be a regular file")
+            }
+            fs::remove_file(path).context("remove stale SD-WAN Core status")?;
+            eprintln!(
+                "level=info event=core_readiness_cleanup stage=pre_spawn error_code=stale_status_removed status={}",
+                path.display()
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspect stale SD-WAN Core status"),
+    }
+    Ok(())
+}
+
+fn is_activation_status_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(activation_id) = name
+        .strip_prefix("sdwan-")
+        .and_then(|value| value.strip_suffix(".status.json"))
+    else {
+        return false;
+    };
+    activation_id.len() == 64
+        && activation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+// Each activation owns a distinct Core status file so a replacement cannot
+// mistake an earlier Core's readiness for its own. The agent is the sole
+// activation supervisor, therefore old files in this namespace are safe to
+// reclaim once its current status has been removed before a new Core starts.
+fn cleanup_superseded_activation_statuses(current: &Path) -> Result<usize> {
+    let Some(directory) = current.parent() else {
+        bail!("SD-WAN Core status path has no parent directory")
+    };
+    let Some(current_name) = current.file_name() else {
+        bail!("SD-WAN Core status path has no file name")
+    };
+    if !is_activation_status_name(current_name) {
+        return Ok(0);
+    }
+
+    let mut removed = 0;
+    for entry in fs::read_dir(directory).context("list SD-WAN Core status directory")? {
+        let entry = entry.context("inspect SD-WAN Core status directory entry")?;
+        if entry.file_name() == current_name || !is_activation_status_name(&entry.file_name()) {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect superseded SD-WAN Core status {}", path.display()))?;
+        if !metadata.file_type().is_file() {
+            eprintln!(
+                "level=warn event=sdwan_status_cleanup_skipped path={} reason=not_regular_file",
+                path.display()
+            );
+            continue;
+        }
+        fs::remove_file(&path)
+            .with_context(|| format!("remove superseded SD-WAN Core status {}", path.display()))?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+fn remove_activation_receipt(path: Option<&Path>) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() {
+                bail!("activation receipt path must be a regular file")
+            }
+            fs::remove_file(path).context("remove activation receipt")?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspect activation receipt"),
+    }
+    Ok(())
+}
+
+fn write_activation_receipt(
+    path: Option<&Path>,
+    generation: u64,
+    activation_id: Option<&str>,
+    candidate_target: Option<&Path>,
+    state: &'static str,
+    error_code: Option<&'static str>,
+    core_proof: Option<ReceiptCoreProof>,
+) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let parent = path.parent().context("activation receipt has no parent")?;
+    let metadata = fs::symlink_metadata(parent).context("inspect activation receipt directory")?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        bail!("activation receipt directory must be a real directory")
+    }
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .context("activation receipt has no file name")?
+            .to_string_lossy(),
+        std::process::id()
+    ));
+    let (activation_id, candidate_target) = match (activation_id, candidate_target) {
+        (Some(id), Some(target)) => (id.to_owned(), target.to_string_lossy().into_owned()),
+        (None, None) => (String::new(), String::new()),
+        _ => bail!("activation receipt requires both activation identity fields"),
+    };
+    if !matches!(
+        (state, error_code),
+        ("committed", None) | ("rejected", Some(_))
+    ) {
+        bail!("activation receipt result is invalid")
+    }
+    let bytes = serde_json::to_vec(&ActivationReadyReceipt {
+        schema_version: if core_proof.is_some() { 2 } else { 1 },
+        activation_id,
+        candidate_target,
+        generation,
+        agent_pid: std::process::id(),
+        state,
+        error_code,
+        core_proof,
+    })?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .context("create activation receipt")?;
+    let result = (|| {
+        file.write_all(&bytes).context("write activation receipt")?;
+        file.sync_all().context("sync activation receipt")?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        drop(file);
+        fs::rename(&temporary, path).context("publish activation receipt")?;
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .context("sync activation receipt directory")
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn write_runtime_activation_receipt(
+    args: &RuntimeArgs,
+    state: &'static str,
+    error_code: Option<&'static str>,
+) -> Result<()> {
+    write_runtime_activation_receipt_with_proof(args, state, error_code, None)
+}
+
+fn write_runtime_activation_receipt_with_proof(
+    args: &RuntimeArgs,
+    state: &'static str,
+    error_code: Option<&'static str>,
+    core_proof: Option<ReceiptCoreProof>,
+) -> Result<()> {
+    write_activation_receipt(
+        args.activation_ready.as_deref(),
+        runtime_policy_generation(args),
+        args.activation_target
+            .as_deref()
+            .and_then(|target| target.file_name().and_then(|name| name.to_str())),
+        args.activation_target.as_deref(),
+        state,
+        error_code,
+        core_proof,
+    )
+}
+
+fn write_failed_activation_receipt(args: &RuntimeArgs, error_code: &'static str) -> Result<()> {
+    if activation_pointer_unchanged(args)? {
+        write_runtime_activation_receipt(args, "rejected", Some(error_code))
+    } else {
+        remove_activation_receipt(args.activation_ready.as_deref())
+    }
+}
+
+struct PendingReceipt {
+    args: RuntimeArgs,
+    state: &'static str,
+    error_code: Option<&'static str>,
+    next_attempt: Instant,
+    core_proof: Option<ReceiptCoreProof>,
+    proof_retry_token: Option<String>,
+}
+
+impl PendingReceipt {
+    fn publish(
+        args: &RuntimeArgs,
+        state: &'static str,
+        error_code: Option<&'static str>,
+    ) -> Option<Self> {
+        Self::publish_with_proof(args, state, error_code, None)
+    }
+
+    fn committed(args: &RuntimeArgs, pid: u32, token: &str) -> Option<Self> {
+        publish_managed_process_record(args, pid, token);
+        match receipt_core_proof(args, pid, token) {
+            Ok(proof) => Self::publish_with_proof(args, "committed", None, Some(proof)),
+            Err(error) => {
+                log_runtime_failure(
+                    "sdwan_receipt_proof_pending",
+                    "core_process_proof_unavailable",
+                    &error,
+                );
+                Some(Self {
+                    args: args.clone(),
+                    state: "committed",
+                    error_code: None,
+                    next_attempt: Instant::now() + RETRY_INITIAL_DELAY,
+                    core_proof: Some(ReceiptCoreProof {
+                        pid,
+                        status_path: args.status.clone(),
+                        readiness_token_sha256: format!("{:x}", Sha256::digest(token.as_bytes())),
+                        process_start_ticks: None,
+                    }),
+                    proof_retry_token: Some(token.to_owned()),
+                })
+            }
+        }
+    }
+
+    fn publish_with_proof(
+        args: &RuntimeArgs,
+        state: &'static str,
+        error_code: Option<&'static str>,
+        core_proof: Option<ReceiptCoreProof>,
+    ) -> Option<Self> {
+        match write_runtime_activation_receipt_with_proof(
+            args,
+            state,
+            error_code,
+            core_proof.clone(),
+        ) {
+            Ok(()) => None,
+            Err(error) => {
+                log_runtime_failure(
+                    "sdwan_receipt_publication_deferred",
+                    "activation_receipt_write",
+                    &error,
+                );
+                Some(Self {
+                    args: args.clone(),
+                    state,
+                    error_code,
+                    next_attempt: Instant::now() + RETRY_INITIAL_DELAY,
+                    core_proof,
+                    proof_retry_token: None,
+                })
+            }
+        }
+    }
+
+    fn retry(&mut self) -> Result<bool> {
+        if !activation_pointer_unchanged(&self.args)? {
+            return Ok(true);
+        }
+        if Instant::now() < self.next_attempt {
+            return Ok(false);
+        }
+        if let Some(token) = self.proof_retry_token.as_deref() {
+            let pid = self
+                .core_proof
+                .as_ref()
+                .context("pending Core proof missing PID")?
+                .pid;
+            match receipt_core_proof(&self.args, pid, token) {
+                Ok(proof) => {
+                    self.core_proof = Some(proof);
+                    self.proof_retry_token = None;
+                }
+                Err(error) => {
+                    log_runtime_failure(
+                        "sdwan_receipt_proof_pending",
+                        "core_process_proof_unavailable",
+                        &error,
+                    );
+                    self.next_attempt = Instant::now() + RETRY_INITIAL_DELAY;
+                    return Ok(false);
+                }
+            }
+        }
+        match write_runtime_activation_receipt_with_proof(
+            &self.args,
+            self.state,
+            self.error_code,
+            self.core_proof.clone(),
+        ) {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                log_runtime_failure(
+                    "sdwan_receipt_publication_deferred",
+                    "activation_receipt_write",
+                    &error,
+                );
+                self.next_attempt = Instant::now() + RETRY_INITIAL_DELAY;
+                Ok(false)
+            }
+        }
+    }
+}
+
+fn publish_managed_process_record(args: &RuntimeArgs, pid: u32, token: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let result = (|| {
+            let deadline = args
+                .activation_descriptor
+                .as_ref()
+                .map_or(0, |descriptor| descriptor.grant_expires_at_unix);
+            let record = process_record::ManagedProcessRecord::capture(
+                pid,
+                &args.core,
+                &args.status,
+                token,
+                args.generation,
+                runtime_policy_generation(args),
+                deadline,
+            )?;
+            let name = args
+                .status
+                .file_name()
+                .context("Core status has no file name")?
+                .to_string_lossy();
+            process_record::publish(
+                &args.status.with_file_name(format!("{name}.process.json")),
+                &record,
+            )
+        })();
+        if let Err(error) = result {
+            log_runtime_failure(
+                "managed_process_record_deferred",
+                "managed_process_record_write",
+                &error,
+            );
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (args, pid, token);
+}
+
+fn remove_activation_receipt_deferred(args: &RuntimeArgs) {
+    if let Err(error) = remove_activation_receipt(args.activation_ready.as_deref()) {
+        log_runtime_failure(
+            "sdwan_receipt_cleanup_deferred",
+            "activation_receipt_remove",
+            &error,
+        );
+    }
+}
+
+fn runtime_failure_marker_path(status: &Path) -> Result<PathBuf> {
+    let name = status
+        .file_name()
+        .context("Core status path has no file name")?
+        .to_string_lossy();
+    Ok(status.with_file_name(format!("{name}.error.json")))
+}
+
+fn write_runtime_failure_marker(args: &RuntimeArgs, error_code: &'static str) -> Result<()> {
+    let path = runtime_failure_marker_path(&args.status)?;
+    let parent = path
+        .parent()
+        .context("Runtime failure marker has no parent")?;
+    let metadata = fs::symlink_metadata(parent).context("inspect Runtime status directory")?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        bail!("Runtime status directory must be a real directory")
+    }
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .context("Runtime failure marker has no file name")?
+            .to_string_lossy(),
+        std::process::id()
+    ));
+    let bytes = serde_json::to_vec(&RuntimeFailureMarker {
+        schema_version: 1,
+        generation: runtime_policy_generation(args),
+        error_code: error_code.into(),
+    })?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .context("create Runtime failure marker")?;
+    let result = (|| {
+        file.write_all(&bytes)
+            .context("write Runtime failure marker")?;
+        file.sync_all().context("sync Runtime failure marker")?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        drop(file);
+        fs::rename(&temporary, &path).context("publish Runtime failure marker")?;
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .context("sync Runtime status directory")
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn remove_runtime_failure_marker(status: &Path) -> Result<()> {
+    let path = runtime_failure_marker_path(status)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            fs::remove_file(path).context("remove Runtime failure marker")
+        }
+        Ok(_) => bail!("Runtime failure marker must be a regular file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("inspect Runtime failure marker"),
+    }
+}
+
+fn activation_pointer_unchanged(args: &RuntimeArgs) -> Result<bool> {
+    match (&args.activation_link, &args.activation_target) {
+        (Some(link), Some(target)) => match fs::read_link(link) {
+            Ok(current) => Ok(current == *target),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error).context("read active candidate pointer"),
+        },
+        (None, None) => Ok(true),
+        _ => bail!("incomplete activation pointer binding"),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActivationPointerState {
+    Unchanged,
+    Superseded,
+    Withdrawn,
+}
+
+fn activation_pointer_state(args: &RuntimeArgs) -> Result<ActivationPointerState> {
+    match (&args.activation_link, &args.activation_target) {
+        (Some(link), Some(target)) => match fs::read_link(link) {
+            Ok(current) if current == *target => Ok(ActivationPointerState::Unchanged),
+            Ok(_) => Ok(ActivationPointerState::Superseded),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(ActivationPointerState::Withdrawn)
+            }
+            Err(error) => Err(error).context("read active candidate pointer"),
+        },
+        (None, None) => Ok(ActivationPointerState::Unchanged),
+        _ => bail!("incomplete activation pointer binding"),
+    }
+}
+
+fn activation_binding_unchanged(args: &RuntimeArgs) -> Result<bool> {
+    let (
+        Some(link),
+        Some(expected_target),
+        Some(expected_descriptor),
+        Some(expected_config_sha256),
+        Some(expected_declaration_sha256),
+    ) = (
+        args.activation_link.as_deref(),
+        args.activation_target.as_deref(),
+        args.activation_descriptor.as_ref(),
+        args.activation_config_sha256,
+        args.activation_declaration_sha256,
+    )
+    else {
+        return Ok(false);
+    };
+    if !activation_pointer_unchanged(args)? {
+        return Ok(false);
+    }
+    let (descriptor, target, config, declaration) = resolve_activation(link)?;
+    Ok(descriptor == *expected_descriptor
+        && target == expected_target
+        && config == args.config
+        && declaration == args.declaration
+        && sha256_file(&config)? == expected_config_sha256
+        && sha256_file(&declaration)? == expected_declaration_sha256
+        && descriptor.core_role == args.core_role
+        && descriptor.projection_generation
+            == args
+                .activation_descriptor
+                .as_ref()
+                .map(|active| active.projection_generation)
+                .unwrap_or(args.generation))
+}
+
+fn activation_retry_eligible(args: &RuntimeArgs) -> Result<bool> {
+    if !activation_binding_unchanged(args)? {
+        return Ok(false);
+    }
+    let descriptor = args
+        .activation_descriptor
+        .as_ref()
+        .context("retry requires an authenticated activation descriptor")?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("read system time before SD-WAN retry")?
+        .as_secs();
+    Ok(grant_retry_eligible(descriptor, now))
+}
+
+fn grant_retry_eligible(descriptor: &ActivationDescriptor, now: u64) -> bool {
+    (descriptor.grant_refresh_after_unix == 0 && descriptor.grant_expires_at_unix == 0)
+        || descriptor.grant_expires_at_unix > now
+}
+
+fn validate_activation_command(
+    activation: &Path,
+    expected_core_role: CoreRole,
+    ordinary_config: Option<&Path>,
+) -> Result<()> {
+    let link =
+        if activation.file_name().and_then(|name| name.to_str()) == Some("activation-v1.json") {
+            activation
+                .parent()
+                .context("activation descriptor has no candidate pointer parent")?
+        } else {
+            activation
+        };
+    let (descriptor, _, _, _) = resolve_activation(link)?;
+    if descriptor.core_role != expected_core_role {
+        bail!("activation Core role does not match the expected service role")
+    }
+    match (expected_core_role, ordinary_config) {
+        (CoreRole::Server, Some(path)) => validate_ordinary_config(path),
+        (CoreRole::Server, None) => Ok(()),
+        (CoreRole::ClientSdwan, Some(_)) => {
+            bail!("ordinary-config is only valid for the server Core role")
+        }
+        (CoreRole::ClientSdwan, None) => Ok(()),
+    }
+}
+
+fn read_core_readiness(
+    path: &PathBuf,
+    generation: u64,
+    pid: u32,
+    readiness_token: &str,
+) -> Result<Option<ReadinessState>> {
+    read_core_readiness_with_policy(
+        path,
+        generation,
+        pid,
+        readiness_token,
+        ReadinessPolicy::Strict,
+    )
+}
+
+fn read_core_readiness_with_policy(
+    path: &PathBuf,
+    generation: u64,
+    pid: u32,
+    readiness_token: &str,
+    policy: ReadinessPolicy,
+) -> Result<Option<ReadinessState>> {
+    let Some(status) = read_core_status(path, generation, pid, readiness_token)? else {
+        return Ok(None);
+    };
+    classify_core_readiness(&status, policy).map(Some)
+}
+
+fn read_core_status(
+    path: &PathBuf,
+    generation: u64,
+    pid: u32,
+    readiness_token: &str,
+) -> Result<Option<CoreReadinessStatus>> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect SD-WAN Core readiness status"),
+    };
+    let metadata = file
+        .metadata()
+        .context("inspect open SD-WAN Core readiness status")?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > MAX_STATUS_BYTES {
+        bail!("SD-WAN Core readiness status must be a bounded regular file")
+    }
+    if metadata.permissions().mode() & 0o777 != 0o600 {
+        bail!("SD-WAN Core readiness status must have mode 0600")
+    }
+    if metadata.uid() != nix::unistd::geteuid().as_raw() {
+        bail!("SD-WAN Core readiness status must belong to current Runtime UID")
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_STATUS_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("read SD-WAN Core readiness status")?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_STATUS_BYTES,
+        "SD-WAN Core readiness status exceeds size limit"
+    );
+    let status: CoreReadinessStatus =
+        serde_json::from_slice(&bytes).context("parse SD-WAN Core readiness status")?;
+    if status.schema_version != 3 || status.pid != pid || status.readiness_token != readiness_token
+    {
+        let code = if status.schema_version != 3 {
+            "readiness_schema_mismatch"
+        } else if status.pid != pid {
+            "readiness_pid_mismatch"
+        } else {
+            "readiness_token_mismatch"
+        };
+        eprintln!(
+            "level=warn event=core_readiness_mismatch stage=readiness_binding error_code={} expected_pid={} actual_pid={} expected_schema=3 actual_schema={} actual_token_match={} expected_generation={} actual_generation={} status={}",
+            code,
+            pid,
+            status.pid,
+            status.schema_version,
+            status.readiness_token == readiness_token,
+            generation,
+            status.generation,
+            path.display()
+        );
+        return Err(ReadinessBindingFailure(code).into());
+    }
+    if status.generation < generation {
+        // The status writer follows the routing actor asynchronously. An
+        // authenticated report from this process for the previous generation
+        // is not a rejection of the newly acknowledged policy.
+        return Ok(None);
+    }
+    if status.generation > generation {
+        bail!("SD-WAN Core readiness generation is newer than the requested activation")
+    }
+    if status.policy_generation != 0 && status.policy_generation < status.generation {
+        bail!("SD-WAN Core readiness policy generation precedes tunnel generation")
+    }
+    if status.active_peers > status.configured_peers
+        || status.ready_route_owners > status.active_peers
+        || status.ready_route_owners > status.required_route_owners
+    {
+        bail!("SD-WAN Core readiness status has impossible peer counters")
+    }
+    Ok(Some(status))
+}
+
+fn classify_core_readiness(
+    status: &CoreReadinessStatus,
+    policy: ReadinessPolicy,
+) -> Result<ReadinessState> {
+    // Route-owner readiness is the lifecycle authority. Receive idleness is
+    // telemetry freshness and must not restart an otherwise authenticated path.
+    // A newly authenticated QUIC lane can legitimately have no received
+    // payload bytes yet (for example, immediately after a peer reconnect or
+    // while the route is idle).  RX bytes are telemetry, not an admission
+    // requirement.  Use the Core-owned path inventory and RTT sample as the
+    // authentication/readiness evidence; otherwise recovery is classified as
+    // failed and the agent tears down the freshly restored lane again.
+    let has_authenticated_path_evidence = status.paths.as_ref().is_some_and(|paths| {
+        paths
+            .iter()
+            .filter(|path| path.rtt_sample_count > 0 && path.probe_misses < 3)
+            .count()
+            >= status.ready_route_owners
+    });
+    let listener_ready = status.inbound_listener_configured
+        && status.inbound_listener_ready
+        && !status.inbound_listener_endpoints.is_empty();
+    // These errors describe loss of all peer lanes, not a broken Core/TUN
+    // process.  Once an activation has committed, keep the dialers alive and
+    // let the agent suspend only SD-WAN steering while peers reconnect.  In
+    // particular, Core reports this condition with lifecycle="active" before
+    // its status writer transitions to "failed"; treating only failed/starting
+    // as recoverable caused the agent to tear down a perfectly recoverable
+    // session under sustained traffic (the all_peer_lanes_unavailable loop).
+    let recoverable_peer_loss_code = matches!(
+        status.last_error_code.as_deref(),
+        Some(
+            "all_peer_reads_failed"
+                | "all_peer_writes_failed"
+                | "route_has_no_active_peer"
+                | "route_peer_missing"
+                | "peer_barrier_failed"
+                | "tun_route_probe_timeout"
+                | "tun_route_probe_no_reply",
+        )
+    );
+    let recoverable_stream_not_ready =
+        status.last_error_code.as_deref() == Some("stream_not_ready") && status.fail_open_required;
+    let recoverable_committed_peer_loss =
+        matches!(
+            policy,
+            ReadinessPolicy::Committed | ReadinessPolicy::CommittedServer
+        ) && matches!(status.lifecycle.as_str(), "active" | "failed" | "starting")
+            && status.fail_open_required
+            && (policy == ReadinessPolicy::Committed || listener_ready)
+            && status.configured_peers > 0
+            && status.required_route_owners > 0
+            && status.ready_route_owners == 0
+            && (recoverable_peer_loss_code || recoverable_stream_not_ready);
+    let recoverable_committed_partial_loss =
+        matches!(
+            policy,
+            ReadinessPolicy::Committed | ReadinessPolicy::CommittedServer
+        ) && matches!(status.lifecycle.as_str(), "active" | "failed" | "starting")
+            && (policy == ReadinessPolicy::Committed || listener_ready)
+            && status.required_route_owners > 1
+            && status.ready_route_owners > 0
+            && status.ready_route_owners < status.required_route_owners
+            && has_authenticated_path_evidence
+            && (!status.fail_open_required
+                || recoverable_peer_loss_code
+                || recoverable_stream_not_ready);
+    let state = match status.lifecycle.as_str() {
+        // Core can authenticate the peer before its packet stream finishes
+        // opening. Keep the authenticated listener alive, but do not admit
+        // routes until the stream contributes a ready route owner.
+        "active" | "starting"
+            if !status.fail_open_required
+                && status.required_route_owners > 0
+                && status.ready_route_owners == 0
+                && status.last_error_code.as_deref() == Some("stream_not_ready") =>
+        {
+            if listener_ready {
+                ReadinessState::ListenerReady
+            } else {
+                ReadinessState::Waiting
+            }
+        }
+        "starting" if !status.fail_open_required && listener_ready => ReadinessState::ListenerReady,
+        "starting" if !status.fail_open_required => ReadinessState::Waiting,
+        "active"
+            if !status.fail_open_required
+                && status.required_route_owners > 0
+                && status.ready_route_owners == status.required_route_owners
+                && has_authenticated_path_evidence =>
+        {
+            ReadinessState::Ready
+        }
+        "active" | "failed" | "starting" if recoverable_committed_partial_loss => {
+            ReadinessState::Degraded
+        }
+        "active"
+            if !status.fail_open_required
+                && status.required_route_owners > 0
+                && status.ready_route_owners > 0
+                && status.ready_route_owners < status.required_route_owners
+                && has_authenticated_path_evidence
+                && listener_ready =>
+        {
+            ReadinessState::Degraded
+        }
+        "active"
+            if !status.fail_open_required
+                && status.required_route_owners > 0
+                && status.ready_route_owners > 0
+                && status.ready_route_owners < status.required_route_owners
+                && has_authenticated_path_evidence =>
+        {
+            ReadinessState::Waiting
+        }
+        "active" | "failed" | "starting" if recoverable_committed_peer_loss => {
+            ReadinessState::RecoverablePeerLoss
+        }
+        "active" | "failed" | "starting"
+            if policy == ReadinessPolicy::Strict
+                && (recoverable_peer_loss_code || recoverable_stream_not_ready)
+                && status.configured_peers > 0
+                && status.required_route_owners > 0 =>
+        {
+            // Initial peer loss has no authority to reject a signed policy.
+            // Keep steering uncommitted and use the bounded readiness retry.
+            ReadinessState::Waiting
+        }
+        "failed" | "stopping" | "stopped" => ReadinessState::Failed,
+        "active"
+            if status.fail_open_required
+                || status.required_route_owners == 0
+                || status.ready_route_owners == 0 =>
+        {
+            ReadinessState::Failed
+        }
+        _ => bail!("SD-WAN Core readiness status has an invalid lifecycle"),
+    };
+    if state == ReadinessState::Failed {
+        return Err(CoreReadinessFailure {
+            code: status
+                .last_error_code
+                .clone()
+                .unwrap_or_else(|| "core_readiness_reason_missing".into()),
+            lifecycle: status.lifecycle.clone(),
+            detail: status.last_error_detail.clone(),
+        }
+        .into());
+    }
+    Ok(state)
+}
+
+fn wait_for_core_readiness(
+    args: &RuntimeArgs,
+    child: &mut Child,
+    readiness_token: &str,
+    netd: &mut NetdClient,
+) -> Result<ReadinessWait> {
+    let deadline = Instant::now()
+        .checked_add(Duration::from_millis(args.readiness_timeout_ms))
+        .context("Core readiness deadline overflow")?;
+    let renew_every = Duration::from_millis((args.lease_ms / 3).max(1_000));
+    let mut next_renewal = Instant::now() + renew_every;
+    // Core publishes readiness with an atomic rename.  During replacement the
+    // status path can briefly be absent even though the authenticated server
+    // listener remains bound.  Once a valid listener receipt was observed,
+    // preserve that fact across such a telemetry gap; the next poll still
+    // validates PID, token, generation and schema before changing state.
+    let mut listener_readiness_observed = false;
+    loop {
+        if shutdown_requested() {
+            return Ok(ReadinessWait::ShutdownRequested);
+        }
+        if let Some(status) = child.try_wait().context("wait for candidate Candy Core")? {
+            if shutdown_requested() {
+                return Ok(ReadinessWait::ShutdownRequested);
+            }
+            // Preserve an authenticated Core rejection or malformed readiness
+            // report as a hard failure. Only an exit without such evidence is
+            // eligible for reconnect retry.
+            read_core_readiness(&args.status, args.generation, child.id(), readiness_token)?;
+            return Err(anyhow::Error::new(TransientReadinessFailure(format!(
+                "Candy Core exited before SD-WAN readiness with status {}",
+                status.code().unwrap_or(1)
+            ))));
+        }
+        let readiness =
+            read_core_readiness(&args.status, args.generation, child.id(), readiness_token)?;
+        if shutdown_requested() {
+            return Ok(ReadinessWait::ShutdownRequested);
+        }
+        if matches!(readiness, Some(ReadinessState::Ready))
+            || (args.core_role == CoreRole::Server
+                && matches!(readiness, Some(ReadinessState::Degraded)))
+        {
+            return Ok(ReadinessWait::Ready);
+        }
+        let server_listener_ready = args.core_role == CoreRole::Server
+            && matches!(readiness, Some(ReadinessState::ListenerReady));
+        if server_listener_ready {
+            listener_readiness_observed = true;
+        }
+        // An authenticated server listener can be healthy before a peer is
+        // connected. Keep Core alive in that phase so the peer's next dial can
+        // complete; netd remains prepared but uncommitted until a route owner
+        // is authenticated.
+        if Instant::now() >= deadline && !(server_listener_ready || listener_readiness_observed) {
+            eprintln!(
+                "level=error event=core_readiness_timeout stage=readiness_wait error_code=core_readiness_timeout generation={} pid={} status={} activation={}",
+                args.generation, child.id(), args.status.display(),
+                args.activation_target.as_deref().map_or("", |path| path.to_str().unwrap_or("<invalid>"))
+            );
+            return Err(anyhow::Error::new(TransientReadinessFailure(
+                "Candy Core SD-WAN readiness timed out".into(),
+            )));
+        }
+        if !activation_pointer_unchanged(args)? {
+            bail!("Cloud candidate changed before Core route readiness")
+        }
+        if Instant::now() >= next_renewal {
+            let renewed_deadline = monotonic_ms()?
+                .checked_add(args.lease_ms)
+                .context("prepared lease deadline overflow")?;
+            netd.renew_lease(renewed_deadline)
+                .context("renew prepared netd lease while waiting for Core")?;
+            next_renewal = Instant::now() + renew_every;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+extern "C" fn request_shutdown(_signal: nix::libc::c_int) {
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+fn shutdown_requested() -> bool {
+    SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
+}
+
+fn install_shutdown_handlers() -> Result<()> {
+    static INSTALLED: std::sync::OnceLock<std::result::Result<(), String>> =
+        std::sync::OnceLock::new();
+    let result = INSTALLED
+        .get_or_init(|| install_shutdown_handlers_once().map_err(|error| format!("{error:#}")));
+    result
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("{error}"))
+        .copied()
+}
+
+fn install_shutdown_handlers_once() -> Result<()> {
+    let mut action: nix::libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = request_shutdown as *const () as usize;
+    action.sa_flags = 0;
+    unsafe {
+        nix::libc::sigemptyset(&mut action.sa_mask);
+        if nix::libc::sigaction(nix::libc::SIGTERM, &action, std::ptr::null_mut()) != 0
+            || nix::libc::sigaction(nix::libc::SIGINT, &action, std::ptr::null_mut()) != 0
+        {
+            return Err(std::io::Error::last_os_error()).context("install shutdown handlers");
+        }
+    }
+    Ok(())
+}
+
+fn stop_core(child: &mut Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let term_result =
+        unsafe { nix::libc::kill(child.id() as nix::libc::pid_t, nix::libc::SIGTERM) };
+    if term_result == 0 {
+        let deadline = Instant::now() + CORE_TERMINATION_GRACE;
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => thread::sleep(Duration::from_millis(50)),
+                Err(error) => {
+                    eprintln!(
+                        "level=warn event=sdwan_core_stop_wait_failed error={}",
+                        sanitize_log_value(&error.to_string())
+                    );
+                    break;
+                }
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn rollback_or_report(netd: &mut NetdClient, cause: &str) -> Result<()> {
+    netd.rollback()
+        .map(|_| ())
+        .with_context(|| format!("{cause}; netd rollback failed"))
+}
+
+/// Complete a replacement drain without turning the intentional bounded
+/// window into a false hot-reload failure. netd returns a dedicated
+/// `DrainPending` code while the previous generation is retained; retries are
+/// idempotent and stop at a strict upper bound so a stuck kernel cannot stall
+/// Runtime forever.
+fn drain_old_bounded(netd: &mut NetdClient) -> Result<()> {
+    let deadline = Instant::now() + NETD_DRAIN_RETRY_WINDOW;
+    loop {
+        let now = monotonic_ms().context("read monotonic clock while draining")?;
+        match netd.drain_old(now) {
+            Ok(_) => return Ok(()),
+            Err(IpcError::Remote(ErrorCode::DrainPending)) if Instant::now() < deadline => {
+                thread::sleep(RETRY_POLL_INTERVAL);
+            }
+            Err(error) => return Err(anyhow::Error::from(error)),
+        }
+    }
+}
+
+fn finish_shutdown_after_rollback(
+    args: &RuntimeArgs,
+    rollback: Result<()>,
+    phase: &str,
+) -> Result<()> {
+    if let Err(rollback_error) = &rollback {
+        log_runtime_failure("sdwan_rollback_failed", "netd_rollback", rollback_error);
+    }
+    rollback?;
+    remove_activation_receipt(args.activation_ready.as_deref())?;
+    eprintln!(
+        "level=info event=sdwan_stopped generation={} phase={} rollback_ok=true",
+        args.generation, phase
+    );
+    Ok(())
+}
+
+#[derive(Debug)]
+struct RetryableFailure {
+    error_code: &'static str,
+    detail: String,
+    // run_once may have hot-switched since run() started. Recovery must bind
+    // to that latest immutable activation, never the initial launch snapshot.
+    activation: Box<RuntimeArgs>,
+}
+
+impl std::fmt::Display for RetryableFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.error_code, self.detail)
+    }
+}
+
+impl std::error::Error for RetryableFailure {}
+
+#[derive(Debug)]
+struct TransientReadinessFailure(String);
+
+impl std::fmt::Display for TransientReadinessFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TransientReadinessFailure {}
+
+// Retry operational unavailability, never malformed IPC or unauthorized peers.
+fn transient_runtime_error(error: &anyhow::Error) -> bool {
+    if error.downcast_ref::<TransientReadinessFailure>().is_some() {
+        return true;
+    }
+    if let Some(readiness) = error.downcast_ref::<CoreReadinessFailure>() {
+        // Only explicit operational codes retry. Invalid signed limits and
+        // unsupported platform settings require a new configuration/build.
+        return matches!(
+            readiness.code.as_str(),
+            "engine_resource_exhausted" | "os_resource_temporarily_unavailable"
+        );
+    }
+    if let Some(ipc) = error.downcast_ref::<IpcError>() {
+        return match ipc {
+            IpcError::Io(error) => transient_io_error(error),
+            IpcError::Remote(
+                ErrorCode::SystemFailure
+                | ErrorCode::GenerationConflict
+                | ErrorCode::DrainPending
+                | ErrorCode::LinkPrepareFailed
+                | ErrorCode::RoutePrepareFailed
+                | ErrorCode::FirewallPrepareFailed
+                | ErrorCode::SysctlPrepareFailed
+                | ErrorCode::LinkActivateFailed
+                | ErrorCode::PolicyActivateFailed,
+            ) => true,
+            _ => false,
+        };
+    }
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(transient_io_error)
+}
+
+fn transient_io_error(error: &std::io::Error) -> bool {
+    if matches!(
+        error.raw_os_error(),
+        Some(nix::libc::ENOMEM | nix::libc::ENOBUFS | nix::libc::EMFILE | nix::libc::ENFILE)
+    ) {
+        return true;
+    }
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::Interrupted
+    )
+}
+
+fn retryable_failure(
+    args: &RuntimeArgs,
+    error_code: &'static str,
+    error: anyhow::Error,
+) -> Result<()> {
+    remove_activation_receipt_deferred(args);
+    Err(anyhow::Error::new(RetryableFailure {
+        error_code,
+        detail: format!("{error:#}"),
+        activation: Box::new(args.clone()),
+    }))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetryWait {
+    Retry,
+    Stop,
+}
+
+#[derive(Debug)]
+struct RetryBackoff {
+    next: Duration,
+}
+
+impl RetryBackoff {
+    fn new() -> Self {
+        Self {
+            next: RETRY_INITIAL_DELAY,
+        }
+    }
+
+    fn delay_after_failure(&mut self, attempt_uptime: Duration) -> Duration {
+        if attempt_uptime >= RETRY_STABLE_RESET {
+            self.next = RETRY_INITIAL_DELAY;
+        }
+        let delay = self.next;
+        self.next = self.next.saturating_mul(2).min(RETRY_MAX_DELAY);
+        delay
+    }
+}
+
+fn retry_after_rollback(
+    args: &RuntimeArgs,
+    child: &mut Child,
+    netd: &mut NetdClient,
+    cause: &str,
+    error_code: &'static str,
+    error: anyhow::Error,
+) -> Result<()> {
+    log_runtime_failure("sdwan_runtime_interrupted", error_code, &error);
+    stop_core(child);
+    let rollback = rollback_or_report(netd, cause);
+    let rollback_ok = rollback.is_ok();
+    if let Err(rollback_error) = &rollback {
+        log_runtime_failure("sdwan_rollback_failed", "netd_rollback", rollback_error);
+    }
+    remove_activation_receipt_deferred(args);
+    if let Err(marker_error) = write_runtime_failure_marker(args, error_code) {
+        log_runtime_failure(
+            "sdwan_runtime_failure_marker_failed",
+            "runtime_failure_marker_write",
+            &marker_error,
+        );
+    }
+    // A netd daemon restart can close the IPC socket after it has already
+    // removed the transaction.  Treat that as a recoverable cleanup failure:
+    // the next activation creates a fresh owner/session.  Propagating the
+    // ECONNRESET here used to terminate the agent and made a peer outage
+    // permanent until a service restart.
+    if let Err(rollback_error) = rollback {
+        log_runtime_failure("sdwan_rollback_deferred", "netd_rollback", &rollback_error);
+    }
+    if let Err(status_error) = remove_stale_status(&args.status) {
+        eprintln!(
+            "level=warn event=sdwan_status_cleanup_deferred generation={} error={}",
+            args.generation,
+            sanitize_log_value(&format!("{status_error:#}"))
+        );
+    }
+    if shutdown_requested() {
+        eprintln!(
+            "level=info event=sdwan_stopped generation={} phase=runtime_failure rollback_ok={}",
+            args.generation, rollback_ok
+        );
+        return Ok(());
+    }
+    Err(anyhow::Error::new(RetryableFailure {
+        error_code,
+        detail: format!("{error:#}"),
+        activation: Box::new(args.clone()),
+    }))
+}
+
+fn wait_before_retry(args: &RuntimeArgs, delay: Duration) -> Result<RetryWait> {
+    let deadline = Instant::now()
+        .checked_add(delay)
+        .context("SD-WAN retry deadline overflow")?;
+    let mut next_cleanup = Instant::now();
+    loop {
+        if shutdown_requested() {
+            remove_activation_receipt_deferred(args);
+            return Ok(RetryWait::Stop);
+        }
+        if !activation_pointer_unchanged(args)? {
+            remove_activation_receipt_deferred(args);
+            eprintln!(
+                "level=info event=sdwan_retry_cancelled generation={} reason=candidate_changed",
+                args.generation
+            );
+            return Ok(RetryWait::Stop);
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        if Instant::now() >= next_cleanup {
+            remove_activation_receipt_deferred(args);
+            next_cleanup = Instant::now() + RETRY_INITIAL_DELAY;
+        }
+        thread::sleep(RETRY_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
+    }
+    if !activation_retry_eligible(args)? {
+        remove_activation_receipt_deferred(args);
+        eprintln!(
+            "level=info event=sdwan_retry_cancelled generation={} reason=candidate_invalid_or_expired",
+            args.generation
+        );
+        return Ok(RetryWait::Stop);
+    }
+    Ok(RetryWait::Retry)
+}
+
+fn fail_before_prepare(
+    args: &RuntimeArgs,
+    cause: &str,
+    error_code: &'static str,
+    error: anyhow::Error,
+) -> Result<()> {
+    if transient_runtime_error(&error) {
+        log_runtime_failure("sdwan_activation_retry", error_code, &error);
+        return retryable_failure(args, error_code, error);
+    }
+    log_runtime_failure("sdwan_activation_rejected", error_code, &error);
+    write_failed_activation_receipt(args, error_code)?;
+    Err(error.context(cause.to_owned()))
+}
+
+fn fail_after_rollback(
+    args: &RuntimeArgs,
+    child: &mut Child,
+    netd: &mut NetdClient,
+    cause: &str,
+    error_code: &'static str,
+    error: anyhow::Error,
+) -> Result<()> {
+    log_runtime_failure("sdwan_activation_failed", error_code, &error);
+    stop_core(child);
+    if transient_runtime_error(&error) {
+        return retry_after_rollback(args, child, netd, cause, error_code, error);
+    }
+    let rollback = rollback_or_report(netd, cause);
+    if shutdown_requested() {
+        return finish_shutdown_after_rollback(args, rollback, "activation_failure");
+    }
+    let marker = write_failed_activation_receipt(args, error_code);
+    if let Err(rollback_error) = &rollback {
+        log_runtime_failure("sdwan_rollback_failed", "netd_rollback", rollback_error);
+    }
+    if let Err(marker_error) = &marker {
+        eprintln!("level=error event=sdwan_rejection_receipt_failed error={marker_error:#}");
+    }
+    rollback?;
+    marker?;
+    Err(error)
+}
+
+#[derive(Default)]
+struct HotTransitionState {
+    core_suspended: bool,
+    steering_suspended: bool,
+}
+
+impl HotTransitionState {
+    fn complete(&self) -> bool {
+        self.core_suspended && self.steering_suspended
+    }
+}
+
+fn enter_proxy_fallback(
+    args: &RuntimeArgs,
+    child: &mut Child,
+    netd: &mut NetdClient,
+    state: &mut HotTransitionState,
+) -> Result<()> {
+    if !state.steering_suspended {
+        netd.suspend()
+            .context("remove SD-WAN steering before entering Candy Proxy fallback")?;
+        state.steering_suspended = true;
+    }
+    if !state.core_suspended {
+        // If the data-plane process has already exited, forwarding is already
+        // stopped.  Do not turn that expected failure state into a second
+        // fatal "fallback failed" error; leave the steering suspended and let
+        // the outer retry loop start a new Core instance.
+        if child
+            .try_wait()
+            .context("inspect Core before entering fallback")?
+            .is_some()
+        {
+            state.core_suspended = true;
+        } else {
+            request_core_control(args, child, netd, CoreReloadAction::Suspend)
+                .context("suspend Core forwarding after steering was removed")?;
+            state.core_suspended = true;
+        }
+    }
+    Ok(())
+}
+
+fn leave_proxy_fallback(
+    args: &RuntimeArgs,
+    child: &mut Child,
+    netd: &mut NetdClient,
+    state: &mut HotTransitionState,
+) -> Result<()> {
+    if state.core_suspended {
+        request_core_control(args, child, netd, CoreReloadAction::Resume)
+            .context("resume Core forwarding before restoring SD-WAN steering")?;
+        state.core_suspended = false;
+    }
+    if state.steering_suspended {
+        if let Err(error) = netd.resume() {
+            if request_core_control(args, child, netd, CoreReloadAction::Suspend).is_ok() {
+                state.core_suspended = true;
+            }
+            return Err(anyhow::Error::from(error).context("restore SD-WAN steering"));
+        }
+        state.steering_suspended = false;
+    }
+    Ok(())
+}
+
+fn restore_uncommitted_netd_activation(
+    current: &RuntimeArgs,
+    child: &mut Child,
+    netd: &mut NetdClient,
+    previous_declaration: PrepareDeclaration,
+    transition: &mut HotTransitionState,
+    resume_previous: bool,
+) -> Result<()> {
+    let deadline = monotonic_ms()?
+        .checked_add(current.lease_ms)
+        .context("last-good lease deadline overflow")?;
+    netd.reconfigure_with_owner(previous_declaration, current.generation, deadline)
+        .context("restore last-good netd declaration")?;
+    // Core has not received Commit. Its old policy and dialers are still
+    // installed; redialing them here would destroy that safety boundary.
+    if resume_previous {
+        leave_proxy_fallback(current, child, netd, transition)
+            .context("resume last-good SD-WAN after rejected hot reload")?;
+    }
+    Ok(())
+}
+
+fn hot_replace_activation(
+    current: &RuntimeArgs,
+    replacement: &RuntimeArgs,
+    child: &mut Child,
+    netd: &mut NetdClient,
+    readiness_token: &str,
+    transition: &mut HotTransitionState,
+) -> Result<bool> {
+    // A stale activation can be delivered while Cloud is reconciling a
+    // rollout (or after a retry races the committed pointer).  Never tear
+    // down the currently active lane for it: doing so turns a harmless
+    // ordering race into a site-wide outage. Rollback must be a new signed
+    // generation; equal-generation credential refresh remains supported.
+    if replacement.generation < current.generation {
+        eprintln!(
+            "level=warn event=sdwan_hot_reload_ignored_stale generation={} active_generation={} error_code=stale_policy_generation",
+            replacement.generation,
+            current.generation
+        );
+        write_failed_activation_receipt(replacement, "stale_policy_generation")?;
+        return Ok(false);
+    }
+    let already_suspended = transition.complete();
+    let previous_declaration = parse_declaration(&current.declaration)?;
+    let replacement_declaration = match parse_declaration(&replacement.declaration) {
+        Ok(declaration) => declaration,
+        Err(error) => {
+            write_failed_activation_receipt(replacement, "declaration_invalid")?;
+            eprintln!(
+                "level=error event=sdwan_hot_reload_rejected generation={} error_code=declaration_invalid error={}",
+                replacement.generation,
+                sanitize_log_value(&format!("{error:#}"))
+            );
+            return Ok(false);
+        }
+    };
+    let transaction_id = format!(
+        "{}{}",
+        generate_readiness_token()?,
+        generate_readiness_token()?
+    );
+    let mut next_renewal = Instant::now();
+    eprintln!("level=info event=sdwan_policy_preparing generation={} transaction_id={} steering=unchanged",
+        replacement.generation, transaction_id);
+    let prepared = request_core_transaction(
+        replacement,
+        child,
+        CoreReloadAction::Prepare,
+        Some(&transaction_id),
+        || renew_transition_lease(current, netd, &mut next_renewal),
+    )
+    .and_then(|_| {
+        anyhow::ensure!(
+            !shutdown_requested() && activation_binding_unchanged(replacement)?,
+            "candidate withdrawn or changed during preparation"
+        );
+        Ok(())
+    });
+    if let Err(error) = prepared {
+        abort_core_preparation(replacement, child, &transaction_id);
+        if transient_runtime_error(&error) {
+            return Err(anyhow::Error::new(CorePreparationPending(format!(
+                "{error:#}"
+            ))));
+        }
+        if error.downcast_ref::<CorePreparationPending>().is_some() {
+            eprintln!("level=warn event=sdwan_policy_prepare_retry generation={} transaction_id={} error_code=peer_preparation_pending steering=unchanged error={}",
+                replacement.generation, transaction_id, sanitize_log_value(&format!("{error:#}")));
+            return Err(error);
+        }
+        // A receipt write failure must not turn a preparation rejection into
+        // the caller's destructive transition-failure path.
+        if let Err(receipt_error) =
+            write_failed_activation_receipt(replacement, "core_policy_prepare_failed")
+        {
+            eprintln!(
+                "level=warn event=sdwan_activation_receipt_failed error={}",
+                sanitize_log_value(&format!("{receipt_error:#}"))
+            );
+        }
+        eprintln!("level=error event=sdwan_policy_prepare_failed generation={} transaction_id={} error_code=core_policy_prepare_failed steering=unchanged error={}",
+            replacement.generation, transaction_id, sanitize_log_value(&format!("{error:#}")));
+        return Ok(false);
+    }
+    let replacement_deadline = monotonic_ms()?
+        .checked_add(replacement.lease_ms)
+        .context("hot reload lease deadline overflow")?;
+    let netd_result = if already_suspended {
+        netd.reconfigure_with_owner(
+            replacement_declaration,
+            replacement.generation,
+            replacement_deadline,
+        )
+    } else {
+        netd.prepare_replacement_with_owner(
+            replacement_declaration,
+            replacement.generation,
+            replacement_deadline,
+        )
+    };
+    if let Err(error) = netd_result {
+        abort_core_preparation(replacement, child, &transaction_id);
+        if already_suspended {
+            leave_proxy_fallback(current, child, netd, transition)
+                .context("restore last-good SD-WAN after rejected reconfigure")
+                .map_err(|error| anyhow::Error::new(HotReloadRecoveryRequired(error)))?;
+        }
+        let error_code = netd_reconfigure_error_code(&error);
+        let error = anyhow::Error::from(error);
+        if transient_runtime_error(&error) {
+            return Err(anyhow::Error::new(CorePreparationPending(format!(
+                "{error:#}"
+            ))));
+        }
+        write_failed_activation_receipt(replacement, error_code)?;
+        eprintln!(
+            "level=error event=sdwan_hot_reload_rejected generation={} error_code={} error={}",
+            replacement.generation,
+            error_code,
+            sanitize_log_value(&error.to_string())
+        );
+        return Ok(false);
+    }
+    // Recheck after netd work as well; Cloud may have withdrawn/superseded
+    // the candidate while the kernel transaction was running.
+    if !activation_binding_unchanged(replacement).unwrap_or(false) || shutdown_requested() {
+        abort_core_preparation(replacement, child, &transaction_id);
+        if already_suspended {
+            restore_uncommitted_netd_activation(
+                current,
+                child,
+                netd,
+                previous_declaration,
+                transition,
+                true,
+            )
+            .map_err(|error| anyhow::Error::new(HotReloadRecoveryRequired(error)))?;
+        } else {
+            netd.rollback()
+                .context("discard prepared netd replacement")?;
+        }
+        return Ok(false);
+    }
+    if let Err(error) = remove_stale_status(&replacement.status) {
+        log_runtime_failure(
+            "sdwan_status_cleanup_failed",
+            "core_status_cleanup_failed",
+            &error,
+        );
+        abort_core_preparation(replacement, child, &transaction_id);
+        if already_suspended {
+            restore_uncommitted_netd_activation(
+                current,
+                child,
+                netd,
+                previous_declaration,
+                transition,
+                true,
+            )
+            .map_err(|error| anyhow::Error::new(HotReloadRecoveryRequired(error)))?;
+        } else {
+            netd.rollback()
+                .context("discard prepared netd replacement")?;
+        }
+        return Ok(false);
+    }
+    let mut commit = request_core_transaction(
+        replacement,
+        child,
+        CoreReloadAction::Commit,
+        Some(&transaction_id),
+        || renew_transition_lease(replacement, netd, &mut next_renewal),
+    );
+    if commit.is_err() {
+        // Core caches the outcome. Retry the same ID to recover a lost reply;
+        // never issue Replace or a lower generation as a guessed rollback.
+        commit = request_core_transaction(
+            replacement,
+            child,
+            CoreReloadAction::Commit,
+            Some(&transaction_id),
+            || renew_transition_lease(replacement, netd, &mut next_renewal),
+        );
+    }
+    if let Err(error) = commit {
+        eprintln!("level=error event=sdwan_policy_commit_unresolved generation={} transaction_id={} error_code=core_policy_commit_unresolved fallback=candy_proxy error={}",
+            replacement.generation, transaction_id, sanitize_log_value(&format!("{error:#}")));
+        return Err(anyhow::Error::new(AppliedHotReloadPending(error)));
+    }
+    if !already_suspended {
+        netd.commit_replacement()
+            .context("commit prepared netd replacement")?;
+    }
+
+    let deadline = Instant::now()
+        .checked_add(Duration::from_millis(replacement.readiness_timeout_ms))
+        .context("hot reload readiness deadline overflow")?;
+    let readiness_failure = loop {
+        if let Err(error) = renew_transition_lease(replacement, netd, &mut next_renewal) {
+            break Some(("netd_lease_renewal_failed", error));
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                break Some((
+                    "core_exit_during_hot_reload",
+                    anyhow::anyhow!("Candy Core exited during hot reload with status {status}"),
+                ))
+            }
+            Err(error) => {
+                break Some((
+                    "core_readiness_failed",
+                    anyhow::Error::from(error).context("inspect Candy Core during hot reload"),
+                ))
+            }
+            Ok(None) => {}
+        }
+        match read_core_readiness(
+            &replacement.status,
+            replacement.generation,
+            child.id(),
+            readiness_token,
+        ) {
+            Err(error) => break Some(("core_readiness_failed", error)),
+            Ok(Some(ReadinessState::Ready)) | Ok(Some(ReadinessState::Degraded))
+                if replacement.core_role == CoreRole::Server =>
+            {
+                break None
+            }
+            Ok(Some(ReadinessState::Ready)) => break None,
+            Ok(_) if Instant::now() >= deadline => {
+                break Some((
+                    "core_readiness_timeout",
+                    anyhow::anyhow!("Candy Core hot reload readiness timed out"),
+                ))
+            }
+            _ => thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    if let Some((error_code, error)) = readiness_failure {
+        // Core has already committed. A REJECTED receipt makes cloud-sync
+        // remove this candidate, which disables recovery and strands steering
+        // in fallback. Only terminal pre-commit failures may reject a candidate.
+        if !already_suspended {
+            // The candidate commit leaves netd in Draining while the old
+            // declaration is retained.  Before the outer loop enters Candy
+            // Proxy fallback, finish that transaction so Suspend can operate
+            // on the promoted candidate instead of being rejected as an
+            // invalid Draining transition.
+            if let Err(drain_error) = drain_old_bounded(netd) {
+                eprintln!(
+                    "level=error event=sdwan_hot_reload_drain_failed generation={} error_code=netd_drain_failed error={}",
+                    replacement.generation,
+                    sanitize_log_value(&format!("{drain_error:#}"))
+                );
+                return Err(anyhow::Error::new(AppliedHotReloadPending(
+                    drain_error.context("drain committed replacement before fallback"),
+                )));
+            }
+        }
+        eprintln!(
+            "level=error event=sdwan_hot_reload_recovering generation={} error_code={} fallback=candy_proxy error={}",
+            replacement.generation,
+            error_code,
+            sanitize_log_value(&format!("{error:#}"))
+        );
+        return Err(anyhow::Error::new(AppliedHotReloadPending(error)));
+    }
+    if !activation_binding_unchanged(replacement).unwrap_or(false) || shutdown_requested() {
+        if !already_suspended {
+            if let Err(drain_error) = drain_old_bounded(netd) {
+                return Err(anyhow::Error::new(AppliedHotReloadPending(
+                    drain_error.context("drain superseded replacement before fallback"),
+                )));
+            }
+        }
+        return Err(anyhow::Error::new(AppliedHotReloadPending(
+            anyhow::anyhow!(
+                "candidate withdrawn or superseded after Core commit; steering stays suspended"
+            ),
+        )));
+    }
+    if !already_suspended {
+        if let Err(error) = drain_old_bounded(netd) {
+            return Err(anyhow::Error::new(AppliedHotReloadPending(
+                error.context("drain old netd owner"),
+            )));
+        }
+    } else if let Err(error) = leave_proxy_fallback(replacement, child, netd, transition) {
+        return Err(anyhow::Error::new(AppliedHotReloadPending(error)));
+    }
+    write_runtime_activation_receipt_with_proof(
+        replacement,
+        "committed",
+        None,
+        Some(receipt_core_proof(
+            replacement,
+            child.id(),
+            readiness_token,
+        )?),
+    )
+    .map_err(|error| anyhow::Error::new(AppliedHotReloadPending(error)))?;
+    eprintln!(
+        "level=info event=sdwan_hot_reload_committed previous_generation={} generation={} core_pid={} fallback=candy_proxy",
+        current.generation,
+        replacement.generation,
+        child.id()
+    );
+    Ok(true)
+}
+
+#[derive(Debug)]
+struct AppliedHotReloadPending(anyhow::Error);
+
+#[derive(Debug)]
+struct CorePreparationPending(String);
+
+#[derive(Debug)]
+struct CoreReloadRejected {
+    message: String,
+    replacement_required: bool,
+}
+
+impl std::fmt::Display for CoreReloadRejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Candy Core rejected hot reload: {}",
+            self.message
+        )
+    }
+}
+
+impl std::error::Error for CoreReloadRejected {}
+
+impl std::fmt::Display for CorePreparationPending {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "candidate preparation pending: {}", self.0)
+    }
+}
+
+impl std::error::Error for CorePreparationPending {}
+
+#[derive(Debug)]
+struct HotReloadRecoveryRequired(anyhow::Error);
+
+impl std::fmt::Display for HotReloadRecoveryRequired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "hot reload rollback incomplete; network recovery required: {:#}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for HotReloadRecoveryRequired {}
+
+impl std::fmt::Display for AppliedHotReloadPending {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Core commit dispatched; activation confirmation/recovery pending: {:#}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for AppliedHotReloadPending {}
+
+fn fail_without_core(
+    args: &RuntimeArgs,
+    netd: &mut NetdClient,
+    cause: &str,
+    error_code: &'static str,
+    error: anyhow::Error,
+) -> Result<()> {
+    log_runtime_failure("sdwan_activation_failed", error_code, &error);
+    let rollback = rollback_or_report(netd, cause);
+    if shutdown_requested() {
+        return finish_shutdown_after_rollback(args, rollback, "activation_failure");
+    }
+    if transient_runtime_error(&error) {
+        if let Err(rollback_error) = rollback {
+            log_runtime_failure("sdwan_rollback_deferred", "netd_rollback", &rollback_error);
+        }
+        return retryable_failure(args, error_code, error);
+    }
+    let marker = write_failed_activation_receipt(args, error_code);
+    if let Err(rollback_error) = &rollback {
+        log_runtime_failure("sdwan_rollback_failed", "netd_rollback", rollback_error);
+    }
+    if let Err(marker_error) = &marker {
+        eprintln!("level=error event=sdwan_rejection_receipt_failed error={marker_error:#}");
+    }
+    rollback?;
+    marker?;
+    Err(error)
+}
+
+fn run_once(mut args: RuntimeArgs, recovery_attempt: bool) -> Result<()> {
+    if args.generation == 0 {
+        return fail_before_prepare(
+            &args,
+            "invalid SD-WAN generation",
+            "invalid_generation",
+            anyhow::anyhow!("generation must be non-zero"),
+        );
+    }
+    if !(MIN_LEASE_MS..=MAX_LEASE_MS).contains(&args.lease_ms) {
+        return fail_before_prepare(
+            &args,
+            "invalid SD-WAN lease",
+            "invalid_lease",
+            anyhow::anyhow!("lease-ms is outside the supported bound"),
+        );
+    }
+    if !(MIN_READINESS_TIMEOUT_MS..=MAX_READINESS_TIMEOUT_MS).contains(&args.readiness_timeout_ms) {
+        return fail_before_prepare(
+            &args,
+            "invalid Core readiness timeout",
+            "invalid_readiness_timeout",
+            anyhow::anyhow!("readiness-timeout-ms is outside the supported bound"),
+        );
+    }
+    if let Err(error) = install_shutdown_handlers() {
+        return fail_before_prepare(
+            &args,
+            "install SD-WAN shutdown handlers",
+            "signal_handler_failed",
+            error,
+        );
+    }
+    let declaration = match parse_declaration(&args.declaration) {
+        Ok(declaration) => declaration,
+        Err(error) => {
+            return fail_before_prepare(
+                &args,
+                "invalid netd declaration",
+                "declaration_invalid",
+                error,
+            )
+        }
+    };
+    let deadline = match monotonic_ms().and_then(|now| {
+        now.checked_add(args.lease_ms)
+            .context("lease deadline overflow")
+    }) {
+        Ok(deadline) => deadline,
+        Err(error) => {
+            return fail_before_prepare(
+                &args,
+                "invalid monotonic lease deadline",
+                "lease_clock_failed",
+                error,
+            )
+        }
+    };
+    let instance_id = match parse_instance_id(&args.instance_id) {
+        Ok(instance_id) => instance_id,
+        Err(error) => {
+            return fail_before_prepare(
+                &args,
+                "invalid SD-WAN instance identity",
+                "instance_id_invalid",
+                error,
+            )
+        }
+    };
+    let owner = LeaseOwner {
+        instance_id,
+        pid: std::process::id(),
+        generation: args.generation,
+        lease_deadline_mono_ms: deadline,
+    };
+    eprintln!(
+        "level=info event=sdwan_prepare generation={} pid={}",
+        owner.generation, owner.pid
+    );
+    let mut netd = NetdClient::new(&args.socket, owner);
+    let prepared = match netd.prepare(declaration).context("netd prepare") {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return fail_before_prepare(&args, "netd prepare failed", "netd_prepare_failed", error)
+        }
+    };
+    if let Err(error) = remove_stale_status(&args.status) {
+        return fail_without_core(
+            &args,
+            &mut netd,
+            "stale Core readiness cleanup failed",
+            "status_cleanup_failed",
+            error,
+        );
+    }
+    match cleanup_superseded_activation_statuses(&args.status) {
+        Ok(removed) if removed > 0 => eprintln!(
+            "level=info event=sdwan_status_cleanup removed={} status={}",
+            removed,
+            args.status.display()
+        ),
+        Ok(_) => {}
+        // Status cleanup must not turn a working candidate into an outage.
+        Err(error) => eprintln!(
+            "level=warn event=sdwan_status_cleanup_failed status={} error={}",
+            args.status.display(),
+            sanitize_log_value(&format!("{error:#}"))
+        ),
+    }
+    let readiness_token = match generate_readiness_token() {
+        Ok(token) => token,
+        Err(error) => {
+            return fail_without_core(
+                &args,
+                &mut netd,
+                "Core readiness token generation failed",
+                "readiness_token_failed",
+                error,
+            )
+        }
+    };
+    let mut child = match spawn_core(&args, &prepared.tun, &readiness_token) {
+        Ok(child) => child,
+        Err(error) => {
+            return fail_without_core(
+                &args,
+                &mut netd,
+                "Candy Core start failed",
+                "core_start_failed",
+                error,
+            );
+        }
+    };
+    match wait_for_core_readiness(&args, &mut child, &readiness_token, &mut netd) {
+        Ok(ReadinessWait::Ready) => {}
+        Ok(ReadinessWait::ShutdownRequested) => {
+            stop_core(&mut child);
+            let rollback = rollback_or_report(&mut netd, "SD-WAN agent shutdown before readiness");
+            let receipt = remove_activation_receipt(args.activation_ready.as_deref());
+            rollback?;
+            receipt?;
+            eprintln!(
+                "level=info event=sdwan_stopped generation={} phase=readiness rollback_ok=true",
+                owner.generation
+            );
+            return Ok(());
+        }
+        Err(error) => {
+            return if error.downcast_ref::<TransientReadinessFailure>().is_some() {
+                retry_after_rollback(
+                    &args,
+                    &mut child,
+                    &mut netd,
+                    "Candy Core readiness failed",
+                    "core_readiness_failed",
+                    error,
+                )
+            } else {
+                fail_after_rollback(
+                    &args,
+                    &mut child,
+                    &mut netd,
+                    "Candy Core readiness failed",
+                    "core_readiness_failed",
+                    error,
+                )
+            }
+        }
+    }
+    if let Err(error) = netd.commit() {
+        return if recovery_attempt {
+            retry_after_rollback(
+                &args,
+                &mut child,
+                &mut netd,
+                "netd recovery commit failed",
+                "netd_commit_failed",
+                error.into(),
+            )
+        } else {
+            fail_after_rollback(
+                &args,
+                &mut child,
+                &mut netd,
+                "netd commit failed",
+                "netd_commit_failed",
+                error.into(),
+            )
+        };
+    }
+    let mut pending_receipt = PendingReceipt::committed(&args, child.id(), &readiness_token);
+    if let Err(error) = remove_runtime_failure_marker(&args.status) {
+        eprintln!(
+            "level=warn event=sdwan_runtime_failure_marker_cleanup_failed error={}",
+            sanitize_log_value(&format!("{error:#}"))
+        );
+    }
+    eprintln!(
+        "level=info event=sdwan_commit generation={}",
+        owner.generation
+    );
+    let renew_every = Duration::from_millis((args.lease_ms / 3).max(1_000));
+    let mut next_renewal = Instant::now() + renew_every;
+    let mut transition = HotTransitionState::default();
+    let mut peer_loss_fallback = false;
+    let mut route_integrity_fallback = false;
+    // This is deliberately separate from `peer_loss_fallback`: the latter is
+    // the current forwarding mode, while this flag records that this process
+    // has completed one successful activation.  A post-commit readiness flap
+    // is recoverable and must not be treated like an initial activation
+    // failure.
+    let mut committed_ready = true;
+    let mut readiness_lost_since = None::<Instant>;
+    let mut last_partial_route_log = None::<Instant>;
+    let mut rejected_activation = None::<PathBuf>;
+    let mut preparation_retry_target = None::<PathBuf>;
+    let mut next_preparation_retry = Instant::now();
+    let mut pending_policy = None::<RuntimeArgs>;
+    // Bound repair latency without issuing a netlink transaction on every
+    // 100 ms Core status sample.
+    let mut last_failed_prefixes = None::<Vec<Ipv4Prefix>>;
+    let mut last_route_reconcile = None::<Instant>;
+    let route_diagnostics_path = route_diagnostics_path(&args.status)?;
+    let mut route_diagnostics = load_route_diagnostics(&route_diagnostics_path, args.generation);
+    loop {
+        // All recovery and candidate-inspection branches below may continue
+        // early. Renew first so repeated transient states cannot starve netd.
+        if let Err(error) = renew_transition_lease(&args, &mut netd, &mut next_renewal) {
+            return retry_after_rollback(
+                &args,
+                &mut child,
+                &mut netd,
+                "netd lease renewal failed",
+                "netd_lease_failed",
+                error,
+            );
+        }
+        if let Some(receipt) = pending_receipt.as_mut() {
+            match receipt.retry() {
+                Ok(true) => pending_receipt = None,
+                Ok(false) => {}
+                Err(error) => log_runtime_failure(
+                    "sdwan_receipt_binding_pending",
+                    "activation_receipt_binding",
+                    &error,
+                ),
+            }
+        }
+        if let Some(replacement) = pending_policy.as_ref() {
+            if shutdown_requested() || child.try_wait()?.is_some() {
+                return retry_after_rollback(
+                    &args,
+                    &mut child,
+                    &mut netd,
+                    "Core stopped during policy confirmation",
+                    "policy_update_core_stopped",
+                    anyhow::anyhow!("Core stopped while policy commit confirmation was pending"),
+                );
+            }
+            // A process-bound status for the candidate is evidence of the
+            // applied policy, even when the reload socket reply was lost.
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+            let authorized = replacement
+                .activation_descriptor
+                .as_ref()
+                .is_none_or(|descriptor| grant_retry_eligible(descriptor, now));
+            let committed = authorized
+                && read_core_status(
+                    &replacement.status,
+                    args.generation,
+                    child.id(),
+                    &readiness_token,
+                )
+                .ok()
+                .flatten()
+                .is_some_and(|status| {
+                    status.policy_generation == runtime_policy_generation(replacement)
+                });
+            let retry_due = authorized && Instant::now() >= next_preparation_retry;
+            let outcome = if committed {
+                Ok(PolicyUpdateOutcome::Applied)
+            } else if retry_due {
+                policy_update_activation_inner(&args, replacement, &mut child, &mut netd, true)
+            } else {
+                Ok(PolicyUpdateOutcome::CommitPending)
+            };
+            match outcome {
+                Ok(PolicyUpdateOutcome::Applied) => {
+                    args = adopt_policy_activation(&args, replacement);
+                    pending_receipt =
+                        PendingReceipt::committed(&args, child.id(), &readiness_token);
+                    pending_policy = None;
+                    preparation_retry_target = None;
+                }
+                outcome => {
+                    if retry_due {
+                        if let Err(error) = outcome {
+                            log_runtime_failure(
+                                "sdwan_policy_confirmation_retry",
+                                "policy_update_commit_unresolved",
+                                &error,
+                            );
+                        }
+                        next_preparation_retry = Instant::now() + RETRY_INITIAL_DELAY;
+                    }
+                    if matches!(
+                        activation_pointer_state(replacement),
+                        Ok(ActivationPointerState::Superseded)
+                    ) {
+                        if let Ok(newer) = reload_runtime_args(&args) {
+                            if runtime_policy_generation(&newer)
+                                >= runtime_policy_generation(replacement)
+                            {
+                                pending_policy = Some(newer);
+                                next_preparation_retry = Instant::now();
+                            }
+                        }
+                    }
+                    thread::sleep(RETRY_POLL_INTERVAL);
+                    continue;
+                }
+            }
+        }
+        match activation_pointer_state(&args) {
+            Ok(ActivationPointerState::Unchanged) => {}
+            Ok(ActivationPointerState::Superseded) => {
+                let replacement = match reload_runtime_args(&args) {
+                    Ok(replacement) => replacement,
+                    Err(error) => {
+                        eprintln!(
+                            "level=error event=sdwan_hot_reload_rejected generation={} error_code=activation_invalid error={}",
+                            args.generation,
+                            sanitize_log_value(&format!("{error:#}"))
+                        );
+                        thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                };
+                if rejected_activation.as_ref() != replacement.activation_target.as_ref()
+                    && (preparation_retry_target != replacement.activation_target
+                        || Instant::now() >= next_preparation_retry)
+                {
+                    let policy_outcome = match policy_update_activation(
+                        &args,
+                        &replacement,
+                        &mut child,
+                        &mut netd,
+                    ) {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            log_runtime_failure(
+                                "sdwan_policy_candidate_rejected",
+                                "policy_candidate_invalid",
+                                &error,
+                            );
+                            pending_receipt = PendingReceipt::publish(
+                                &replacement,
+                                "rejected",
+                                Some("policy_candidate_invalid"),
+                            );
+                            rejected_activation = replacement.activation_target.clone();
+                            continue;
+                        }
+                    };
+                    match policy_outcome {
+                        PolicyUpdateOutcome::Applied => {
+                            let applied = adopt_policy_activation(&args, &replacement);
+                            args = applied;
+                            pending_receipt =
+                                PendingReceipt::committed(&args, child.id(), &readiness_token);
+                            rejected_activation = None;
+                            preparation_retry_target = None;
+                            continue;
+                        }
+                        PolicyUpdateOutcome::Rejected => {
+                            pending_receipt = PendingReceipt::publish(
+                                &replacement,
+                                "rejected",
+                                Some("policy_update_rejected"),
+                            );
+                            rejected_activation = replacement.activation_target.clone();
+                            continue;
+                        }
+                        PolicyUpdateOutcome::Retry => {
+                            preparation_retry_target = replacement.activation_target.clone();
+                            next_preparation_retry = Instant::now() + RETRY_INITIAL_DELAY;
+                            continue;
+                        }
+                        PolicyUpdateOutcome::CommitPending => {
+                            // Suspend steering while Core/netd agreement is
+                            // uncertain, retaining the process and its policy.
+                            if let Err(error) = netd.suspend() {
+                                return retry_after_rollback(
+                                    &replacement,
+                                    &mut child,
+                                    &mut netd,
+                                    "failed to withdraw uncertain policy steering",
+                                    "policy_steering_suspend_failed",
+                                    error.into(),
+                                );
+                            }
+                            transition.steering_suspended = true;
+                            peer_loss_fallback = true;
+                            pending_policy = Some(replacement);
+                            next_preparation_retry = Instant::now() + RETRY_INITIAL_DELAY;
+                            continue;
+                        }
+                        PolicyUpdateOutcome::RequiresTunnelReplacement => {}
+                    }
+                    match hot_replace_activation(
+                        &args,
+                        &replacement,
+                        &mut child,
+                        &mut netd,
+                        &readiness_token,
+                        &mut transition,
+                    ) {
+                        Ok(true) => {
+                            args = replacement;
+                            peer_loss_fallback = false;
+                            route_integrity_fallback = false;
+                            rejected_activation = None;
+                            next_renewal = Instant::now() + renew_every;
+                        }
+                        Ok(false) => {
+                            rejected_activation = replacement.activation_target.clone();
+                        }
+                        Err(error) if error.downcast_ref::<CorePreparationPending>().is_some() => {
+                            // Keep old ownership/readiness and retry this
+                            // publication after backoff. A new candidate need
+                            // not wait for the previous candidate's deadline.
+                            preparation_retry_target = replacement.activation_target.clone();
+                            next_preparation_retry = Instant::now() + RETRY_INITIAL_DELAY;
+                        }
+                        Err(error) if error.downcast_ref::<AppliedHotReloadPending>().is_some() => {
+                            // Core has crossed its commit point. Keep ownership
+                            // and readiness checks on that generation and retry
+                            // forwarding, never attempt a lower signed generation.
+                            args = replacement;
+                            peer_loss_fallback = true;
+                            rejected_activation = None;
+                            next_renewal = Instant::now();
+                            eprintln!("level=warn event=sdwan_activation_recovery_pending generation={} error={}", args.generation, sanitize_log_value(&format!("{error:#}")));
+                        }
+                        Err(error)
+                            if error.downcast_ref::<HotReloadRecoveryRequired>().is_some() =>
+                        {
+                            // A poisoned netd transaction cannot Resume. Clean
+                            // it and retry the desired activation, rather than
+                            // rejecting it and remaining stuck in fallback.
+                            return retry_after_rollback(
+                                &replacement,
+                                &mut child,
+                                &mut netd,
+                                "hot reload rollback incomplete",
+                                "hot_transition_failed",
+                                error,
+                            );
+                        }
+                        Err(error) => {
+                            if !transition.complete() {
+                                let _ = enter_proxy_fallback(
+                                    &args,
+                                    &mut child,
+                                    &mut netd,
+                                    &mut transition,
+                                );
+                            }
+                            let _ = write_failed_activation_receipt(
+                                &replacement,
+                                "hot_transition_failed",
+                            );
+                            rejected_activation = replacement.activation_target.clone();
+                            eprintln!(
+                                "level=error event=sdwan_hot_reload_rejected generation={} error_code=hot_transition_failed fallback={} error={}",
+                                replacement.generation,
+                                if transition.steering_suspended { "candy_proxy" } else { "last_good_sdwan" },
+                                sanitize_log_value(&format!("{error:#}"))
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(ActivationPointerState::Withdrawn) => {
+                // A withdrawn Cloud policy owns the fallback decision. Do not
+                // let a stale pre-withdrawal readiness report resume steering.
+                peer_loss_fallback = false;
+                route_integrity_fallback = false;
+                rejected_activation = None;
+                let was_in_fallback = transition.complete();
+                if !was_in_fallback {
+                    if let Err(error) =
+                        enter_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
+                    {
+                        eprintln!(
+                            "level=error event=sdwan_hot_degrade_retry generation={} error_code=proxy_fallback_failed error={}",
+                            args.generation,
+                            sanitize_log_value(&format!("{error:#}"))
+                        );
+                        thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                    eprintln!(
+                        "level=info event=sdwan_hot_degraded generation={} source=candy_proxy core_pid={} reason=cloud_policy_withdrawn",
+                        args.generation,
+                        child.id()
+                    );
+                }
+                // The policy may be withdrawn while the agent is already in
+                // the peer-loss fallback path. Receipt removal must therefore
+                // be unconditional; otherwise Cloud keeps observing the old
+                // activation as committed after the policy is gone.
+                if let Err(error) = remove_activation_receipt(args.activation_ready.as_deref()) {
+                    eprintln!(
+                        "level=error event=sdwan_activation_receipt_cleanup_failed generation={} error_code=activation_receipt_cleanup_failed error={}",
+                        args.generation,
+                        sanitize_log_value(&format!("{error:#}"))
+                    );
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "level=error event=sdwan_candidate_inspection_retry generation={} error_code=candidate_inspection_failed fallback=last_good_sdwan error={}",
+                    args.generation,
+                    sanitize_log_value(&format!("{error:#}"))
+                );
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        }
+        if shutdown_requested() {
+            stop_core(&mut child);
+            let rollback = rollback_or_report(&mut netd, "SD-WAN agent shutdown");
+            rollback?;
+            remove_activation_receipt_deferred(&args);
+            eprintln!(
+                "level=info event=sdwan_stopped generation={} rollback_ok=true",
+                owner.generation
+            );
+            return Ok(());
+        }
+        let child_status = match child.try_wait().context("wait for Candy Core") {
+            Ok(status) => status,
+            Err(error) => {
+                return retry_after_rollback(
+                    &args,
+                    &mut child,
+                    &mut netd,
+                    "Candy Core process inspection failed",
+                    "core_process_inspection_failed",
+                    error,
+                )
+            }
+        };
+        if let Some(status) = child_status {
+            let code = status.code().unwrap_or(1);
+            return retry_after_rollback(
+                &args,
+                &mut child,
+                &mut netd,
+                "Candy Core SD-WAN exited",
+                "core_exit",
+                anyhow::anyhow!("Candy Core SD-WAN exited with status {code}"),
+            );
+        }
+        if !transition.steering_suspended || peer_loss_fallback || route_integrity_fallback {
+            let readiness_policy = if args.core_role == CoreRole::Server {
+                ReadinessPolicy::CommittedServer
+            } else {
+                ReadinessPolicy::Committed
+            };
+            match read_core_readiness_with_policy(
+                &args.status,
+                args.generation,
+                child.id(),
+                &readiness_token,
+                readiness_policy,
+            ) {
+                Ok(Some(ReadinessState::Ready | ReadinessState::Degraded))
+                    if args.core_role == CoreRole::Server =>
+                {
+                    committed_ready = true;
+                    readiness_lost_since = None;
+                    last_partial_route_log = None;
+                    if peer_loss_fallback && !route_integrity_fallback {
+                        match leave_proxy_fallback(&args, &mut child, &mut netd, &mut transition) {
+                            Ok(()) => {
+                                peer_loss_fallback = false;
+                                pending_receipt =
+                                    PendingReceipt::committed(&args, child.id(), &readiness_token);
+                                eprintln!("level=info event=sdwan_recovered generation={} source=peer_reconnect", args.generation);
+                            }
+                            Err(error) => eprintln!(
+                                "level=warn event=sdwan_recovery_pending generation={} error={}",
+                                args.generation,
+                                sanitize_log_value(&format!("{error:#}"))
+                            ),
+                        }
+                    }
+                }
+                Ok(Some(ReadinessState::Ready)) => {
+                    committed_ready = true;
+                    readiness_lost_since = None;
+                    last_partial_route_log = None;
+                    if peer_loss_fallback && !route_integrity_fallback {
+                        if let Err(error) =
+                            leave_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
+                        {
+                            eprintln!(
+                                "level=warn event=sdwan_recovery_pending error_code=steering_resume_failed error={}",
+                                sanitize_log_value(&format!("{error:#}"))
+                            );
+                        } else {
+                            peer_loss_fallback = false;
+                            pending_receipt =
+                                PendingReceipt::committed(&args, child.id(), &readiness_token);
+                            eprintln!(
+                                "level=info event=sdwan_recovered generation={} source=peer_reconnect",
+                                args.generation
+                            );
+                        }
+                    }
+                }
+                Ok(Some(ReadinessState::Degraded)) => {
+                    committed_ready = true;
+                    readiness_lost_since = None;
+                    // A recovered owner must restore healthy-route forwarding
+                    // immediately after an all-peer fallback. Exact failed
+                    // prefixes are reconciled below from the authenticated
+                    // Core status; healthy routes remain installed.
+                    if peer_loss_fallback && !route_integrity_fallback {
+                        if let Err(error) =
+                            leave_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
+                        {
+                            eprintln!(
+                                "level=warn event=sdwan_partial_route_recovery_pending generation={} error_code=steering_resume_failed error={}",
+                                args.generation,
+                                sanitize_log_value(&format!("{error:#}"))
+                            );
+                            thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
+                        peer_loss_fallback = false;
+                        pending_receipt =
+                            PendingReceipt::committed(&args, child.id(), &readiness_token);
+                    }
+                    let should_log = last_partial_route_log
+                        .is_none_or(|logged| logged.elapsed() >= PARTIAL_ROUTE_RETRY_LOG_INTERVAL);
+                    if should_log {
+                        last_partial_route_log = Some(Instant::now());
+                        let evidence = read_core_status(
+                            &args.status,
+                            args.generation,
+                            child.id(),
+                            &readiness_token,
+                        )
+                        .ok()
+                        .flatten();
+                        eprintln!(
+                            "level=warn event=sdwan_partial_route_degraded generation={} error_code=partial_route_owner_unavailable action=reconcile_exact_failed_prefixes configured_peers={} active_peers={} required_routes={} ready_routes={}",
+                            args.generation,
+                            evidence.as_ref().map_or(0, |status| status.configured_peers),
+                            evidence.as_ref().map_or(0, |status| status.active_peers),
+                            evidence.as_ref().map_or(0, |status| status.required_route_owners),
+                            evidence.as_ref().map_or(0, |status| status.ready_route_owners),
+                        );
+                    }
+                }
+                Ok(Some(ReadinessState::ListenerReady)) => {
+                    if committed_ready {
+                        let lost_since = readiness_lost_since.get_or_insert_with(Instant::now);
+                        if !peer_loss_fallback {
+                            if let Err(error) =
+                                enter_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
+                            {
+                                return retry_after_rollback(
+                                    &args,
+                                    &mut child,
+                                    &mut netd,
+                                    "SD-WAN route readiness fallback failed",
+                                    "peer_loss_fallback_failed",
+                                    error,
+                                );
+                            }
+                            peer_loss_fallback = true;
+                            eprintln!(
+                                "level=warn event=sdwan_peer_loss_fallback generation={} source=candy_proxy reason=route_readiness_lost error_code=peer_readiness_transient action=preserve_core_and_retry",
+                                args.generation
+                            );
+                        }
+                        if lost_since.elapsed() < CORE_READINESS_RECOVERY_GRACE {
+                            thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
+                    }
+                    return retry_after_rollback(
+                        &args,
+                        &mut child,
+                        &mut netd,
+                        "Candy Core lost SD-WAN route readiness",
+                        "core_route_readiness_lost",
+                        anyhow::anyhow!(
+                            "Candy Core listener remains ready but no route owner is active"
+                        ),
+                    );
+                }
+                Ok(Some(ReadinessState::Waiting)) | Ok(None) => {
+                    if committed_ready {
+                        let lost_since = readiness_lost_since.get_or_insert_with(Instant::now);
+                        if !peer_loss_fallback {
+                            if let Err(error) =
+                                enter_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
+                            {
+                                return retry_after_rollback(
+                                    &args,
+                                    &mut child,
+                                    &mut netd,
+                                    "SD-WAN readiness fallback failed",
+                                    "peer_loss_fallback_failed",
+                                    error,
+                                );
+                            }
+                            peer_loss_fallback = true;
+                            eprintln!(
+                                "level=warn event=sdwan_peer_loss_fallback generation={} source=candy_proxy reason=core_readiness_temporarily_unavailable error_code=peer_readiness_transient action=preserve_core_and_retry",
+                                args.generation
+                            );
+                        }
+                        if lost_since.elapsed() < CORE_READINESS_RECOVERY_GRACE {
+                            thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
+                    }
+                    return retry_after_rollback(
+                        &args,
+                        &mut child,
+                        &mut netd,
+                        "Candy Core lost SD-WAN readiness",
+                        "core_readiness_lost",
+                        anyhow::anyhow!("Candy Core lost SD-WAN readiness after netd commit"),
+                    );
+                }
+                Ok(Some(ReadinessState::RecoverablePeerLoss)) => {
+                    readiness_lost_since.get_or_insert_with(Instant::now);
+                    if args.core_role == CoreRole::ClientSdwan && !peer_loss_fallback {
+                        if let Err(error) =
+                            enter_proxy_fallback(&args, &mut child, &mut netd, &mut transition)
+                        {
+                            return retry_after_rollback(
+                                &args,
+                                &mut child,
+                                &mut netd,
+                                "SD-WAN peer loss fallback failed",
+                                "peer_loss_fallback_failed",
+                                error,
+                            );
+                        }
+                        peer_loss_fallback = true;
+                        let evidence = read_core_status(
+                            &args.status,
+                            args.generation,
+                            child.id(),
+                            &readiness_token,
+                        )
+                        .ok()
+                        .flatten();
+                        let error_code = evidence
+                            .as_ref()
+                            .and_then(|status| status.last_error_code.as_deref())
+                            .unwrap_or("sdwan_peer_loss");
+                        let detail = evidence
+                            .as_ref()
+                            .and_then(|status| status.last_error_detail.as_deref())
+                            .unwrap_or("all required peer lanes are unavailable");
+                        eprintln!(
+                            "level=warn event=sdwan_peer_loss_fallback generation={} source=candy_proxy reason=all_peer_lanes_unavailable error_code={} detail={} configured_peers={} active_peers={} required_routes={} ready_routes={} action=preserve_core_and_reconnect",
+                            args.generation,
+                            error_code,
+                            sanitize_log_value(detail),
+                            evidence.as_ref().map_or(0, |status| status.configured_peers),
+                            evidence.as_ref().map_or(0, |status| status.active_peers),
+                            evidence.as_ref().map_or(0, |status| status.required_route_owners),
+                            evidence.as_ref().map_or(0, |status| status.ready_route_owners),
+                        );
+                    }
+                }
+                Ok(Some(ReadinessState::Failed)) => {
+                    unreachable!("failed readiness returns an error")
+                }
+                Err(error) => {
+                    return retry_after_rollback(
+                        &args,
+                        &mut child,
+                        &mut netd,
+                        "Candy Core reported SD-WAN failure",
+                        "core_runtime_failed",
+                        error.context("Candy Core failed after netd commit"),
+                    );
+                }
+            }
+            match read_core_status(&args.status, args.generation, child.id(), &readiness_token) {
+                // Fallback has removed the SD-WAN policy rule, so this
+                // route table cannot receive traffic. Keep it immutable
+                // while Core redials; the first healthy iteration resumes
+                // steering before reconciling the exact failed set.
+                Ok(Some(_)) if transition.steering_suspended && !route_integrity_fallback => {}
+                // During the bounded post-commit recovery window the status
+                // file may legitimately be absent while Core atomically
+                // replaces it.  Readiness handling above already put traffic
+                // on the independent Candy Proxy fallback in that case.
+                Ok(None) if peer_loss_fallback => {}
+                Ok(Some(status)) => {
+                    let declaration = parse_declaration(&args.declaration)
+                        .context("parse declaration for failed-prefix recovery")?;
+                    // Older Core builds do not report the exact failed set.
+                    // Retain the last kernel state and expose why
+                    // reconciliation was skipped instead of guessing empty.
+                    let desired_prefixes = desired_failed_prefixes(&status, &declaration)?;
+                    let reconcile_due = last_route_reconcile
+                        .is_none_or(|last| last.elapsed() >= ROUTE_RECONCILE_INTERVAL);
+                    if let Some(prefixes) = desired_prefixes {
+                        if last_failed_prefixes.as_ref() != Some(&prefixes) || reconcile_due {
+                            let started = Instant::now();
+                            route_diagnostics.reconcile_attempts =
+                                route_diagnostics.reconcile_attempts.saturating_add(1);
+                            let now = unix_seconds()?;
+                            route_diagnostics.record_probe(&status, now);
+                            let before = match inspect_kernel_routes(&declaration, &prefixes) {
+                                Ok(snapshot) => Some(snapshot),
+                                Err(error) => {
+                                    eprintln!(
+                                        "level=warn event=route_snapshot_pre_reconcile_failed error_code=route_snapshot_inspection_failed error={}",
+                                        sanitize_log_value(&format!("{error:#}"))
+                                    );
+                                    None
+                                }
+                            };
+                            if let Err(error) = netd.set_failed_prefixes(prefixes.clone()) {
+                                route_diagnostics.record_error(
+                                    now,
+                                    started.elapsed().as_millis() as u64,
+                                    "netd_route_reconcile_failed",
+                                );
+                                if let Some(snapshot) = &before {
+                                    route_diagnostics.active_issues = snapshot.issues.clone();
+                                }
+                                if let Err(write_error) = write_route_diagnostics(
+                                    &route_diagnostics_path,
+                                    &route_diagnostics,
+                                ) {
+                                    eprintln!(
+                                        "level=warn event=route_diagnostics_write_failed error_code=route_diagnostics_write_failed error={}",
+                                        sanitize_log_value(&format!("{write_error:#}"))
+                                    );
+                                }
+                                return Err(anyhow::Error::new(error))
+                                    .context("reconcile Core failed-prefix route set");
+                            }
+                            match inspect_kernel_routes(&declaration, &prefixes) {
+                                Ok(snapshot) => route_diagnostics.record_snapshot(
+                                    before,
+                                    snapshot,
+                                    now,
+                                    started.elapsed().as_millis() as u64,
+                                ),
+                                Err(error) => {
+                                    route_diagnostics.record_error(
+                                        now,
+                                        started.elapsed().as_millis() as u64,
+                                        "route_snapshot_inspection_failed",
+                                    );
+                                    if let Some(snapshot) = before {
+                                        route_diagnostics.active_issues = snapshot.issues;
+                                    }
+                                    eprintln!(
+                                        "level=warn event=route_snapshot_inspection_failed error_code=route_snapshot_inspection_failed error={}",
+                                        sanitize_log_value(&format!("{error:#}"))
+                                    );
+                                }
+                            }
+                            if let Err(error) =
+                                write_route_diagnostics(&route_diagnostics_path, &route_diagnostics)
+                            {
+                                eprintln!(
+                                    "level=warn event=route_diagnostics_write_failed error_code=route_diagnostics_write_failed error={}",
+                                    sanitize_log_value(&format!("{error:#}"))
+                                );
+                            }
+                            eprintln!(
+                                "level=info event=route_reconcile_completed generation={} desired_failed_prefix_count={} integrity={} expected_routes={} observed_routes={} orphaned_routes={} active_issues={} recovered_issues={} attempts={} successes={} error_code={}",
+                                args.generation,
+                                prefixes.len(),
+                                route_diagnostics.integrity,
+                                route_diagnostics.expected_routes,
+                                route_diagnostics.observed_routes,
+                                route_diagnostics.orphaned_routes,
+                                route_diagnostics.active_issues.len(),
+                                route_diagnostics.last_recovered_issues.len(),
+                                route_diagnostics.reconcile_attempts,
+                                route_diagnostics.reconcile_successes,
+                                route_diagnostics.last_error_code.as_deref().unwrap_or("none")
+                            );
+                            if route_diagnostics.integrity == "consistent"
+                                && route_integrity_fallback
+                            {
+                                if peer_loss_fallback {
+                                    route_integrity_fallback = false;
+                                    eprintln!(
+                                        "level=info event=route_integrity_recovered generation={} action=keep_peer_loss_fallback",
+                                        args.generation
+                                    );
+                                } else {
+                                    match leave_proxy_fallback(
+                                        &args,
+                                        &mut child,
+                                        &mut netd,
+                                        &mut transition,
+                                    ) {
+                                        Ok(()) => {
+                                            route_integrity_fallback = false;
+                                            eprintln!(
+                                                "level=info event=route_integrity_recovered generation={} action=resume_sdwan_steering",
+                                                args.generation
+                                            );
+                                        }
+                                        Err(error) => eprintln!(
+                                            "level=warn event=route_integrity_resume_pending generation={} error_code=steering_resume_failed error={}",
+                                            args.generation,
+                                            sanitize_log_value(&format!("{error:#}"))
+                                        ),
+                                    }
+                                }
+                            } else if route_diagnostics.integrity != "consistent"
+                                && !route_integrity_fallback
+                            {
+                                match netd.suspend() {
+                                    Ok(_) => {
+                                        transition.steering_suspended = true;
+                                        route_integrity_fallback = true;
+                                        eprintln!(
+                                            "level=error event=route_integrity_fallback generation={} error_code=route_snapshot_mismatch action=suspend_sdwan_steering active_issues={}",
+                                            args.generation,
+                                            route_diagnostics.active_issues.len()
+                                        );
+                                    }
+                                    Err(error) => {
+                                        return retry_after_rollback(
+                                            &args,
+                                            &mut child,
+                                            &mut netd,
+                                            "route integrity fallback failed",
+                                            "route_integrity_fallback_failed",
+                                            error.into(),
+                                        );
+                                    }
+                                }
+                            }
+                            last_failed_prefixes = Some(prefixes);
+                            last_route_reconcile = Some(Instant::now());
+                        }
+                    } else if reconcile_due {
+                        route_diagnostics.record_error(
+                            unix_seconds()?,
+                            0,
+                            "core_failed_prefixes_unreported",
+                        );
+                        if let Err(error) =
+                            write_route_diagnostics(&route_diagnostics_path, &route_diagnostics)
+                        {
+                            eprintln!(
+                                "level=warn event=route_diagnostics_write_failed error_code=route_diagnostics_write_failed error={}",
+                                sanitize_log_value(&format!("{error:#}"))
+                            );
+                        }
+                        eprintln!(
+                            "level=warn event=route_reconcile_skipped generation={} reason=core_failed_prefixes_unreported configured_peers={} active_peers={} required_routes={} ready_routes={} error_code=core_failed_prefixes_unreported",
+                            args.generation,
+                            status.configured_peers,
+                            status.active_peers,
+                            status.required_route_owners,
+                            status.ready_route_owners
+                        );
+                        last_route_reconcile = Some(Instant::now());
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return retry_after_rollback(
+                        &args,
+                        &mut child,
+                        &mut netd,
+                        "Candy Core traffic status inspection failed",
+                        "core_status_inspection_failed",
+                        error,
+                    );
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn run(mut args: RuntimeArgs) -> Result<()> {
+    // The signal latch and child lifecycle are process-wide. Keep the test
+    // fixture lock across every retry and reset the latch only after taking it.
+    #[cfg(test)]
+    let _test_guard = RUN_TEST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("SD-WAN agent test lock poisoned");
+    #[cfg(test)]
+    SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+
+    let mut retry_backoff = RetryBackoff::new();
+    let mut recovery_attempt = false;
+    loop {
+        let attempt_started = Instant::now();
+        match run_once(args.clone(), recovery_attempt) {
+            Err(error) if error.downcast_ref::<RetryableFailure>().is_some() => {
+                let failure = error
+                    .downcast_ref::<RetryableFailure>()
+                    .expect("retryable failure downcast changed");
+                let error_code = failure.error_code;
+                args = (*failure.activation).clone();
+                if args.activation_link.is_none() {
+                    return Err(error);
+                }
+                let retry_delay = retry_backoff.delay_after_failure(attempt_started.elapsed());
+                eprintln!(
+                    "level=info event=sdwan_retry_scheduled generation={} error_code={} delay_ms={}",
+                    args.generation,
+                    error_code,
+                    retry_delay.as_millis()
+                );
+                match wait_before_retry(&args, retry_delay)? {
+                    RetryWait::Retry => recovery_attempt = true,
+                    RetryWait::Stop => return Ok(()),
+                }
+            }
+            result => return result,
+        }
+    }
+}
+
+pub fn cli_main() {
+    let args = Args::parse();
+    let result = match args.command.as_ref() {
+        Some(CommandKind::ExperimentalRuntimeAgent { config, experimental_packet_port_ipc }) => runtime_agent::run(config,*experimental_packet_port_ipc),
+        Some(CommandKind::ExperimentalPacketPortRun { plan, experimental_packet_port_ipc }) => experimental_tunio::run(plan,*experimental_packet_port_ipc),
+        Some(CommandKind::AdoptTunio { record, expected_executable, control_socket, experimental_packet_port_ipc }) => experimental_tunio::adopt(record,expected_executable,control_socket,*experimental_packet_port_ipc),
+        Some(CommandKind::AdoptPacketPortWorker { plan, experimental_packet_port_ipc }) => experimental_tunio::adopt_worker(plan,*experimental_packet_port_ipc),
+        Some(CommandKind::InspectManagedProcess { record, expected_executable }) => {
+            process_record::read(record).and_then(|record| {
+                record.validate_current(expected_executable, unix_seconds()?)?;
+                eprintln!("level=info code=managed_process_evidence_valid module=process_supervisor pid={} process_start_ticks={} action=preflight_only owner_gate_required=true", record.pid, record.process_start_ticks);
+                Ok(())
+            })
+        }
+        Some(CommandKind::ValidateActivation {
+            activation,
+            expected_core_role,
+            ordinary_config,
+        }) => {
+            validate_activation_command(activation, *expected_core_role, ordinary_config.as_deref())
+        }
+        Some(CommandKind::Run) | None => resolve_runtime_args(args).and_then(run),
+    };
+    if let Err(error) = result {
+        eprintln!("level=error event=sdwan_agent_failed error={error:#}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    fn run_test_attempt(args: super::RuntimeArgs) -> anyhow::Result<()> {
+        let _guard = super::RUN_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        super::SHUTDOWN_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        super::run_once(args, false)
+    }
+    use super::*;
+
+    #[test]
+    fn route_diagnostics_persist_real_reconcile_outcomes_without_inventing_probes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("route-diagnostics-v1.json");
+        let mut diagnostics = RouteDiagnosticsFile::new(9);
+        diagnostics.reconcile_attempts = 1;
+        diagnostics.record_snapshot(
+            None,
+            RouteSnapshot {
+                expected_snapshot_sha256: "11".repeat(32),
+                observed_snapshot_sha256: "11".repeat(32),
+                expected_routes: 4,
+                observed_routes: 4,
+                orphaned_routes: 0,
+                issues: Vec::new(),
+            },
+            100,
+            17,
+        );
+        write_route_diagnostics(&path, &diagnostics).unwrap();
+
+        let restored = load_route_diagnostics(&path, 9);
+        assert_eq!(restored.integrity, "consistent");
+        assert_eq!(restored.reconcile_successes, 1);
+        assert_eq!(restored.last_recovery_duration_ms, Some(17));
+        assert_eq!(restored.probe_state, "unreported");
+        assert_eq!(restored.probe_successes, 0);
+        assert_eq!(load_route_diagnostics(&path, 10).reconcile_attempts, 0);
+    }
+
+    #[test]
+    fn route_diagnostics_keep_snapshot_drift_visible() {
+        let mut diagnostics = RouteDiagnosticsFile::new(9);
+        diagnostics.reconcile_attempts = 1;
+        diagnostics.record_snapshot(
+            None,
+            RouteSnapshot {
+                expected_snapshot_sha256: "11".repeat(32),
+                observed_snapshot_sha256: "22".repeat(32),
+                expected_routes: 4,
+                observed_routes: 5,
+                orphaned_routes: 1,
+                issues: vec![RouteDiagnosticIssue {
+                    prefix: "10.0.0.0/24".into(),
+                    table_id: 20_001,
+                    expected_kind: "link".into(),
+                    observed_kind: "throw".into(),
+                    reason: "stale_failed_prefix_throw".into(),
+                    action: "restore_signed_route".into(),
+                }],
+            },
+            100,
+            9,
+        );
+        assert_eq!(diagnostics.integrity, "drifted");
+        assert_eq!(diagnostics.reconcile_successes, 0);
+        assert_eq!(diagnostics.active_issues.len(), 1);
+        assert_eq!(
+            diagnostics.last_error_code.as_deref(),
+            Some("route_snapshot_mismatch")
+        );
+    }
+
+    #[test]
+    fn route_diagnostics_preserve_repair_evidence_after_snapshot_recovers() {
+        let issue = RouteDiagnosticIssue {
+            prefix: "10.0.0.0/24".into(),
+            table_id: 20_001,
+            expected_kind: "link".into(),
+            observed_kind: "throw".into(),
+            reason: "stale_failed_prefix_throw".into(),
+            action: "restore_signed_route".into(),
+        };
+        let before = RouteSnapshot {
+            expected_snapshot_sha256: "11".repeat(32),
+            observed_snapshot_sha256: "22".repeat(32),
+            expected_routes: 1,
+            observed_routes: 1,
+            orphaned_routes: 1,
+            issues: vec![issue.clone()],
+        };
+        let after = RouteSnapshot {
+            expected_snapshot_sha256: "11".repeat(32),
+            observed_snapshot_sha256: "11".repeat(32),
+            expected_routes: 1,
+            observed_routes: 1,
+            orphaned_routes: 0,
+            issues: Vec::new(),
+        };
+        let mut diagnostics = RouteDiagnosticsFile::new(9);
+        diagnostics.record_snapshot(Some(before), after, 100, 7);
+
+        assert_eq!(diagnostics.integrity, "consistent");
+        assert!(diagnostics.active_issues.is_empty());
+        assert_eq!(diagnostics.last_recovered_issues, vec![issue]);
+        assert_eq!(diagnostics.last_recovered_at_unix, Some(100));
+    }
+
+    #[test]
+    fn route_snapshot_issues_classify_recoverable_and_unknown_routes() {
+        let expected = vec![
+            "10.0.0.0/24|link|mtu=1180|advmss=1140".to_owned(),
+            "192.168.0.0/24|throw".to_owned(),
+        ];
+        let observed = vec![
+            "10.0.0.0/24|throw".to_owned(),
+            "orphan|203.0.113.0/24|Static|Unicast|Universe|oif=2".to_owned(),
+            "192.168.0.0/24|throw".to_owned(),
+        ];
+
+        let issues = route_snapshot_issues(20_001, &expected, &observed);
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].reason, "stale_failed_prefix_throw");
+        assert_eq!(issues[0].action, "restore_signed_route");
+        assert_eq!(issues[1].reason, "undeclared_route");
+        assert_eq!(issues[1].action, "suspend_steering_and_require_review");
+    }
+
+    #[test]
+    fn route_diagnostics_report_only_generation_bound_packet_probes() {
+        let status = |generation, ready_route_owners, probe_generation, error_code| {
+            serde_json::from_value::<CoreReadinessStatus>(serde_json::json!({
+                "schema_version": 3,
+                "generation": generation,
+                "pid": 42,
+                "readiness_token": "token",
+                "lifecycle": "active",
+                "configured_peers": 1,
+                "active_peers": 1,
+                "required_route_owners": 1,
+                "ready_route_owners": ready_route_owners,
+                "failed_prefixes": [],
+                "fail_open_required": ready_route_owners == 0,
+                "last_error_code": error_code,
+                "paths": [{
+                    "rtt_sample_count": 1,
+                    "rx_bytes": 0,
+                    "rx_idle_ms": 0,
+                    "streams": [{
+                        "packet_probe_state": if ready_route_owners == 1 { "ready" } else { "pending" },
+                        "packet_probe_generation": probe_generation,
+                        "packet_probe_rtt_micros": if ready_route_owners == 1 { Some(12_001_u64) } else { None }
+                    }]
+                }]
+            }))
+            .unwrap()
+        };
+
+        let mut diagnostics = RouteDiagnosticsFile::new(9);
+        diagnostics.record_probe(&status(9, 1, Some(9), None), 100);
+        assert_eq!(diagnostics.probe_state, "succeeded");
+        assert_eq!(diagnostics.probe_targets, 1);
+        assert_eq!(diagnostics.probe_successes, 1);
+        assert_eq!(diagnostics.probe_rtt_ms, Some(13));
+        assert_eq!(diagnostics.probe_checked_at_unix, Some(100));
+
+        diagnostics.record_probe(
+            &status(10, 0, Some(9), Some("tun_route_probe_no_reply")),
+            101,
+        );
+        assert_eq!(diagnostics.probe_state, "failed");
+        assert_eq!(diagnostics.probe_successes, 0);
+        assert_eq!(diagnostics.probe_rtt_ms, None);
+        assert_eq!(diagnostics.probe_checked_at_unix, Some(101));
+
+        // A policy-only refresh advances policy generation without replacing
+        // the tunnel, so its existing tunnel-generation probe remains valid.
+        let policy_refresh = serde_json::from_value::<CoreReadinessStatus>(serde_json::json!({
+            "schema_version": 3,
+            "generation": 287,
+            "policy_generation": 288,
+            "pid": 42,
+            "readiness_token": "token",
+            "lifecycle": "active",
+            "configured_peers": 1,
+            "active_peers": 1,
+            "required_route_owners": 1,
+            "ready_route_owners": 1,
+            "failed_prefixes": [],
+            "fail_open_required": false,
+            "paths": [{"rtt_sample_count": 1, "rx_bytes": 0, "rx_idle_ms": 0,
+                "streams": [{"packet_probe_state": "ready", "packet_probe_generation": 287,
+                    "packet_probe_rtt_micros": 12001}]}]
+        }))
+        .unwrap();
+        diagnostics.record_probe(&policy_refresh, 103);
+        assert_eq!(diagnostics.probe_state, "succeeded");
+        assert_eq!(diagnostics.probe_rtt_ms, Some(13));
+        assert_eq!(diagnostics.probe_checked_at_unix, Some(103));
+
+        let legacy = serde_json::from_value::<CoreReadinessStatus>(serde_json::json!({
+            "schema_version": 3,
+            "generation": 10,
+            "pid": 42,
+            "readiness_token": "token",
+            "lifecycle": "active",
+            "configured_peers": 1,
+            "active_peers": 1,
+            "required_route_owners": 1,
+            "ready_route_owners": 1,
+            "failed_prefixes": [],
+            "fail_open_required": false,
+            "paths": [{"rtt_sample_count": 1, "rx_bytes": 0, "rx_idle_ms": 0}]
+        }))
+        .unwrap();
+        diagnostics.record_probe(&legacy, 102);
+        assert_eq!(diagnostics.probe_state, "unreported");
+        assert_eq!(diagnostics.probe_targets, 0);
+        assert_eq!(diagnostics.probe_checked_at_unix, None);
+    }
+
+    #[test]
+    fn legacy_core_never_guesses_an_empty_failed_prefix_set() {
+        let declaration = PrepareDeclaration {
+            table_id: 20_001,
+            overlay_router_ipv4: [100, 64, 0, 2],
+            effective_mtu: 1_300,
+            routes: vec![RouteDeclaration {
+                prefix: Ipv4Prefix::new([192, 168, 1, 0], 24).unwrap(),
+                kind: RouteKind::Remote,
+            }],
+            exclusions: Vec::new(),
+            firewall: FirewallPolicy {
+                allow_forward: true,
+                clamp_tcp_mss: true,
+                require_ipv4_forwarding: true,
+                manage_rp_filter: true,
+            },
+        };
+        let status = |ready| {
+            serde_json::from_value::<CoreReadinessStatus>(serde_json::json!({
+                "schema_version": 2,
+                "generation": 7,
+                "pid": 42,
+                "readiness_token": "token",
+                "lifecycle": "active",
+                "configured_peers": 1,
+                "active_peers": ready,
+                "required_route_owners": 1,
+                "ready_route_owners": ready,
+                "fail_open_required": false
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            desired_failed_prefixes(&status(1), &declaration).unwrap(),
+            None
+        );
+        assert_eq!(
+            desired_failed_prefixes(&status(0), &declaration).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn runtime_diagnostics_preserve_typed_causes_through_context() {
+        for (error, code) in [
+            (
+                anyhow::Error::from(IpcError::Remote(ErrorCode::SystemFailure)),
+                "netd_system_failure",
+            ),
+            (
+                anyhow::Error::from(IpcError::Remote(ErrorCode::UnauthorizedPeer)),
+                "netd_peer_unauthorized",
+            ),
+            (
+                anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+                "io_permission_denied",
+            ),
+            (
+                anyhow::Error::new(CoreReadinessFailure {
+                    code: "grant_expired".into(),
+                    lifecycle: "failed".into(),
+                    detail: None,
+                }),
+                "grant_expired",
+            ),
+            (
+                anyhow::anyhow!("netd permission denied timeout"),
+                "unclassified",
+            ),
+        ] {
+            assert_eq!(runtime_cause_code(&error.context("caller stage")), code);
+        }
+    }
+
+    #[test]
+    fn broken_netd_ipc_is_classified_as_retryable_peer_closed() {
+        let error = IpcError::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "write failed",
+        ));
+        assert_eq!(
+            netd_reconfigure_error_code(&error),
+            "netd_reconfigure_peer_closed"
+        );
+        let error = IpcError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "netd closed response",
+        ));
+        assert_eq!(
+            netd_reconfigure_error_code(&error),
+            "netd_reconfigure_peer_closed"
+        );
+    }
+    use candy_netd_client::{recv_request, send_response};
+    use candy_netd_proto::{ErrorCode, NetdOperation, NetdResponse, ResponseBody};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixListener;
+
+    fn write_private(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum ReloadFault {
+        PrepareRejected,
+        PreparePending,
+        CandidateChanged,
+        LostCommitReply,
+        CommitUnresolved,
+        NetdRollbackIncomplete,
+    }
+
+    fn exercise_prepared_hot_reload(fault: ReloadFault) {
+        use std::sync::{Arc, Mutex};
+        let _guard = RUN_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+        let (_root, mut current) = server_runtime_fixture();
+        current.core_role = CoreRole::ClientSdwan;
+        current.generation = 6;
+        let (_candidate_root, candidate, _) = activation_fixture();
+        write_private(
+            &candidate.join("declaration.json"),
+            &fs::read(&current.declaration).unwrap(),
+        );
+        let (descriptor, target, config, declaration) = resolve_activation(&candidate).unwrap();
+        let mut replacement = current.clone();
+        replacement.generation = descriptor.projection_generation;
+        replacement.activation_link = Some(candidate);
+        replacement.activation_target = Some(target);
+        replacement.activation_descriptor = Some(descriptor);
+        replacement.activation_config_sha256 = Some(sha256_file(&config).unwrap());
+        replacement.activation_declaration_sha256 = Some(sha256_file(&declaration).unwrap());
+        replacement.config = config;
+        replacement.declaration = declaration;
+        struct TestChild(Child);
+        impl Drop for TestChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = TestChild(Command::new("/bin/sleep").arg("60").spawn().unwrap());
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let finished = Arc::new(AtomicBool::new(false));
+        let netd_listener = UnixListener::bind(&current.socket).unwrap();
+        netd_listener.set_nonblocking(true).unwrap();
+        let netd_events = events.clone();
+        let netd_finished = finished.clone();
+        let netd_task = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let stream = match netd_listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if netd_finished.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        assert!(Instant::now() < deadline, "netd mock timed out");
+                        thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(error) => panic!("{error}"),
+                };
+                stream.set_nonblocking(false).unwrap();
+                let request = recv_request(&stream).unwrap();
+                let generation = request.owner.generation;
+                let tun = File::open("/dev/null").unwrap();
+                let mut fd = None;
+                let (name, body) = match request.operation {
+                    NetdOperation::Prepare(_) => {
+                        fd = Some(tun.as_raw_fd());
+                        (
+                            "prepare",
+                            ResponseBody::Prepared {
+                                generation,
+                                tun_fd_attached: true,
+                            },
+                        )
+                    }
+                    NetdOperation::Commit => ("commit", ResponseBody::Committed { generation }),
+                    NetdOperation::LeaseRenew => {
+                        ("lease", ResponseBody::LeaseRenewed { generation })
+                    }
+                    NetdOperation::Suspend => ("suspend", ResponseBody::Suspended { generation }),
+                    NetdOperation::Reconfigure(_) => (
+                        "reconfigure",
+                        if fault == ReloadFault::NetdRollbackIncomplete {
+                            ResponseBody::Error(ErrorCode::SystemFailure)
+                        } else {
+                            ResponseBody::Reconfigured { generation }
+                        },
+                    ),
+                    NetdOperation::Resume => (
+                        "resume",
+                        if fault == ReloadFault::NetdRollbackIncomplete {
+                            ResponseBody::Error(ErrorCode::SystemFailure)
+                        } else {
+                            ResponseBody::Resumed { generation }
+                        },
+                    ),
+                    NetdOperation::Status => (
+                        "status",
+                        ResponseBody::Status {
+                            phase: candy_netd_proto::SessionPhase::Suspended,
+                            generation: 6,
+                        },
+                    ),
+                    NetdOperation::Rollback => {
+                        ("rollback", ResponseBody::RolledBack { generation })
+                    }
+                    NetdOperation::Drain { .. } => ("drain", ResponseBody::Drained { generation }),
+                    other => panic!("unexpected netd operation {other:?}"),
+                };
+                netd_events.lock().unwrap().push(format!("netd:{name}"));
+                send_response(
+                    &stream,
+                    &NetdResponse {
+                        request_id: request.request_id,
+                        body,
+                    },
+                    fd,
+                )
+                .unwrap();
+            }
+        });
+        let core_listener = UnixListener::bind(core_reload_socket(&replacement).unwrap()).unwrap();
+        core_listener.set_nonblocking(true).unwrap();
+        let core_events = events.clone();
+        let core_finished = finished.clone();
+        let candidate_config = replacement.config.clone();
+        let status_path = replacement.status.clone();
+        let pid = child.0.id();
+        let core_task = thread::spawn(move || {
+            let mut id = None;
+            let mut commits = 0;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let mut stream = match core_listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if core_finished.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        assert!(Instant::now() < deadline, "Core mock timed out");
+                        thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(error) => panic!("{error}"),
+                };
+                // Accepted sockets inherit the listener's nonblocking mode on
+                // Linux. The mock protocol is length-delimited by EOF, so
+                // switch the connected stream back to blocking mode before
+                // draining the request; otherwise a partial write can yield
+                // WouldBlock and poison every subsequent serialized test.
+                stream.set_nonblocking(false).unwrap();
+                // macOS can reject SO_RCVTIMEO after Abort's sender has
+                // closed. Its buffered request is still readable.
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut bytes = Vec::new();
+                stream.read_to_end(&mut bytes).unwrap();
+                let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                let action = request["action"].as_str().unwrap();
+                core_events.lock().unwrap().push(format!("core:{action}"));
+                if action == "prepare" {
+                    let transaction = request["transaction_id"].as_str().unwrap();
+                    assert_eq!(transaction.len(), 64);
+                    id = Some(transaction.to_owned());
+                    if fault == ReloadFault::CandidateChanged {
+                        write_private(&candidate_config, b"changed while preparing");
+                    }
+                }
+                if matches!(action, "commit" | "abort") {
+                    assert_eq!(request["transaction_id"].as_str(), id.as_deref());
+                }
+                if action == "commit" {
+                    commits += 1;
+                    if fault == ReloadFault::LostCommitReply {
+                        write_private(&status_path, serde_json::json!({
+                            "schema_version":3,"generation":7,"pid":pid,"readiness_token":"test-token",
+                            "lifecycle":"active","configured_peers":1,"active_peers":1,
+                            "required_route_owners":1,"ready_route_owners":1,"fail_open_required":false,
+                            "last_error_code":null,"paths":[{"rtt_sample_count":1,"rx_bytes":0,"rx_idle_ms":0}]
+                        }).to_string().as_bytes());
+                        if commits == 1 {
+                            continue;
+                        }
+                    }
+                }
+                let ok = !(action == "prepare"
+                    && matches!(
+                        fault,
+                        ReloadFault::PrepareRejected | ReloadFault::PreparePending
+                    )
+                    || action == "commit" && fault == ReloadFault::CommitUnresolved);
+                let response = serde_json::json!({"schema_version":1,"ok":ok,
+                    "generation": if matches!(action, "prepare" | "commit") { Some(7) } else { None },
+                    "error": if ok { None } else if fault == ReloadFault::PreparePending {
+                        Some("peer_preparation_pending: required route owner is unreachable")
+                    } else { Some("injected failure") }});
+                let _ = stream.write_all(&serde_json::to_vec(&response).unwrap());
+            }
+        });
+        let mut netd = NetdClient::new(
+            &current.socket,
+            LeaseOwner {
+                instance_id: [1; 16],
+                pid: std::process::id(),
+                generation: 6,
+                lease_deadline_mono_ms: monotonic_ms().unwrap() + current.lease_ms,
+            },
+        );
+        let _prepared = netd
+            .prepare(parse_declaration(&current.declaration).unwrap())
+            .unwrap();
+        netd.commit().unwrap();
+        events.lock().unwrap().clear();
+        let mut transition = HotTransitionState::default();
+        let result = hot_replace_activation(
+            &current,
+            &replacement,
+            &mut child.0,
+            &mut netd,
+            "test-token",
+            &mut transition,
+        );
+        if matches!(
+            fault,
+            ReloadFault::CommitUnresolved | ReloadFault::NetdRollbackIncomplete
+        ) {
+            let retry = retry_after_rollback(
+                &replacement,
+                &mut child.0,
+                &mut netd,
+                "test unresolved commit recovery",
+                "core_policy_commit_unresolved",
+                anyhow::anyhow!("injected missing acknowledgement"),
+            )
+            .unwrap_err();
+            let failure = retry.downcast_ref::<RetryableFailure>().unwrap();
+            assert_eq!(failure.activation.generation, 7);
+            assert_eq!(
+                failure.activation.activation_target,
+                replacement.activation_target
+            );
+            assert_eq!(
+                wait_before_retry(&failure.activation, Duration::ZERO).unwrap(),
+                RetryWait::Retry
+            );
+            assert!(
+                !activation_retry_eligible(&current).unwrap_or(false),
+                "launch snapshot should be superseded in this regression"
+            );
+        }
+        drop(netd); // teardown while the mock can acknowledge rollback
+        finished.store(true, Ordering::SeqCst);
+        core_task.join().unwrap();
+        netd_task.join().unwrap();
+        let events = events.lock().unwrap();
+        assert!(
+            events.iter().any(|event| event == "netd:lease"),
+            "preparation must renew the old lease"
+        );
+        let operations: Vec<_> = events
+            .iter()
+            .filter(|event| !matches!(event.as_str(), "netd:lease" | "netd:rollback"))
+            .map(String::as_str)
+            .collect();
+        match fault {
+            ReloadFault::PreparePending => {
+                assert!(result
+                    .unwrap_err()
+                    .downcast_ref::<CorePreparationPending>()
+                    .is_some());
+                assert_eq!(operations, ["core:prepare", "core:abort"]);
+                assert!(!transition.core_suspended && !transition.steering_suspended);
+                assert!(
+                    !replacement.activation_ready.unwrap().exists(),
+                    "temporarily unreachable candidate must not publish a permanent rejection"
+                );
+            }
+            ReloadFault::PrepareRejected | ReloadFault::CandidateChanged => {
+                assert!(!result.unwrap());
+                assert_eq!(operations, ["core:prepare", "core:abort"]);
+                assert!(!transition.core_suspended && !transition.steering_suspended);
+            }
+            ReloadFault::LostCommitReply => {
+                assert!(result.unwrap());
+                assert_eq!(
+                    operations,
+                    [
+                        "core:prepare",
+                        "netd:reconfigure",
+                        "core:commit",
+                        "core:commit",
+                        "netd:commit",
+                        "netd:drain"
+                    ]
+                );
+                let receipt: serde_json::Value = serde_json::from_slice(
+                    &fs::read(replacement.activation_ready.unwrap()).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(receipt["state"], "committed");
+            }
+            ReloadFault::CommitUnresolved => {
+                assert!(result
+                    .unwrap_err()
+                    .downcast_ref::<AppliedHotReloadPending>()
+                    .is_some());
+                assert_eq!(
+                    operations,
+                    [
+                        "core:prepare",
+                        "netd:reconfigure",
+                        "core:commit",
+                        "core:commit"
+                    ]
+                );
+                assert!(!transition.complete());
+                assert!(
+                    !replacement.activation_ready.unwrap().exists(),
+                    "uncertain commit must not publish rejection"
+                );
+            }
+            ReloadFault::NetdRollbackIncomplete => {
+                assert!(result
+                    .unwrap_err()
+                    .downcast_ref::<CorePreparationPending>()
+                    .is_some());
+                assert!(!operations.contains(&"core:commit"));
+                assert!(!transition.complete());
+                assert!(
+                    !replacement.activation_ready.unwrap().exists(),
+                    "incomplete rollback needs cleanup/retry, not a permanent rejection"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn failed_preparation_preserves_live_steering() {
+        exercise_prepared_hot_reload(ReloadFault::PrepareRejected);
+    }
+
+    #[test]
+    fn unavailable_prepared_route_is_retryable_without_mutating_live_steering() {
+        exercise_prepared_hot_reload(ReloadFault::PreparePending);
+    }
+
+    #[test]
+    fn superseded_preparation_aborts_before_netd_mutation() {
+        exercise_prepared_hot_reload(ReloadFault::CandidateChanged);
+    }
+
+    #[test]
+    fn lost_commit_reply_retries_same_transaction_before_resuming() {
+        exercise_prepared_hot_reload(ReloadFault::LostCommitReply);
+    }
+
+    #[test]
+    fn unresolved_commit_preserves_candidate_for_recovery() {
+        exercise_prepared_hot_reload(ReloadFault::CommitUnresolved);
+    }
+
+    #[test]
+    fn incomplete_netd_rollback_retries_desired_activation_instead_of_stalling() {
+        exercise_prepared_hot_reload(ReloadFault::NetdRollbackIncomplete);
+    }
+
+    #[test]
+    fn core_reply_wait_keeps_progress_alive_across_partial_reads() {
+        let (_root, args) = server_runtime_fixture();
+        let listener = UnixListener::bind(core_reload_socket(&args).unwrap()).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            stream
+                .write_all(br#"{"schema_version":1,"ok":true,"#)
+                .unwrap();
+            thread::sleep(Duration::from_millis(600));
+            stream
+                .write_all(br#""generation":7,"error":null}"#)
+                .unwrap();
+        });
+        let mut child = Command::new("/bin/sleep").arg("10").spawn().unwrap();
+        let mut progress_calls = 0;
+        let result = request_core_transaction(
+            &args,
+            &mut child,
+            CoreReloadAction::Prepare,
+            Some(&"a".repeat(64)),
+            || {
+                progress_calls += 1;
+                Ok(())
+            },
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        server.join().unwrap();
+        result.unwrap();
+        assert!(
+            progress_calls >= 3,
+            "waiting for a split reply must continue lease heartbeats"
+        );
+    }
+
+    fn activation_fixture() -> (tempfile::TempDir, PathBuf, String) {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let activations = root.path().join("activations");
+        fs::create_dir(&activations).unwrap();
+        fs::set_permissions(&activations, fs::Permissions::from_mode(0o700)).unwrap();
+        let activation_id = "a".repeat(64);
+        let generation = activations.join(&activation_id);
+        fs::create_dir(&generation).unwrap();
+        fs::set_permissions(&generation, fs::Permissions::from_mode(0o700)).unwrap();
+        write_private(&generation.join("core.toml"), b"schema_version = 1\n");
+        write_private(&generation.join("declaration.json"), b"{}");
+        write_private(
+            &generation.join("activation-v1.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "activation_id": activation_id,
+                "delivery_etag": format!("\"sha256-{}\"", "b".repeat(64)),
+                "delivery_sha256": "b".repeat(64),
+                "projection_publication_id": "8bf15734-8cdc-40b8-af96-308902a876d8",
+                "projection_content_hash": "c".repeat(64),
+                "segment_generation": 3,
+                "projection_generation": 7,
+                "core_role": "client_sdwan",
+                "core_config": "core.toml",
+                "netd_declaration": "declaration.json",
+                "grant_refresh_after_unix": 4_000_000_000_u64,
+                "grant_expires_at_unix": 4_102_444_800_u64
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let candidate = root.path().join("candidate");
+        symlink(Path::new("activations").join(&activation_id), &candidate).unwrap();
+        (root, candidate, activation_id)
+    }
+
+    fn server_runtime_fixture() -> (tempfile::TempDir, RuntimeArgs) {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let candidate = root.path().join("candidate");
+        let activation_id = "a".repeat(64);
+        let target = Path::new("activations").join(&activation_id);
+        symlink(&target, &candidate).unwrap();
+        let ordinary = root.path().join("ordinary.toml");
+        write_private(&ordinary, b"listen = \"127.0.0.1:8443\"\n");
+        let declaration = root.path().join("declaration.json");
+        write_private(
+            &declaration,
+            br#"{"table_id":20000,"overlay_router_ipv4":"10.250.0.1","effective_mtu":1180,"routes":[{"prefix":"10.0.0.0/24","kind":"local"}],"exclusions":[{"prefix":"198.51.100.1/32","kind":"cloud-api"}],"firewall":{"allow_forward":true,"clamp_tcp_mss":true,"require_ipv4_forwarding":true,"manage_rp_filter":true}}"#,
+        );
+        let args = RuntimeArgs {
+            socket: root.path().join("netd.sock"),
+            core: root.path().join("missing-core"),
+            core_role: CoreRole::Server,
+            config: root.path().join("merged.toml"),
+            declaration,
+            status: root.path().join("status.json"),
+            instance_id: activation_id[..32].to_owned(),
+            generation: 7,
+            lease_ms: 30_000,
+            readiness_timeout_ms: 5_000,
+            activation_link: Some(candidate),
+            activation_target: Some(target),
+            activation_descriptor: None,
+            activation_config_sha256: None,
+            activation_declaration_sha256: None,
+            activation_ready: Some(root.path().join("activation-ready-v1.json")),
+            ordinary_config: Some(ordinary),
+        };
+        (root, args)
+    }
+
+    #[test]
+    fn declaration_formatting_does_not_replace_the_tunnel() {
+        let (_root, current) = server_runtime_fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let declaration = directory.path().join("declaration.json");
+        write_private(
+            &declaration,
+            br#"{
+                "firewall": {
+                    "manage_rp_filter": true,
+                    "require_ipv4_forwarding": true,
+                    "clamp_tcp_mss": true,
+                    "allow_forward": true
+                },
+                "exclusions": [{"kind":"cloud_api","prefix":"198.51.100.1/32"}],
+                "routes": [{"kind":"local","prefix":"10.0.0.0/24"}],
+                "effective_mtu": 1180,
+                "overlay_router_ipv4": "10.250.0.1",
+                "table_id": 20000
+            }"#,
+        );
+        let mut replacement = current.clone();
+        replacement.declaration = declaration;
+
+        assert!(!tunnel_declaration_changed(&current, &replacement).unwrap());
+    }
+
+    #[test]
+    fn declaration_semantic_change_requires_tunnel_replacement() {
+        let (_root, current) = server_runtime_fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let declaration = directory.path().join("declaration.json");
+        write_private(
+            &declaration,
+            br#"{"table_id":20000,"overlay_router_ipv4":"10.250.0.1","effective_mtu":1280,"routes":[{"prefix":"10.0.0.0/24","kind":"local"}],"exclusions":[{"prefix":"198.51.100.1/32","kind":"cloud-api"}],"firewall":{"allow_forward":true,"clamp_tcp_mss":true,"require_ipv4_forwarding":true,"manage_rp_filter":true}}"#,
+        );
+        let mut replacement = current.clone();
+        replacement.declaration = declaration;
+
+        assert!(tunnel_declaration_changed(&current, &replacement).unwrap());
+    }
+
+    fn start_netd_mock_with_shutdown(
+        socket: &Path,
+        commit_result: Option<bool>,
+        shutdown_during_rollback: bool,
+    ) -> thread::JoinHandle<()> {
+        let listener = UnixListener::bind(socket).unwrap();
+        thread::spawn(move || {
+            let (prepare_stream, _) = listener.accept().unwrap();
+            let prepare = recv_request(&prepare_stream).unwrap();
+            assert!(matches!(prepare.operation, NetdOperation::Prepare(_)));
+            let tun = File::open("/dev/null").unwrap();
+            send_response(
+                &prepare_stream,
+                &NetdResponse {
+                    request_id: prepare.request_id,
+                    body: ResponseBody::Prepared {
+                        generation: prepare.owner.generation,
+                        tun_fd_attached: true,
+                    },
+                },
+                Some(tun.as_raw_fd()),
+            )
+            .unwrap();
+            if let Some(commit_ok) = commit_result {
+                let (commit_stream, _) = listener.accept().unwrap();
+                let commit = recv_request(&commit_stream).unwrap();
+                assert!(matches!(commit.operation, NetdOperation::Commit));
+                send_response(
+                    &commit_stream,
+                    &NetdResponse {
+                        request_id: commit.request_id,
+                        body: if commit_ok {
+                            ResponseBody::Committed {
+                                generation: commit.owner.generation,
+                            }
+                        } else {
+                            ResponseBody::Error(ErrorCode::SystemFailure)
+                        },
+                    },
+                    None,
+                )
+                .unwrap();
+            }
+            let (rollback_stream, _) = listener.accept().unwrap();
+            let rollback = recv_request(&rollback_stream).unwrap();
+            assert!(matches!(rollback.operation, NetdOperation::Rollback));
+            if shutdown_during_rollback {
+                request_shutdown(nix::libc::SIGTERM);
+            }
+            send_response(
+                &rollback_stream,
+                &NetdResponse {
+                    request_id: rollback.request_id,
+                    body: ResponseBody::RolledBack {
+                        generation: rollback.owner.generation,
+                    },
+                },
+                None,
+            )
+            .unwrap();
+        })
+    }
+
+    fn start_netd_mock(socket: &Path, commit_result: Option<bool>) -> thread::JoinHandle<()> {
+        start_netd_mock_with_shutdown(socket, commit_result, false)
+    }
+
+    fn install_fake_ready_core(path: &Path, lifecycle: &str) {
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+status=
+token=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --status) shift; status=$1 ;;
+        --readiness-token) shift; token=$1 ;;
+    esac
+    shift
+done
+[ -n "$status" ]
+[ -n "$token" ]
+rm -f "$0"
+umask 077
+status_tmp="$status.$$".tmp
+trap 'rm -f "$status_tmp"' EXIT
+printf '{{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"{lifecycle}","configured_peers":1,"active_peers":1,"required_route_owners":1,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null,"paths":[{{"rtt_sample_count":1,"rx_bytes":1,"rx_idle_ms":0}}]}}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+sleep 30
+"#
+        );
+        fs::write(path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    fn install_fake_shutdown_core(path: &Path) {
+        let script = r#"#!/bin/sh
+set -eu
+status=
+token=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --status) shift; status=$1 ;;
+        --readiness-token) shift; token=$1 ;;
+    esac
+    shift
+done
+[ -n "$status" ]
+[ -n "$token" ]
+rm -f "$0"
+umask 077
+status_tmp="$status.$$".tmp
+trap 'rm -f "$status_tmp"' EXIT
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"starting","configured_peers":0,"active_peers":0,"required_route_owners":0,"ready_route_owners":0,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+kill -TERM "$PPID"
+sleep 30
+"#;
+        fs::write(path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    fn install_fake_partial_server_ready_core(path: &Path) {
+        let script = r#"#!/bin/sh
+set -eu
+status=
+token=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --status) shift; status=$1 ;;
+        --readiness-token) shift; token=$1 ;;
+    esac
+    shift
+done
+[ -n "$status" ]
+[ -n "$token" ]
+rm -f "$0"
+umask 077
+status_tmp="$status.$$".tmp
+trap 'rm -f "$status_tmp"' EXIT
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"active","configured_peers":2,"active_peers":1,"required_route_owners":2,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null,"paths":[{"rtt_sample_count":1,"rx_bytes":1,"rx_idle_ms":0}]}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+sleep 1
+kill -TERM "$PPID"
+sleep 30
+"#;
+        fs::write(path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    fn install_fake_recovering_server_core(path: &Path) {
+        let script = r#"#!/bin/sh
+set -eu
+status=
+token=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --status) shift; status=$1 ;;
+        --readiness-token) shift; token=$1 ;;
+    esac
+    shift
+done
+[ -n "$status" ]
+[ -n "$token" ]
+rm -f "$0"
+umask 077
+status_tmp="$status.$$".tmp
+trap 'rm -f "$status_tmp"' EXIT
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"active","configured_peers":1,"active_peers":1,"required_route_owners":1,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null,"paths":[{"rtt_sample_count":1,"rx_bytes":1,"rx_idle_ms":0}]}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+sleep 1
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"failed","configured_peers":1,"active_peers":0,"required_route_owners":1,"ready_route_owners":0,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":true,"last_error_code":"all_peer_reads_failed","paths":[]}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+sleep 1
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"starting","configured_peers":1,"active_peers":0,"required_route_owners":1,"ready_route_owners":0,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":true,"last_error_code":"all_peer_reads_failed","paths":[]}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+sleep 1
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"active","configured_peers":1,"active_peers":1,"required_route_owners":1,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null,"paths":[{"rtt_sample_count":2,"rx_bytes":2,"rx_idle_ms":0}]}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+sleep 1
+kill -TERM "$PPID"
+sleep 30
+"#;
+        fs::write(path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    fn install_fake_exiting_core(path: &Path) {
+        let script = r#"#!/bin/sh
+set -eu
+status=
+token=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --status) shift; status=$1 ;;
+        --readiness-token) shift; token=$1 ;;
+    esac
+    shift
+done
+[ -n "$status" ]
+[ -n "$token" ]
+umask 077
+status_tmp="$status.$$".tmp
+trap 'rm -f "$status_tmp"' EXIT
+printf '{"schema_version":3,"generation":7,"pid":%s,"readiness_token":"%s","lifecycle":"active","configured_peers":1,"active_peers":1,"required_route_owners":1,"ready_route_owners":1,"inbound_listener_configured":true,"inbound_listener_ready":true,"inbound_listener_endpoints":["127.0.0.1:8443"],"fail_open_required":false,"last_error_code":null,"paths":[{"rtt_sample_count":1,"rx_bytes":1,"rx_idle_ms":0}]}\n' "$$" "$token" >"$status_tmp"
+mv -f "$status_tmp" "$status"
+sleep 1
+exit 17
+"#;
+        fs::write(path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn activation_descriptor_is_bound_to_immutable_candidate_target() {
+        let (_root, candidate, activation_id) = activation_fixture();
+        let (descriptor, target, config, declaration) = resolve_activation(&candidate).unwrap();
+        assert_eq!(descriptor.activation_id, activation_id);
+        assert_eq!(target, Path::new("activations").join(&activation_id));
+        assert_eq!(config.file_name().unwrap(), "core.toml");
+        assert_eq!(declaration.file_name().unwrap(), "declaration.json");
+        validate_activation_command(&candidate, CoreRole::ClientSdwan, None).unwrap();
+        assert!(validate_activation_command(&candidate, CoreRole::Server, None).is_err());
+    }
+
+    #[test]
+    fn documented_run_first_cli_accepts_global_runtime_arguments() {
+        let args = Args::try_parse_from([
+            "candy-sdwan-agent",
+            "run",
+            "--core",
+            "/bin/true",
+            "--activation",
+            "/var/lib/candy/sdwan/candidate",
+        ])
+        .unwrap();
+        assert!(matches!(args.command, Some(CommandKind::Run)));
+        assert_eq!(args.core.as_deref(), Some(Path::new("/bin/true")));
+    }
+
+    #[test]
+    fn server_activation_does_not_require_standalone_config() {
+        let (_root, candidate, _) = activation_fixture();
+        let descriptor_path = candidate.join("activation-v1.json");
+        let mut descriptor: serde_json::Value =
+            serde_json::from_slice(&fs::read(&descriptor_path).unwrap()).unwrap();
+        descriptor["core_role"] = serde_json::Value::String("server".into());
+        write_private(
+            &descriptor_path,
+            serde_json::to_string(&descriptor).unwrap().as_bytes(),
+        );
+        let args = Args::try_parse_from([
+            "candy-sdwan-agent",
+            "run",
+            "--core",
+            "/bin/true",
+            "--activation",
+            candidate.to_str().unwrap(),
+        ])
+        .unwrap();
+        assert!(resolve_runtime_args(args)
+            .unwrap()
+            .ordinary_config
+            .is_none());
+    }
+
+    #[test]
+    fn server_invalid_declaration_fails_closed() {
+        let (_root, args) = server_runtime_fixture();
+        write_private(&args.declaration, b"{}");
+        let error = run(args).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("invalid netd declaration"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn server_netd_prepare_failure_retries_without_rejection() {
+        let (_root, args) = server_runtime_fixture();
+        let receipt = args.activation_ready.clone().unwrap();
+        let error = run_test_attempt(args).unwrap_err();
+        assert!(
+            error.downcast_ref::<RetryableFailure>().is_some(),
+            "{error:#}"
+        );
+        assert!(!receipt.exists());
+    }
+
+    #[test]
+    fn server_core_spawn_failure_rolls_back_then_retries() {
+        let (_root, args) = server_runtime_fixture();
+        let receipt = args.activation_ready.clone().unwrap();
+        let netd = start_netd_mock(&args.socket, None);
+        let error = run_test_attempt(args).unwrap_err();
+        netd.join().unwrap();
+        assert!(
+            error.downcast_ref::<RetryableFailure>().is_some(),
+            "{error:#}"
+        );
+        assert!(!receipt.exists());
+    }
+
+    #[test]
+    fn server_hard_readiness_failure_rolls_back_and_fails_closed() {
+        let (_root, mut args) = server_runtime_fixture();
+        install_fake_ready_core(&args.core, "failed");
+        let receipt = args.activation_ready.clone().unwrap();
+        args.readiness_timeout_ms = 2_000;
+        let netd = start_netd_mock(&args.socket, None);
+        let error = run(args).unwrap_err();
+        netd.join().unwrap();
+        assert!(
+            format!("{error:#}").contains("failed readiness"),
+            "{error:#}"
+        );
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
+        assert_eq!(value["error_code"], "core_readiness_failed");
+    }
+
+    #[test]
+    fn server_shutdown_during_readiness_rolls_back_without_rejection_or_fallback() {
+        let (_root, mut args) = server_runtime_fixture();
+        install_fake_shutdown_core(&args.core);
+        let receipt = args.activation_ready.clone().unwrap();
+        write_private(&receipt, b"stale receipt");
+        args.readiness_timeout_ms = 2_000;
+        let netd = start_netd_mock(&args.socket, None);
+
+        let result = run(args);
+
+        netd.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            !receipt.exists(),
+            "normal shutdown retained or replaced the activation receipt"
+        );
+    }
+
+    #[test]
+    fn server_partial_route_readiness_commits_when_listener_is_ready() {
+        let (_root, mut args) = server_runtime_fixture();
+        install_fake_partial_server_ready_core(&args.core);
+        let receipt = args.activation_ready.clone().unwrap();
+        args.readiness_timeout_ms = 2_000;
+        let netd = start_netd_mock(&args.socket, Some(true));
+
+        let result = run(args);
+
+        netd.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            !receipt.exists(),
+            "normal shutdown retained the activation receipt"
+        );
+    }
+
+    #[test]
+    fn committed_server_waits_for_recoverable_peer_loss_without_restarting_core() {
+        let (_root, mut args) = server_runtime_fixture();
+        install_fake_recovering_server_core(&args.core);
+        let receipt = args.activation_ready.clone().unwrap();
+        args.readiness_timeout_ms = 2_000;
+        let netd = start_netd_mock(&args.socket, Some(true));
+
+        let result = run(args);
+
+        netd.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            !receipt.exists(),
+            "normal shutdown retained the activation receipt"
+        );
+    }
+
+    #[test]
+    fn server_commit_failure_rolls_back_then_retries() {
+        let (_root, args) = server_runtime_fixture();
+        install_fake_ready_core(&args.core, "active");
+        let receipt = args.activation_ready.clone().unwrap();
+        let netd = start_netd_mock(&args.socket, Some(false));
+        let error = run_test_attempt(args).unwrap_err();
+        netd.join().unwrap();
+        assert!(
+            error.downcast_ref::<RetryableFailure>().is_some(),
+            "{error:#}"
+        );
+        assert!(!receipt.exists());
+    }
+
+    #[test]
+    fn server_shutdown_during_failure_rollback_never_starts_ordinary_core() {
+        let (_root, args) = server_runtime_fixture();
+        install_fake_ready_core(&args.core, "active");
+        let receipt = args.activation_ready.clone().unwrap();
+        write_private(&receipt, b"stale receipt");
+        let netd = start_netd_mock_with_shutdown(&args.socket, Some(false), true);
+
+        let result = run(args);
+
+        netd.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "shutdown entered ordinary fallback: {result:?}"
+        );
+        assert!(
+            !receipt.exists(),
+            "shutdown retained or published an activation rejection receipt"
+        );
+    }
+
+    #[test]
+    fn committed_receipt_failure_preserves_core_until_explicit_shutdown() {
+        let (_root, mut args) = server_runtime_fixture();
+        install_fake_ready_core(&args.core, "active");
+        let script = fs::read_to_string(&args.core)
+            .unwrap()
+            .replace("sleep 30", "sleep 1\nkill -TERM \"$PPID\"\nsleep 30");
+        fs::write(&args.core, script).unwrap();
+        args.activation_ready = Some(args.socket.join("missing/receipt.json"));
+        let netd = start_netd_mock(&args.socket, Some(true));
+        let started = Instant::now();
+        let result = run(args);
+        netd.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            started.elapsed() >= Duration::from_millis(900),
+            "receipt failure stopped the Core before its shutdown signal"
+        );
+    }
+
+    #[test]
+    fn policy_activation_adoption_preserves_tunnel_generation_and_uses_candidate_status_path() {
+        let (_root, current) = server_runtime_fixture();
+        let mut replacement = current.clone();
+        replacement.generation = current.generation + 1;
+        replacement.config = PathBuf::from("/new/policy.toml");
+        replacement.declaration = PathBuf::from("/new/declaration.json");
+        replacement.status = PathBuf::from("/new/status.json");
+        replacement.activation_target = Some(PathBuf::from("new-candidate"));
+        replacement.activation_descriptor = Some(ActivationDescriptor {
+            schema_version: 1,
+            activation_id: "b".repeat(64),
+            delivery_etag: format!("\"sha256-{}\"", "c".repeat(64)),
+            delivery_sha256: "c".repeat(64),
+            projection_publication_id: "d".repeat(32),
+            projection_content_hash: "e".repeat(64),
+            segment_generation: 1,
+            projection_generation: replacement.generation,
+            core_role: replacement.core_role,
+            core_config: "core.toml".into(),
+            netd_declaration: "declaration.json".into(),
+            grant_refresh_after_unix: 0,
+            grant_expires_at_unix: 0,
+        });
+
+        let applied = adopt_policy_activation(&current, &replacement);
+
+        assert_eq!(applied.generation, current.generation);
+        assert_eq!(applied.status, replacement.status);
+        assert_eq!(runtime_policy_generation(&applied), replacement.generation);
+        assert_eq!(applied.config, replacement.config);
+        assert_eq!(applied.declaration, replacement.declaration);
+        assert_eq!(applied.activation_target, replacement.activation_target);
+    }
+
+    #[test]
+    fn policy_update_calls_core_without_starting_a_netd_tunnel_transaction() {
+        exercise_policy_update_reply(false);
+    }
+
+    #[test]
+    fn lost_policy_reply_does_not_restore_old_netd_policy_or_stop_core() {
+        exercise_policy_update_reply(true);
+    }
+
+    fn exercise_policy_update_reply(lost_reply: bool) {
+        let (root, current) = server_runtime_fixture();
+        let mut replacement = current.clone();
+        replacement.generation = current.generation + 1;
+        replacement.config = current.config.with_file_name("policy.toml");
+        replacement.status = current.status.with_file_name("policy.status.json");
+        replacement.declaration = root.path().join("policy-declaration.json");
+        replacement.activation_descriptor = Some(ActivationDescriptor {
+            schema_version: 1,
+            activation_id: "b".repeat(64),
+            delivery_etag: format!("\"sha256-{}\"", "c".repeat(64)),
+            delivery_sha256: "c".repeat(64),
+            projection_publication_id: "d".repeat(32),
+            projection_content_hash: "e".repeat(64),
+            segment_generation: 1,
+            projection_generation: replacement.generation,
+            core_role: replacement.core_role,
+            core_config: "core.toml".into(),
+            netd_declaration: "declaration.json".into(),
+            grant_refresh_after_unix: 0,
+            grant_expires_at_unix: 0,
+        });
+        write_private(&replacement.config, b"policy_generation = 8\n");
+        write_private(
+            &replacement.declaration,
+            br#"{"table_id":20000,"overlay_router_ipv4":"10.250.0.1","effective_mtu":1180,"routes":[{"prefix":"10.0.0.0/24","kind":"local"}],"exclusions":[{"prefix":"198.51.100.1/32","kind":"cloud-api"}],"firewall":{"allow_forward":false,"clamp_tcp_mss":true,"require_ipv4_forwarding":true,"manage_rp_filter":true}}"#,
+        );
+
+        let netd_listener = UnixListener::bind(&current.socket).unwrap();
+        let netd_task = thread::spawn(move || {
+            let mut operations = Vec::new();
+            for _ in 0..4 {
+                let (stream, _) = netd_listener.accept().unwrap();
+                let request = recv_request(&stream).unwrap();
+                let generation = request.owner.generation;
+                let tun = File::open("/dev/null").unwrap();
+                let (operation, body, fd) = match request.operation {
+                    NetdOperation::Prepare(_) => (
+                        "prepare",
+                        ResponseBody::Prepared {
+                            generation,
+                            tun_fd_attached: true,
+                        },
+                        Some(tun.as_raw_fd()),
+                    ),
+                    NetdOperation::Commit => {
+                        ("commit", ResponseBody::Committed { generation }, None)
+                    }
+                    NetdOperation::LeaseRenew => {
+                        ("lease", ResponseBody::LeaseRenewed { generation }, None)
+                    }
+                    NetdOperation::PolicyUpdate(_) => (
+                        "policy_update",
+                        ResponseBody::PolicyUpdated { generation },
+                        None,
+                    ),
+                    other => panic!("policy update started a netd tunnel operation: {other:?}"),
+                };
+                operations.push(operation);
+                send_response(
+                    &stream,
+                    &NetdResponse {
+                        request_id: request.request_id,
+                        body,
+                    },
+                    fd,
+                )
+                .unwrap();
+            }
+            operations
+        });
+
+        let reload_listener =
+            UnixListener::bind(core_reload_socket(&replacement).unwrap()).unwrap();
+        let expected_config = replacement.config.clone();
+        let expected_status = replacement.status.clone();
+        let tunnel_generation = current.generation;
+        let policy_generation = replacement.generation;
+        let reload_task = thread::spawn(move || {
+            let (mut stream, _) = reload_listener.accept().unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).unwrap();
+            let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(request["action"], "policy_update");
+            assert_eq!(request["config"], expected_config.to_str().unwrap());
+            assert_eq!(request["status"], expected_status.to_str().unwrap());
+            assert!(request.get("transaction_id").is_none());
+            if lost_reply {
+                return;
+            }
+            stream
+                .write_all(
+                    &serde_json::to_vec(&serde_json::json!({
+                        "schema_version": 1,
+                        "ok": true,
+                        "generation": tunnel_generation,
+                        "policy_generation": policy_generation,
+                        "error": null
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        });
+
+        let mut child = Command::new("/bin/sleep").arg("10").spawn().unwrap();
+        let core_pid = child.id();
+        let mut netd = NetdClient::new(
+            &current.socket,
+            LeaseOwner {
+                instance_id: [1; 16],
+                pid: std::process::id(),
+                generation: current.generation,
+                lease_deadline_mono_ms: monotonic_ms().unwrap() + current.lease_ms,
+            },
+        );
+        let _prepared = netd
+            .prepare(parse_declaration(&current.declaration).unwrap())
+            .unwrap();
+        netd.commit().unwrap();
+
+        let outcome = policy_update_activation(&current, &replacement, &mut child, &mut netd)
+            .expect("policy-only update should remain on the live tunnel");
+
+        assert_eq!(
+            outcome,
+            if lost_reply {
+                PolicyUpdateOutcome::CommitPending
+            } else {
+                PolicyUpdateOutcome::Applied
+            }
+        );
+        assert_eq!(child.id(), core_pid);
+        assert!(child.try_wait().unwrap().is_none());
+        assert_eq!(
+            netd_task.join().unwrap(),
+            ["prepare", "commit", "policy_update", "lease"]
+        );
+        reload_task.join().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn receipt_cleanup_error_preserves_retryable_failure_and_original_cause() {
+        let (_root, mut args) = server_runtime_fixture();
+        let receipt = args.status.with_file_name("receipt-directory");
+        fs::create_dir(&receipt).unwrap();
+        args.activation_ready = Some(receipt.clone());
+        let error = retryable_failure(
+            &args,
+            "netd_prepare_failed",
+            anyhow::anyhow!("original network outage"),
+        )
+        .unwrap_err();
+        let failure = error
+            .downcast_ref::<RetryableFailure>()
+            .expect("receipt cleanup replaced the recovery result");
+        assert_eq!(failure.error_code, "netd_prepare_failed");
+        assert!(failure.detail.contains("original network outage"));
+        assert!(
+            receipt.is_dir(),
+            "invalid receipt path should not be recursively removed"
+        );
+    }
+
+    #[test]
+    fn receipt_publication_retries_exact_committed_generation_after_fs_recovers() {
+        let (_root, mut args) = server_runtime_fixture();
+        let receipt = args.status.with_file_name("receipt-directory");
+        fs::create_dir(&receipt).unwrap();
+        args.activation_ready = Some(receipt.clone());
+        let token = "test-secret-readiness-token";
+        let mut pending = PendingReceipt::committed(&args, std::process::id(), token)
+            .expect("directory destination must defer publication");
+        fs::remove_dir(&receipt).unwrap();
+        pending.next_attempt = Instant::now();
+        assert!(pending.retry().unwrap());
+        let result: serde_json::Value =
+            serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
+        assert_eq!(result["state"], "committed");
+        assert_eq!(result["generation"], runtime_policy_generation(&args));
+        assert_eq!(result["agent_pid"], std::process::id());
+        assert_eq!(result["schema_version"], 2);
+        assert_eq!(result["core_proof"]["pid"], std::process::id());
+        assert_eq!(
+            result["core_proof"]["readiness_token_sha256"],
+            format!("{:x}", Sha256::digest(token.as_bytes()))
+        );
+        assert!(!serde_json::to_string(&result).unwrap().contains(token));
+        #[cfg(target_os = "linux")]
+        assert!(result["core_proof"]["process_start_ticks"]
+            .as_u64()
+            .is_some());
+    }
+
+    #[test]
+    fn invalid_policy_candidate_keeps_live_child_and_never_contacts_netd() {
+        let (_root, current) = server_runtime_fixture();
+        let mut replacement = current.clone();
+        replacement.declaration = current.declaration.with_file_name("invalid-policy.json");
+        write_private(&replacement.declaration, b"not JSON");
+        let mut child = Command::new("/bin/sleep").arg("10").spawn().unwrap();
+        let mut netd = NetdClient::new(
+            &current.socket,
+            LeaseOwner {
+                instance_id: [1; 16],
+                pid: std::process::id(),
+                generation: current.generation,
+                lease_deadline_mono_ms: monotonic_ms().unwrap() + current.lease_ms,
+            },
+        );
+        let result = policy_update_activation(&current, &replacement, &mut child, &mut netd);
+        assert!(result.is_err());
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn core_fencing_token_is_scoped_to_the_writable_sdwan_state_directory() {
+        let (root, args) = server_runtime_fixture();
+        assert_eq!(
+            core_fencing_token_path(&args).unwrap(),
+            root.path().join("fencing.token")
+        );
+    }
+
+    #[test]
+    fn activation_pointer_replacement_is_detected_after_launch() {
+        let (root, candidate, activation_id) = activation_fixture();
+        let args = RuntimeArgs {
+            socket: PathBuf::new(),
+            core: PathBuf::new(),
+            core_role: CoreRole::ClientSdwan,
+            config: PathBuf::new(),
+            declaration: PathBuf::new(),
+            status: PathBuf::new(),
+            instance_id: String::new(),
+            generation: 1,
+            lease_ms: 30_000,
+            readiness_timeout_ms: 20_000,
+            activation_link: Some(candidate.clone()),
+            activation_target: Some(Path::new("activations").join(activation_id)),
+            activation_descriptor: None,
+            activation_config_sha256: None,
+            activation_declaration_sha256: None,
+            activation_ready: None,
+            ordinary_config: None,
+        };
+        assert!(activation_pointer_unchanged(&args).unwrap());
+        assert_eq!(
+            activation_pointer_state(&args).unwrap(),
+            ActivationPointerState::Unchanged
+        );
+        fs::remove_file(&candidate).unwrap();
+        symlink(
+            "activations/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            &candidate,
+        )
+        .unwrap();
+        assert!(!activation_pointer_unchanged(&args).unwrap());
+        assert_eq!(
+            activation_pointer_state(&args).unwrap(),
+            ActivationPointerState::Superseded
+        );
+        fs::remove_file(&candidate).unwrap();
+        assert_eq!(
+            activation_pointer_state(&args).unwrap(),
+            ActivationPointerState::Withdrawn
+        );
+        drop(root);
+    }
+
+    #[test]
+    fn withdrawn_activation_receipt_cleanup_is_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        let receipt = root.path().join("activation-ready-v1.json");
+        write_private(&receipt, br#"{"state":"committed","generation":7}"#);
+
+        remove_activation_receipt(Some(&receipt)).unwrap();
+        // A withdrawn policy is observed repeatedly until its candidate is
+        // replaced. Reprocessing the event must remain harmless after the
+        // first successful cleanup.
+        remove_activation_receipt(Some(&receipt)).unwrap();
+        assert!(!receipt.exists());
+    }
+
+    #[test]
+    fn retry_backoff_is_exponential_capped_and_resets_after_stability() {
+        let mut backoff = RetryBackoff::new();
+        assert_eq!(
+            backoff.delay_after_failure(Duration::ZERO),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            backoff.delay_after_failure(Duration::ZERO),
+            Duration::from_secs(2)
+        );
+        for _ in 0..10 {
+            backoff.delay_after_failure(Duration::ZERO);
+        }
+        assert_eq!(
+            backoff.delay_after_failure(Duration::ZERO),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            backoff.delay_after_failure(RETRY_STABLE_RESET),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn retry_wait_is_cancelled_by_candidate_withdrawal() {
+        let (_root, candidate, _) = activation_fixture();
+        let args = resolve_runtime_args(
+            Args::try_parse_from([
+                "candy-sdwan-agent",
+                "run",
+                "--core",
+                "/bin/true",
+                "--activation",
+                candidate.to_str().unwrap(),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        fs::remove_file(&candidate).unwrap();
+        assert_eq!(
+            wait_before_retry(&args, Duration::ZERO).unwrap(),
+            RetryWait::Stop
+        );
+    }
+
+    #[test]
+    fn non_expiring_server_activation_remains_retry_eligible() {
+        let (_root, candidate, _) = activation_fixture();
+        let mut args = resolve_runtime_args(
+            Args::try_parse_from([
+                "candy-sdwan-agent",
+                "run",
+                "--core",
+                "/bin/true",
+                "--activation",
+                candidate.to_str().unwrap(),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        let descriptor = args.activation_descriptor.as_mut().unwrap();
+        descriptor.grant_refresh_after_unix = 0;
+        descriptor.grant_expires_at_unix = 0;
+        assert!(grant_retry_eligible(
+            args.activation_descriptor.as_ref().unwrap(),
+            u64::MAX
+        ));
+    }
+
+    #[test]
+    fn retry_wait_is_cancelled_by_descriptor_change() {
+        let (_root, candidate, _) = activation_fixture();
+        let args = resolve_runtime_args(
+            Args::try_parse_from([
+                "candy-sdwan-agent",
+                "run",
+                "--core",
+                "/bin/true",
+                "--activation",
+                candidate.to_str().unwrap(),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        let descriptor_path = candidate.join("activation-v1.json");
+        let mut descriptor: serde_json::Value =
+            serde_json::from_slice(&fs::read(&descriptor_path).unwrap()).unwrap();
+        descriptor["projection_content_hash"] = serde_json::Value::String("d".repeat(64));
+        write_private(
+            &descriptor_path,
+            serde_json::to_string(&descriptor).unwrap().as_bytes(),
+        );
+        assert_eq!(
+            wait_before_retry(&args, Duration::ZERO).unwrap(),
+            RetryWait::Stop
+        );
+    }
+
+    #[test]
+    fn retry_wait_is_cancelled_by_activation_content_change() {
+        let (_root, candidate, _) = activation_fixture();
+        let args = resolve_runtime_args(
+            Args::try_parse_from([
+                "candy-sdwan-agent",
+                "run",
+                "--core",
+                "/bin/true",
+                "--activation",
+                candidate.to_str().unwrap(),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        write_private(
+            &candidate.join("core.toml"),
+            b"schema_version = 1\nchanged = true\n",
+        );
+        assert_eq!(
+            wait_before_retry(&args, Duration::ZERO).unwrap(),
+            RetryWait::Stop
+        );
+    }
+
+    #[test]
+    fn retry_wait_is_interrupted_by_shutdown() {
+        let _test_guard = RUN_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("SD-WAN agent test lock poisoned");
+        let (_root, candidate, _) = activation_fixture();
+        let args = resolve_runtime_args(
+            Args::try_parse_from([
+                "candy-sdwan-agent",
+                "run",
+                "--core",
+                "/bin/true",
+                "--activation",
+                candidate.to_str().unwrap(),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+        let result = wait_before_retry(&args, Duration::from_secs(30));
+        SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+        assert_eq!(result.unwrap(), RetryWait::Stop);
+    }
+
+    #[test]
+    fn committed_core_exit_rolls_back_before_becoming_retryable() {
+        let _test_guard = RUN_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("SD-WAN agent test lock poisoned");
+        let (_root, candidate, _) = activation_fixture();
+        let activation = candidate
+            .parent()
+            .unwrap()
+            .join("activations")
+            .join("a".repeat(64));
+        write_private(
+            &activation.join("declaration.json"),
+            br#"{"table_id":20000,"overlay_router_ipv4":"10.250.0.1","effective_mtu":1180,"routes":[{"prefix":"10.0.0.0/24","kind":"local"}],"exclusions":[{"prefix":"198.51.100.1/32","kind":"cloud-api"}],"firewall":{"allow_forward":true,"clamp_tcp_mss":true,"require_ipv4_forwarding":true,"manage_rp_filter":true}}"#,
+        );
+        let core = candidate.parent().unwrap().join("fake-core");
+        install_fake_exiting_core(&core);
+        let socket = candidate.parent().unwrap().join("netd.sock");
+        let receipt = candidate.parent().unwrap().join("activation-ready-v1.json");
+        let core_status = candidate.parent().unwrap().join("core-status.json");
+        let args = resolve_runtime_args(
+            Args::try_parse_from([
+                "candy-sdwan-agent",
+                "run",
+                "--socket",
+                socket.to_str().unwrap(),
+                "--core",
+                core.to_str().unwrap(),
+                "--activation",
+                candidate.to_str().unwrap(),
+                "--activation-ready",
+                receipt.to_str().unwrap(),
+                "--status",
+                core_status.to_str().unwrap(),
+                "--readiness-timeout-ms",
+                "2000",
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+        let status = args.status.clone();
+        let netd = start_netd_mock(&socket, Some(true));
+
+        let error = run_once(args.clone(), false).unwrap_err();
+
+        netd.join().unwrap();
+        let failure = error
+            .downcast_ref::<RetryableFailure>()
+            .expect("committed Core exit was not classified as retryable");
+        assert_eq!(failure.error_code, "core_exit");
+        assert!(!receipt.exists(), "committed receipt survived fail-open");
+        assert!(!status.exists(), "stale Core status survived fail-open");
+        let marker: RuntimeFailureMarker = serde_json::from_slice(
+            &fs::read(runtime_failure_marker_path(&status).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker.generation, args.generation);
+        assert_eq!(marker.error_code, "core_exit");
+        assert!(activation_retry_eligible(&args).unwrap());
+    }
+
+    #[test]
+    fn transient_readiness_exit_remains_retryable_without_rejection() {
+        let _test_guard = RUN_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("SD-WAN agent test lock poisoned");
+        let (_root, candidate, _) = activation_fixture();
+        let activation = candidate
+            .parent()
+            .unwrap()
+            .join("activations")
+            .join("a".repeat(64));
+        write_private(
+            &activation.join("declaration.json"),
+            br#"{"table_id":20000,"overlay_router_ipv4":"10.250.0.1","effective_mtu":1180,"routes":[{"prefix":"10.0.0.0/24","kind":"local"}],"exclusions":[{"prefix":"198.51.100.1/32","kind":"cloud-api"}],"firewall":{"allow_forward":true,"clamp_tcp_mss":true,"require_ipv4_forwarding":true,"manage_rp_filter":true}}"#,
+        );
+        let core = candidate.parent().unwrap().join("early-exit-core");
+        fs::write(&core, "#!/bin/sh\nexit 17\n").unwrap();
+        fs::set_permissions(&core, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = candidate.parent().unwrap().join("recovery-netd.sock");
+        let receipt = candidate.parent().unwrap().join("activation-ready-v1.json");
+        let core_status = candidate.parent().unwrap().join("recovery-status.json");
+        let args = resolve_runtime_args(
+            Args::try_parse_from([
+                "candy-sdwan-agent",
+                "run",
+                "--socket",
+                socket.to_str().unwrap(),
+                "--core",
+                core.to_str().unwrap(),
+                "--activation",
+                candidate.to_str().unwrap(),
+                "--activation-ready",
+                receipt.to_str().unwrap(),
+                "--status",
+                core_status.to_str().unwrap(),
+                "--readiness-timeout-ms",
+                "2000",
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+        let netd = start_netd_mock(&socket, None);
+
+        let error = run_once(args, true).unwrap_err();
+
+        netd.join().unwrap();
+        let failure = error
+            .downcast_ref::<RetryableFailure>()
+            .expect("recovery readiness failure was not retryable");
+        assert_eq!(failure.error_code, "core_readiness_failed");
+        assert!(!receipt.exists(), "recovery published a rejection receipt");
+        assert!(!core_status.exists(), "recovery retained stale Core status");
+    }
+    #[test]
+    fn rejects_noncanonical_prefix() {
+        assert!(parse_prefix("10.0.0.1/8").is_err());
+    }
+    #[test]
+    fn operational_errors_retry_but_security_errors_do_not() {
+        for code in [
+            ErrorCode::SystemFailure,
+            ErrorCode::GenerationConflict,
+            ErrorCode::DrainPending,
+            ErrorCode::LinkPrepareFailed,
+            ErrorCode::RoutePrepareFailed,
+            ErrorCode::FirewallPrepareFailed,
+            ErrorCode::SysctlPrepareFailed,
+            ErrorCode::LinkActivateFailed,
+            ErrorCode::PolicyActivateFailed,
+        ] {
+            assert!(transient_runtime_error(&anyhow::Error::new(
+                IpcError::Remote(code)
+            )));
+        }
+        for code in [
+            ErrorCode::UnauthorizedPeer,
+            ErrorCode::InvalidRequest,
+            ErrorCode::PreflightFailed,
+        ] {
+            assert!(!transient_runtime_error(&anyhow::Error::new(
+                IpcError::Remote(code)
+            )));
+        }
+        for kind in [
+            std::io::ErrorKind::ConnectionRefused,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(transient_runtime_error(&anyhow::Error::new(
+                std::io::Error::from(kind)
+            )));
+        }
+        assert!(!transient_runtime_error(&anyhow::Error::new(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        )));
+        assert!(!transient_runtime_error(&anyhow::anyhow!(
+            "signature invalid"
+        )));
+        assert!(!transient_runtime_error(&anyhow::Error::new(
+            IpcError::FrameLength
+        )));
+        assert!(!transient_runtime_error(&anyhow::Error::new(
+            CoreReadinessFailure {
+                code: "engine_resource_limits_invalid".into(),
+                lifecycle: "failed".into(),
+                detail: Some(
+                    "SD-WAN engine resource limits are invalid: max_queue_packets=0".into(),
+                ),
+            }
+        )));
+    }
+
+    #[test]
+    fn invalid_policy_resource_limits_are_rejected_without_retrying_same_candidate() {
+        let (_root, args) = server_runtime_fixture();
+        for code in [
+            "engine_resource_limits_invalid",
+            "sdwan_platform_incompatible",
+            "sdwan_rlimit_nofile_failed",
+            "unclassified",
+        ] {
+            let error = anyhow::Error::new(CoreReadinessFailure {
+                code: code.into(),
+                lifecycle: "failed".into(),
+                detail: Some(
+                    "engine resource limits are invalid; temporary memory pressure".into(),
+                ),
+            });
+            let failure =
+                fail_before_prepare(&args, "invalid candidate", "core_readiness_failed", error)
+                    .unwrap_err();
+            assert!(
+                failure.downcast_ref::<RetryableFailure>().is_none(),
+                "{code}"
+            );
+        }
+        for code in [
+            "engine_resource_exhausted",
+            "os_resource_temporarily_unavailable",
+        ] {
+            let error = anyhow::Error::new(CoreReadinessFailure {
+                code: code.into(),
+                lifecycle: "failed".into(),
+                detail: Some("temporary OS resources exhausted".into()),
+            });
+            let failure =
+                fail_before_prepare(&args, "temporary resources", "core_readiness_failed", error)
+                    .unwrap_err();
+            assert!(
+                failure.downcast_ref::<RetryableFailure>().is_some(),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_instance_id() {
+        assert_eq!(
+            parse_instance_id("00112233445566778899aabbccddeeff").unwrap()[0],
+            0
+        );
+    }
+    #[test]
+    fn rejects_short_instance_id() {
+        assert!(parse_instance_id("abcd").is_err());
+    }
+
+    fn status(generation: u64, lifecycle: &str, configured: usize, active: usize) -> String {
+        serde_json::json!({
+            "schema_version": 3,
+            "generation": generation,
+            "pid": 42,
+            "readiness_token": "00112233445566778899aabbccddeeff",
+            "lifecycle": lifecycle,
+            "configured_peers": configured,
+            "active_peers": active,
+            "required_route_owners": 1,
+            "ready_route_owners": active.min(1),
+            "inbound_listener_configured": false,
+            "inbound_listener_ready": false,
+            "inbound_listener_endpoints": [],
+            "fail_open_required": false,
+            "last_error_code": null,
+            "paths": if lifecycle == "active" { serde_json::json!([{"rtt_sample_count": 1, "rx_bytes": 1, "rx_idle_ms": 0}]) } else { serde_json::json!([]) }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn failed_opening_stream_waits_or_recovers_without_rejecting_policy() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&status(9, "failed", 1, 0)).unwrap();
+        value["last_error_code"] = serde_json::json!("stream_not_ready");
+        value["fail_open_required"] = serde_json::json!(true);
+        let parsed: CoreReadinessStatus = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            classify_core_readiness(&parsed, ReadinessPolicy::Strict).unwrap(),
+            ReadinessState::Waiting
+        );
+        assert_eq!(
+            classify_core_readiness(&parsed, ReadinessPolicy::Committed).unwrap(),
+            ReadinessState::RecoverablePeerLoss
+        );
+        assert!(classify_core_readiness(&parsed, ReadinessPolicy::CommittedServer).is_err());
+        value["inbound_listener_configured"] = serde_json::json!(true);
+        value["inbound_listener_ready"] = serde_json::json!(true);
+        value["inbound_listener_endpoints"] = serde_json::json!(["127.0.0.1:8443"]);
+        let parsed = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            classify_core_readiness(&parsed, ReadinessPolicy::CommittedServer).unwrap(),
+            ReadinessState::RecoverablePeerLoss
+        );
+        value["last_error_code"] = serde_json::json!("signature_invalid");
+        let parsed = serde_json::from_value(value).unwrap();
+        assert!(classify_core_readiness(&parsed, ReadinessPolicy::Strict).is_err());
+    }
+
+    #[test]
+    fn peer_control_and_missing_lane_errors_preserve_committed_recovery() {
+        for code in ["peer_barrier_failed", "route_peer_missing"] {
+            let mut value: serde_json::Value =
+                serde_json::from_str(&status(9, "failed", 2, 0)).unwrap();
+            value["required_route_owners"] = serde_json::json!(2);
+            value["fail_open_required"] = serde_json::json!(true);
+            value["last_error_code"] = serde_json::json!(code);
+            value["failed_prefixes"] = serde_json::json!(["10.2.0.0/16", "10.3.0.0/16"]);
+            for listener in [false, true] {
+                value["inbound_listener_configured"] = serde_json::json!(listener);
+                value["inbound_listener_ready"] = serde_json::json!(listener);
+                value["inbound_listener_endpoints"] = if listener {
+                    serde_json::json!(["127.0.0.1:8443"])
+                } else {
+                    serde_json::json!([])
+                };
+                let policy = if listener {
+                    ReadinessPolicy::CommittedServer
+                } else {
+                    ReadinessPolicy::Committed
+                };
+                let parsed: CoreReadinessStatus = serde_json::from_value(value.clone()).unwrap();
+                assert_eq!(
+                    classify_core_readiness(&parsed, policy).unwrap(),
+                    ReadinessState::RecoverablePeerLoss
+                );
+                assert_eq!(
+                    classify_core_readiness(&parsed, ReadinessPolicy::Strict).unwrap(),
+                    ReadinessState::Waiting
+                );
+
+                let mut partial = value.clone();
+                partial["lifecycle"] = serde_json::json!("active");
+                partial["active_peers"] = serde_json::json!(1);
+                partial["ready_route_owners"] = serde_json::json!(1);
+                partial["failed_prefixes"] = serde_json::json!(["10.3.0.0/16"]);
+                partial["paths"] =
+                    serde_json::json!([{"rtt_sample_count": 1, "rx_bytes": 512, "rx_idle_ms": 0}]);
+                let parsed = serde_json::from_value(partial.clone()).unwrap();
+                assert_eq!(
+                    classify_core_readiness(&parsed, policy).unwrap(),
+                    ReadinessState::Degraded
+                );
+
+                for fatal in ["signature_invalid", "tun_read_failed", "unknown_failure"] {
+                    partial["last_error_code"] = serde_json::json!(fatal);
+                    let parsed = serde_json::from_value(partial.clone()).unwrap();
+                    assert!(classify_core_readiness(&parsed, policy).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn opening_packet_stream_preserves_listener_without_admitting_routes() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&status(9, "active", 1, 0)).unwrap();
+        value["last_error_code"] = serde_json::json!("stream_not_ready");
+        for lifecycle in ["active", "starting"] {
+            value["lifecycle"] = serde_json::json!(lifecycle);
+            for listener in [false, true] {
+                value["inbound_listener_configured"] = serde_json::json!(listener);
+                value["inbound_listener_ready"] = serde_json::json!(listener);
+                value["inbound_listener_endpoints"] = if listener {
+                    serde_json::json!(["127.0.0.1:8443"])
+                } else {
+                    serde_json::json!([])
+                };
+                let parsed: CoreReadinessStatus = serde_json::from_value(value.clone()).unwrap();
+                for policy in [
+                    ReadinessPolicy::Strict,
+                    ReadinessPolicy::Committed,
+                    ReadinessPolicy::CommittedServer,
+                ] {
+                    assert_eq!(
+                        classify_core_readiness(&parsed, policy).unwrap(),
+                        if listener {
+                            ReadinessState::ListenerReady
+                        } else {
+                            ReadinessState::Waiting
+                        }
+                    );
+                }
+            }
+        }
+        value["lifecycle"] = serde_json::json!("active");
+        value["fail_open_required"] = serde_json::json!(true);
+        let parsed = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            classify_core_readiness(&parsed, ReadinessPolicy::Strict).unwrap(),
+            ReadinessState::Waiting
+        );
+        value["last_error_code"] = serde_json::json!("tun_read_failed");
+        let parsed = serde_json::from_value(value).unwrap();
+        assert!(classify_core_readiness(&parsed, ReadinessPolicy::CommittedServer).is_err());
+    }
+
+    #[test]
+    fn readiness_binding_errors_are_distinct_and_never_expose_tokens() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("status.json");
+        for (field, value, expected) in [
+            (
+                "schema_version",
+                serde_json::json!(2),
+                "readiness_schema_mismatch",
+            ),
+            ("pid", serde_json::json!(123), "readiness_pid_mismatch"),
+            (
+                "readiness_token",
+                serde_json::json!("secret-token"),
+                "readiness_token_mismatch",
+            ),
+        ] {
+            let mut report: serde_json::Value =
+                serde_json::from_str(&status(9, "active", 1, 1)).unwrap();
+            report[field] = value;
+            write_private(&path, &serde_json::to_vec(&report).unwrap());
+            let error =
+                read_core_status(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap_err();
+            assert_eq!(runtime_cause_code(&error), expected);
+            assert!(!transient_runtime_error(&error));
+            assert!(!format!("{error:#}").contains("secret-token"));
+        }
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(directory.path().join("missing"), &path).unwrap();
+        assert!(read_core_status(&path, 9, 42, "redacted").is_err());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn parent_lifetime_helper() {
+        let Some(path) = std::env::var_os("CANDY_TEST_CHILD_PID") else {
+            return;
+        };
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        protect_child_lifetime(&mut command);
+        let mut child = command.spawn().unwrap();
+        fs::write(path, child.id().to_string()).unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn killing_agent_cannot_leave_a_live_core_child() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("child-pid");
+        let mut parent = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::parent_lifetime_helper", "--nocapture"])
+            .env("CANDY_TEST_CHILD_PID", &path)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let child_pid = loop {
+            if let Ok(text) = fs::read_to_string(&path) {
+                if let Ok(pid) = text.parse::<u32>() {
+                    break pid;
+                }
+            }
+            if Instant::now() >= deadline {
+                let _ = parent.kill();
+                let _ = parent.wait();
+                panic!("child did not start");
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        parent.kill().unwrap();
+        parent.wait().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match fs::read_to_string(format!("/proc/{child_pid}/status")) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Ok(status)
+                    if status
+                        .lines()
+                        .any(|line| line.starts_with("State:") && line.contains("Z (zombie)")) =>
+                {
+                    break
+                }
+                _ => {}
+            }
+            if Instant::now() >= deadline {
+                unsafe {
+                    nix::libc::kill(child_pid as i32, nix::libc::SIGKILL);
+                }
+                panic!("Core child survived agent SIGKILL");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn readiness_requires_matching_generation_and_an_active_authorized_peer() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("status.json");
+        fs::write(&path, status(9, "starting", 1, 0)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Waiting)
+        );
+        fs::write(&path, status(9, "active", 1, 1)).unwrap();
+        let mut no_path =
+            serde_json::from_str::<serde_json::Value>(&status(9, "active", 1, 1)).unwrap();
+        no_path.as_object_mut().unwrap().remove("paths");
+        fs::write(&path, serde_json::to_vec(&no_path).unwrap()).unwrap();
+        assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
+        let mut active =
+            serde_json::from_str::<serde_json::Value>(&status(9, "active", 1, 1)).unwrap();
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Ready)
+        );
+        // A freshly reconnected lane may not have received payload bytes yet,
+        // but its authenticated path and RTT sample are sufficient to resume
+        // SD-WAN.  RX counters must not force an unnecessary Core restart.
+        active["paths"] =
+            serde_json::json!([{ "rtt_sample_count": 1, "rx_bytes": 0, "rx_idle_ms": 0 }]);
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Ready)
+        );
+        active["paths"] = serde_json::json!([]);
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
+        active["paths"] =
+            serde_json::json!([{ "rtt_sample_count": 0, "rx_bytes": 1, "rx_idle_ms": 0 }]);
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
+        active["configured_peers"] = serde_json::json!(2);
+        active["active_peers"] = serde_json::json!(2);
+        active["required_route_owners"] = serde_json::json!(2);
+        active["ready_route_owners"] = serde_json::json!(2);
+        active["paths"] =
+            serde_json::json!([{ "rtt_sample_count": 1, "rx_bytes": 1, "rx_idle_ms": 0 }]);
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
+        active["paths"] = serde_json::json!([
+            { "rtt_sample_count": 1, "rx_bytes": 1, "rx_idle_ms": 0 },
+            { "rtt_sample_count": 2, "rx_bytes": 1, "rx_idle_ms": 0 }
+        ]);
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Ready)
+        );
+        active["paths"] = serde_json::json!([
+            { "rtt_sample_count": 1, "rx_bytes": 1, "rx_idle_ms": 120_000 },
+            { "rtt_sample_count": 2, "rx_bytes": 1, "rx_idle_ms": 180_000 }
+        ]);
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Ready)
+        );
+        active["ready_route_owners"] = serde_json::json!(1);
+        active["paths"] =
+            serde_json::json!([{ "rtt_sample_count": 1, "rx_bytes": 1, "rx_idle_ms": 0 }]);
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Waiting)
+        );
+        active["paths"] =
+            serde_json::json!([{ "rtt_sample_count": 0, "rx_bytes": 1, "rx_idle_ms": 0 }]);
+        fs::write(&path, serde_json::to_vec(&active).unwrap()).unwrap();
+        assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
+        assert_eq!(
+            read_core_readiness(&path, 10, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            None
+        );
+        assert!(read_core_readiness(&path, 8, 42, "00112233445566778899aabbccddeeff").is_err());
+        assert!(read_core_readiness(&path, 9, 43, "00112233445566778899aabbccddeeff").is_err());
+        assert!(read_core_readiness(&path, 9, 42, "11112233445566778899aabbccddeeff").is_err());
+        fs::write(&path, status(9, "active", 1, 0)).unwrap();
+        assert!(read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").is_err());
+    }
+
+    #[test]
+    fn listener_readiness_is_distinct_from_route_readiness() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("status.json");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "schema_version": 3,
+                "generation": 9,
+                "pid": 42,
+                "readiness_token": "00112233445566778899aabbccddeeff",
+                "lifecycle": "starting",
+                "configured_peers": 0,
+                "active_peers": 0,
+                "required_route_owners": 0,
+                "ready_route_owners": 0,
+                "inbound_listener_configured": true,
+                "inbound_listener_ready": true,
+                "inbound_listener_endpoints": ["127.0.0.1:8443"],
+                "fail_open_required": false,
+                "last_error_code": null
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::ListenerReady)
+        );
+        fs::write(&path, status(9, "active", 1, 1)).unwrap();
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Ready)
+        );
+        let mut partial =
+            serde_json::from_str::<serde_json::Value>(&status(9, "active", 2, 1)).unwrap();
+        partial["required_route_owners"] = serde_json::json!(2);
+        partial["inbound_listener_configured"] = serde_json::json!(true);
+        partial["inbound_listener_ready"] = serde_json::json!(true);
+        partial["inbound_listener_endpoints"] = serde_json::json!(["127.0.0.1:8443"]);
+        fs::write(&path, serde_json::to_vec(&partial).unwrap()).unwrap();
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Degraded)
+        );
+    }
+
+    #[test]
+    fn initial_peer_loss_waits_without_permanent_rejection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("status.json");
+        let mut failed = serde_json::json!({
+            "schema_version": 3,
+            "generation": 9,
+            "pid": 42,
+            "readiness_token": "00112233445566778899aabbccddeeff",
+            "lifecycle": "failed",
+            "configured_peers": 1,
+            "active_peers": 0,
+            "required_route_owners": 1,
+            "ready_route_owners": 0,
+            "inbound_listener_configured": true,
+            "inbound_listener_ready": true,
+            "inbound_listener_endpoints": ["127.0.0.1:8443"],
+            "fail_open_required": true,
+            "last_error_code": "all_peer_reads_failed",
+            "paths": []
+        });
+        write_private(&path, &serde_json::to_vec(&failed).unwrap());
+
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Waiting)
+        );
+        assert_eq!(
+            read_core_readiness_with_policy(
+                &path,
+                9,
+                42,
+                "00112233445566778899aabbccddeeff",
+                ReadinessPolicy::Committed,
+            )
+            .unwrap(),
+            Some(ReadinessState::RecoverablePeerLoss)
+        );
+        assert_eq!(
+            read_core_readiness_with_policy(
+                &path,
+                9,
+                42,
+                "00112233445566778899aabbccddeeff",
+                ReadinessPolicy::CommittedServer,
+            )
+            .unwrap(),
+            Some(ReadinessState::RecoverablePeerLoss)
+        );
+
+        // Core can remain lifecycle=active while the routing actor records
+        // fail-open after the final peer lane drops.  This is the normal
+        // transient state seen during a reconnect and must not trigger a
+        // process restart or permanent rejection.
+        failed["lifecycle"] = serde_json::json!("active");
+        write_private(&path, &serde_json::to_vec(&failed).unwrap());
+        assert_eq!(
+            read_core_readiness_with_policy(
+                &path,
+                9,
+                42,
+                "00112233445566778899aabbccddeeff",
+                ReadinessPolicy::Committed,
+            )
+            .unwrap(),
+            Some(ReadinessState::RecoverablePeerLoss)
+        );
+
+        failed["last_error_code"] = serde_json::json!("route_has_no_active_peer");
+        write_private(&path, &serde_json::to_vec(&failed).unwrap());
+        assert_eq!(
+            read_core_readiness_with_policy(
+                &path,
+                9,
+                42,
+                "00112233445566778899aabbccddeeff",
+                ReadinessPolicy::CommittedServer,
+            )
+            .unwrap(),
+            Some(ReadinessState::RecoverablePeerLoss)
+        );
+
+        failed["last_error_code"] = serde_json::json!("all_peer_writes_failed");
+        write_private(&path, &serde_json::to_vec(&failed).unwrap());
+        assert_eq!(
+            read_core_readiness_with_policy(
+                &path,
+                9,
+                42,
+                "00112233445566778899aabbccddeeff",
+                ReadinessPolicy::CommittedServer,
+            )
+            .unwrap(),
+            Some(ReadinessState::RecoverablePeerLoss)
+        );
+
+        failed["lifecycle"] = serde_json::json!("starting");
+        write_private(&path, &serde_json::to_vec(&failed).unwrap());
+        assert_eq!(
+            read_core_readiness_with_policy(
+                &path,
+                9,
+                42,
+                "00112233445566778899aabbccddeeff",
+                ReadinessPolicy::CommittedServer,
+            )
+            .unwrap(),
+            Some(ReadinessState::RecoverablePeerLoss)
+        );
+
+        for (field, value) in [
+            ("inbound_listener_ready", serde_json::json!(false)),
+            ("required_route_owners", serde_json::json!(0)),
+            ("ready_route_owners", serde_json::json!(1)),
+            ("last_error_code", serde_json::json!("tun_read_failed")),
+        ] {
+            let mut rejected = failed.clone();
+            rejected[field] = value;
+            write_private(&path, &serde_json::to_vec(&rejected).unwrap());
+            assert!(read_core_readiness_with_policy(
+                &path,
+                9,
+                42,
+                "00112233445566778899aabbccddeeff",
+                ReadinessPolicy::CommittedServer,
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn committed_partial_route_loss_preserves_healthy_owners() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("status.json");
+        let status = serde_json::json!({
+            "schema_version": 3,
+            "generation": 9,
+            "pid": 42,
+            "readiness_token": "00112233445566778899aabbccddeeff",
+            "lifecycle": "active",
+            "configured_peers": 2,
+            "active_peers": 1,
+            "required_route_owners": 2,
+            "ready_route_owners": 1,
+            "inbound_listener_configured": false,
+            "inbound_listener_ready": false,
+            "inbound_listener_endpoints": [],
+            "fail_open_required": false,
+            "last_error_code": "route_has_no_active_peer",
+            "last_error_detail": "one route owner is unavailable",
+            "paths": [{"rtt_sample_count": 1, "rx_bytes": 512, "rx_idle_ms": 0}]
+        });
+        write_private(&path, &serde_json::to_vec(&status).unwrap());
+
+        assert_eq!(
+            read_core_readiness_with_policy(
+                &path,
+                9,
+                42,
+                "00112233445566778899aabbccddeeff",
+                ReadinessPolicy::Committed,
+            )
+            .unwrap(),
+            Some(ReadinessState::Degraded)
+        );
+        // Initial activation remains conservative: without a committed
+        // steering owner, partial readiness must not be admitted.
+        assert_eq!(
+            read_core_readiness(&path, 9, 42, "00112233445566778899aabbccddeeff").unwrap(),
+            Some(ReadinessState::Waiting)
+        );
+
+        let mut fatal = status;
+        fatal["last_error_code"] = serde_json::json!("tun_read_failed");
+        fatal["fail_open_required"] = serde_json::json!(true);
+        write_private(&path, &serde_json::to_vec(&fatal).unwrap());
+        assert!(read_core_readiness_with_policy(
+            &path,
+            9,
+            42,
+            "00112233445566778899aabbccddeeff",
+            ReadinessPolicy::Committed,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn stale_status_is_removed_before_candidate_start() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("status.json");
+        fs::write(&path, status(9, "active", 1, 1)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        remove_stale_status(&path).unwrap();
+        assert!(!path.exists());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(directory.path().join("target"), &path).unwrap();
+            assert!(remove_stale_status(&path).is_err());
+        }
+    }
+
+    #[test]
+    fn superseded_activation_statuses_are_reclaimed_without_touching_other_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory
+            .path()
+            .join(format!("sdwan-{}.status.json", "a".repeat(64)));
+        let stale = directory
+            .path()
+            .join(format!("sdwan-{}.status.json", "b".repeat(64)));
+        let unrelated = directory.path().join("sdwan-status.json");
+        fs::write(&current, status(9, "active", 1, 1)).unwrap();
+        fs::write(&stale, status(8, "active", 1, 1)).unwrap();
+        fs::write(&unrelated, "runtime product status").unwrap();
+
+        assert_eq!(cleanup_superseded_activation_statuses(&current).unwrap(), 1);
+        assert!(current.exists());
+        assert!(!stale.exists());
+        assert!(unrelated.exists());
+
+        #[cfg(unix)]
+        {
+            let link = directory
+                .path()
+                .join(format!("sdwan-{}.status.json", "c".repeat(64)));
+            std::os::unix::fs::symlink(directory.path().join("target"), &link).unwrap();
+            assert_eq!(cleanup_superseded_activation_statuses(&current).unwrap(), 0);
+            assert!(link.exists() || fs::symlink_metadata(&link).is_ok());
+        }
+    }
+
+    #[test]
+    fn readiness_token_is_random_bounded_hex() {
+        let first = generate_readiness_token().unwrap();
+        let second = generate_readiness_token().unwrap();
+        assert_eq!(first.len(), 32);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(first, second);
+    }
+}

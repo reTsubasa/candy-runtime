@@ -8,7 +8,9 @@ members = [
   "linux/common/crates/candy-netd-client",
   "linux/common/crates/candy-netd-proto",
   "linux/common/crates/candy-runtime-log",
+  "linux/common/crates/candy-process-control",
 ]
+exclude = ["linux/common/apps/candy-tunio"]
 
 [workspace.package]
 version = "0.4.0"

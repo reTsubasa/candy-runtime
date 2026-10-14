@@ -1,0 +1,1209 @@
+use super::*;
+
+#[cfg(not(all(feature = "experimental-tunio-rebind", target_os = "linux")))]
+pub(super) fn run(_: &Path) -> Result<()> {
+    bail!("code=signed_renewal_feature_required module=sdwan_activation detail=signed authority renewal requires Linux experimental-tunio-rebind");
+}
+
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+mod linux {
+    use super::*;
+    use crate::signed_snapshot::Snapshot;
+    use candy_netd_proto::v2::{ForwardAuthority, ForwardAuthorityReceipt};
+    use candy_process_control::{
+        exchange, process_identity, process_is_current, ControlOperation, ControlRequest,
+        ProcessIdentity,
+    };
+    use candy_tunio::authority_control::{
+        authority_control_path, exchange_authority, AuthorityControlRequest, AuthorityEnvelope,
+        AuthorityOperation as AuthorityControlOperation,
+    };
+    use sha2::{Digest, Sha256};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Journal {
+        schema_version: u8,
+        phase: String,
+        snapshot: Snapshot,
+        envelope: Option<AuthorityEnvelope>,
+        candidate_plan: PathBuf,
+        #[serde(default)]
+        candidate_plan_snapshot: Option<Plan>,
+        candidate_record: PathBuf,
+        owner: ForwardOwner,
+        old_worker: Option<crate::process_record::ManagedProcessRecord>,
+    }
+
+    fn publish<T: Serialize>(path: &Path, object: &T) -> Result<()> {
+        let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        let result = (|| {
+            file.write_all(&serde_json::to_vec(object)?)?;
+            file.sync_all()?;
+            fs::rename(&temporary, path)?;
+            OpenOptions::new()
+                .read(true)
+                .open(path.parent().context("missing journal parent")?)?
+                .sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(temporary);
+        }
+        result
+    }
+
+    pub(in crate::experimental_tunio) fn publish_plan(plan: &Plan) -> Result<()> {
+        publish(
+            plan.effective_plan_file
+                .as_ref()
+                .context("effective immutable plan path absent")?,
+            plan,
+        )
+    }
+
+    fn read_private<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.len() > 1024 * 1024
+            || metadata.uid() != nix::unistd::geteuid().as_raw()
+            || metadata.mode() & 0o777 != 0o600
+        {
+            bail!("renewal journal must be private bounded regular file");
+        }
+        Ok(serde_json::from_reader(file.take(1024 * 1024 + 1))?)
+    }
+
+    fn stop_record(
+        record: &crate::process_record::ManagedProcessRecord,
+        plan: &Plan,
+    ) -> Result<()> {
+        let identity = ProcessIdentity {
+            pid: record.pid,
+            start_ticks: record.process_start_ticks,
+        };
+        if !process_is_current(identity) {
+            return Ok(());
+        }
+        record.validate_infrastructure_identity(&plan.core)?;
+        let worker = plan
+            .independent_worker
+            .as_ref()
+            .context("recorded Core private control absent")?;
+        for operation in [ControlOperation::Takeover, ControlOperation::Stop] {
+            exchange(
+                &worker.control_socket,
+                identity,
+                &ControlRequest {
+                    schema_version: 1,
+                    operation,
+                    token_sha256: record.readiness_token_sha256.clone(),
+                    nonce: uuid::Uuid::new_v4().simple().to_string(),
+                },
+            )?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while process_is_current(identity) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        if process_is_current(identity) {
+            bail!("code=renewal_old_core_stop_pending module=process_supervisor detail=authenticated stop did not retire old Core within deadline");
+        }
+        unsafe {
+            nix::libc::waitpid(
+                identity.pid as i32,
+                std::ptr::null_mut(),
+                nix::libc::WNOHANG,
+            );
+        }
+        Ok(())
+    }
+
+    fn retire_plan(plan: &Plan, parent: &Path) -> Result<()> {
+        let directory = plan
+            .core_config
+            .parent()
+            .context("snapshot directory absent")?;
+        if directory.parent() != Some(parent)
+            || !directory
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("signed-snapshot-"))
+        {
+            bail!("retirement is restricted to an owned generated snapshot");
+        }
+        if directory.try_exists()? {
+            match fs::read(directory.join("manifest.json")) {
+                Ok(bytes) => {
+                    let snapshot: Snapshot = serde_json::from_slice(&bytes)?;
+                    if snapshot.directory != directory || snapshot.config != plan.core_config {
+                        bail!("retirement snapshot binding differs");
+                    }
+                    snapshot.retire()?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let metadata = fs::symlink_metadata(directory)?;
+                    if !metadata.is_dir()
+                        || metadata.file_type().is_symlink()
+                        || metadata.uid() != nix::unistd::geteuid().as_raw()
+                        || metadata.mode() & 0o777 != 0o700
+                        || fs::read_dir(directory)?.next().is_some()
+                    {
+                        bail!("generated snapshot without manifest is not an empty private retirement remainder");
+                    }
+                    fs::remove_dir(directory)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        for path in [&plan.binding_file, &plan.core_status] {
+            let _ = fs::remove_file(path);
+        }
+        if let Some(worker) = &plan.independent_worker {
+            let _ = fs::remove_file(&worker.control_socket);
+        }
+        if let Some(path) = &plan.effective_plan_file {
+            let _ = fs::remove_file(path);
+        }
+        Ok(())
+    }
+
+    fn retire_old_worker(journal: &Journal, desired: &Plan, parent: &Path) -> Result<()> {
+        let Some(old) = &journal.old_worker else {
+            return Ok(());
+        };
+        let old_plan = match &old.effective_plan_file {
+            Some(path) if path.try_exists()? => read_plan(path)?,
+            Some(_) => {
+                if process_is_current(ProcessIdentity {
+                    pid: old.pid,
+                    start_ticks: old.process_start_ticks,
+                }) {
+                    bail!("code=renewal_old_core_cleanup_pending module=process_supervisor detail=old Core remains alive but immutable plan is absent");
+                }
+                return Ok(());
+            }
+            None => desired.clone(),
+        };
+        stop_record(old, &old_plan)?;
+        if old.effective_plan_file.is_some() {
+            retire_plan(&old_plan, parent)?;
+        }
+        Ok(())
+    }
+
+    fn exact_ready(
+        plan: &Plan,
+        record: &crate::process_record::ManagedProcessRecord,
+        envelope: &AuthorityEnvelope,
+    ) -> Result<()> {
+        record.validate_current(&plan.core, unix_time()?)?;
+        let status = record.private_status()?;
+        if status["worker_authority_revision"] != envelope.authority_revision
+            || status["worker_authority_sha256"] != envelope.signed_control_hash
+            || status["worker_transaction_id"] != envelope.transaction_id
+            || status["packet_binding"] != serde_json::to_value(envelope.binding)?
+        {
+            bail!("code=signed_candidate_proof_mismatch module=sdwan_activation detail=fresh Core authority revision/hash/transaction/binding differs");
+        }
+        Ok(())
+    }
+
+    fn finish_records(
+        plan: &mut Plan,
+        journal: &mut Journal,
+        journal_path: &Path,
+        owner_record: &Path,
+        io_record_path: &Path,
+        io_record: &crate::process_record::ManagedProcessRecord,
+    ) -> Result<()> {
+        let envelope = journal
+            .envelope
+            .as_ref()
+            .context("renewal envelope absent")?;
+        let mut record = crate::process_record::read(&journal.candidate_record)?;
+        exact_ready(plan, &record, envelope)?;
+        record.effective_plan_file = Some(journal.candidate_plan.clone());
+        plan.independent_worker
+            .as_mut()
+            .context("candidate worker absent")?
+            .process_record = owner_record.to_owned();
+        publish(&journal.candidate_plan, plan)?;
+        journal.candidate_plan_snapshot = Some(plan.clone());
+        crate::process_record::publish(owner_record, &record)?;
+        let mut updated_io = io_record.clone();
+        updated_io.policy_generation = plan.signed_generation;
+        updated_io.auth_deadline_unix = plan.auth_deadline_unix;
+        updated_io.status_generation = io_record.private_status()?["generation"].as_u64();
+        updated_io.worker_epoch = Some(plan.worker_epoch);
+        crate::process_record::publish(io_record_path, &updated_io)?;
+        journal.phase = "committed".into();
+        publish(journal_path, journal)?;
+        retire_candidate_record(journal, owner_record)?;
+        Ok(())
+    }
+
+    fn retire_candidate_record(journal: &Journal, owner_record: &Path) -> Result<()> {
+        if journal.candidate_record == owner_record {
+            return Ok(());
+        }
+        match fs::remove_file(&journal.candidate_record) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn forward_authority(envelope: &AuthorityEnvelope, io: ProcessIdentity) -> ForwardAuthority {
+        ForwardAuthority {
+            transaction_id: envelope.transaction_id.clone(),
+            authority_revision: envelope.authority_revision,
+            signed_control_hash: envelope.signed_control_hash.clone(),
+            declaration_hash: envelope.declaration_hash.clone(),
+            snapshot_closure_hash: envelope.snapshot_closure_hash.clone(),
+            io_epoch: envelope.binding.io_epoch,
+            io_pid: io.pid,
+            io_start_ticks: io.start_ticks,
+            candidate_pid: envelope.candidate.pid,
+            candidate_start_ticks: envelope.candidate.start_ticks,
+        }
+    }
+
+    pub(in crate::experimental_tunio) fn commit_authorized(
+        plan: &Plan,
+        record: &crate::process_record::ManagedProcessRecord,
+        owner: &ForwardOwner,
+        netd: &mut NetdControl,
+    ) -> Result<()> {
+        let io = plan
+            .independent_supervision
+            .as_ref()
+            .context("authorized commit IO absent")?;
+        let io_record = crate::process_record::read(&io.process_record)?;
+        io_record.validate_infrastructure_current(&plan.tunio)?;
+        let identity = ProcessIdentity {
+            pid: io_record.pid,
+            start_ticks: io_record.process_start_ticks,
+        };
+        let controller = process_identity(std::process::id())?;
+        let takeover = exchange(
+            &io.control_socket,
+            identity,
+            &ControlRequest {
+                schema_version: 1,
+                operation: ControlOperation::Takeover,
+                token_sha256: io_record.readiness_token_sha256.clone(),
+                nonce: uuid::Uuid::new_v4().simple().to_string(),
+            },
+        )?;
+        let proof = plan
+            .authority
+            .as_ref()
+            .context("candidate authority proof absent")?;
+        let actual = exchange_authority(
+            &authority_control_path(&io.control_socket),
+            identity,
+            &AuthorityControlRequest {
+                schema_version: 2,
+                process: identity,
+                controller,
+                controller_epoch: takeover.controller_epoch,
+                token_sha256: io_record.readiness_token_sha256.clone(),
+                nonce: uuid::Uuid::new_v4().simple().to_string(),
+                operation: AuthorityControlOperation::ProbeTransaction,
+                envelope: None,
+                transaction_id: proof.transaction_id.clone(),
+            },
+            None,
+            Instant::now() + Duration::from_secs(2),
+        )?;
+        let envelope = actual
+            .active
+            .context("IO actual current authorization absent")?;
+        if !actual.owner_active
+            || actual.applied_transaction_id.as_deref() != Some(proof.transaction_id.as_str())
+            || actual.authority_revision != Some(proof.revision)
+            || envelope.signed_control_hash != proof.sha256
+            || envelope.candidate.pid != record.pid
+            || envelope.candidate.start_ticks != record.process_start_ticks
+            || envelope.binding.owner_epoch != plan.worker_epoch
+            || actual.current_binding != envelope.binding
+            || actual
+                .actual_deadline_mono_ms
+                .is_none_or(|cap| cap < owner.auth_deadline_mono_ms)
+        {
+            bail!("actual applied authority does not prove current candidate owner/cap");
+        }
+        exact_ready(plan, record, &envelope)?;
+        let status = record.private_status()?;
+        let reported = status["reported_at_mono_ms"]
+            .as_u64()
+            .context("fresh packet report clock absent")?;
+        expect_ack(
+            netd,
+            Operation::ForwardAuthorize {
+                owner: owner.clone(),
+                authority: forward_authority(&envelope, identity),
+            },
+        )?;
+        expect_ack(
+            netd,
+            Operation::ForwardCommitAuthorized {
+                owner: owner.clone(),
+                receipt: ForwardAuthorityReceipt {
+                    authority: forward_authority(&envelope, identity),
+                    owner_active: true,
+                    authorization_deadline_mono_ms: owner.auth_deadline_mono_ms,
+                    packet_proof_reported_mono_ms: reported,
+                },
+            },
+        )
+    }
+
+    pub(in crate::experimental_tunio) fn run(path: &Path) -> Result<()> {
+        let desired = recovery_plan(verified_plan(path)?)?;
+        run_with_plan(path, desired)
+    }
+
+    pub(in crate::experimental_tunio) fn archive_retired_io_transaction(
+        desired: &Plan,
+        retired_io: &crate::process_record::ManagedProcessRecord,
+    ) -> Result<Option<PathBuf>> {
+        let identity = ProcessIdentity {
+            pid: retired_io.pid,
+            start_ticks: retired_io.process_start_ticks,
+        };
+        if process_is_current(identity) {
+            bail!("cannot archive a live IO transaction");
+        }
+        let path = desired
+            .independent_worker
+            .as_ref()
+            .context("original worker record absent")?
+            .process_record
+            .with_extension("renewal.json");
+        if !path.try_exists()? {
+            return Ok(None);
+        }
+        let journal: Journal = read_private(&path)?;
+        let candidate = journal
+            .candidate_plan_snapshot
+            .as_ref()
+            .context("retired IO journal scope absent")?;
+        if journal.schema_version != 1
+            || candidate.infrastructure != desired.infrastructure
+            || candidate.domain_id != desired.domain_id
+            || Some(candidate.io_epoch) != retired_io.io_epoch
+        {
+            bail!("retired IO transaction scope differs; refusing unsafe journal replacement");
+        }
+        if let Ok(record) = crate::process_record::read(&journal.candidate_record) {
+            if process_is_current(ProcessIdentity {
+                pid: record.pid,
+                start_ticks: record.process_start_ticks,
+            }) {
+                bail!("retired IO transaction has a live candidate Core");
+            }
+        } else if let Some(worker) = &candidate.independent_worker {
+            preserve_unrecorded_endpoint(&worker.control_socket)?;
+        }
+        let archived = path.with_extension(format!(
+            "retired-io-{}-{}.json",
+            retired_io.pid,
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::rename(&path, &archived)?;
+        OpenOptions::new()
+            .read(true)
+            .open(path.parent().context("journal parent absent")?)?
+            .sync_all()?;
+        Ok(Some(archived))
+    }
+
+    pub(in crate::experimental_tunio) fn run_with_plan(path: &Path, desired: Plan) -> Result<()> {
+        let io = desired
+            .independent_supervision
+            .as_ref()
+            .context("renewal requires independent I/O")?
+            .clone();
+        let original_worker = desired
+            .independent_worker
+            .as_ref()
+            .context("renewal requires independent Core")?
+            .clone();
+        let io_record = crate::process_record::read(&io.process_record)?;
+        io_record.validate_infrastructure_current(&desired.tunio)?;
+        let io_identity = ProcessIdentity {
+            pid: io_record.pid,
+            start_ticks: io_record.process_start_ticks,
+        };
+        if io_record.infrastructure_generation != desired.infrastructure.generation
+            || io_record
+                .io_epoch
+                .is_some_and(|epoch| epoch != desired.io_epoch)
+        {
+            bail!("renewal cannot change infrastructure/IO identity");
+        }
+        let io_status = io_record.private_status()?;
+        let binding: candy_tunio::attach_control::PacketPortBinding =
+            serde_json::from_value(io_status["packet_binding"].clone())?;
+        if binding.infrastructure_id != desired.infrastructure.infra_id
+            || binding.routing_domain_id != desired.domain_id
+            || binding.infrastructure_generation != desired.infrastructure.generation
+            || binding.io_epoch != desired.io_epoch
+            || desired.signed_generation < binding.policy_generation
+        {
+            bail!("new authority domain/infrastructure/policy is incompatible");
+        }
+        let controller = process_identity(std::process::id())?;
+        let takeover = exchange(
+            &io.control_socket,
+            io_identity,
+            &ControlRequest {
+                schema_version: 1,
+                operation: ControlOperation::Takeover,
+                token_sha256: io_record.readiness_token_sha256.clone(),
+                nonce: uuid::Uuid::new_v4().simple().to_string(),
+            },
+        )?;
+        if takeover.controller != controller || takeover.controller_epoch == 0 {
+            bail!("renewal IO controller fence differs");
+        }
+        let authority_path = authority_control_path(&io.control_socket);
+        let request = |operation, envelope, transaction_id| AuthorityControlRequest {
+            schema_version: 2,
+            process: io_identity,
+            controller,
+            controller_epoch: takeover.controller_epoch,
+            token_sha256: io_record.readiness_token_sha256.clone(),
+            nonce: uuid::Uuid::new_v4().simple().to_string(),
+            operation,
+            envelope,
+            transaction_id,
+        };
+        let mut actual = exchange_authority(
+            &authority_path,
+            io_identity,
+            &request(
+                AuthorityControlOperation::ProbeTransaction,
+                None,
+                uuid::Uuid::new_v4().simple().to_string(),
+            ),
+            None,
+            Instant::now() + Duration::from_secs(2),
+        )?;
+        let parent = original_worker
+            .process_record
+            .parent()
+            .context("missing private owner directory")?;
+        let old_worker = crate::process_record::read(&original_worker.process_record).ok();
+        let journal_path = original_worker
+            .process_record
+            .with_extension("renewal.json");
+        if journal_path.try_exists()? {
+            let mut previous_journal: Journal = read_private(&journal_path)?;
+            if previous_journal.schema_version != 1 {
+                bail!("renewal journal schema differs");
+            }
+            if previous_journal.phase == "committed" {
+                retire_candidate_record(&previous_journal, &original_worker.process_record)?;
+                retire_old_worker(&previous_journal, &desired, parent)?;
+                let new_plan = read_plan(&previous_journal.candidate_plan)?;
+                let (_, desired_report) = compile_verified_plan(desired.clone())?;
+                let candidate = crate::process_record::read(&original_worker.process_record)?;
+                if actual.owner_active
+                    && previous_journal.envelope.as_ref() == actual.active.as_ref()
+                    && desired_report["authorization_snapshot_sha256"]
+                        == new_plan
+                            .authorization_snapshot_sha256
+                            .as_deref()
+                            .unwrap_or("")
+                    && new_plan.auth_deadline_unix == desired.auth_deadline_unix
+                    && candidate.authorization_snapshot_sha256
+                        == new_plan.authorization_snapshot_sha256
+                    && process_is_current(ProcessIdentity {
+                        pid: candidate.pid,
+                        start_ticks: candidate.process_start_ticks,
+                    })
+                {
+                    return adopt_worker_with_io(path, true, true);
+                }
+            }
+            if previous_journal.phase != "committed" {
+                let mut previous_plan = match read_plan(&previous_journal.candidate_plan) {
+                    Ok(plan) => plan,
+                    Err(error) if previous_journal.phase == "retiring" => previous_journal
+                        .candidate_plan_snapshot
+                        .clone()
+                        .ok_or(error)?,
+                    Err(error) => return Err(error),
+                };
+                if previous_journal.phase != "retiring" {
+                    previous_journal.snapshot.verify()?;
+                }
+                if previous_plan.infrastructure != desired.infrastructure
+                    || previous_plan.domain_id != desired.domain_id
+                    || previous_plan.io_epoch != desired.io_epoch
+                {
+                    bail!("renewal journal scope differs");
+                }
+                if previous_journal.envelope.is_none() {
+                    if let Ok(record) =
+                        crate::process_record::read(&previous_journal.candidate_record)
+                    {
+                        stop_record(&record, &previous_plan)?;
+                    } else {
+                        preserve_unrecorded_endpoint(
+                            &previous_plan
+                                .independent_worker
+                                .as_ref()
+                                .context("candidate control absent")?
+                                .control_socket,
+                        )?;
+                    }
+                }
+                if let Some(envelope) = previous_journal.envelope.as_ref() {
+                    let record =
+                        crate::process_record::read(&previous_journal.candidate_record).ok();
+                    if actual.active.as_ref() == Some(envelope)
+                        && actual.owner_active
+                        && record.as_ref().is_some_and(|record| {
+                            process_is_current(ProcessIdentity {
+                                pid: record.pid,
+                                start_ticks: record.process_start_ticks,
+                            })
+                        })
+                    {
+                        let record = record.unwrap();
+                        let (verified, report) = compile_verified_plan(previous_plan.clone())?;
+                        if report["authorization_snapshot_sha256"] != envelope.signed_control_hash {
+                            bail!("journal signed snapshot hash differs from actual authority");
+                        }
+                        previous_plan = verified;
+                        let candidate = ProcessIdentity {
+                            pid: record.pid,
+                            start_ticks: record.process_start_ticks,
+                        };
+                        exchange(
+                            &previous_plan
+                                .independent_worker
+                                .as_ref()
+                                .unwrap()
+                                .control_socket,
+                            candidate,
+                            &ControlRequest {
+                                schema_version: 1,
+                                operation: ControlOperation::Takeover,
+                                token_sha256: record.readiness_token_sha256.clone(),
+                                nonce: uuid::Uuid::new_v4().simple().to_string(),
+                            },
+                        )?;
+                        let token = record.private_status()?["readiness_token"]
+                            .as_str()
+                            .context("candidate token absent")?
+                            .to_owned();
+                        let mut netd = NetdControl::new(&previous_plan);
+                        let (state, _) = netd.exchange(Operation::ForwardStatus)?;
+                        if !matches!(state,Body::ForwardStatus {owner:Some(ref owner),..} if owner==&previous_journal.owner)
+                            && !matches!(state,Body::ForwardStatus {candidate_owner:Some(ref owner),..} if owner==&previous_journal.owner)
+                        {
+                            if let Body::ForwardStatus {
+                                owner: Some(owner),
+                                candidate_owner: None,
+                                ..
+                            } = state
+                            {
+                                expect_ack(&mut netd, Operation::ForwardRevoke { owner })?;
+                            }
+                            let actual_cap = actual
+                                .actual_deadline_mono_ms
+                                .context("actual candidate cap absent during recovery")?;
+                            previous_journal.owner.auth_deadline_mono_ms = previous_journal
+                                .owner
+                                .auth_deadline_mono_ms
+                                .min(actual_cap.saturating_sub(1));
+                            previous_journal.owner.lease_deadline_mono_ms = previous_journal
+                                .owner
+                                .lease_deadline_mono_ms
+                                .min(previous_journal.owner.auth_deadline_mono_ms);
+                            expect_ack(
+                                &mut netd,
+                                Operation::ForwardPrepare {
+                                    infra_id: previous_plan.infrastructure.infra_id,
+                                    infra_generation: previous_plan.infrastructure.generation,
+                                    owner: previous_journal.owner.clone(),
+                                    declaration: previous_plan.declaration.clone(),
+                                },
+                            )?;
+                            publish(&journal_path, &previous_journal)?;
+                        }
+                        let deadline = Instant::now() + Duration::from_secs(20);
+                        let mut failed = None;
+                        loop {
+                            exact_ready(&previous_plan, &record, envelope)?;
+                            if matches!(
+                                read_core_readiness_with_policy(
+                                    &previous_plan.core_status,
+                                    previous_plan.signed_generation,
+                                    candidate.pid,
+                                    &token,
+                                    ReadinessPolicy::Strict
+                                )?,
+                                Some(ReadinessState::Ready)
+                            ) {
+                                sync_failed_prefixes(
+                                    &mut netd,
+                                    &previous_plan,
+                                    candidate.pid,
+                                    &token,
+                                    &previous_journal.owner,
+                                    candidate,
+                                    &mut failed,
+                                )?;
+                                if failed.is_some() {
+                                    break;
+                                }
+                            }
+                            if Instant::now() >= deadline {
+                                return Err(ManagedProofPending.into());
+                            }
+                            thread::sleep(Duration::from_millis(100));
+                        }
+                        let (state, _) = netd.exchange(Operation::ForwardStatus)?;
+                        if !matches!(state,Body::ForwardStatus {owner:Some(ref owner),phase:Some(candy_netd_proto::v2::Phase::Active),..} if owner==&previous_journal.owner)
+                        {
+                            commit_authorized(
+                                &previous_plan,
+                                &record,
+                                &previous_journal.owner,
+                                &mut netd,
+                            )?;
+                        }
+                        finish_records(
+                            &mut previous_plan,
+                            &mut previous_journal,
+                            &journal_path,
+                            &original_worker.process_record,
+                            &io.process_record,
+                            &io_record,
+                        )?;
+                        retire_old_worker(&previous_journal, &desired, parent)?;
+                        return adopt_worker_with_io(path, true, true);
+                    }
+                    if let Some(record) = record {
+                        stop_record(&record, &previous_plan)?;
+                    }
+                    if actual.pending.as_ref() == Some(envelope) {
+                        actual = exchange_authority(
+                            &authority_path,
+                            io_identity,
+                            &request(
+                                AuthorityControlOperation::DiscardAuthority,
+                                None,
+                                envelope.transaction_id.clone(),
+                            ),
+                            None,
+                            Instant::now() + Duration::from_secs(2),
+                        )?;
+                    }
+                    if actual.active.as_ref() == Some(envelope) {
+                        actual = exchange_authority(
+                            &authority_path,
+                            io_identity,
+                            &request(
+                                AuthorityControlOperation::RevokeExact,
+                                Some(envelope.clone()),
+                                envelope.transaction_id.clone(),
+                            ),
+                            None,
+                            Instant::now() + Duration::from_secs(2),
+                        )?;
+                    }
+                    let mut netd = NetdControl::new(&previous_plan);
+                    let (state, _) = netd.exchange(Operation::ForwardStatus)?;
+                    if matches!(state,Body::ForwardStatus {owner:Some(ref owner),..} if owner==&previous_journal.owner)
+                        || matches!(state,Body::ForwardStatus {candidate_owner:Some(ref owner),..} if owner==&previous_journal.owner)
+                    {
+                        expect_ack(
+                            &mut netd,
+                            Operation::ForwardRevoke {
+                                owner: previous_journal.owner.clone(),
+                            },
+                        )?;
+                    }
+                }
+                previous_journal.phase = "retiring".into();
+                previous_journal.candidate_plan_snapshot = Some(previous_plan.clone());
+                publish(&journal_path, &previous_journal)?;
+                previous_journal.snapshot.retire()?;
+                for generated in [
+                    &previous_plan.binding_file,
+                    &previous_plan.core_status,
+                    &previous_journal.candidate_plan,
+                    &previous_journal.candidate_record,
+                ] {
+                    match fs::remove_file(generated) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                if let Some(worker) = &previous_plan.independent_worker {
+                    let _ = fs::remove_file(&worker.control_socket);
+                }
+                fs::remove_file(&journal_path)?;
+            }
+        }
+        if actual.pending.is_some() {
+            bail!("unknown pending signed authority requires scoped reconciliation");
+        }
+        let snapshot = Snapshot::capture(&desired.core_config, parent)?;
+        let mut snapshot_cleanup = crate::signed_snapshot::CleanupGuard::new(&snapshot);
+        let mut plan = desired.clone();
+        plan.core_config = snapshot.config.clone();
+        let (mut plan, report) = compile_verified_plan(plan)?;
+        let signed_hash = report["authorization_snapshot_sha256"]
+            .as_str()
+            .context("Core compile report lacks exact authorization snapshot hash")?
+            .to_owned();
+        if signed_hash.len() != 64 || !signed_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("invalid Core authorization snapshot hash");
+        }
+        let mut netd = NetdControl::new(&desired);
+        let (status, fd) = netd.exchange(Operation::ForwardStatus)?;
+        if fd.is_some() {
+            bail!("unexpected FD in renewal status");
+        }
+        let Body::ForwardStatus {
+            owner: previous,
+            candidate_owner,
+            ..
+        } = status
+        else {
+            bail!("missing forwarding status");
+        };
+        if candidate_owner.is_some() {
+            bail!("retained netd candidate requires exact renewal journal reconciliation");
+        }
+        if previous.as_ref().is_some_and(|owner| {
+            owner.domain_id != plan.domain_id || owner.signed_generation > plan.signed_generation
+        }) {
+            bail!("new signed authority cannot downgrade existing owner");
+        }
+        let epoch = previous
+            .as_ref()
+            .map_or(binding.owner_epoch, |owner| {
+                owner.worker_epoch.max(binding.owner_epoch)
+            })
+            .checked_add(1)
+            .context("owner epoch exhausted")?;
+        let fence = previous
+            .as_ref()
+            .map_or(0, |owner| owner.fencing_token)
+            .checked_add(1)
+            .context("fence exhausted")?;
+        let revision = actual
+            .highest_revision
+            .checked_add(1)
+            .context("authority revision exhausted")?;
+        let transaction = uuid::Uuid::new_v4().simple().to_string();
+        let now = candy_tunio::authority_control::monotonic_ms()?;
+        let remaining = Duration::from_secs(plan.auth_deadline_unix)
+            .checked_sub(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?)
+            .filter(|value| !value.is_zero())
+            .context("new signed authority expired")?;
+        if remaining > Duration::from_secs(3600) {
+            bail!("experimental detached authority is limited to one hour");
+        }
+        let mut cap = now
+            .checked_add(u64::try_from(remaining.as_millis())?)
+            .context("authority deadline overflow")?;
+        if let Some(active) = &actual.active {
+            if active.signed_control_hash == signed_hash {
+                cap = cap.min(active.effective_deadline_mono_ms);
+                if let Some(actual_cap) = actual.actual_deadline_mono_ms {
+                    cap = cap.min(actual_cap);
+                }
+            }
+        }
+        if old_worker.as_ref().is_some_and(|record| {
+            record.authorization_snapshot_sha256.as_deref() == Some(signed_hash.as_str())
+        }) {
+            if let Some(previous) = &previous {
+                cap = cap.min(previous.auth_deadline_mono_ms);
+            }
+        }
+        if let Some(recovery) = &desired.pair_recovery {
+            if recovery.authorization_snapshot_sha256.as_deref() == Some(signed_hash.as_str()) {
+                cap = cap.min(recovery.auth_deadline_mono_ms);
+            }
+        }
+        if cap <= monotonic_ms()? {
+            bail!("original pair recovery authorization expired");
+        }
+        if let Some(recovery) = &mut plan.pair_recovery {
+            recovery.auth_deadline_mono_ms = cap;
+            recovery.authorization_snapshot_sha256 = Some(signed_hash.clone());
+        }
+        let mut owner = ForwardOwner {
+            domain_id: plan.domain_id,
+            signed_generation: plan.signed_generation,
+            worker_epoch: epoch,
+            fencing_token: fence,
+            auth_deadline_mono_ms: cap,
+            lease_deadline_mono_ms: (now + 30000).min(cap),
+        };
+        plan.worker_epoch = epoch;
+        plan.fencing_token = fence;
+        plan.binding_file = parent.join(format!("renewal-{transaction}-binding.json"));
+        plan.core_status = parent.join(format!("renewal-{transaction}-core-status.json"));
+        plan.independent_worker = Some(IndependentWorker {
+            control_socket: parent.join(format!("renewal-{transaction}-core.sock")),
+            process_record: parent.join(format!("renewal-{transaction}-core-record.json")),
+        });
+        plan.authority = Some(AuthorityProof {
+            revision,
+            sha256: signed_hash.clone(),
+            transaction_id: transaction.clone(),
+        });
+        plan.authorization_snapshot_sha256 = Some(signed_hash.clone());
+        let candidate_plan = parent.join(format!("renewal-{transaction}-plan.json"));
+        plan.effective_plan_file = Some(candidate_plan.clone());
+        snapshot_cleanup.track_file(candidate_plan.clone());
+        publish(&candidate_plan, &plan)?;
+        let mut journal = Journal {
+            schema_version: 1,
+            phase: "verified".into(),
+            snapshot: snapshot.clone(),
+            envelope: None,
+            candidate_plan: candidate_plan.clone(),
+            candidate_plan_snapshot: Some(plan.clone()),
+            candidate_record: plan
+                .independent_worker
+                .as_ref()
+                .unwrap()
+                .process_record
+                .clone(),
+            owner: owner.clone(),
+            old_worker: old_worker.clone(),
+        };
+        if let Err(error) = publish(&journal_path, &journal) {
+            if read_private::<Journal>(&journal_path).is_ok_and(|persisted| {
+                persisted.candidate_plan == journal.candidate_plan
+                    && persisted.snapshot.closure_sha256 == journal.snapshot.closure_sha256
+                    && persisted.snapshot.directory == journal.snapshot.directory
+            }) {
+                snapshot_cleanup.transfer();
+                eprintln!("level=warn code=renewal_journal_durability_pending module=sdwan_activation detail={error:#} action=reconcile_exact_persisted_candidate");
+                return Err(ManagedProofPending.into());
+            }
+            return Err(error);
+        }
+        snapshot_cleanup.transfer();
+        create_binding(&plan)?;
+        let (io_socket, worker_socket) = UnixDatagram::pair()?;
+        snapshot.verify()?;
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        let mut child = spawn_business_worker(&plan, &worker_socket, &token)?;
+        drop(worker_socket);
+        let candidate = process_identity(child.id())?;
+        let new_binding = candy_tunio::attach_control::PacketPortBinding {
+            owner_epoch: epoch,
+            policy_generation: plan.signed_generation,
+            ..binding
+        };
+        let envelope = AuthorityEnvelope {
+            transaction_id: transaction.clone(),
+            authority_revision: revision,
+            binding: new_binding,
+            candidate,
+            controller,
+            controller_epoch: takeover.controller_epoch,
+            signed_control_hash: signed_hash,
+            declaration_hash: format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&plan.declaration)?)
+            ),
+            verification_report_hash: format!("{:x}", Sha256::digest(serde_json::to_vec(&report)?)),
+            snapshot_closure_hash: snapshot.closure_sha256.clone(),
+            signed_min_expiry_unix: report["authorization_expires_at_unix"]
+                .as_u64()
+                .context("signed expiry absent")?,
+            effective_expiry_unix: plan.auth_deadline_unix,
+            verified_at_unix: unix_time()?,
+            verified_at_mono_ms: now,
+            effective_deadline_mono_ms: cap,
+            boot_id: fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+                .trim()
+                .to_owned(),
+        };
+        journal.envelope = Some(envelope.clone());
+        let mut attached = false;
+        let result = (|| -> Result<()> {
+            publish_worker_record(&plan, child.id(), &token)?;
+            journal.phase = "registered".into();
+            publish(&journal_path, &journal)?;
+            exchange_authority(
+                &authority_path,
+                io_identity,
+                &request(
+                    AuthorityControlOperation::StageAuthority,
+                    Some(envelope.clone()),
+                    transaction.clone(),
+                ),
+                None,
+                Instant::now() + Duration::from_secs(2),
+            )?;
+            journal.phase = "staged".into();
+            publish(&journal_path, &journal)?;
+            if let Some(previous) = &previous {
+                expect_ack(
+                    &mut netd,
+                    Operation::ForwardRevoke {
+                        owner: previous.clone(),
+                    },
+                )?;
+            }
+            journal.phase = "barrier".into();
+            publish(&journal_path, &journal)?;
+            snapshot.verify()?;
+            let fd: std::os::fd::OwnedFd = io_socket.into();
+            let attach = exchange_authority(
+                &authority_path,
+                io_identity,
+                &request(
+                    AuthorityControlOperation::AttachAuthorized,
+                    Some(envelope.clone()),
+                    transaction.clone(),
+                ),
+                Some(&fd),
+                Instant::now() + Duration::from_secs(2),
+            );
+            let actual = match attach {
+                Ok(actual) => actual,
+                Err(error) => {
+                    let probe = exchange_authority(
+                        &authority_path,
+                        io_identity,
+                        &request(
+                            AuthorityControlOperation::ProbeTransaction,
+                            None,
+                            transaction.clone(),
+                        ),
+                        None,
+                        Instant::now() + Duration::from_secs(2),
+                    )?;
+                    if probe.active.as_ref() != Some(&envelope) {
+                        return Err(error.context(
+                            "authorized Attach receipt absent and actual transaction differs",
+                        ));
+                    }
+                    probe
+                }
+            };
+            if actual.active.as_ref() != Some(&envelope) || actual.current_binding != new_binding {
+                bail!("IO actual signed authority receipt differs");
+            }
+            attached = true;
+            let actual_cap = actual
+                .actual_deadline_mono_ms
+                .context("IO actual applied deadline absent")?;
+            owner.auth_deadline_mono_ms = owner
+                .auth_deadline_mono_ms
+                .min(actual_cap.saturating_sub(1));
+            owner.lease_deadline_mono_ms = owner
+                .lease_deadline_mono_ms
+                .min(owner.auth_deadline_mono_ms);
+            journal.owner = owner.clone();
+            expect_ack(
+                &mut netd,
+                Operation::ForwardPrepare {
+                    infra_id: plan.infrastructure.infra_id,
+                    infra_generation: plan.infrastructure.generation,
+                    owner: owner.clone(),
+                    declaration: plan.declaration.clone(),
+                },
+            )?;
+            expect_ack(
+                &mut netd,
+                Operation::ForwardAuthorize {
+                    owner: owner.clone(),
+                    authority: forward_authority(&envelope, io_identity),
+                },
+            )?;
+            journal.phase = "attached".into();
+            publish(&journal_path, &journal)?;
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut failed_snapshot = None;
+            loop {
+                if shutdown_requested()
+                    || !process_is_current(candidate)
+                    || !process_is_current(io_identity)
+                    || monotonic_ms()? > cap
+                {
+                    bail!("renewal candidate cancelled/dead/expired");
+                }
+                snapshot.verify()?;
+                let record = crate::process_record::read(&journal.candidate_record)?;
+                exact_ready(&plan, &record, &envelope)?;
+                if matches!(
+                    read_core_readiness_with_policy(
+                        &plan.core_status,
+                        plan.signed_generation,
+                        child.id(),
+                        &token,
+                        ReadinessPolicy::Strict
+                    )?,
+                    Some(ReadinessState::Ready)
+                ) {
+                    sync_failed_prefixes(
+                        &mut netd,
+                        &plan,
+                        child.id(),
+                        &token,
+                        &owner,
+                        candidate,
+                        &mut failed_snapshot,
+                    )?;
+                    if failed_snapshot.is_some() {
+                        break;
+                    }
+                }
+                if Instant::now() >= deadline {
+                    return Err(ManagedProofPending.into());
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            journal.phase = "proved".into();
+            publish(&journal_path, &journal)?;
+            let io_receipt = exchange_authority(
+                &authority_path,
+                io_identity,
+                &request(
+                    AuthorityControlOperation::ProbeTransaction,
+                    None,
+                    transaction.clone(),
+                ),
+                None,
+                Instant::now() + Duration::from_secs(2),
+            )?;
+            if io_receipt.active.as_ref() != Some(&envelope)
+                || !io_receipt.owner_active
+                || io_receipt.applied_transaction_id.as_deref() != Some(transaction.as_str())
+                || io_receipt.authority_revision != Some(revision)
+                || io_receipt.current_binding != new_binding
+                || io_receipt
+                    .actual_deadline_mono_ms
+                    .is_none_or(|actual| actual < owner.auth_deadline_mono_ms)
+            {
+                bail!("IO fresh actual applied authority proof differs before commit");
+            }
+            let record = crate::process_record::read(&journal.candidate_record)?;
+            exact_ready(&plan, &record, &envelope)?;
+            let fresh_status = record.private_status()?;
+            let reported = fresh_status["reported_at_mono_ms"]
+                .as_u64()
+                .context("fresh packet report clock absent")?;
+            journal.phase = "commit_pending".into();
+            publish(&journal_path, &journal)?;
+            expect_ack(
+                &mut netd,
+                Operation::ForwardCommitAuthorized {
+                    owner: owner.clone(),
+                    receipt: ForwardAuthorityReceipt {
+                        authority: forward_authority(&envelope, io_identity),
+                        owner_active: true,
+                        authorization_deadline_mono_ms: owner.auth_deadline_mono_ms,
+                        packet_proof_reported_mono_ms: reported,
+                    },
+                },
+            )?;
+            let (committed, fd) = netd.exchange(Operation::ForwardStatus)?;
+            if fd.is_some()
+                || !matches!(committed,Body::ForwardStatus {owner:Some(ref current),phase:Some(candy_netd_proto::v2::Phase::Active),..} if current==&owner)
+            {
+                bail!("netd exact renewal commit unconfirmed");
+            }
+            finish_records(
+                &mut plan,
+                &mut journal,
+                &journal_path,
+                &original_worker.process_record,
+                &io.process_record,
+                &io_record,
+            )?;
+            retire_old_worker(&journal, &desired, parent)?;
+            eprintln!("level=info code=signed_authority_committed module=sdwan_activation transaction_id={} authority_revision={} core_pid={} io_pid={} policy_generation={} action=preserve_original_tun",transaction,revision,child.id(),io_record.pid,plan.signed_generation);
+            adopt_worker_with_io(path, true, true)
+        })();
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.is::<DesiredStateChanged>())
+        {
+            return result;
+        }
+        if matches!(journal.phase.as_str(), "committed" | "commit_pending") {
+            if result.is_err() {
+                if result.as_ref().err().is_some_and(|error| {
+                    error.is::<PairRecoveryRequired>() || error.is::<CoreRecoveryRequired>()
+                }) {
+                    return result;
+                }
+                return Err(ManagedProofPending.into());
+            }
+            return result;
+        }
+        stop(&mut child);
+        let _ = expect_ack(&mut netd, Operation::ForwardRevoke { owner });
+        let operation = if attached {
+            AuthorityControlOperation::RevokeExact
+        } else {
+            AuthorityControlOperation::DiscardAuthority
+        };
+        let _ = exchange_authority(
+            &authority_path,
+            io_identity,
+            &request(
+                operation,
+                if attached { Some(envelope) } else { None },
+                transaction,
+            ),
+            None,
+            Instant::now() + Duration::from_secs(2),
+        );
+        journal.phase = "retry_wait".into();
+        let _ = publish(&journal_path, &journal);
+        result
+    }
+}
+
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+pub(super) use linux::run;
+
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+pub(super) use linux::{archive_retired_io_transaction, run_with_plan};
+
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+pub(super) use linux::commit_authorized;
+
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+pub(super) use linux::publish_plan;
+
+#[cfg(not(all(feature = "experimental-tunio-rebind", target_os = "linux")))]
+pub(super) fn commit_authorized(
+    _: &Plan,
+    _: &crate::process_record::ManagedProcessRecord,
+    _: &ForwardOwner,
+    _: &mut NetdControl,
+) -> Result<()> {
+    bail!("signed authorized commit requires Linux experimental-tunio-rebind");
+}

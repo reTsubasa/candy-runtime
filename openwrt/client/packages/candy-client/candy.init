@@ -1442,7 +1442,8 @@ node_group_names() {
 
 write_node_status() {
 	local node_id="$1"
-	local enabled name server state="unused" groups
+	local enabled name server state="unused" groups passive_expr passive_state passive_updated now_ms
+	local active_tcp active_udp reconnects last_error url_status url_latency url_checked url_error passive
 	config_get_bool enabled "$node_id" enabled 1
 	config_get name "$node_id" name "$node_id"
 	config_get server "$node_id" server
@@ -1451,6 +1452,33 @@ write_node_status() {
 	groups=$(node_group_names "$node_id")
 	if [ "$enabled" -eq 1 ] && [ -n "$groups" ]; then
 		state="down"
+	fi
+	# The static configuration only tells us that a node is enabled.  When the
+	# Core passive snapshot is available, use its fresh per-node evidence for
+	# the exported status as well; otherwise the UI/API reports every enabled
+	# node as down even while the data plane is ready.  jsonfilter's bracket
+	# notation also supports human-readable node names containing spaces or
+	# non-ASCII characters.
+	if [ "$enabled" -eq 1 ] && [ -s "$CANDY_PASSIVE_STATUS_FILE" ] && command -v jsonfilter >/dev/null 2>&1; then
+		passive_expr=$(printf '%s' "$name" | sed 's/\\/\\\\/g; s/"/\\"/g')
+		passive_updated=$(jsonfilter -i "$CANDY_PASSIVE_STATUS_FILE" -e '@.updated_unix_ms' 2>/dev/null || true)
+		now_ms=$(date +%s 2>/dev/null || printf 0)
+		case "$passive_updated" in ''|*[!0-9]*) passive_updated=0 ;; esac
+		case "$now_ms" in ''|*[!0-9]*) now_ms=0 ;; esac
+		# A passive snapshot older than two minutes is not evidence of readiness.
+		if [ "$passive_updated" -gt 0 ] && [ "$now_ms" -gt 0 ] && [ "$passive_updated" -ge $((now_ms * 1000 - 120000)) ]; then
+			passive_state=$(jsonfilter -i "$CANDY_PASSIVE_STATUS_FILE" -e "@.nodes[\"$passive_expr\"].state" 2>/dev/null || true)
+			case "$passive_state" in ready|running|active|degraded|reconnecting|connecting|down|unavailable) state="$passive_state" ;; esac
+			active_tcp=$(jsonfilter -i "$CANDY_PASSIVE_STATUS_FILE" -e "@.nodes[\"$passive_expr\"].active_tcp_flows" 2>/dev/null || true)
+			active_udp=$(jsonfilter -i "$CANDY_PASSIVE_STATUS_FILE" -e "@.nodes[\"$passive_expr\"].active_udp_flows" 2>/dev/null || true)
+			reconnects=$(jsonfilter -i "$CANDY_PASSIVE_STATUS_FILE" -e "@.nodes[\"$passive_expr\"].reconnects" 2>/dev/null || true)
+			last_error=$(jsonfilter -i "$CANDY_PASSIVE_STATUS_FILE" -e "@.nodes[\"$passive_expr\"].last_error" 2>/dev/null || true)
+			url_status=$(jsonfilter -i "$CANDY_PASSIVE_STATUS_FILE" -e "@.nodes[\"$passive_expr\"].url_test.status" 2>/dev/null || true)
+			url_latency=$(jsonfilter -i "$CANDY_PASSIVE_STATUS_FILE" -e "@.nodes[\"$passive_expr\"].url_test.latency_ms" 2>/dev/null || true)
+			url_checked=$(jsonfilter -i "$CANDY_PASSIVE_STATUS_FILE" -e "@.nodes[\"$passive_expr\"].url_test.checked_unix_ms" 2>/dev/null || true)
+			url_error=$(jsonfilter -i "$CANDY_PASSIVE_STATUS_FILE" -e "@.nodes[\"$passive_expr\"].url_test.last_error" 2>/dev/null || true)
+			passive=$(jsonfilter -i "$CANDY_PASSIVE_STATUS_FILE" -e "@.nodes[\"$passive_expr\"].passive" 2>/dev/null || true)
+		fi
 	fi
 	if [ "$FIRST_STATUS_NODE" -eq 0 ]; then
 		printf ','
@@ -1465,9 +1493,15 @@ write_node_status() {
 	json_string "$server"
 	printf ',"groups":'
 	json_string_list "$groups"
-	printf ',"telemetry_status":"unavailable","active_tcp_flows":null,"active_udp_flows":null,"reconnects":null'
-	printf ',"url_test":{"status":"unavailable","latency_ms":null,"checked_unix_ms":null,"error":"telemetry unavailable"}'
-	printf ',"passive":null,"last_error":"telemetry unavailable"}'
+	if [ -n "$passive_state" ]; then
+		printf ',"telemetry_status":"available","active_tcp_flows":%s,"active_udp_flows":%s,"reconnects":%s' "${active_tcp:-null}" "${active_udp:-null}" "${reconnects:-null}"
+		printf ',"url_test":{"status":'; json_string "${url_status:-not-run}"; printf ',"latency_ms":%s,"checked_unix_ms":%s,"error":' "${url_latency:-null}" "${url_checked:-null}"; json_string "${url_error:-}"; printf '}'
+		printf ',"passive":%s,"last_error":' "${passive:-null}"; json_string "${last_error:-}"; printf '}'
+	else
+		printf ',"telemetry_status":"unavailable","active_tcp_flows":null,"active_udp_flows":null,"reconnects":null'
+		printf ',"url_test":{"status":"unavailable","latency_ms":null,"checked_unix_ms":null,"error":"telemetry unavailable"}'
+		printf ',"passive":null,"last_error":"telemetry unavailable"}'
+	fi
 	FIRST_STATUS_NODE=0
 }
 

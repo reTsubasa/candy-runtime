@@ -23,11 +23,11 @@ use std::time::Duration;
 struct Args {
     #[arg(long, conflicts_with_all = ["socket", "allowed_uid", "allowed_gid", "journal", "recover"])]
     probe_socket: Option<PathBuf>,
-    #[arg(long, required_unless_present_any = ["probe_socket", "recover"])]
+    #[arg(long, required_unless_present_any = ["probe_socket", "recover", "check_domain_resources"])]
     socket: Option<PathBuf>,
-    #[arg(long, required_unless_present_any = ["probe_socket", "recover", "allowed_user"])]
+    #[arg(long, required_unless_present_any = ["probe_socket", "recover", "allowed_user", "check_domain_resources"])]
     allowed_uid: Option<u32>,
-    #[arg(long, required_unless_present_any = ["probe_socket", "recover", "allowed_group"])]
+    #[arg(long, required_unless_present_any = ["probe_socket", "recover", "allowed_group", "check_domain_resources"])]
     allowed_gid: Option<u32>,
     #[arg(long, conflicts_with = "allowed_uid", requires = "allowed_group")]
     allowed_user: Option<String>,
@@ -44,6 +44,17 @@ struct Args {
     recover: bool,
     #[arg(long, default_value = "/var/lib/candy/netd.journal")]
     journal: PathBuf,
+    /// Enable the independent infrastructure ABI; version 1 is never accepted in this mode.
+    #[arg(long, conflicts_with_all = ["probe_socket", "recover"])]
+    protocol_v2: bool,
+    #[arg(long, default_value = "/var/lib/candy/netd-infrastructure-v2.journal")]
+    infrastructure_journal: PathBuf,
+    /// Bind explicit domain identities to independent precreated network namespaces.
+    #[arg(long, requires = "protocol_v2")]
+    domain_config: Option<PathBuf>,
+    /// Check configured resource budgets without binding a socket or recovering domains.
+    #[arg(long, conflicts_with_all = ["probe_socket", "recover", "socket", "allowed_uid", "allowed_gid", "allowed_user", "allowed_group", "protocol_v2", "domain_config"])]
+    check_domain_resources: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -66,6 +77,11 @@ fn sanitize_log_value(value: &str) -> String {
 
 #[cfg(target_os = "linux")]
 fn run_linux(args: Args) -> anyhow::Result<()> {
+    if let Some(path) = args.check_domain_resources {
+        candy_netd::v2::domains::DomainsConfig::load(&path)?.validate_resource_admission()?;
+        eprintln!("level=info code=domain_resource_check_passed module=netd_domains scope=resource_admission");
+        return Ok(());
+    }
     if let Some(path) = args.probe_socket {
         std::os::unix::net::UnixStream::connect(path)?;
         return Ok(());
@@ -76,6 +92,9 @@ fn run_linux(args: Args) -> anyhow::Result<()> {
             FileNetworkJournal::new(args.journal)?,
         )?;
         let mut service = NetdService::with_network(0, 0, SystemTunFactory, network);
+        // The legacy journal stores deadlines in CLOCK_MONOTONIC units.  Keep
+        // this path on the legacy clock; BOOTTIME is reserved for protocol v2
+        // authorization and would make an orphan look expired after suspend.
         let recovered = service.recover_orphan(monotonic_millis()?)?;
         eprintln!(
             "level=info component=candy-netd event=orphan_recovery completed=true recovered={recovered}"
@@ -84,8 +103,72 @@ fn run_linux(args: Args) -> anyhow::Result<()> {
     }
     let (allowed_uid, allowed_gid) = resolve_allowed_identity(&args)?;
     let socket = args.socket.expect("clap requires --socket");
+    if let Some(config_path) = args.domain_config {
+        use candy_netd::v2::domains::{DomainsConfig, FrontDispatcher, MultiDomainService};
+        let service =
+            MultiDomainService::new(allowed_uid, allowed_gid, DomainsConfig::load(&config_path)?)?;
+        let front = FrontDispatcher::new(std::sync::Arc::new(service))?;
+        let listener = bind_private_socket_for(&socket, allowed_uid, allowed_gid)?;
+        listener.set_nonblocking(true)?;
+        install_shutdown_handlers()?;
+        eprintln!("level=info component=candy-netd event=service_started protocol=2 domain_routing=namespace infrastructure=preserved");
+        while !SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    if let Err(error) = front.dispatch(stream) {
+                        eprintln!("level=warn code=netd_domain_request_failed module=netd_domains reason={}", sanitize_log_value(&error.to_string()));
+                    }
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error.into()),
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        eprintln!("level=info component=candy-netd event=service_stopped protocol=2 infrastructure=preserved");
+        return Ok(());
+    }
     let listener = bind_private_socket_for(&socket, allowed_uid, allowed_gid)?;
     listener.set_nonblocking(true)?;
+    if args.protocol_v2 {
+        let journal = candy_netd::v2::InfrastructureJournal::new(args.infrastructure_journal)?;
+        let mut service = candy_netd::v2::InfrastructureService::new(
+            allowed_uid,
+            allowed_gid,
+            SystemTunFactory,
+            LinuxNetworkBackend::new()?,
+            journal,
+        )?;
+        install_shutdown_handlers()?;
+        eprintln!("level=info component=candy-netd event=service_started protocol=2 independent_infrastructure=true multi_domain=false");
+        while !SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+                    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+                    if let Err(error) =
+                        service.serve_once(&stream, candy_netd::v2::clock::now_ms()?)
+                    {
+                        eprintln!(
+                            "level=warn code=netd_v2_request_failed module=netd_v2 reason={}",
+                            sanitize_log_value(&error.to_string())
+                        );
+                    }
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error.into()),
+            }
+            if let Err(error) = service.recover_expired(candy_netd::v2::clock::now_ms()?) {
+                eprintln!(
+                    "level=error code=netd_v2_recovery_failed module=netd_v2 reason={}",
+                    sanitize_log_value(&error.to_string())
+                );
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // A netd restart is not an infrastructure retirement or a forwarding rollback.
+        eprintln!("level=info component=candy-netd event=service_stopped protocol=2 infrastructure=preserved");
+        return Ok(());
+    }
     let network = NetworkTransaction::new(
         LinuxNetworkBackend::new()?,
         FileNetworkJournal::new(args.journal)?,

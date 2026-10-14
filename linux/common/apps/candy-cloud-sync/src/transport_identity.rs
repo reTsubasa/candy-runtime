@@ -229,15 +229,13 @@ where
 }
 
 pub fn put_to_cloud(
-    client: &reqwest::blocking::Client,
+    client: &super::SyncClient,
     endpoint: Url,
     request: &TransportIdentityRequest,
 ) -> Result<()> {
     validate_request(request)?;
     let response = client
-        .put(endpoint)
-        .json(request)
-        .send()
+        .send(client.put(endpoint).json(request))
         .context("publish Runtime transport identity")?;
     // Cloud V1 specifies 204. Accept 200 from older Cloud images during a
     // rolling upgrade; the response body is intentionally ignored.
