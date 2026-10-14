@@ -166,19 +166,33 @@ async fn next_data_packet<T: PacketPort, W: PacketPort>(
     tun: &T,
     worker: Option<&W>,
     prefer_worker: bool,
+    to_worker: Option<super::packet_port::OutputAdmission>,
+    to_tun: Option<super::packet_port::OutputAdmission>,
 ) -> DataPacket {
+    let from_tun = async {
+        if let Some(admission) = to_worker {
+            admission.ready().await;
+        }
+        tun.recv_packet().await
+    };
+    let from_worker = async {
+        if let Some(admission) = to_tun {
+            admission.ready().await;
+        }
+        owner_packet(worker).await
+    };
     // Control stays in the outer select; only the two data directions rotate.
     if prefer_worker {
         tokio::select! {
             biased;
-            packet = owner_packet(worker) => DataPacket::FromWorker(packet),
-            packet = tun.recv_packet() => DataPacket::FromTun(packet),
+            packet = from_worker => DataPacket::FromWorker(packet),
+            packet = from_tun => DataPacket::FromTun(packet),
         }
     } else {
         tokio::select! {
             biased;
-            packet = tun.recv_packet() => DataPacket::FromTun(packet),
-            packet = owner_packet(worker) => DataPacket::FromWorker(packet),
+            packet = from_tun => DataPacket::FromTun(packet),
+            packet = from_worker => DataPacket::FromWorker(packet),
         }
     }
 }
@@ -337,6 +351,8 @@ pub async fn run_observed_packet_port_bridge<P: PacketPort>(
         }
         let worker = owner.as_ref().map(|owner| owner.port.clone());
         let expiry = owner.as_ref().map(|owner| owner.auth_deadline);
+        let to_worker = owner.as_ref().map(|owner| owner.to_worker.admission());
+        let to_tun = owner.as_ref().map(|owner| owner.to_tun.admission());
         tokio::select! {
             biased;
             changed = shutdown.changed() => {
@@ -448,7 +464,7 @@ pub async fn run_observed_packet_port_bridge<P: PacketPort>(
                 outputs.sampled_elapsed_millis = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
                 if let Some(sender) = &diagnostics { sender.send_replace(outputs.clone()); }
             }
-            packet = next_data_packet(tun.as_ref(), worker.as_deref(), prefer_worker) => {
+            packet = next_data_packet(tun.as_ref(), worker.as_deref(), prefer_worker, to_worker, to_tun) => {
                 prefer_worker = matches!(&packet, DataPacket::FromTun(_));
                 match packet {
                     DataPacket::FromTun(Ok(packet)) => match &owner {
@@ -653,6 +669,52 @@ mod tests {
             },
             shutdown,
         )
+    }
+
+    #[tokio::test]
+    async fn byte_backpressure_does_not_block_reverse_data_or_control_cancellation() {
+        struct ReadyPort;
+        impl PacketPort for ReadyPort {
+            async fn recv_packet(&self) -> io::Result<Vec<u8>> {
+                Ok(vec![7; 64])
+            }
+            async fn send_packet(&self, _: &[u8]) -> io::Result<()> {
+                std::future::pending().await
+            }
+        }
+        let mut full = PacketOutput::new(Arc::new(ReadyPort));
+        for _ in 0..8 {
+            full.enqueue(vec![1; 65_535]).unwrap();
+        }
+        let reverse = PacketOutput::new(Arc::new(ReadyPort));
+        let packet = tokio::time::timeout(
+            Duration::from_millis(20),
+            next_data_packet(
+                &ReadyPort,
+                Some(&ReadyPort),
+                false,
+                Some(full.admission()),
+                Some(reverse.admission()),
+            ),
+        )
+        .await
+        .expect("one direction blocked reverse ingress");
+        assert!(matches!(packet, DataPacket::FromWorker(Ok(data)) if data == vec![7; 64]));
+        let mut cancelled = Box::pin(next_data_packet(
+            &ReadyPort,
+            Some(&ReadyPort),
+            false,
+            Some(full.admission()),
+            Some(full.admission()),
+        ));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(cancelled.as_mut().poll(&mut context).is_pending());
+        drop(cancelled); // Owner change/shutdown cancels the direction waits.
+        let started = Instant::now();
+        full.stop().await;
+        assert!(started.elapsed() < Duration::from_millis(50));
+        let mut reverse = reverse;
+        reverse.stop().await;
     }
 
     #[tokio::test]

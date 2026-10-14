@@ -119,7 +119,34 @@ pub struct PacketOutput {
     max_packet_size: usize,
 }
 
+/// Direction-local ingress backpressure. The single producer waits before
+/// reading another packet; owner updates and the opposite direction remain
+/// independently pollable. Credits are still charged by enqueue.
+#[derive(Clone)]
+pub struct OutputAdmission {
+    slots: Arc<Semaphore>,
+    bytes: Arc<Semaphore>,
+    packet_bytes: u32,
+}
+
+impl OutputAdmission {
+    pub async fn ready(&self) {
+        let slot = self.slots.acquire().await;
+        let bytes = self.bytes.acquire_many(self.packet_bytes).await;
+        drop(bytes);
+        drop(slot);
+    }
+}
+
 impl PacketOutput {
+    pub fn admission(&self) -> OutputAdmission {
+        OutputAdmission {
+            slots: self.slot_credit.clone(),
+            bytes: self.credit.clone(),
+            packet_bytes: self.max_packet_size as u32,
+        }
+    }
+
     pub fn new<P: PacketPort>(port: Arc<P>) -> Self {
         let max_packet_size = port.max_packet_size().min(65_535);
         let try_port = port.clone();
@@ -473,6 +500,61 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ingress_admission_waits_for_credit_and_resumes_without_rejection() {
+        let port = TestPort::new(true, None);
+        let mut output = PacketOutput::new(port.clone());
+        for _ in 0..OUTPUT_PACKET_LIMIT {
+            output.enqueue(vec![1; 100]).unwrap();
+        }
+        let admission = output.admission();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), admission.ready())
+                .await
+                .is_err()
+        );
+        port.blocked.store(0, Ordering::Relaxed);
+        port.unblock.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), admission.ready())
+            .await
+            .unwrap();
+        wait_packet(&port, OUTPUT_PACKET_LIMIT).await;
+        let delta = output.take_delta();
+        assert_eq!(delta.queue_slot_exhausted, 0);
+        assert_eq!(delta.deadline_drops, 0);
+        output.stop().await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_byte_wait_releases_slot_and_preserves_opposite_output() {
+        let port = TestPort::new(true, None);
+        let mut output = PacketOutput::new(port.clone());
+        // Byte budget is exhausted before the 256-slot budget. Cancellation
+        // must release the temporary slot held while waiting for bytes.
+        for _ in 0..8 {
+            output.enqueue(vec![1; 65_535]).unwrap();
+        }
+        let initial_slots = output.slot_credit.available_permits();
+        for _ in 0..8 {
+            let admission = output.admission();
+            let mut ready = Box::pin(admission.ready());
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(ready.as_mut().poll(&mut context).is_pending());
+            assert_eq!(output.slot_credit.available_permits(), initial_slots - 1);
+            drop(ready);
+            assert_eq!(output.slot_credit.available_permits(), initial_slots);
+        }
+        let reverse = TestPort::new(false, None);
+        let mut reverse_output = PacketOutput::new(reverse.clone());
+        reverse_output.admission().ready().await;
+        reverse_output.enqueue(vec![2; 64]).unwrap();
+        wait_packet(&reverse, 1).await;
+        assert_eq!(*reverse.packets.lock().unwrap(), vec![vec![2; 64]]);
+        output.stop().await;
+        reverse_output.stop().await;
+        assert_eq!(output.outstanding.load(Ordering::Acquire), 0);
     }
 
     #[tokio::test]

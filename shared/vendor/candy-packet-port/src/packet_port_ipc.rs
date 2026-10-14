@@ -299,6 +299,8 @@ pub async fn run_packet_port_bridge<P: PacketPort>(
         if *shutdown.borrow() {
             break Ok(());
         }
+        let to_worker_admission = to_worker.admission();
+        let to_tun_admission = to_tun.admission();
         tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() { break Ok(()); }
@@ -312,14 +314,20 @@ pub async fn run_packet_port_bridge<P: PacketPort>(
                 if let Err(error) = to_tun.invalidate().await { break Err(error); }
             }
             error = to_tun.failed() => { break Err(error); }
-            packet = tun.recv_packet() => match packet {
+            packet = async {
+                if worker_available { to_worker_admission.ready().await; }
+                tun.recv_packet().await
+            } => match packet {
                 Ok(packet) => {
                     if !worker_available { counters.no_worker_drops += 1; }
                     else { counters.record_enqueue(to_worker.enqueue(packet)); }
                 }
                 Err(error) => break Err(error),
             },
-            packet = worker.recv_packet(), if worker_available => match packet {
+            packet = async {
+                to_tun_admission.ready().await;
+                worker.recv_packet().await
+            }, if worker_available => match packet {
                 Ok(packet) => {
                     counters.record_enqueue(to_tun.enqueue(packet));
                 }
