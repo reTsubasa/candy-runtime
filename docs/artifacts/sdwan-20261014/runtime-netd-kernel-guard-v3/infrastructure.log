@@ -1,0 +1,26 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.23s
+     Running tests/infrastructure_v2.rs (target-linux-netd-v2/debug/deps/infrastructure_v2-6ecd9146de2f0b2a)
+
+running 3 tests
+test real_linux_creation_crash_recovery_requires_durable_owned_marker ... 
+running 1 test
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=11
+
+running 1 test
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=13
+
+running 1 test
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=15
+
+running 1 test
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=16
+
+running 1 test
+ok
+test real_linux_failed_prefix_only_changes_its_route_and_retains_healthy_prefix ... level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=18
+ok
+test real_linux_tun_survives_forward_revoke_and_netd_restart ... level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=19
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 1.57s
+

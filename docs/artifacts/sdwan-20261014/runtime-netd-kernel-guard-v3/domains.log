@@ -1,0 +1,44 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.42s
+     Running tests/domains_v2.rs (target-linux-netd-v2/debug/deps/domains_v2-78d7313724693796)
+
+running 2 tests
+test real_one_and_four_explicit_namespace_domains_activate_independently ... level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=11
+resource_observation domains=1 control_thread_delta=3 fd_delta=10 rss_delta_kib=3020 scope=netd_control_only profile=debug
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=11
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=11
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=11
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=11
+resource_observation domains=4 control_thread_delta=6 fd_delta=32 rss_delta_kib=892 scope=netd_control_only profile=debug
+ok
+test real_two_domains_same_prefix_failures_leases_journals_and_fd_owners_are_isolated ... level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=11
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=11
+level=info code=domain_resource_check_passed module=netd_domains scope=resource_admission
+level=warn code=domain_front_request_failed module=netd_domains reason=infrastructure IPC failed: netd IPC I/O failed: netd IPC I/O failed: netd IPC peer closed during frame
+
+running 1 test
+
+running 1 test
+
+running 1 test
+test real_multidomain_fd_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+test real_multidomain_fd_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.24s
+
+
+running 1 test
+test real_multidomain_fd_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.03s
+
+test real_multidomain_fd_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.07s
+
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.43s
+
