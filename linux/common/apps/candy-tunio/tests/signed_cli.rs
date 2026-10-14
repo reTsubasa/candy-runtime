@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[path = "fixtures/slot_rotation.rs"]
+mod slot_rotation;
+
 struct Process(Child);
 impl Drop for Process {
     fn drop(&mut self) {
@@ -40,7 +43,7 @@ impl Drop for FailedStateEvidence {
             if path.is_file()
                 && matches!(
                     path.extension().and_then(|ext| ext.to_str()),
-                    Some("json" | "journal")
+                    Some("json" | "journal" | "log")
                 )
             {
                 let _ = fs::copy(&path, destination.join(entry.file_name()));
@@ -438,6 +441,21 @@ fn signed_cli_listener_conflict_and_transport_exit_preserve_client_infrastructur
     );
 }
 
+#[test]
+#[ignore = "loaded actual Linux worker slot rotations, conflicts and Agent takeover; isolated privileged namespace only"]
+fn signed_cli_loaded_domain_slot_rotation_preserves_signed_authority_and_tun() {
+    run_signed_cli(
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        FaultMode::Placement,
+    );
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FaultMode {
     None,
@@ -446,6 +464,7 @@ enum FaultMode {
     PublicListener,
     CloudMtls,
     CloudRenewal,
+    Placement,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -737,8 +756,20 @@ fn run_signed_cli(
         });
     }
     let mut plan = serde_json::json!({"schema_version":1,"netd_socket":root.join("netd.sock"),"tunio":env!("CARGO_BIN_EXE_candy-tunio"),"core":core(),"core_config":root.join("fixture/client.toml"),"core_status":root.join("client-status.json"),"binding_file":root.join("binding.json"),"instance_id":vec![1;16],"infrastructure":spec,"domain_id":vec![2;16],"io_epoch":1,"worker_epoch":1,"fencing_token":1,"signed_generation":1,"auth_deadline_unix":expiry+3600,"declaration":declaration,"independent_supervision":{"control_socket":root.join("io-control.sock"),"status":root.join("io-status.json"),"process_record":root.join("io-process.json")}});
-    if independent || rebind || renewal || pair_recovery || fault_mode == FaultMode::CloudRenewal {
+    if independent
+        || rebind
+        || renewal
+        || pair_recovery
+        || matches!(fault_mode, FaultMode::CloudRenewal | FaultMode::Placement)
+    {
         plan["independent_worker"] = serde_json::json!({"control_socket":root.join("worker-control.sock"),"process_record":root.join("worker-process.json")});
+    }
+    if fault_mode == FaultMode::Placement {
+        let directory = root.join("worker-pool");
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        plan["placement"] =
+            serde_json::json!({"revision":1,"target_worker_id":1,"pool_directory":directory});
     }
     if fault_mode == FaultMode::CloudRenewal {
         plan["core_config"] = serde_json::json!(root.join("cloud-state/candidate/core.toml"));
@@ -779,6 +810,10 @@ fn run_signed_cli(
                 "--plan",
             ])
             .arg(root.join("plan.json"));
+    }
+    if fault_mode == FaultMode::Placement {
+        let log = fs::File::create(root.join("placement-agent.log")).unwrap();
+        agent_command.stdout(log.try_clone().unwrap()).stderr(log);
     }
     let mut agent = Process(agent_command.spawn().unwrap());
     let mut client = ClientControl {
@@ -843,6 +878,33 @@ fn run_signed_cli(
             .success()
     };
     assert!(ping(), "signed real TUN traffic failed before fault");
+    if fault_mode == FaultMode::Placement {
+        slot_rotation::verify(
+            root,
+            &ns.0,
+            &mut agent,
+            &mut client,
+            &ping,
+            &link_state,
+            &link,
+        );
+        unsafe {
+            nix::libc::kill(agent.0.id() as i32, nix::libc::SIGTERM);
+        }
+        assert!(agent.0.wait().unwrap().success());
+        assert!(matches!(
+            client
+                .exchange(Operation::InfraRetire {
+                    infra_id: [3; 16],
+                    generation: infra_generation
+                })
+                .unwrap()
+                .0,
+            Body::Ack
+        ));
+        drop(server);
+        return;
+    }
     if fault_mode == FaultMode::CloudRenewal {
         verify_cloud_renewal(root, &mut agent, &ping, &link_state, &link);
         unsafe {
