@@ -59,7 +59,7 @@ impl Fixture {
                     thread_stack_bytes: 256 * 1024,
                     max_total_stack_bytes: 6 * 256 * 1024,
                     max_pending_control_requests: 8,
-                    max_pending_control_bytes: 1024 * 1024,
+                    max_pending_control_bytes: 2 * 4 * candy_netd_proto::MAX_NETD_FRAME_LEN,
                     max_reserved_fds: 1024,
                 },
                 domains: Vec::new(),

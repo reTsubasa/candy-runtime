@@ -729,6 +729,33 @@ mod backend {
                         })?;
                 }
                 if changed.is_none() {
+                    // Candidate publication must install its own bypass routes
+                    // before removing the previous policy's stale exclusions.
+                    // ForwardPrepare is side-effect free for a candidate, so
+                    // initial prepare cannot be relied on to create them.
+                    for prefix in plan.throw_prefixes() {
+                        let route = RouteMessageBuilder::<Ipv4Addr>::new()
+                            .destination_prefix(Ipv4Addr::from(prefix.network), prefix.prefix_len)
+                            .table_id(plan.route_table)
+                            .protocol(RouteProtocol::Static)
+                            .kind(RouteType::Throw)
+                            .build();
+                        handle
+                            .route()
+                            .add(route)
+                            .replace()
+                            .execute()
+                            .await
+                            .map_err(|error| {
+                                log_route_backend_error(
+                                    "forward_bypass_route_replace",
+                                    plan.route_table,
+                                    Some(prefix),
+                                    &error,
+                                );
+                                NetworkError::Backend
+                            })?;
+                    }
                     Self::reconcile_policy_rules(&handle, &plan).await?;
                 }
                 Ok(())

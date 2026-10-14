@@ -855,6 +855,61 @@ fn real_linux_tun_survives_forward_revoke_and_netd_restart() {
     );
     call(&mut service, Operation::ForwardCommit { owner: owner() });
     assert!(command(&["route", "show", "table", "20000"]).contains("dev candy0"));
+    // Exercise the actual connected local UDP socket that failed when a
+    // transient handoff installed unreachable routes. Keep this socket and
+    // the same TUN queue alive through guard and netd journal recovery.
+    let (_, guard_io_fd) = call(
+        &mut service,
+        Operation::InfraAcquireIoFd {
+            infra_id: [2; 16],
+            generation: 1,
+            io_epoch: 1,
+        },
+    );
+    let guard_io_fd = guard_io_fd.unwrap();
+    let udp = std::net::UdpSocket::bind("100.64.0.10:0").unwrap();
+    udp.connect("10.2.0.20:9898").unwrap();
+    let assert_udp_reaches_tun = |payload: &[u8]| {
+        use std::os::fd::AsRawFd;
+        assert_eq!(udp.send(payload).unwrap(), payload.len());
+        let mut descriptor = nix::libc::pollfd {
+            fd: guard_io_fd.as_raw_fd(),
+            events: nix::libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { nix::libc::poll(&mut descriptor, 1, 1000) }, 1);
+        let mut packet = [0_u8; 2048];
+        let size = unsafe {
+            nix::libc::read(
+                guard_io_fd.as_raw_fd(),
+                packet.as_mut_ptr().cast(),
+                packet.len(),
+            )
+        };
+        assert!(size >= payload.len() as isize);
+        assert!(packet[..size as usize].ends_with(payload));
+    };
+    assert_udp_reaches_tun(b"before-guard");
+    let guard_routes = command(&["-j", "route", "show", "table", "20000"]);
+    call(&mut service, Operation::ForwardGuard { owner: owner() });
+    assert_eq!(
+        guard_routes,
+        command(&["-j", "route", "show", "table", "20000"])
+    );
+    for _ in 0..8 {
+        assert_udp_reaches_tun(b"during-guard");
+    }
+    drop(service);
+    let mut service = make_service();
+    assert!(matches!(
+        call(&mut service, Operation::ForwardStatus).0,
+        Body::ForwardStatus {
+            phase: Some(Phase::Guarded),
+            ..
+        }
+    ));
+    assert_udp_reaches_tun(b"after-guard-recovery");
+    drop(udp);
     let before_routes = command(&["-j", "route", "show", "table", "20000"]);
     let (next_owner, next_policy) = candidate();
     call(
@@ -879,7 +934,10 @@ fn real_linux_tun_survives_forward_revoke_and_netd_restart() {
     let switched_routes = command(&["route", "show", "table", "20000"]);
     assert!(switched_routes.contains("10.3.0.0/16 dev candy0"));
     assert!(!switched_routes.contains("10.2.0.0/16"));
-    assert!(switched_routes.contains("throw 192.0.2.2"));
+    assert!(
+        switched_routes.contains("throw 192.0.2.2"),
+        "candidate routes: {switched_routes}"
+    );
     assert!(!switched_routes.contains("192.0.2.1"));
     call(
         &mut service,
@@ -920,7 +978,7 @@ fn real_linux_tun_survives_forward_revoke_and_netd_restart() {
         command(&["-j", "addr", "show", "dev", "candy0"])
     );
     drop(service);
-    // Both queue holders exited here; persistence keeps identity, not carrier LOWER_UP.
+    // The real I/O owner remains alive while netd restarts.
     assert_eq!(
         before_ifindex,
         serde_json::from_str::<serde_json::Value>(&command(&[
@@ -928,17 +986,8 @@ fn real_linux_tun_survives_forward_revoke_and_netd_restart() {
         ]))
         .unwrap()[0]["ifindex"]
     );
-    let mut service = make_service();
-    let (body, io_fd) = call(
-        &mut service,
-        Operation::InfraAcquireIoFd {
-            infra_id: [2; 16],
-            generation: 1,
-            io_epoch: 1,
-        },
-    );
-    assert!(matches!(body, Body::IoFd { .. }));
-    assert!(io_fd.is_some());
+    let service = make_service();
+    let io_fd = guard_io_fd;
     let reopened = serde_json::from_str::<serde_json::Value>(&command(&[
         "-j", "link", "show", "dev", "candy0",
     ]))
