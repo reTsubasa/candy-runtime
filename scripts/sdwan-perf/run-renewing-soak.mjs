@@ -16,6 +16,7 @@ const ttl = smoke ? 60 : 1800, renewalInterval = smoke ? 30 : 900;
 const rounds = smoke || mode === 'comparison' ? 4 : mode === 'diagnostic' ? 12 : 120;
 const seconds = smoke ? 20 : 60;
 const policyTtl = 10800;
+const requireOutputs = process.env.CANDY_PERF_REQUIRE_OUTPUT_DIAGNOSTICS === '1';
 if (fs.existsSync(root)) throw new Error('new evidence directory required');
 fs.mkdirSync(root, {recursive: true, mode: 0o700});
 const write = (name, value) => fs.writeFileSync(path.join(root, name), JSON.stringify(value, null, 2), {mode: 0o600});
@@ -39,7 +40,16 @@ const status = async () => {
       const current = await readPrivate('/run/candy-perf/worker-process.json');
       if (JSON.stringify(record) !== JSON.stringify(current)) { await delay(100); continue; }
       if (core.pid !== record.pid) throw new Error('worker status PID differs from stable process record');
-      return {record, core, io: await readPrivate('/run/candy-perf/io-process.json'), io_status: await readPrivate('/run/candy-perf/io-status.json'), link: JSON.parse(await inClient('ip', '-j', 'link', 'show', 'candy0'))};
+      const io = await readPrivate('/run/candy-perf/io-process.json');
+      let outputs;
+      try {
+        outputs = await readPrivate('/run/candy-perf/io-status.outputs.json');
+        const monotonic = Number(await inClient('python3', '-c', 'import time; print(time.clock_gettime(time.CLOCK_MONOTONIC) * 1000)'));
+        if (!Number.isFinite(monotonic) || outputs.schema_version !== 1 || outputs.pid !== io.pid || outputs.process_start_ticks !== io.process_start_ticks || !Number.isFinite(outputs.report_monotonic_millis) || monotonic - outputs.report_monotonic_millis > 5000 || outputs.report_monotonic_millis > monotonic + 50) throw new Error('TUNIO output sidecar identity/clock differs from running process');
+      } catch (error) {
+        if (requireOutputs || !String(error.stderr || '').includes('No such file or directory')) throw error;
+      }
+      return {record, core, io, io_status: await readPrivate('/run/candy-perf/io-status.json'), outputs, link: JSON.parse(await inClient('ip', '-j', 'link', 'show', 'candy0'))};
     } catch (error) {
       if (!String(error.stderr || '').includes('No such file or directory') || attempt === 19) throw error;
       await delay(100);
@@ -81,7 +91,7 @@ const snapshot = async name => {
 try {
   fs.cpSync(path.join(build, 'binaries'), path.join(root, 'binaries'), {recursive: true});
   for (const name of ['binary-hashes.json', 'source-freeze.json', 'build-provenance.json']) fs.copyFileSync(path.join(build, name), path.join(root, name));
-  write('renewal-run.json', {mode, ttl_seconds: ttl, policy_ttl_seconds: policyTtl, renewal_interval_seconds: renewalInterval, rounds, seconds, runner_sha256: crypto.createHash('sha256').update(fs.readFileSync(new URL(import.meta.url))).digest('hex'), scope: 'isolated aarch64 Docker renewal stability; not physical-link acceptance'});
+  write('renewal-run.json', {mode, require_output_diagnostics: requireOutputs, ttl_seconds: ttl, policy_ttl_seconds: policyTtl, renewal_interval_seconds: renewalInterval, rounds, seconds, runner_sha256: crypto.createHash('sha256').update(fs.readFileSync(new URL(import.meta.url))).digest('hex'), scope: 'isolated aarch64 Docker renewal stability; not physical-link acceptance'});
   phase('setup');
   identity = read('run-identity.json');
   const initial = await status();
