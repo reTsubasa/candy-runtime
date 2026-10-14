@@ -1933,11 +1933,13 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
     let Body::ForwardStatus {
         owner: Some(previous),
         candidate_owner,
+        phase: previous_phase,
         ..
     } = body
     else {
         bail!("independent Core forwarding receipt absent");
     };
+    let retained_owner = previous.clone();
     let previous = if let Some(candidate) = candidate_owner {
         if candidate.worker_epoch != plan.worker_epoch
             || candidate.domain_id != plan.domain_id
@@ -1980,6 +1982,24 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
             .min(previous.auth_deadline_mono_ms.min(auth_deadline)),
         ..previous
     };
+    // Controller adoption changes the fence, not the live business or I/O
+    // owner. Preserve its route-to-TUN policy through this bookkeeping commit;
+    // an ordinary active replacement briefly installs unreachable routes and
+    // can terminate existing connected UDP application sockets.
+    if matches!(
+        previous_phase,
+        Some(candy_netd_proto::v2::Phase::Active | candy_netd_proto::v2::Phase::Guarded)
+    ) {
+        if let Err(error) = expect_ack(
+            &mut netd,
+            Operation::ForwardGuard {
+                owner: retained_owner,
+            },
+        ) {
+            eprintln!("level=warn code=forward_guard_failed module=process_supervisor worker_pid={} detail={error:#} action=preserve_live_owner_retry_adoption", managed.pid);
+            return Err(error.context(ManagedProofPending));
+        }
+    }
     expect_ack(
         &mut netd,
         Operation::ForwardPrepare {
