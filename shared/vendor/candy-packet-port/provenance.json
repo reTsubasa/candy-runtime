@@ -3,23 +3,23 @@
     "Cargo.toml": "f1f9ded3ada35cf1ac6abb3bfd066e21a4d9871826e708de4e261a927bbcfa82",
     "src/fd.rs": "4e08796effc340169a7de21974dfba13b0bc2d65813aec6b6e308db5c9dbc8ba",
     "src/lib.rs": "1ffb422cb562f15d265a0c27e6f6b8d025b61f81dd3236b97039c23c6dbd7d13",
-    "src/packet_port.rs": "b9974f25ebe097144a32318a490d935c71e3966df4030bb2dd2fc0d3e6043551",
+    "src/packet_port.rs": "f5541183b44d8944973a35c43b881b3ec32fff0f388f1813979b52bf764a30f1",
     "src/packet_port_ipc.rs": "0020287a971ec190d1ea51415e695e21bda0604a99b521475f6f2de8058b14f8",
     "src/packet_port_manager.rs": "33ff6065f60571868360ce53e65b30de58b1cb51ecdff94a7e78cf0966dc10f9"
   },
   "note": "Fixed public source package from a development worktree; base commit alone is not its content identity.",
   "origin": "https://github.com/reTsubasa/candy-core",
-  "origin_base_commit": "33b11021f45912eccd558f7f051de990520f24e8",
+  "origin_base_commit": "123fb58338e013d47e91689412ca5eeff42b702f",
   "origin_path": "crates/candy-packet-port",
-  "origin_worktree_content_sha256": "41a6d31c30471eae77d29bc22ef5d9e26333139fd88089c5bb5667bd1dd6e442",
+  "origin_worktree_content_sha256": "e978dfe57b8cf5274969c0a0703919f5b4fde885a90f65193608f97241961d7b",
   "package": "candy-packet-port",
-  "package_content_sha256": "257bd42acfb522e8f26826dd16197bc1ff1f92bd0a5cc52010b7a612703574e2",
+  "package_content_sha256": "66949645d802ef58cf159e7a8275befd82b95d58ef669140ac89e17dcfaf378a",
   "schema_version": 1,
   "source_files": {
     "Cargo.toml": "7be1c63650c39ceb702a14b9d869013a86728dc2196f4883880836ac7f539be8",
     "src/fd.rs": "4e08796effc340169a7de21974dfba13b0bc2d65813aec6b6e308db5c9dbc8ba",
     "src/lib.rs": "1ffb422cb562f15d265a0c27e6f6b8d025b61f81dd3236b97039c23c6dbd7d13",
-    "src/packet_port.rs": "b9974f25ebe097144a32318a490d935c71e3966df4030bb2dd2fc0d3e6043551",
+    "src/packet_port.rs": "f5541183b44d8944973a35c43b881b3ec32fff0f388f1813979b52bf764a30f1",
     "src/packet_port_ipc.rs": "0020287a971ec190d1ea51415e695e21bda0604a99b521475f6f2de8058b14f8",
     "src/packet_port_manager.rs": "33ff6065f60571868360ce53e65b30de58b1cb51ecdff94a7e78cf0966dc10f9"
   }

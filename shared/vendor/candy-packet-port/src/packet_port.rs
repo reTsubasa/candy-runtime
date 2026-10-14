@@ -30,9 +30,9 @@ pub trait PacketPort: Send + Sync + 'static {
 const OUTPUT_PACKET_LIMIT: usize = 256;
 const OUTPUT_BYTE_LIMIT: usize = 512 * 1024;
 const OUTPUT_WRITE_TIMEOUT: Duration = Duration::from_millis(100);
-// Bound executor wakeups without changing packet, byte, deadline, or epoch
-// limits. A batch is deliberately small so revocation remains responsive.
-const OUTPUT_DRAIN_BATCH: usize = 8;
+// Ready writes bypass reactor futures, so explicitly yield between bounded
+// batches. Epoch and deadline checks still run before every packet.
+const OUTPUT_DRAIN_BATCH: usize = 64;
 
 #[derive(Default)]
 struct OutputMetrics {
@@ -131,8 +131,8 @@ impl PacketOutput {
         let task_metrics = metrics.clone();
         let queue_depth = Arc::new(AtomicUsize::new(0));
         let task = tokio::spawn(async move {
+            let mut batch = Vec::with_capacity(OUTPUT_DRAIN_BATCH);
             loop {
-                let mut batch = Vec::with_capacity(OUTPUT_DRAIN_BATCH);
                 let received = tokio::select! {
                     biased;
                     changed = epoch_rx.changed() => {
@@ -145,7 +145,7 @@ impl PacketOutput {
                 if received == 0 {
                     return Ok(());
                 }
-                for mut packet in batch {
+                for mut packet in batch.drain(..) {
                     if let Some(error) = packet.failure.take() {
                         return Err(error);
                     }
@@ -163,16 +163,27 @@ impl PacketOutput {
                         write_started
                             .saturating_duration_since(packet.deadline - OUTPUT_WRITE_TIMEOUT),
                     );
-                    let result = tokio::select! {
-                        biased;
-                        changed = epoch_rx.changed() => {
-                            if changed.is_err() { return Ok(()); }
-                            observed_tx.send_replace(*epoch_rx.borrow_and_update());
-                            task_metrics.stale_drops.fetch_add(1, Ordering::Relaxed);
-                            continue;
+                    // timeout_at polls its inner future first. Reject expired
+                    // packets before a ready fd can write them, including when
+                    // readiness and the deadline become ready together.
+                    let result = if write_started >= packet.deadline {
+                        Err(())
+                    } else {
+                        match port.try_send_packet(&packet.packet) {
+                            Ok(true) => Ok(Ok(())),
+                            Err(error) => Ok(Err(error)),
+                            Ok(false) => tokio::select! {
+                                biased;
+                                changed = epoch_rx.changed() => {
+                                    if changed.is_err() { return Ok(()); }
+                                    observed_tx.send_replace(*epoch_rx.borrow_and_update());
+                                    task_metrics.stale_drops.fetch_add(1, Ordering::Relaxed);
+                                    continue;
+                                }
+                                _ = tokio::time::sleep_until(packet.deadline) => Err(()),
+                                result = port.send_packet(&packet.packet) => Ok(result),
+                            },
                         }
-                        result = tokio::time::timeout_at(packet.deadline,
-                            port.send_packet(&packet.packet)) => result,
                     };
                     record_elapsed(
                         &task_metrics.send_elapsed_micros,
@@ -213,6 +224,7 @@ impl PacketOutput {
                         }
                     }
                 }
+                tokio::task::yield_now().await;
             }
         });
         Self {
@@ -588,6 +600,111 @@ mod tests {
         assert!(delta.send_elapsed_max_micros >= 20_000);
         assert_eq!(delta.sent_packets, 2);
         assert_eq!(delta.deadline_drops, 0);
+        output.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_queued_packets_never_poll_a_ready_port_and_release_all_credit() {
+        let port = TestPort::new(false, None);
+        let mut output = PacketOutput::new(port.clone());
+        for value in 1..=4 {
+            output.enqueue(vec![value; 100]).unwrap();
+        }
+        // Advance before the writer's first poll: a ready inner future must
+        // not win over an already elapsed packet deadline.
+        tokio::time::advance(OUTPUT_WRITE_TIMEOUT + Duration::from_millis(1)).await;
+        while output.queue_depth.load(Ordering::Acquire) != 0 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(port.attempts.load(Ordering::Relaxed), 0);
+        assert!(port.packets.lock().unwrap().is_empty());
+        assert_eq!(output.take_delta().deadline_drops, 4);
+        assert_eq!(output.slot_credit.available_permits(), OUTPUT_PACKET_LIMIT);
+        assert_eq!(output.credit.available_permits(), OUTPUT_BYTE_LIMIT);
+        output.enqueue(vec![5; 100]).unwrap();
+        wait_packet(&port, 1).await;
+        output.stop().await;
+    }
+
+    struct ReadyDrainPort {
+        ready: AtomicUsize,
+        attempts: AtomicUsize,
+        packets: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl PacketPort for ReadyDrainPort {
+        fn try_send_packet(&self, packet: &[u8]) -> io::Result<bool> {
+            self.attempts.fetch_add(1, Ordering::Relaxed);
+            if self.ready.load(Ordering::Acquire) == 0 {
+                return Ok(false);
+            }
+            self.packets.lock().unwrap().push(packet.to_vec());
+            Ok(true)
+        }
+        async fn recv_packet(&self) -> io::Result<Vec<u8>> {
+            std::future::pending().await
+        }
+        async fn send_packet(&self, _: &[u8]) -> io::Result<()> {
+            panic!("queued ready writes must not poll the readiness future");
+        }
+    }
+
+    fn ready_drain_port() -> Arc<ReadyDrainPort> {
+        Arc::new(ReadyDrainPort {
+            ready: AtomicUsize::new(0),
+            attempts: AtomicUsize::new(0),
+            packets: Mutex::new(Vec::new()),
+        })
+    }
+
+    #[tokio::test]
+    async fn queued_nonblocking_drain_preserves_order_across_batches_and_returns_credit() {
+        let port = ready_drain_port();
+        let mut output = PacketOutput::new(port.clone());
+        let expected: Vec<_> = (0..OUTPUT_PACKET_LIMIT)
+            .map(|value| vec![value as u8; 100])
+            .collect();
+        for packet in &expected {
+            output.enqueue(packet.clone()).unwrap();
+        }
+        port.ready.store(1, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while output.queue_depth.load(Ordering::Acquire) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(*port.packets.lock().unwrap(), expected);
+        assert_eq!(output.take_delta().sent_packets, OUTPUT_PACKET_LIMIT as u64);
+        assert_eq!(output.slot_credit.available_permits(), OUTPUT_PACKET_LIMIT);
+        assert_eq!(output.credit.available_permits(), OUTPUT_BYTE_LIMIT);
+        output.stop().await;
+    }
+
+    #[tokio::test]
+    async fn fencing_a_ready_queued_drain_discards_old_epoch_before_any_fd_write() {
+        let port = ready_drain_port();
+        let mut output = PacketOutput::new(port.clone());
+        for _ in 0..OUTPUT_PACKET_LIMIT {
+            output.enqueue(vec![1; 100]).unwrap();
+        }
+        port.ready.store(1, Ordering::Release);
+        output.invalidate().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while output.queue_depth.load(Ordering::Acquire) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(port.packets.lock().unwrap().is_empty());
+        assert_eq!(port.attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(output.take_delta().stale_drops, OUTPUT_PACKET_LIMIT as u64);
+        assert_eq!(output.slot_credit.available_permits(), OUTPUT_PACKET_LIMIT);
+        assert_eq!(output.credit.available_permits(), OUTPUT_BYTE_LIMIT);
+        output.enqueue(vec![2; 100]).unwrap();
+        assert_eq!(*port.packets.lock().unwrap(), vec![vec![2; 100]]);
         output.stop().await;
     }
 
