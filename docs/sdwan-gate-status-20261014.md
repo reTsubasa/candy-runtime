@@ -40,3 +40,12 @@ Core 和 Runtime 的局部修复已推送到各自 `main`，但完整发布门�
 - IPC nonblocking fast path 直接尝试 fd，避免 Tokio readiness cache 尚未填充时虚假不可写；异步发送仍使用 reactor readiness 并在实际 EAGAIN 时清理。Core host PacketPort 24/24 与 clippy PASS；Linux 满缓冲等待/恢复专项待实跑。macOS 满队列返回 ENOBUFS，该 Linux EAGAIN 专项不用于推定 macOS 通过。
 
 Docker aarch64 veth 结果不替代 x86_64 物理 WAN、OpenWrt 或 Android 真机验收。所有构建/运行原始证据保留于工作区 `docs/artifacts/sdwan-20261014/`。
+
+## Cloud candidate → domain plan bridge（2026-10-14 v4）
+
+- Runtime 将经签名验证并持久化的 Cloud activation 转换为 domain plan：模板保留本地 TUN/IO、基础设施和 worker placement；Cloud 仅提供签名策略，并与本地 underlay exclusions 合并。activation generation、descriptor、文件权限和路径均经过约束；Core `compile-control` 在 deadline 内验证 immutable snapshot。candidate 无效或编译失败时保留此前 published plan；Supervisor shutdown 会取消编译。
+- 实现已提交：Runtime `ba747ca`；Cloud renewal 测试接线 `627da65`。
+- 隔离证据 `docs/artifacts/sdwan-20261014/runtime-cloud-bridge-v4/renewal/run.log`：真实 mTLS Cloud 签发 2 次授权，318 个请求均验证客户端证书；首次授权过期时流量被拒绝，Cloud 恢复后第二个 activation 发布、新授权生效，原 TUN 上 ICMP 恢复；Agent PID、IO PID、TUN 身份保持不变。专项测试 1/1 PASS。Agent feature suite 103/103 PASS，Clippy 与 release build PASS。
+- 有载 worker placement 目前 FAIL，证据在 `docs/artifacts/sdwan-20261014/runtime-cloud-bridge-v4/placement/run.log`。placement revision 1→2、worker 1→2 的切换中，旧 worker 对端 tunnel 在新 peer 全面可用前关闭；服务端记录 `route_has_no_active_peer=62`，持续 UDP upload socket 返回 `EHOSTUNREACH` 并退出。TUNIO/netd 基础设施仍存活、io_epoch 不变且自身队列 drop 为零，因此这是对端业务 owner handoff 的数据面窗口，不是 Cloud bridge 或 TUN teardown。该结果维持 F08/live placement 门禁 FAIL；须修复原子 peer/route handoff 并在连续双向负载下复测，不能弱化流量存活断言。
+- v4 测试文件同时含另一并行任务新增的 CandidateFailover 草稿，以上 `627da65` 只提交 CloudRenewal 两个 hunk；未将并行改动混入提交。
+- 本门禁在隔离 Docker `NetworkMode=none`、privileged 容器完成；没有访问或切换线上节点。性能门禁仍 FAIL，bridge 专项短测不构成 800 Mbps 验收，也不构成正式发布许可。
