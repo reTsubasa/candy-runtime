@@ -153,6 +153,7 @@ fn finish(children: Vec<(Process, PathBuf)>, allow_loss: bool) -> Vec<Value> {
             if !allow_loss {
                 assert_eq!(value["lost_packets"], 0);
                 assert_eq!(value["send_errors"], 0);
+                assert_eq!(value["recv_errors"], 0);
             }
             value
         })
@@ -226,4 +227,10 @@ pub(super) fn verify(
         );
     }
     eprintln!("two_candidate_failover_evidence {evidence}");
+    for phase in ["failed_over", "recovered"] {
+        assert!(
+            evidence[phase]["elapsed_ms"].as_u64().unwrap() <= 3000,
+            "low RTT candidate {phase} exceeded the three second convergence gate"
+        );
+    }
 }
