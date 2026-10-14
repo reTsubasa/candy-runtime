@@ -2489,6 +2489,7 @@ mod tests {
         drop(listener);
         remove_retired_control_endpoint(&path).unwrap();
         let replacement = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         drop(replacement);
         remove_retired_control_endpoint(&path).unwrap();
         fs::write(&path, "unrelated").unwrap();
