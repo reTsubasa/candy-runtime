@@ -145,9 +145,9 @@ v11 结束后仍不可宣称所有 SD-WAN 门禁关闭：完整 1→2→4→2→
 
 本门禁以本地签名 Grant fixture 代替生产 Cloud；不覆盖真实 WAN 硬件、Cloud 续期服务、OpenWrt、Android 或完整 Proxy/SD-WAN worker 架构。早期 signature-mismatch 文本是 tamper rejection probe；报告只将最终签名恢复断言标记通过，保留原始日志。
 
-### WorkerPool 连续扩缩池级门禁（Core `a94f814`）
+### WorkerPool 连续扩缩池级门禁（Core `6d16c86`）
 
-`candy-core/crates/candy-carrier-transport/src/worker_pool_shared_tests.rs` 新增连续 `1→2→4→2→1` 测试并已推送。`cargo fmt --all -- --check` 与该单项测试通过。测试验证新连接分布、存量 owner sticky、draining worker 不接新 owner、存量 lease/ByteCredit 阻止 retire、credit 释放后 retire、迟到重复 release 拒绝；结果打印 `remaining_connections=728`。
+`candy-core/crates/candy-carrier-transport/src/worker_pool_shared_tests.rs` 新增连续 `1→2→4→2→1` 测试并已推送。`cargo fmt --all -- --check` 与 WorkerPool 18 项测试通过。测试验证新连接分布、存量 owner sticky、draining worker 不接新 owner、存量 lease/ByteCredit 阻止 retire、credit 释放后 retire、迟到重复 release 拒绝；结果打印 `remaining_connections=728`。
 
 这是 WorkerPool API/lease 语义的**池级部分通过**，不关闭 F08：当前没有生产进程池生命周期、drain completion ACK 或 live connection/session 迁移；扩缩时连接会留在原 owner，完成 drain 依赖对应连接正常释放。必须实现并集成进程管理和 live ownership/drain 协议，再执行端到端 F08。该测试不能证明真实 Proxy Session、SD-WAN domain dispatch 或同 listener 混合业务已经迁移。
 
