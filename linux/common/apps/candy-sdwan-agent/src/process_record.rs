@@ -120,6 +120,18 @@ impl ManagedProcessRecord {
     }
 
     pub fn validate_current(&self, expected_executable: &Path, now_unix: u64) -> Result<()> {
+        let status = self.validate_bound_status(expected_executable, now_unix)?;
+        if !matches!(status["lifecycle"].as_str(), Some("active" | "starting")) {
+            bail!("managed Core lifecycle is not active or starting");
+        }
+        Ok(())
+    }
+
+    pub fn validate_bound_status(
+        &self,
+        expected_executable: &Path,
+        now_unix: u64,
+    ) -> Result<serde_json::Value> {
         self.validate_identity(expected_executable, now_unix)?;
         let status = self.private_status()?;
         let policy_generation = status["policy_generation"]
@@ -140,11 +152,10 @@ impl ManagedProcessRecord {
             || status["auth_deadline_unix"]
                 .as_u64()
                 .is_some_and(|deadline| deadline != self.auth_deadline_unix)
-            || !matches!(status["lifecycle"].as_str(), Some("active" | "starting"))
         {
             bail!("managed Core status is not bound to process, epoch, token and generations");
         }
-        Ok(())
+        Ok(status)
     }
 
     pub fn validate_identity(&self, expected_executable: &Path, now_unix: u64) -> Result<()> {
@@ -287,6 +298,18 @@ mod tests {
         fs::write(&status, serde_json::to_vec(&json).unwrap()).unwrap();
         fs::set_permissions(&status, fs::Permissions::from_mode(0o600)).unwrap();
         record.validate_current(&executable, 99).unwrap();
+        let mut terminal = json.clone();
+        terminal["lifecycle"] = "failed".into();
+        fs::write(&status, serde_json::to_vec(&terminal).unwrap()).unwrap();
+        assert_eq!(
+            record.validate_bound_status(&executable, 99).unwrap()["lifecycle"],
+            "failed"
+        );
+        assert!(record.validate_current(&executable, 99).is_err());
+        terminal["pid"] = (record.pid + 1).into();
+        fs::write(&status, serde_json::to_vec(&terminal).unwrap()).unwrap();
+        assert!(record.validate_bound_status(&executable, 99).is_err());
+        fs::write(&status, serde_json::to_vec(&json).unwrap()).unwrap();
         assert_eq!(record.infrastructure_generation, 7);
         assert_eq!(record.status_generation, Some(8));
         assert!(record.validate_current(&executable, 100).is_err());

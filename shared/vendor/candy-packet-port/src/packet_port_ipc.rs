@@ -127,6 +127,25 @@ impl UnixPacketPort {
         Ok(frame)
     }
 
+    fn send_frame(&self, packet: &[u8]) -> io::Result<()> {
+        let header = self.encode_header(packet)?;
+        let length = nix::sys::socket::sendmsg::<()>(
+            self.socket.as_raw_fd(),
+            &[IoSlice::new(&header), IoSlice::new(packet)],
+            &[],
+            nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+            None,
+        )
+        .map_err(|error| io::Error::from_raw_os_error(error as i32))?;
+        if length != HEADER_BYTES + packet.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "IPC packet short write",
+            ));
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     fn encode(&self, packet: &[u8]) -> io::Result<Vec<u8>> {
         let mut frame = self.encode_header(packet)?.to_vec();
@@ -147,22 +166,11 @@ impl PacketPort for UnixPacketPort {
         MAX_PACKET_BYTES
     }
     fn try_send_packet(&self, packet: &[u8]) -> io::Result<bool> {
-        let header = self.encode_header(packet)?;
-        match self.socket.try_io(tokio::io::Interest::WRITABLE, || {
-            nix::sys::socket::sendmsg::<()>(
-                self.socket.as_raw_fd(),
-                &[IoSlice::new(&header), IoSlice::new(packet)],
-                &[],
-                nix::sys::socket::MsgFlags::empty(),
-                None,
-            )
-            .map_err(|error| io::Error::from_raw_os_error(error as i32))
-        }) {
-            Ok(length) if length == HEADER_BYTES + packet.len() => Ok(true),
-            Ok(_) => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "IPC packet short write",
-            )),
+        // A nonblocking attempt must reflect the fd, even before the reactor
+        // has populated its readiness cache. async_io clears stale readiness
+        // when a queued writer observes actual EAGAIN.
+        match self.send_frame(packet) {
+            Ok(()) => Ok(true),
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
             Err(error) => Err(error),
         }
@@ -225,12 +233,9 @@ impl PacketPort for UnixPacketPort {
     }
 
     async fn send_packet(&self, packet: &[u8]) -> io::Result<()> {
-        loop {
-            self.socket.writable().await?;
-            if self.try_send_packet(packet)? {
-                return Ok(());
-            }
-        }
+        self.socket
+            .async_io(tokio::io::Interest::WRITABLE, || self.send_frame(packet))
+            .await
     }
 }
 
@@ -358,6 +363,47 @@ mod tests {
             owner_epoch: 2,
             policy_generation: 3,
         }
+    }
+
+    #[tokio::test]
+    async fn nonblocking_send_does_not_require_reactor_readiness_to_be_cached() {
+        let (infrastructure, worker) = UnixDatagram::pair().unwrap();
+        let infrastructure =
+            UnixPacketPort::new(infrastructure, binding(), PacketPortRole::Infrastructure).unwrap();
+        let worker = UnixPacketPort::new(worker, binding(), PacketPortRole::Worker).unwrap();
+        assert!(infrastructure.try_send_packet(&[0x45; 64]).unwrap());
+        assert_eq!(worker.recv_packet().await.unwrap(), vec![0x45; 64]);
+    }
+
+    // Linux reports a full connected datagram queue as EAGAIN; Darwin uses
+    // ENOBUFS with different writable notifications, so test this contract there.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn saturated_socket_async_send_waits_and_recovers_without_spinning() {
+        let (infrastructure, worker) = UnixDatagram::pair().unwrap();
+        let infrastructure = Arc::new(
+            UnixPacketPort::new(infrastructure, binding(), PacketPortRole::Infrastructure).unwrap(),
+        );
+        let worker = UnixPacketPort::new(worker, binding(), PacketPortRole::Worker).unwrap();
+        let mut queued = 0;
+        while infrastructure.try_send_packet(&[0x45; 1400]).unwrap() {
+            queued += 1;
+            assert!(queued < 10000, "socket backpressure was not exercised");
+        }
+        assert!(queued > 0);
+        let sender = infrastructure.clone();
+        let pending = tokio::spawn(async move { sender.send_packet(&[0x46; 1400]).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!pending.is_finished());
+        for _ in 0..queued {
+            assert_eq!(worker.recv_packet().await.unwrap(), vec![0x45; 1400]);
+        }
+        tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(worker.recv_packet().await.unwrap(), vec![0x46; 1400]);
     }
 
     #[tokio::test]

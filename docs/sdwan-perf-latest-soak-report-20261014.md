@@ -23,14 +23,14 @@ Runner 使用四并行 iperf UDP/TCP 业务样本，目标 offered load 750 Mbps
 
 ## 失效原因
 
-fixture 的 Grant TTL 已允许 10800 秒，但运行时 worker authorization 仍按 3600 秒有效期上限执行。Core status 在约启动后一小时报告：
+fixture 的 Grant TTL 已允许 10800 秒，但 Segment/Site Projection 的签名策略期限仍为 3600 秒。`compile-control` 取 Segment、Projection 和 Grant 的最小期限，因而实际授权仍在一小时后到期。生产独立 worker 另外保留一小时上限，不能将这次到期单独归因于 worker cap。Core status 报告：
 
 - `code=worker_authorization_expired`
 - `action=keep_tunio_revoke_owned_forwarding`
 - `lifecycle=stopped`, `steering_suspended=true`
 - TUNIO 继续存活，基础设施保持；业务 worker 被撤销。
 
-随后 iperf 进程等待/无有效 peer，不能继续生成有效稳定性数据。该行为符合授权过期保护，不能通过把静态测试 TTL 改成长于 worker cap 来规避。
+随后 iperf 进程等待/无有效 peer，不能继续生成有效稳定性数据。该行为符合授权过期保护。后续 runner 独立设置 fixture 策略期限，并通过实际签名续期交易跨越短 Grant 周期；没有放宽生产 worker cap。
 
 ## 资源与丢包证据
 

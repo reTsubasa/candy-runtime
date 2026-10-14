@@ -8,48 +8,6 @@ fn next_authority_epochs(binding_epoch: u64, epochs: &[u64], fences: &[u64]) -> 
     ))
 }
 
-#[cfg(test)]
-mod epoch_tests {
-    use super::*;
-
-    #[test]
-    fn signed_renewal_advances_all_consumed_identity_receipts() {
-        for (name, binding, epochs, fences, expected) in [
-            ("fresh grant", 1, [1, 1, 0], [1, 1, 0], (2, 2)),
-            ("ordinary renewal", 2, [1, 1, 2], [1, 1, 3], (3, 4)),
-            (
-                "pair recovery after revoked candidate",
-                3,
-                [3, 3, 2],
-                [4, 4, 2],
-                (4, 5),
-            ),
-            (
-                "first reconciliation after recovery",
-                4,
-                [4, 4, 4],
-                [5, 5, 5],
-                (5, 6),
-            ),
-            (
-                "restart retaining failed journal",
-                4,
-                [4, 7, 4],
-                [5, 9, 5],
-                (8, 10),
-            ),
-        ] {
-            assert_eq!(
-                next_authority_epochs(binding, &epochs, &fences).unwrap(),
-                expected,
-                "{name}"
-            );
-        }
-        assert!(next_authority_epochs(u64::MAX, &[1], &[1]).is_err());
-        assert!(next_authority_epochs(1, &[1], &[u64::MAX]).is_err());
-    }
-}
-
 #[cfg(not(all(feature = "experimental-tunio-rebind", target_os = "linux")))]
 pub(super) fn run(_: &Path) -> Result<()> {
     bail!("code=signed_renewal_feature_required module=sdwan_activation detail=signed authority renewal requires Linux experimental-tunio-rebind");
@@ -267,14 +225,22 @@ mod linux {
         record: &crate::process_record::ManagedProcessRecord,
         envelope: &AuthorityEnvelope,
     ) -> Result<()> {
-        record.validate_current(&plan.core, unix_time()?)?;
-        let status = record.private_status()?;
+        let status = record.validate_bound_status(&plan.core, unix_time()?)?;
+        validate_worker_placement(plan, record, &status)?;
         if status["worker_authority_revision"] != envelope.authority_revision
             || status["worker_authority_sha256"] != envelope.signed_control_hash
             || status["worker_transaction_id"] != envelope.transaction_id
             || status["packet_binding"] != serde_json::to_value(envelope.binding)?
         {
             bail!("code=signed_candidate_proof_mismatch module=sdwan_activation detail=fresh Core authority revision/hash/transaction/binding differs");
+        }
+        match status["lifecycle"].as_str() {
+            Some("active" | "starting") => {}
+            Some("failed" | "stopped") => {
+                eprintln!("level=warn code=signed_candidate_unavailable module=sdwan_activation pid={} lifecycle={} detail=authenticated_candidate_reported_terminal_lifecycle action=retry_verified_authority_preserve_infrastructure", record.pid, status["lifecycle"]);
+                return Err(CoreRecoveryRequired.into());
+            }
+            _ => bail!("code=signed_candidate_lifecycle_invalid module=sdwan_activation detail=authenticated candidate has unknown lifecycle"),
         }
         Ok(())
     }
@@ -593,6 +559,7 @@ mod linux {
                             .as_deref()
                             .unwrap_or("")
                     && new_plan.auth_deadline_unix == desired.auth_deadline_unix
+                    && new_plan.placement == desired.placement
                     && candidate.authorization_snapshot_sha256
                         == new_plan.authorization_snapshot_sha256
                     && process_is_current(ProcessIdentity {
@@ -831,6 +798,16 @@ mod linux {
         if actual.pending.is_some() {
             bail!("unknown pending signed authority requires scoped reconciliation");
         }
+        let old_plan = old_worker
+            .as_ref()
+            .map(|old| match &old.effective_plan_file {
+                Some(path) => read_plan(path),
+                None => Ok(desired.clone()),
+            })
+            .transpose()?;
+        if let Some(old) = &old_plan {
+            placement_changed(old.placement.as_ref(), desired.placement.as_ref())?;
+        }
         let snapshot = Snapshot::capture(&desired.core_config, parent)?;
         let mut snapshot_cleanup = crate::signed_snapshot::CleanupGuard::new(&snapshot);
         let mut plan = desired.clone();
@@ -978,8 +955,36 @@ mod linux {
         create_binding(&plan)?;
         let (io_socket, worker_socket) = UnixDatagram::pair()?;
         snapshot.verify()?;
+        let same_slot = plan.placement.as_ref().is_some_and(|placement| {
+            old_plan
+                .as_ref()
+                .and_then(|old| old.placement.as_ref())
+                .is_some_and(|old| {
+                    old.pool_directory == placement.pool_directory
+                        && old.target_worker_id == placement.target_worker_id
+                })
+        });
+        let mut slot = if same_slot {
+            None
+        } else {
+            reserve_worker_slot(&plan)?
+        };
+        // A retired Core must not reconnect and replace the candidate's remote
+        // lane. Signed inputs and the recovery journal are durable before this
+        // business-only barrier; netd and TUNIO keep infrastructure ownership.
+        if let Some(old) = &old_worker {
+            if let Err(error) = stop_record(old, old_plan.as_ref().unwrap()) {
+                eprintln!("level=warn code=renewal_old_worker_barrier_pending module=sdwan_activation old_pid={} detail={error:#} action=retry_authenticated_stop_preserve_infrastructure", old.pid);
+                return Err(error.context(ManagedProofPending));
+            }
+        }
+        journal.phase = "old_worker_retired".into();
+        publish(&journal_path, &journal)?;
+        if same_slot {
+            slot = reserve_worker_slot(&plan)?;
+        }
         let token = uuid::Uuid::new_v4().simple().to_string();
-        let mut child = spawn_business_worker(&plan, &worker_socket, &token)?;
+        let mut child = spawn_business_worker_with_slot(&plan, &worker_socket, &token, slot)?;
         drop(worker_socket);
         let candidate = process_identity(child.id())?;
         let new_binding = candy_tunio::attach_control::PacketPortBinding {
@@ -1111,12 +1116,14 @@ mod linux {
             let deadline = Instant::now() + Duration::from_secs(20);
             let mut failed_snapshot = None;
             loop {
-                if shutdown_requested()
-                    || !process_is_current(candidate)
-                    || !process_is_current(io_identity)
-                    || monotonic_ms()? > cap
-                {
-                    bail!("renewal candidate cancelled/dead/expired");
+                if shutdown_requested() || monotonic_ms()? > cap {
+                    bail!("renewal candidate cancelled/expired");
+                }
+                if !process_is_current(io_identity) {
+                    return Err(PairRecoveryRequired.into());
+                }
+                if !process_is_current(candidate) {
+                    return Err(CoreRecoveryRequired.into());
                 }
                 snapshot.verify()?;
                 let record = crate::process_record::read(&journal.candidate_record)?;
@@ -1269,4 +1276,46 @@ pub(super) fn commit_authorized(
     _: &mut NetdControl,
 ) -> Result<()> {
     bail!("signed authorized commit requires Linux experimental-tunio-rebind");
+}
+
+#[cfg(test)]
+mod epoch_tests {
+    use super::*;
+
+    #[test]
+    fn signed_renewal_advances_all_consumed_identity_receipts() {
+        for (name, binding, epochs, fences, expected) in [
+            ("fresh grant", 1, [1, 1, 0], [1, 1, 0], (2, 2)),
+            ("ordinary renewal", 2, [1, 1, 2], [1, 1, 3], (3, 4)),
+            (
+                "pair recovery after revoked candidate",
+                3,
+                [3, 3, 2],
+                [4, 4, 2],
+                (4, 5),
+            ),
+            (
+                "first reconciliation after recovery",
+                4,
+                [4, 4, 4],
+                [5, 5, 5],
+                (5, 6),
+            ),
+            (
+                "restart retaining failed journal",
+                4,
+                [4, 7, 4],
+                [5, 9, 5],
+                (8, 10),
+            ),
+        ] {
+            assert_eq!(
+                next_authority_epochs(binding, &epochs, &fences).unwrap(),
+                expected,
+                "{name}"
+            );
+        }
+        assert!(next_authority_epochs(u64::MAX, &[1], &[1]).is_err());
+        assert!(next_authority_epochs(1, &[1], &[u64::MAX]).is_err());
+    }
 }
