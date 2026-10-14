@@ -279,6 +279,21 @@ fn signed_cli_unified_agent_isolates_cloud_failure_from_domain_recovery() {
 }
 
 #[test]
+#[ignore = "real mTLS Cloud HTTP500 in same Agent as signed QUIC/TUN peer loss; isolated privileged namespace only"]
+fn signed_cli_mtls_cloud_outage_preserves_real_tun_peer_recovery() {
+    run_signed_cli(
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        FaultMode::CloudMtls,
+    );
+}
+
+#[test]
 #[ignore = "authenticated original-Grant Core replacement and Agent takeover; isolated privileged namespace only"]
 fn signed_cli_unified_agent_rebinds_crashed_core_preserving_original_tun() {
     run_signed_cli(
@@ -404,6 +419,7 @@ enum FaultMode {
     ConcurrentGrantIo,
     NetdIo,
     PublicListener,
+    CloudMtls,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -426,6 +442,21 @@ fn run_signed_cli(
     let root = temp.path();
     let _failed_state = FailedStateEvidence(root.to_path_buf());
     fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+    let _cloud_fixture = if fault_mode == FaultMode::CloudMtls {
+        let script = root.join("cloud_mtls_outage.py");
+        fs::write(&script, include_str!("fixtures/cloud_mtls_outage.py")).unwrap();
+        let child = Process(
+            Command::new("python3")
+                .arg(script)
+                .arg(root.join("cloud-mtls"))
+                .spawn()
+                .unwrap(),
+        );
+        wait_socket(&root.join("cloud-mtls/ready.json"));
+        Some(child)
+    } else {
+        None
+    };
     let ns = Namespace(format!("candy-signed-{}", std::process::id()));
     ip(&["netns", "add", &ns.0]);
     ip(&[
@@ -672,10 +703,14 @@ fn run_signed_cli(
     if unified {
         fs::create_dir(root.join("cloud-state")).unwrap();
         fs::set_permissions(root.join("cloud-state"), fs::Permissions::from_mode(0o700)).unwrap();
-        private_json(
-            &root.join("runtime-agent.json"),
-            &serde_json::json!({"schema_version":1,"status":root.join("runtime-agent-status.json"),"budgets":{"max_domain_supervisors":1,"max_managed_threads":2,"thread_stack_bytes":1048576,"max_managed_stack_bytes":2097152,"event_capacity":1,"cloud_iteration_deadline_ms":1000,"shutdown_timeout_ms":5000},"cloud":{"state_dir":root.join("cloud-state"),"run_dir":root,"interval_ms":100,"retry_initial_ms":100,"retry_max_ms":200},"domain_plans":[root.join("plan.json")]}),
-        );
+        let mut runtime_config = serde_json::json!({"schema_version":1,"status":root.join("runtime-agent-status.json"),"budgets":{"max_domain_supervisors":1,"max_managed_threads":2,"thread_stack_bytes":1048576,"max_managed_stack_bytes":2097152,"event_capacity":1,"cloud_iteration_deadline_ms":1000,"shutdown_timeout_ms":5000},"cloud":{"state_dir":root.join("cloud-state"),"run_dir":root,"interval_ms":100,"retry_initial_ms":100,"retry_max_ms":200},"domain_plans":[root.join("plan.json")]});
+        if fault_mode == FaultMode::CloudMtls {
+            runtime_config["cloud"]["identity_dir"] =
+                serde_json::json!(root.join("cloud-mtls/identity"));
+            runtime_config["cloud"]["ca_certificate"] =
+                serde_json::json!(root.join("cloud-mtls/ca.pem"));
+        }
+        private_json(&root.join("runtime-agent.json"), &runtime_config);
         agent_command
             .args([
                 "experimental-runtime-agent",
@@ -753,6 +788,45 @@ fn run_signed_cli(
             .success()
     };
     assert!(ping(), "signed real TUN traffic failed before fault");
+    if fault_mode == FaultMode::CloudMtls {
+        let stderr = root.join("duplicate-agent.stderr");
+        let mut duplicate = Process(
+            Command::new(std::env::var("CANDY_AGENT_TEST_BINARY").unwrap())
+                .args([
+                    "experimental-runtime-agent",
+                    "--experimental-packet-port-ipc",
+                    "--config",
+                ])
+                .arg(root.join("runtime-agent.json"))
+                .stderr(fs::File::create(&stderr).unwrap())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(result) = duplicate.0.try_wait().unwrap() {
+                assert!(
+                    !result.success(),
+                    "duplicate Runtime Agent acquired a live instance"
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "duplicate Runtime Agent did not reject within deadline"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(fs::read_to_string(stderr)
+            .unwrap()
+            .contains("runtime Agent already owns this status/configuration"));
+        assert_eq!(
+            status(&root.join("client-status.json")).unwrap()["pid"],
+            pid
+        );
+        assert_eq!(link_state(), link);
+        assert!(ping(), "duplicate Agent rejection affected real traffic");
+    }
     if fault_mode == FaultMode::PublicListener {
         verify_public_listener_conflict(root, &ns.0, &ping, &link_state, &link);
     }
@@ -869,6 +943,32 @@ fn run_signed_cli(
         assert!(runtime["tasks"][0]["failures"].as_u64().unwrap() > 1);
         assert_eq!(runtime["tasks"][1]["phase"], "running");
         eprintln!("unified_agent_evidence same_agent_pid={} cloud_failed_iterations={} domain_recovered=true bounded_notifications=1",agent.0.id(),runtime["tasks"][0]["failures"]);
+        if fault_mode == FaultMode::CloudMtls {
+            let requests = fs::read_to_string(root.join("cloud-mtls/requests.jsonl")).unwrap();
+            let requests: Vec<serde_json::Value> = requests
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert!(
+                requests
+                    .iter()
+                    .filter(|request| request["path"] == "/auth/v1/runtime/configuration")
+                    .count()
+                    >= 2
+            );
+            assert!(requests
+                .iter()
+                .all(
+                    |request| request["authenticated_client_certificate"] == true
+                        && request["response"] == 500
+                ));
+            if let Some(destination) = std::env::var_os("CANDY_SIGNED_EVIDENCE_DIR") {
+                private_json(
+                    &PathBuf::from(destination).join("signed-mtls-cloud-tun-evidence.json"),
+                    &serde_json::json!({"cloud_client_certificate_verified":true,"actual_http500_requests":requests.len(),"duplicate_agent_rejected":true,"same_agent_pid":agent.0.id(),"same_tun":true,"real_quic_peer_loss_and_icmp_recovery":true,"scope":"mTLS HTTP500 plus TUN peer recovery; not Cloud renewal/production deployment"}),
+                );
+            }
+        }
     }
     let recovered = status(&root.join("client-status.json")).unwrap();
     assert_eq!(recovered["pid"], pid);
