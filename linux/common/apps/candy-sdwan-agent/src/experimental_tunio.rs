@@ -2133,10 +2133,16 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
         plan.pair_recovery.as_mut().unwrap().retired_renewal_journal = archived;
         signed_renewal::publish_plan(&plan)?;
     }
-    expect_ack(&mut netd, Operation::ForwardRevoke { owner: previous })?;
+    // Revoking the committed owner also clears its candidate in netd. Retire the
+    // candidate first so a pending takeover does not turn the second revoke stale.
     if let Some(owner) = candidate_owner {
-        expect_ack(&mut netd, Operation::ForwardRevoke { owner })?;
+        expect_ack(&mut netd, Operation::ForwardRevoke { owner: owner.clone() }).with_context(|| {
+            format!("code=pair_candidate_revoke_failed module=process_supervisor worker_epoch={} fence={} auth_deadline_mono_ms={} lease_deadline_mono_ms={} detail=retire pending owner before committed owner",owner.worker_epoch,owner.fencing_token,owner.auth_deadline_mono_ms,owner.lease_deadline_mono_ms)
+        })?;
     }
+    expect_ack(&mut netd, Operation::ForwardRevoke { owner: previous.clone() }).with_context(|| {
+        format!("code=pair_committed_revoke_failed module=process_supervisor worker_epoch={} fence={} auth_deadline_mono_ms={} lease_deadline_mono_ms={} detail=retire committed owner after candidate",previous.worker_epoch,previous.fencing_token,previous.auth_deadline_mono_ms,previous.lease_deadline_mono_ms)
+    })?;
     if let Some(io_epoch) = actual_io_epoch {
         expect_ack(
             &mut netd,
