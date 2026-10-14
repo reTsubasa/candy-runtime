@@ -208,6 +208,12 @@ mod backend {
                 // the current signed declaration are reclaimable.
                 return plan.cleanup_throw_prefixes().contains(&prefix);
             }
+            if matches!(
+                route.header.kind,
+                RouteType::Unreachable | RouteType::BlackHole
+            ) {
+                return plan.remote_routes.contains(&prefix);
+            }
             // Signed remote routes are unicast link routes with a destination
             // present in the signed plan. The output interface is deliberately
             // not checked here because the interface may have disappeared;
@@ -491,9 +497,18 @@ mod backend {
                     || (plan.route_table <= u8::MAX.into()
                         && u32::from(route.header.table) == plan.route_table);
                 if in_table
-                    && route.header.kind == RouteType::Throw
+                    && matches!(
+                        route.header.kind,
+                        RouteType::Throw | RouteType::Unreachable | RouteType::BlackHole
+                    )
                     && route.header.protocol == RouteProtocol::Static
-                    && prefix.is_some_and(|value| throw_set.contains(&value))
+                    && prefix.is_some_and(|value| {
+                        if route.header.kind == RouteType::Throw {
+                            throw_set.contains(&value)
+                        } else {
+                            plan.remote_routes.contains(&value)
+                        }
+                    })
                 {
                     if let Err(error) = handle.route().del(route).execute().await {
                         if !route_delete_is_idempotent(&error) {

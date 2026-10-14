@@ -26,9 +26,9 @@ pub trait InfrastructureBackend: NetworkBackend {
     fn ensure_infrastructure(&mut self, spec: &InfraSpec) -> Result<u32, NetworkError>;
     fn retire_infrastructure(&mut self) -> Result<(), NetworkError>;
     fn reject_forwarding(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError>;
-    /// Quiesce a live owner without changing its route-to-TUN path.
-    fn guard_forwarding(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
-        self.restore_forwarding_with_failures(declaration, &[])
+    /// Retain the exact kernel policy while IO quiesces the live owner.
+    fn guard_forwarding(&mut self, _declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        Ok(())
     }
     fn restore_forwarding(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError>;
     fn restore_forwarding_with_failures(
@@ -1235,10 +1235,6 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
         let ambiguous_preparation = self.restart_recovery_pending
             && matches!(forward.phase, Phase::Preparing | Phase::Prepared);
         let boot_changed = self.state.boot_id != current_boot_id()?;
-        if !ambiguous_preparation && !boot_changed && clock::owner_is_live(&forward.owner, now) {
-            self.restart_recovery_pending = false;
-            return Ok(candidate_recovered);
-        }
         if forward.phase == Phase::Guarded
             && !boot_changed
             && clock::owner_is_live(&forward.owner, now)
@@ -1246,6 +1242,10 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
             self.backend.guard_forwarding(&forward.declaration)?;
             self.restart_recovery_pending = false;
             return Ok(true);
+        }
+        if !ambiguous_preparation && !boot_changed && clock::owner_is_live(&forward.owner, now) {
+            self.restart_recovery_pending = false;
+            return Ok(candidate_recovered);
         }
         self.backend.reject_forwarding(&forward.declaration)?;
         self.backend.remove_firewall(&forward.declaration)?;
@@ -1279,16 +1279,7 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
                     cause,
                 })?;
         }
-        if previous.phase == Phase::Guarded {
-            // IO has already fenced the previous owner. Preserve route-to-TUN
-            // semantics for overlapping signed prefixes during publication.
-            self.backend
-                .guard_forwarding(&candidate.declaration)
-                .map_err(|cause| InfrastructureError::Transition {
-                    stage: "guard_candidate",
-                    cause,
-                })?;
-        } else {
+        if previous.phase != Phase::Guarded {
             self.backend
                 .reject_forwarding(&candidate.declaration)
                 .map_err(|cause| InfrastructureError::Transition {
