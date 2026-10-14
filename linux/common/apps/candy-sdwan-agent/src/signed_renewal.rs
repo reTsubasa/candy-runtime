@@ -650,11 +650,36 @@ mod linux {
                         {
                             if let Body::ForwardStatus {
                                 owner: Some(owner),
+                                phase,
                                 candidate_owner: None,
                                 ..
                             } = state
                             {
-                                expect_ack(&mut netd, Operation::ForwardRevoke { owner })?;
+                                // Keep the route-to-TUN path while recovering a
+                                // live owner. Revoke is reserved for expired or
+                                // already-fenced owners because it installs
+                                // unreachable routes and can surface EHOSTUNREACH
+                                // to existing UDP sockets.
+                                if matches!(
+                                    phase,
+                                    Some(
+                                        candy_netd_proto::v2::Phase::Active
+                                            | candy_netd_proto::v2::Phase::Guarded
+                                    )
+                                ) {
+                                    if expect_ack(
+                                        &mut netd,
+                                        Operation::ForwardGuard {
+                                            owner: owner.clone(),
+                                        },
+                                    )
+                                    .is_err()
+                                    {
+                                        expect_ack(&mut netd, Operation::ForwardRevoke { owner })?;
+                                    }
+                                } else {
+                                    expect_ack(&mut netd, Operation::ForwardRevoke { owner })?;
+                                }
                             }
                             let actual_cap = actual
                                 .actual_deadline_mono_ms
@@ -674,6 +699,17 @@ mod linux {
                                     infra_generation: previous_plan.infrastructure.generation,
                                     owner: previous_journal.owner.clone(),
                                     declaration: previous_plan.declaration.clone(),
+                                },
+                            )?;
+                            // Recovery can recreate a prepared forwarding record after a
+                            // daemon restart. Rebind the exact signed IO authority before
+                            // probing readiness; without this, the subsequent authorized
+                            // commit is rejected as an unauthorised candidate.
+                            expect_ack(
+                                &mut netd,
+                                Operation::ForwardAuthorize {
+                                    owner: previous_journal.owner.clone(),
+                                    authority: forward_authority(envelope, io_identity),
                                 },
                             )?;
                             publish(&journal_path, &previous_journal)?;
@@ -827,6 +863,7 @@ mod linux {
         }
         let Body::ForwardStatus {
             owner: previous,
+            phase: previous_phase,
             candidate_owner,
             ..
         } = status
@@ -969,6 +1006,25 @@ mod linux {
         } else {
             reserve_worker_slot(&plan)?
         };
+        // Quiesce the live routing owner before stopping its Core. Retaining the
+        // route-to-TUN path lets TUNIO discard unavailable packets without
+        // injecting EHOSTUNREACH into existing UDP sockets during this bounded
+        // handoff. Expired/revoked authority keeps the explicit reject path.
+        if let Some(previous) = &previous {
+            if matches!(
+                previous_phase,
+                Some(candy_netd_proto::v2::Phase::Active | candy_netd_proto::v2::Phase::Guarded)
+            ) {
+                expect_ack(
+                    &mut netd,
+                    Operation::ForwardGuard {
+                        owner: previous.clone(),
+                    },
+                )?;
+                journal.phase = "old_worker_guarded".into();
+                publish(&journal_path, &journal)?;
+            }
+        }
         // A retired Core must not reconnect and replace the candidate's remote
         // lane. Signed inputs and the recovery journal are durable before this
         // business-only barrier; netd and TUNIO keep infrastructure ownership.
@@ -1036,14 +1092,6 @@ mod linux {
             )?;
             journal.phase = "staged".into();
             publish(&journal_path, &journal)?;
-            if let Some(previous) = &previous {
-                expect_ack(
-                    &mut netd,
-                    Operation::ForwardRevoke {
-                        owner: previous.clone(),
-                    },
-                )?;
-            }
             journal.phase = "barrier".into();
             publish(&journal_path, &journal)?;
             snapshot.verify()?;
