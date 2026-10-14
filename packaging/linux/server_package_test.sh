@@ -137,8 +137,10 @@ grep -F 'OnUnitInactiveSec=1s' "$edge_stage/systemd/candy-cloud-sync.timer" >/de
 if grep -F 'OnUnitActiveSec=' "$edge_stage/systemd/candy-cloud-sync.timer" >/dev/null; then
 	fail "Cloud synchronization timer still depends on a pre-upgrade service activation"
 fi
-grep -F 'Requires=candy-netd.service' "$edge_stage/systemd/candy-sdwan.service" >/dev/null || fail "SD-WAN unit does not require netd"
-grep -F 'BindsTo=candy-netd.service' "$edge_stage/systemd/candy-sdwan.service" >/dev/null || fail "SD-WAN unit is not bound to netd"
+grep -E '^Wants=.*(^|[[:space:]])candy-netd\.service([[:space:]]|$)' "$edge_stage/systemd/candy-sdwan.service" >/dev/null || fail "SD-WAN unit does not request netd at startup"
+if grep -Eq '^(Requires|BindsTo)=candy-netd\.service' "$edge_stage/systemd/candy-sdwan.service"; then
+	fail "SD-WAN lifecycle is coupled to netd and a netd restart can stop the Agent"
+fi
 grep -F -- '--recover --journal' "$edge_stage/systemd/candy-netd.service" >/dev/null || fail "netd unit has no real orphan recovery hook"
 grep -F 'ExecStart=/usr/local/libexec/candy-client' "$edge_stage/systemd/candy-client.service" >/dev/null ||
 	fail "Linux Edge service exposes a private data-plane command"
@@ -153,8 +155,12 @@ grep -F 'EnvironmentFile=-/etc/candy/sdwan-agent.env' "$edge_stage/systemd/candy
 	fail "Linux Edge SD-WAN service does not support optional deployment overrides"
 grep -F 'Environment=CANDY_CORE_BIN=/opt/candy/cores/current/candy-core' "$edge_stage/systemd/candy-sdwan.service" >/dev/null ||
 	fail "Linux Edge SD-WAN service has no product Core default"
-grep -F 'Restart=no' "$edge_stage/systemd/candy-sdwan.service" >/dev/null ||
-	fail "Linux Edge SD-WAN service can loop on a rejected candidate"
+grep -F 'Restart=on-failure' "$edge_stage/systemd/candy-sdwan.service" >/dev/null ||
+	fail "Linux Edge SD-WAN service has no crash backstop"
+grep -F 'RestartSec=2s' "$edge_stage/systemd/candy-sdwan.service" >/dev/null ||
+	fail "Linux Edge SD-WAN service has no bounded restart delay"
+grep -F 'StartLimitBurst=5' "$edge_stage/systemd/candy-sdwan.service" >/dev/null ||
+	fail "Linux Edge SD-WAN service has no restart burst limit"
 grep -F 'ExecStartPost=+/usr/local/libexec/candy-sdwan-runtime reconcile candy-sdwan.service' "$edge_stage/systemd/candy-cloud-sync.service" >/dev/null ||
 	fail "Linux Edge Cloud sync does not reconcile candidate lifecycle changes"
 grep -F 'project-local-runtime-status' "$edge_stage/usr/local/libexec/candy-sdwan-runtime" >/dev/null ||

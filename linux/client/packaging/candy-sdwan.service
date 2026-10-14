@@ -1,9 +1,13 @@
 [Unit]
 Description=Candy SD-WAN managed data plane
 After=network-online.target candy-netd.service
-Wants=network-online.target
-Requires=candy-netd.service
-BindsTo=candy-netd.service
+Wants=network-online.target candy-netd.service
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+# netd owns persistent network infrastructure and may restart independently.
+# The SD-WAN Agent must stay alive to observe/retry netd recovery; binding its
+# unit lifecycle to netd would stop a healthy Agent and cascade a netd restart
+# into the active domain. The candidate path remains required by the condition.
 ConditionPathIsSymbolicLink=/var/lib/candy/sdwan/candidate
 
 [Service]
@@ -20,7 +24,8 @@ ExecStartPre=+/usr/local/libexec/candy-sdwan-runtime publish
 ExecStart=/usr/local/libexec/candy-sdwan-agent --socket ${CANDY_NETD_SOCKET} --core ${CANDY_CORE_BIN} --activation ${CANDY_SDWAN_ACTIVATION} --activation-ready ${CANDY_SDWAN_ACTIVATION_READY} --lease-ms ${CANDY_SDWAN_LEASE_MS} --readiness-timeout-ms ${CANDY_SDWAN_READINESS_TIMEOUT_MS} run
 # The agent rolls back through netd before exit; this hook only publishes state.
 ExecStopPost=+/usr/local/libexec/candy-sdwan-runtime fail-open service-stopped
-Restart=no
+Restart=on-failure
+RestartSec=2s
 TimeoutStopSec=20s
 User=candy-sdwan
 Group=candy-sdwan
