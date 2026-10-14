@@ -1191,7 +1191,7 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
         &mut netd,
         Operation::InfraEnsure(plan.infrastructure.clone()),
     )?;
-    if plan.authority.is_none() {
+    if plan.authority.is_none() && plan.pair_recovery.is_none() {
         expect_ack(
             &mut netd,
             Operation::ForwardPrepare {
@@ -1300,8 +1300,8 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
         }
     }
     #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
-    if plan.authority.is_some() && plan.pair_recovery.is_some() {
-        // New IO has no authority receipt. Reuse the complete signed installation transaction.
+    if plan.pair_recovery.is_some() {
+        // Every new IO epoch needs a fresh signed transaction, including a legacy bootstrap.
         drop(worker_socket);
         let result = signed_renewal::run_with_plan(path, plan.clone());
         if result.as_ref().err().is_some_and(|error| {
