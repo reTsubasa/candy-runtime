@@ -1279,12 +1279,23 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
                     cause,
                 })?;
         }
-        self.backend
-            .reject_forwarding(&candidate.declaration)
-            .map_err(|cause| InfrastructureError::Transition {
-                stage: "guard_candidate",
-                cause,
-            })?;
+        if previous.phase == Phase::Guarded {
+            // IO has already fenced the previous owner. Preserve route-to-TUN
+            // semantics for overlapping signed prefixes during publication.
+            self.backend
+                .guard_forwarding(&candidate.declaration)
+                .map_err(|cause| InfrastructureError::Transition {
+                    stage: "guard_candidate",
+                    cause,
+                })?;
+        } else {
+            self.backend
+                .reject_forwarding(&candidate.declaration)
+                .map_err(|cause| InfrastructureError::Transition {
+                    stage: "guard_candidate",
+                    cause,
+                })?;
+        }
         self.backend
             .remove_firewall(&previous.declaration)
             .map_err(|cause| InfrastructureError::Transition {
