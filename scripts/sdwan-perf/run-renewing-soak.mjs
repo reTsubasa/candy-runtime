@@ -5,15 +5,15 @@ import {spawnSync, execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 
 const [buildDirectory, destination, mode = 'renewal-smoke'] = process.argv.slice(2);
-if (!buildDirectory || !destination || !['renewal-smoke', 'diagnostic', 'soak'].includes(mode)) {
-  throw new Error('usage: node run-renewing-soak.mjs <frozen build> <new evidence directory> [renewal-smoke|diagnostic|soak]');
+if (!buildDirectory || !destination || !['renewal-smoke', 'comparison', 'diagnostic', 'soak'].includes(mode)) {
+  throw new Error('usage: node run-renewing-soak.mjs <frozen build> <new evidence directory> [renewal-smoke|comparison|diagnostic|soak]');
 }
 const root = path.resolve(destination), build = path.resolve(buildDirectory);
 const workspace = path.resolve(new URL('../../..', import.meta.url).pathname);
 const runner = path.resolve(new URL('./run-two-docker-perf.mjs', import.meta.url).pathname);
 const smoke = mode === 'renewal-smoke';
 const ttl = smoke ? 60 : 1800, renewalInterval = smoke ? 30 : 900;
-const rounds = smoke ? 4 : mode === 'diagnostic' ? 12 : 120;
+const rounds = smoke || mode === 'comparison' ? 4 : mode === 'diagnostic' ? 12 : 120;
 const seconds = smoke ? 20 : 60;
 const policyTtl = 10800;
 if (fs.existsSync(root)) throw new Error('new evidence directory required');
