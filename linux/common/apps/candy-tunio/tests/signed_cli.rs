@@ -771,9 +771,6 @@ fn run_signed_cli(
         plan["placement"] =
             serde_json::json!({"revision":1,"target_worker_id":1,"pool_directory":directory});
     }
-    if fault_mode == FaultMode::CloudRenewal {
-        plan["core_config"] = serde_json::json!(root.join("cloud-state/candidate/core.toml"));
-    }
     if let Some(path) = &namespace_path {
         plan["routing_namespace"] = serde_json::json!(path);
     }
@@ -793,6 +790,8 @@ fn run_signed_cli(
             runtime_config["cloud"]["core"] = serde_json::json!(core());
             runtime_config["budgets"]["cloud_iteration_deadline_ms"] = serde_json::json!(10000);
             runtime_config["cloud"]["interval_ms"] = serde_json::json!(500);
+            runtime_config["domain_plans"] = serde_json::json!([]);
+            runtime_config["cloud_activation_bindings"] = serde_json::json!([{"template_plan":root.join("plan.json"),"published_plan":root.join("cloud-plan.json")}]);
         }
         private_json(&root.join("runtime-agent.json"), &runtime_config);
         agent_command
