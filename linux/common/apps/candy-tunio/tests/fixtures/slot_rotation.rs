@@ -155,6 +155,29 @@ impl Load {
             processes: Vec::new(),
             logs: Vec::new(),
         };
+        // Preserve the live kernel transition and ICMP error source even when
+        // the original traffic-survival assertion fails. These collectors do
+        // not send traffic or modify routes.
+        for (label, remote) in [("client", false), ("server", true)] {
+            for (kind, program, arguments) in [
+                ("network", "ip", vec!["-ts", "monitor", "all"]),
+                ("icmp", "python3", vec!["-u", "-c",
+                    "import socket,time; s=socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.IPPROTO_ICMP); print('icmp_capture_started',time.time(),flush=True)\nwhile True:\n p,a=s.recvfrom(65535); h=(p[0]&15)*4; print('time=',time.time(),'source=',a[0],'type=',p[h] if len(p)>h else -1,'code=',p[h+1] if len(p)>h+1 else -1,'packet=',p.hex(),flush=True)"]),
+            ] {
+                let path = root.join(format!("placement-{label}-{kind}-monitor.log"));
+                let log = File::create(&path).unwrap();
+                let mut command = if remote {
+                    let mut command = Command::new("ip");
+                    command.args(["netns", "exec", namespace, program]);
+                    command
+                } else {
+                    Command::new(program)
+                };
+                command.args(arguments).stdout(log.try_clone().unwrap()).stderr(log);
+                load.processes.push(Process(command.spawn().unwrap()));
+                load.logs.push(path);
+            }
+        }
         for (port, direction) in [(5207, "upload"), (5208, "download")] {
             let server_log = root.join(format!("placement-{direction}-server.log"));
             let log = File::create(&server_log).unwrap();
