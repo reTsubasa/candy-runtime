@@ -150,3 +150,13 @@ v11 结束后仍不可宣称所有 SD-WAN 门禁关闭：完整 1→2→4→2→
 `candy-core/crates/candy-carrier-transport/src/worker_pool_shared_tests.rs` 新增连续 `1→2→4→2→1` 测试并已推送。`cargo fmt --all -- --check` 与该单项测试通过。测试验证新连接分布、存量 owner sticky、draining worker 不接新 owner、存量 lease/ByteCredit 阻止 retire、credit 释放后 retire、迟到重复 release 拒绝；结果打印 `remaining_connections=728`。
 
 这是 WorkerPool API/lease 语义的**池级部分通过**，不关闭 F08：当前没有生产进程池生命周期、drain completion ACK 或 live connection/session 迁移；扩缩时连接会留在原 owner，完成 drain 依赖对应连接正常释放。必须实现并集成进程管理和 live ownership/drain 协议，再执行端到端 F08。该测试不能证明真实 Proxy Session、SD-WAN domain dispatch 或同 listener 混合业务已经迁移。
+
+### 运行监督修订（Runtime `0094dea`）
+
+Linux `candy-sdwan.service` 已解除对 `candy-netd.service` 的 `Requires=`/`BindsTo=`强生命周期绑定，保留 `After=` 与 `Wants=` 启动顺序；Agent 使用 `Restart=on-failure`、`RestartSec=2s`、`StartLimitIntervalSec=60s`、`StartLimitBurst=5`。这样 netd 的独立重启不会直接停止 Agent，Agent 可继续观察并恢复 netd；失败启动仍受有界重试限制。`packaging/linux/server_package_test.sh` 与 `linux/client/tests/candy_sdwan_runtime_test.sh` 均通过。
+
+本机是 macOS launchd，未执行真实 systemd/procd PID1 自动拉起、退避和启动竞态门禁；无效候选在现有 unit 下仍可能消耗最多 5 次启动尝试，不能宣称 supervisor 故障门禁通过。`ExecStopPost` 的 fail-open 只发布状态，不直接删除 TUN/netd 基础设施。
+
+### 性能门禁阻断（隔离 Linux，2026-10-14）
+
+`docs/artifacts/sdwan-20261014/worker-isolation-final-gates/result.json`：Worker scaling fixture PASS（1→2→4→2→1，sticky owner、credit 归零）；slow-consumer fixture FAIL。吞吐达到要求、credit 最终归零且健康 worker PID 独立，但健康请求 p99 为 8.3155 ms，门槛 7.892083 ms；第二次独立运行同类 p99 为 10.096 ms。该 fixture 每个样本都会重新建立 QUIC/鉴权/Unix IPC，且两线程 Tokio runtime 同时承载 slow/healthy 流量，故已提交 Core `3f45eaa` 增加鉴权、Unix connect、stream setup、payload transfer 分段计时；分段诊断只能解释失败，不能替换原总 p99 门槛。正式 UDP、750 Mbps CPU/GiB、小事务 p99、2 小时 soak 尚未启动。
