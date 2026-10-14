@@ -1,0 +1,1 @@
+{"pid1":"systemd","systemd_state":"running","netd_restart_isolated":true,"agent_crash_recovered":true,"netd_pid_before":118,"netd_pid_after":151,"agent_pid_before":121,"agent_pid_after_netd_restart":121,"agent_pid_after_sigkill":210,"n_restarts_before":0,"n_restarts_after":1,"scope":"fake payloads in isolated Docker; no TUN/Cloud/production"}
