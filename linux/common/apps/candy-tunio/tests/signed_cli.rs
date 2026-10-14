@@ -20,6 +20,34 @@ impl Drop for Process {
         let _ = self.0.wait();
     }
 }
+struct FailedStateEvidence(PathBuf);
+impl Drop for FailedStateEvidence {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        let Some(destination) = std::env::var_os("CANDY_SIGNED_EVIDENCE_DIR") else {
+            return;
+        };
+        let destination =
+            PathBuf::from(destination).join(format!("failed-state-{}", std::process::id()));
+        let _ = fs::create_dir_all(&destination);
+        let Ok(entries) = fs::read_dir(&self.0) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && matches!(
+                    path.extension().and_then(|ext| ext.to_str()),
+                    Some("json" | "journal")
+                )
+            {
+                let _ = fs::copy(&path, destination.join(entry.file_name()));
+            }
+        }
+    }
+}
 struct Namespace(String);
 impl Drop for Namespace {
     fn drop(&mut self) {
@@ -193,49 +221,189 @@ fn signed_b0_client_helper() {
 #[test]
 #[ignore = "strict signed CLI + real QUIC + two real Linux TUNs; isolated privileged namespace only"]
 fn signed_cli_peer_loss_selfheals_same_policy_through_agent_and_netd() {
-    run_signed_cli(false, false, false, false, false, false, false);
+    run_signed_cli(
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        FaultMode::None,
+    );
 }
 
 #[test]
 #[ignore = "real signed Grant expiry and independent Core/IO takeover; isolated privileged namespace only"]
 fn signed_cli_independent_worker_takeover_and_expiry_preserve_tun() {
-    run_signed_cli(true, false, false, false, false, false, false);
+    run_signed_cli(
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        FaultMode::None,
+    );
 }
 
 #[test]
 #[ignore = "strict signed Core+Agent+TUNIO in separate routing namespace; isolated privileged namespace only"]
 fn signed_cli_scoped_namespace_peer_loss_selfheals() {
-    run_signed_cli(false, true, false, false, false, false, false);
+    run_signed_cli(
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        FaultMode::None,
+    );
 }
 
 #[test]
 #[ignore = "same-process Cloud failures and signed SD-WAN recovery; isolated privileged namespace only"]
 fn signed_cli_unified_agent_isolates_cloud_failure_from_domain_recovery() {
-    run_signed_cli(false, false, true, false, false, false, false);
+    run_signed_cli(
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        FaultMode::None,
+    );
 }
 
 #[test]
 #[ignore = "authenticated original-Grant Core replacement and Agent takeover; isolated privileged namespace only"]
 fn signed_cli_unified_agent_rebinds_crashed_core_preserving_original_tun() {
-    run_signed_cli(false, false, true, true, false, false, false);
+    run_signed_cli(
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        FaultMode::None,
+    );
 }
 
 #[test]
 #[ignore = "fresh actual signed Grant after expiry, same IO/TUN, Agent journal takeover; isolated privileged namespace only"]
 fn signed_cli_fresh_grant_renews_expired_worker_on_original_tun() {
-    run_signed_cli(false, false, true, false, true, false, false);
+    run_signed_cli(
+        false,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        FaultMode::None,
+    );
 }
 
 #[test]
 #[ignore = "real authorized commit reply loss, netd SIGKILL/restart and stale epoch; isolated privileged namespace only"]
 fn signed_cli_lost_commit_reply_and_netd_restart_preserve_original_tun() {
-    run_signed_cli(false, false, true, false, true, true, false);
+    run_signed_cli(
+        false,
+        false,
+        true,
+        false,
+        true,
+        true,
+        false,
+        FaultMode::None,
+    );
 }
 
 #[test]
 #[ignore = "actual TUNIO SIGKILL twice and domain pair recovery; isolated privileged namespace only"]
 fn signed_cli_io_sigkill_recovers_pair_without_replacing_original_tun() {
-    run_signed_cli(false, false, true, false, false, false, true);
+    run_signed_cli(
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        true,
+        FaultMode::None,
+    );
+}
+
+#[test]
+#[ignore = "fresh signed Grant then actual TUNIO SIGKILL twice; isolated privileged namespace only"]
+fn signed_cli_new_grant_and_io_sigkill_recover_same_infrastructure() {
+    run_signed_cli(
+        false,
+        false,
+        true,
+        false,
+        true,
+        false,
+        true,
+        FaultMode::None,
+    );
+}
+
+#[test]
+#[ignore = "new signed Grant and dead IO simultaneously on Agent restart; isolated privileged namespace only"]
+fn signed_cli_concurrent_new_grant_and_io_death_selfheal_original_tun() {
+    run_signed_cli(
+        false,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        FaultMode::ConcurrentGrantIo,
+    );
+}
+
+#[test]
+#[ignore = "actual netd and TUNIO simultaneous SIGKILL twice; isolated privileged namespace only"]
+fn signed_cli_netd_and_io_sigkill_recover_original_infrastructure() {
+    run_signed_cli(
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        true,
+        FaultMode::NetdIo,
+    );
+}
+
+#[test]
+#[ignore = "actual duplicate public listener and server SIGKILL/restart; isolated privileged namespace only"]
+fn signed_cli_listener_conflict_and_transport_exit_preserve_client_infrastructure() {
+    run_signed_cli(
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        FaultMode::PublicListener,
+    );
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FaultMode {
+    None,
+    ConcurrentGrantIo,
+    NetdIo,
+    PublicListener,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -247,13 +415,16 @@ fn run_signed_cli(
     renewal: bool,
     reply_loss: bool,
     pair_recovery: bool,
+    fault_mode: FaultMode,
 ) {
+    let concurrent_renewal_io_death = fault_mode == FaultMode::ConcurrentGrantIo;
     assert_eq!(
         std::env::var("CANDY_NETD_ISOLATED_KERNEL_TEST").as_deref(),
         Ok("1")
     );
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
+    let _failed_state = FailedStateEvidence(root.to_path_buf());
     fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
     let ns = Namespace(format!("candy-signed-{}", std::process::id()));
     ip(&["netns", "add", &ns.0]);
@@ -582,8 +753,18 @@ fn run_signed_cli(
             .success()
     };
     assert!(ping(), "signed real TUN traffic failed before fault");
-    if pair_recovery {
-        verify_io_pair_recovery(root, &mut client, &ping, &link_state, &link);
+    if fault_mode == FaultMode::PublicListener {
+        verify_public_listener_conflict(root, &ns.0, &ping, &link_state, &link);
+    }
+    if pair_recovery && !renewal {
+        verify_io_pair_recovery(
+            root,
+            &mut client,
+            &ping,
+            &link_state,
+            &link,
+            (fault_mode == FaultMode::NetdIo).then_some(&mut client_netd),
+        );
         unsafe {
             nix::libc::kill(agent.0.id() as i32, nix::libc::SIGTERM);
         }
@@ -606,6 +787,11 @@ fn run_signed_cli(
         return;
     }
     if renewal {
+        if concurrent_renewal_io_death {
+            ip(&["link", "set", "candy-test-host", "down"]);
+            assert!(!ping(), "underlay outage still forwarded test traffic");
+            assert_eq!(link_state(), link);
+        }
         verify_fresh_grant_renewal(
             root,
             &mut agent,
@@ -615,6 +801,8 @@ fn run_signed_cli(
             &link,
             expiry,
             reply_loss.then_some(&mut client_netd),
+            pair_recovery,
+            concurrent_renewal_io_death,
         );
         unsafe {
             nix::libc::kill(agent.0.id() as i32, nix::libc::SIGTERM);
@@ -636,6 +824,11 @@ fn run_signed_cli(
     server.0.kill().unwrap();
     server.0.wait().unwrap();
     let lost = wait(&mut client, true, first);
+    if fault_mode == FaultMode::PublicListener {
+        assert!(!ping(), "dead public Transport still forwarded traffic");
+        let current_io = status(&root.join("io-status.json")).unwrap();
+        assert_eq!(current_io["pid"], io["pid"]);
+    }
     assert!(agent.0.try_wait().unwrap().is_none());
     let failed = status(&root.join("client-status.json")).unwrap();
     assert_eq!(failed["pid"], pid);
@@ -656,6 +849,18 @@ fn run_signed_cli(
     server = spawn_server(2);
     let restored = wait(&mut client, false, lost);
     assert!(ping(), "signed real TUN traffic did not recover");
+    if fault_mode == FaultMode::PublicListener {
+        if let Some(destination) = std::env::var_os("CANDY_SIGNED_EVIDENCE_DIR") {
+            private_json(
+                &PathBuf::from(destination).join("signed-public-listener-evidence.json"),
+                &serde_json::json!({"scope":"current Core public server process, not a separated master implementation",
+                "duplicate_bind_rejected":true,"existing_traffic_preserved_during_conflict":true,
+                "server_sigkill_and_manual_restart":true,"client_core_pid":pid,"client_io_pid":io["pid"],
+                "client_tun_preserved":true,"actual_icmp_restored":true,
+                "initial_revision":first,"failed_revision":lost,"restored_revision":restored}),
+            );
+        }
+    }
     if unified {
         let runtime = status(&root.join("runtime-agent-status.json")).unwrap();
         assert_eq!(runtime["pid"], agent.0.id());
@@ -713,10 +918,12 @@ fn verify_fresh_grant_renewal(
     original_link: &[u8],
     original_expiry: u64,
     reply_loss_netd: Option<&mut Process>,
+    pair_recovery: bool,
+    concurrent_renewal_io_death: bool,
 ) {
     use candy_process_control::{process_identity, process_is_current};
     let io_record = status(&root.join("io-process.json")).unwrap();
-    let io = process_identity(io_record["pid"].as_u64().unwrap() as u32).unwrap();
+    let mut io = process_identity(io_record["pid"].as_u64().unwrap() as u32).unwrap();
     let first_core = process_identity(
         status(&root.join("worker-process.json")).unwrap()["pid"]
             .as_u64()
@@ -747,6 +954,10 @@ fn verify_fresh_grant_renewal(
     assert_eq!(process_identity(io.pid).unwrap(), io);
     assert!(!ping(), "tampered fresh Grant activated actual traffic");
     fs::write(root.join("fixture/grant.bin"), original_grant).unwrap();
+    if concurrent_renewal_io_death {
+        agent.0.kill().unwrap();
+        agent.0.wait().unwrap();
+    }
     let renew = Command::new(std::env::var("CANDY_SIGNED_FIXTURE_BINARY").unwrap())
         .env("CANDY_SIGNED_FIXTURE_RENEW_ROOT", root.join("fixture"))
         .env("CANDY_SIGNED_FIXTURE_GRANT_TTL_SECS", "60")
@@ -766,8 +977,40 @@ fn verify_fresh_grant_renewal(
     let compiled: serde_json::Value = serde_json::from_slice(&compiled.stdout).unwrap();
     let expiry = compiled["authorization_expires_at_unix"].as_u64().unwrap();
     assert!(expiry > original_expiry);
-    let deadline = Instant::now() + Duration::from_secs(25);
-    let renewed = loop {
+    let prior_io = io;
+    if concurrent_renewal_io_death {
+        assert_eq!(
+            unsafe { nix::libc::kill(io.pid as i32, nix::libc::SIGKILL) },
+            0
+        );
+        let dead_io_deadline = Instant::now() + Duration::from_secs(5);
+        while process_is_current(prior_io) {
+            assert!(
+                Instant::now() < dead_io_deadline,
+                "old TUNIO remained alive after SIGKILL"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !process_is_current(prior_io),
+            "old TUNIO must be confirmed dead before Agent restart"
+        );
+        ip(&["link", "set", "candy-test-host", "up"]);
+        *agent = Process(
+            Command::new(std::env::var("CANDY_AGENT_TEST_BINARY").unwrap())
+                .args([
+                    "experimental-runtime-agent",
+                    "--experimental-packet-port-ipc",
+                    "--config",
+                ])
+                .arg(root.join("runtime-agent.json"))
+                .spawn()
+                .unwrap(),
+        );
+    }
+    let deadline =
+        Instant::now() + Duration::from_secs(if concurrent_renewal_io_death { 45 } else { 25 });
+    let mut renewed = loop {
         if let Some(record) = status(&root.join("worker-process.json")) {
             let pid = record["pid"].as_u64().unwrap() as u32;
             if pid != first_core.pid && record["auth_deadline_unix"] == expiry {
@@ -791,10 +1034,42 @@ fn verify_fresh_grant_renewal(
             Instant::now() < deadline,
             "valid fresh signed Grant did not restore original TUN traffic"
         );
-        assert_eq!(process_identity(io.pid).unwrap(), io);
+        if !concurrent_renewal_io_death {
+            assert_eq!(process_identity(io.pid).unwrap(), io);
+        }
         assert_eq!(link(), original_link);
         std::thread::sleep(Duration::from_millis(50));
     };
+    if concurrent_renewal_io_death {
+        io = process_identity(
+            status(&root.join("io-process.json")).unwrap()["pid"]
+                .as_u64()
+                .unwrap() as u32,
+        )
+        .unwrap();
+        assert_ne!(io, prior_io);
+        assert!(!process_is_current(prior_io));
+        assert!(
+            status(&root.join("io-process.json")).unwrap()["io_epoch"]
+                .as_u64()
+                .unwrap()
+                > io_record["io_epoch"].as_u64().unwrap()
+        );
+        if let Some(destination) = std::env::var_os("CANDY_SIGNED_EVIDENCE_DIR") {
+            private_json(
+                &PathBuf::from(destination).join("signed-concurrent-grant-io-evidence.json"),
+                &serde_json::json!({"old_io":prior_io,"new_io":io,"new_core":renewed,
+                    "new_signed_expiry":expiry,"original_expiry":original_expiry,
+                    "original_tun":serde_json::from_slice::<serde_json::Value>(original_link).unwrap(),
+                    "restored_tun":serde_json::from_slice::<serde_json::Value>(&link()).unwrap(),
+                    "new_grant_prepared_before_agent_start":true,
+                    "io_sigkill_confirmed_dead_before_agent_start":true,
+                    "actual_underlay_down_across_original_grant_expiry":true,
+                    "cloud_source":"local_signed_grant_fixture"}),
+            );
+        }
+        eprintln!("signed_concurrent_grant_io_evidence old_io={} new_io={} new_core={} new_grant_before_agent_start=true io_dead_before_agent_start=true same_tun=true",prior_io.pid,io.pid,renewed.pid);
+    }
     assert!(ping());
     let record = status(&root.join("worker-process.json")).unwrap();
     let core_status = PathBuf::from(record["status_path"].as_str().unwrap());
@@ -827,6 +1102,21 @@ fn verify_fresh_grant_renewal(
             renewed,
             io,
         );
+    }
+    if pair_recovery {
+        verify_io_pair_recovery(root, client, ping, link, original_link, None);
+        io = process_identity(
+            status(&root.join("io-process.json")).unwrap()["pid"]
+                .as_u64()
+                .unwrap() as u32,
+        )
+        .unwrap();
+        renewed = process_identity(
+            status(&root.join("worker-process.json")).unwrap()["pid"]
+                .as_u64()
+                .unwrap() as u32,
+        )
+        .unwrap();
     }
     agent.0.kill().unwrap();
     agent.0.wait().unwrap();
@@ -861,12 +1151,73 @@ fn verify_fresh_grant_renewal(
     eprintln!("signed_fresh_grant_evidence expired_core={} renewed_core={} same_io={} original_expiry={} new_signed_expiry={} same_policy=true same_tun=true tun_fd_count={} tamper_denied=true agent_takeover=true real_icmp=true",first_core.pid,renewed.pid,io.pid,original_expiry,expiry,tun_fds);
 }
 
+fn verify_public_listener_conflict(
+    root: &Path,
+    namespace: &str,
+    ping: &impl Fn() -> bool,
+    link: &impl Fn() -> Vec<u8>,
+    original_link: &[u8],
+) {
+    let path = root.join("duplicate-listener.toml");
+    fs::write(&path, format!(
+        "listen = \"10.200.0.2:18443\"\ncert_pem = {:?}\nkey_pem = {:?}\n[[users]]\nkey_id = \"isolated-fault-fixture\"\nsecret = \"0123456789abcdef\"\n",
+        root.join("fixture/server.cert.pem"), root.join("fixture/server.key.pem")
+    )).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let log_path = root.join("duplicate-listener.log");
+    let log = fs::File::create(&log_path).unwrap();
+    let mut duplicate = Process(
+        Command::new("ip")
+            .args(["netns", "exec", namespace])
+            .arg(core())
+            .args(["server", "--config"])
+            .arg(path)
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let exit = loop {
+        if let Some(exit) = duplicate.0.try_wait().unwrap() {
+            break exit;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "duplicate public listener did not reject bind conflict"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let output = fs::read_to_string(&log_path).unwrap();
+    assert!(
+        !exit.success(),
+        "duplicate public listener unexpectedly started: {output}"
+    );
+    assert!(
+        output.contains("Address already in use") || output.contains("os error 98"),
+        "duplicate listener failed before the public bind conflict: {output}"
+    );
+    assert_eq!(link(), original_link);
+    assert!(
+        ping(),
+        "duplicate bind failure damaged the existing listener"
+    );
+    if let Some(destination) = std::env::var_os("CANDY_SIGNED_EVIDENCE_DIR") {
+        fs::write(
+            PathBuf::from(destination).join("signed-public-listener-conflict.log"),
+            output,
+        )
+        .unwrap();
+    }
+}
+
 fn verify_io_pair_recovery(
     root: &Path,
     client: &mut ClientControl,
     ping: &impl Fn() -> bool,
     link: &impl Fn() -> Vec<u8>,
     original_link: &[u8],
+    mut simultaneous_netd: Option<&mut Process>,
 ) {
     use candy_process_control::{process_identity, process_is_current};
     let mut cycles = Vec::new();
@@ -884,17 +1235,36 @@ fn verify_io_pair_recovery(
             panic!("owner absent before IO kill: {before:?}");
         };
         let started = Instant::now();
+        let old_netd_pid = simultaneous_netd.as_ref().map(|netd| netd.0.id());
+        if let Some(netd) = simultaneous_netd.as_mut() {
+            netd.0.kill().unwrap();
+        }
         assert_eq!(
             unsafe { nix::libc::kill(io_identity.pid as i32, nix::libc::SIGKILL) },
             0
         );
+        if let Some(netd) = simultaneous_netd.as_mut() {
+            netd.0.wait().unwrap();
+            assert_same_tun_identity(&link(), original_link);
+            **netd = Process(
+                Command::new(std::env::var("CANDY_NETD_TEST_BINARY").unwrap())
+                    .arg("--protocol-v2")
+                    .arg("--socket")
+                    .arg(root.join("netd.sock"))
+                    .args(["--allowed-uid", "0", "--allowed-gid", "0"])
+                    .arg("--infrastructure-journal")
+                    .arg(root.join("infra.journal"))
+                    .spawn()
+                    .unwrap(),
+            );
+        }
         let deadline = Instant::now() + Duration::from_secs(45);
         let (new_io, new_core, new_owner) = loop {
-            assert_eq!(
-                link(),
-                original_link,
-                "IO recovery changed immutable TUN identity"
-            );
+            if simultaneous_netd.is_some() {
+                assert_same_tun_identity(&link(), original_link);
+            } else {
+                assert_eq!(link(), original_link, "IO recovery changed TUN state");
+            }
             let io = status(&root.join("io-process.json")).unwrap();
             let core = status(&root.join("worker-process.json")).unwrap();
             if io["pid"] != old_io["pid"] && core["pid"] != old_core["pid"] {
@@ -940,22 +1310,78 @@ fn verify_io_pair_recovery(
             infra_id: [3; 16], generation: 1,
             io_epoch: new_io["io_epoch"].as_u64().unwrap() + 1,
         }).unwrap(), (Body::Error { code, .. }, _) if code == "io_owner_alive"));
-        assert_eq!(link(), original_link);
+        if simultaneous_netd.is_some() {
+            let recovered_link = link();
+            assert_same_tun_identity(&recovered_link, original_link);
+            let recovered: serde_json::Value = serde_json::from_slice(&recovered_link).unwrap();
+            let flags = recovered[0]["flags"].as_array().unwrap();
+            assert!(flags.iter().any(|flag| flag == "UP"));
+            assert!(flags.iter().any(|flag| flag == "LOWER_UP"));
+            assert!(!flags.iter().any(|flag| flag == "NO-CARRIER"));
+            assert!(matches!(
+                recovered[0]["operstate"].as_str(),
+                Some("UP" | "UNKNOWN")
+            ));
+        } else {
+            assert_eq!(link(), original_link);
+        }
         assert!(ping());
         let recovery = status(&root.join("client-status.pair-recovery.json")).unwrap();
         cycles.push(serde_json::json!({"cycle":cycle,"old_io":old_io,"new_io":new_io,
             "old_core":old_core,"new_core":new_core,"old_owner":old_owner,
             "new_owner":new_owner,"recovery_plan":recovery,"recovery_ms":started.elapsed().as_millis(),
+            "simultaneous_netd_kill":old_netd_pid.is_some(),"old_netd_pid":old_netd_pid,
+            "new_netd_pid":simultaneous_netd.as_ref().map(|netd|netd.0.id()),
             "same_tun":true,"icmp_restored":true,"stale_epoch_denied":true,"duplicate_reader_denied":true}));
     }
     if let Some(destination) = std::env::var_os("CANDY_SIGNED_EVIDENCE_DIR") {
         private_json(
-            &PathBuf::from(destination).join("signed-io-pair-recovery-evidence.json"),
+            &PathBuf::from(destination).join(format!(
+                "signed-{}-pair-recovery-{}-evidence.json",
+                if simultaneous_netd.is_some() {
+                    "netd-io"
+                } else {
+                    "io"
+                },
+                cycles[0]["old_io"]["pid"]
+            )),
             &serde_json::json!({"original_tun":serde_json::from_slice::<serde_json::Value>(original_link).unwrap(),
                 "final_tun":serde_json::from_slice::<serde_json::Value>(&link()).unwrap(),"cycles":cycles}),
         );
     }
     eprintln!("signed_io_pair_recovery_evidence real_io_sigkills=2 same_tun=true new_core_and_io=true monotonic_epochs=true original_auth_cap_preserved=true stale_epoch_denied=true duplicate_reader_denied=true real_icmp_restored=true");
+}
+
+fn assert_same_tun_identity(actual: &[u8], expected: &[u8]) {
+    let actual: serde_json::Value = serde_json::from_slice(actual).unwrap();
+    let expected: serde_json::Value = serde_json::from_slice(expected).unwrap();
+    assert_eq!(actual.as_array().unwrap().len(), 1, "TUN disappeared");
+    for key in [
+        "ifindex",
+        "ifname",
+        "mtu",
+        "addr_info",
+        "link_type",
+        "txqlen",
+        "qdisc",
+        "group",
+    ] {
+        assert_eq!(
+            actual[0][key], expected[0][key],
+            "TUN identity/config changed: {key}"
+        );
+    }
+    // Closing every TUN FD changes carrier state even for a persistent interface.
+    let stable_flags = |value: &serde_json::Value| {
+        value[0]["flags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|flag| flag.as_str() != Some("NO-CARRIER") && flag.as_str() != Some("LOWER_UP"))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(stable_flags(&actual), stable_flags(&expected));
 }
 
 #[allow(clippy::too_many_arguments)]
