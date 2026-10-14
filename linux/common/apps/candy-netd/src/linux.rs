@@ -1219,7 +1219,7 @@ mod backend {
                 let mut routes = handle.route().get(query).execute();
                 while let Some(route) = routes.try_next().await.map_err(|_| NetworkError::Backend)? {
                     let in_table = route.attributes.iter().any(|value| matches!(value, RouteAttribute::Table(table) if *table == old_plan.route_table));
-                    let owned_guard = matches!(route.header.kind, RouteType::Unreachable | RouteType::Blackhole)
+                    let owned_guard = matches!(route.header.kind, RouteType::Unreachable | RouteType::BlackHole)
                         && route.header.protocol == RouteProtocol::Static
                         && Self::route_prefix(&route).is_some_and(|prefix| old_plan.remote_routes.contains(&prefix));
                     let owned_existing = Self::is_owned_residual_route(&route, &old_plan)
@@ -1289,7 +1289,7 @@ mod backend {
                 let mut routes = handle.route().get(query).execute();
                 while let Some(route) = routes.try_next().await.map_err(|_| NetworkError::Backend)? {
                     let in_table = route.attributes.iter().any(|value| matches!(value, RouteAttribute::Table(table) if *table == plan.route_table));
-                    if in_table && matches!(route.header.kind, RouteType::Unreachable | RouteType::Blackhole) && route.header.protocol == RouteProtocol::Static
+                    if in_table && matches!(route.header.kind, RouteType::Unreachable | RouteType::BlackHole) && route.header.protocol == RouteProtocol::Static
                         && Self::route_prefix(&route).is_some_and(|prefix| plan.remote_routes.contains(&prefix)) {
                         if let Err(error) = handle.route().del(route).execute().await {
                             if !route_delete_is_idempotent(&error) { return Err(NetworkError::Backend); }
