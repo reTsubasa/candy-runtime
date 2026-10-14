@@ -345,14 +345,16 @@ log_command_output() {
 
 json_string() {
 	printf '"'
-	printf '%s' "$1" | awk '
+	printf '%s\n' "$1" | awk '
+		BEGIN { for (i = 1; i < 32; i++) escapes[sprintf("%c", i)] = sprintf("\\u%04x", i) }
 		NR > 1 { printf "\\n" }
 		{
-			gsub(/\\/, "\\\\")
-			gsub(/"/, "\\\"")
-			gsub(/\t/, "\\t")
-			gsub(/\r/, "\\r")
-			printf "%s", $0
+			for (i = 1; i <= length($0); i++) {
+				c = substr($0, i, 1)
+				if (c == "\\" || c == "\"") printf "\\%s", c
+				else if (c in escapes) printf "%s", escapes[c]
+				else printf "%s", c
+			}
 		}
 	'
 	printf '"'
@@ -1916,14 +1918,28 @@ provider_update_interval_hours() {
 
 provider_file_mtime() {
 	local path="$1"
-	stat -c %Y "$path" 2>/dev/null || stat -f %m "$path" 2>/dev/null || printf '0\n'
+	stat -c %Y "$path" 2>/dev/null && return 0
+	stat -f %m "$path" 2>/dev/null && return 0
+	# Some minimal OpenWrt images omit even the BusyBox stat applet.
+	if command -v lua >/dev/null 2>&1; then
+		lua - "$path" 2>/dev/null <<'LUA' && return 0
+local ok, fs = pcall(require, "nixio.fs")
+local metadata = ok and fs.stat(arg[1])
+if not metadata or not tonumber(metadata.mtime) then os.exit(1) end
+print(metadata.mtime)
+LUA
+	fi
+	return 1
 }
 
 provider_update_due() {
 	local path="$1" interval_hours="$2" now mtime age
 	[ -s "$path" ] || return 0
 	now=$(date +%s)
-	mtime=$(provider_file_mtime "$path")
+	mtime=$(provider_file_mtime "$path") || {
+		log_warn "code=provider_timestamp_unavailable module=provider_update path=$path detail=Cannot schedule update from file age"
+		return 1
+	}
 	case "$mtime" in
 		''|*[!0-9]*) return 0 ;;
 	esac
@@ -2363,6 +2379,11 @@ refresh_node_status() {
 		rm -f "$temporary"
 		return 1
 	}
+	if command -v jsonfilter >/dev/null 2>&1 && ! jsonfilter -i "$temporary" -e '@' >/dev/null 2>&1; then
+		rm -f "$temporary"
+		log_error "code=status_json_invalid module=status detail=Preserving previous valid status snapshot"
+		return 1
+	fi
 	atomic_commit_file "$temporary" "$NODE_STATUS_FILE" || return 1
 }
 
@@ -2563,23 +2584,27 @@ write_rule() {
 }
 
 write_dns_rule() {
-	local section kind domain target target_name
+	local section="$1" kind domain target target_name
 	config_get kind "$section" type domain-suffix
 	config_get domain "$section" domain
 	config_get target "$section" target direct
+	# LuCI can persist an added row before its domain has been filled in.
+	if [ -z "$domain" ] && [ "$kind" = domain-suffix ] && [ "$target" = direct ]; then
+		log_warn "code=dns_rule_draft_skipped module=config section=$section detail=Empty default DNS rule is not active"
+		return 0
+	fi
 	case "$kind" in
 		domain|domain-suffix) ;;
-		*) log_error "dns_rule=$section rejected invalid type: $kind"; CANDY_CONFIG_RULE_ERROR=1; return 0 ;;
+		*) dns_rule_error "$section" dns_rule_type_invalid "Invalid DNS rule type: $kind"; return 0 ;;
 	esac
 	case "$domain" in
-		""|*[!A-Za-z0-9._-]*|.*|*.) log_error "dns_rule=$section rejected invalid domain: $domain"; CANDY_CONFIG_RULE_ERROR=1; return 0 ;;
+		""|*[!A-Za-z0-9._-]*|.*|*.) dns_rule_error "$section" dns_rule_domain_invalid "Invalid DNS rule domain: $domain"; return 0 ;;
 	esac
 	case "$target" in
 		direct) ;;
 		*)
 			if ! uci -q get "candy.$target" >/dev/null 2>&1 || [ "$(uci -q get "candy.$target" 2>/dev/null)" != node ]; then
-				log_error "dns_rule=$section rejected unknown node target: $target"
-				CANDY_CONFIG_RULE_ERROR=1
+				dns_rule_error "$section" dns_rule_target_invalid "Unknown DNS node target: $target"
 				return 0
 			fi
 			config_get target_name "$target" name "$target"
@@ -2592,6 +2617,13 @@ write_dns_rule() {
 	if [ "$target" = direct ]; then printf '"direct"'; else printf '{"node":'; json_string "$target_name"; printf '}'; fi
 	printf '}'
 	FIRST_DNS_RULE=0
+}
+
+dns_rule_error() {
+	local detail="code=$2 module=config section=$1 detail=$3"
+	CANDY_CONFIG_RULE_ERROR=1
+	log_error "$detail"
+	printf '%s\n' "$detail" >&2
 }
 
 write_rule_value() {
@@ -4620,6 +4652,7 @@ reload_runtime_locked() {
 	rm -f "$RUNTIME_NEXT_CONFIG"
 	if ! generate_runtime_candidate; then
 		log_msg "runtime reload candidate generation failed"
+		printf '%s\n' 'code=runtime_candidate_generation_failed module=reload_runtime detail=Invalid product configuration; current runtime preserved' >&2
 		rm -f "$RUNTIME_NEXT_CONFIG"
 		return 1
 	fi

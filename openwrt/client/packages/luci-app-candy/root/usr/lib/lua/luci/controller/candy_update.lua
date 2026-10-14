@@ -1,7 +1,7 @@
 module("luci.controller.candy_update", package.seeall)
 
 local UPDATE_MANAGER = "/usr/libexec/candy-update-manager"
-local MAX_STATUS_BYTES = 1024 * 1024
+local MAX_STATUS_BYTES = 768 * 1024
 local MAX_CORE_UPLOAD_BYTES = 128 * 1024 * 1024
 local CORE_UPLOAD_ROOT = os.getenv("CANDY_UPDATE_UPLOAD_ROOT") or "/tmp/candy-core-upload"
 local process = require "luci.candy.process"
@@ -95,17 +95,17 @@ end
 
 function action_status()
 	local jsonc = require "luci.jsonc"
-	local ok, output
+	local ok, output, error_code
 	luci.http.header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 	luci.http.prepare_content("application/json")
 	if not manager_available() then
 		luci.http.write(jsonc.stringify({ schema_version = 1, error = "Update manager is unavailable" }))
 		return
 	end
-	ok, output = process.capture({ UPDATE_MANAGER, "status" }, { timeout = 5 })
+	ok, output, error_code = process.capture({ UPDATE_MANAGER, "status" }, { timeout = 10 })
 	if not ok or not output or #output > MAX_STATUS_BYTES then
 		luci.http.status(503, "Service Unavailable")
-		luci.http.write(jsonc.stringify({ schema_version = 1, error = "Update manager status is unavailable" }))
+		luci.http.write(jsonc.stringify({ schema_version = 1, error = "Update manager status is unavailable", module = "update_status", phase = "status", error_code = error_code or "status_unavailable", detail = output }))
 		return
 	end
 	local status = jsonc.parse(output)
@@ -119,7 +119,7 @@ end
 
 function action_check()
 	if not require_post() then return end
-	start_operation({ UPDATE_MANAGER, "check" })
+	start_operation({ UPDATE_MANAGER, "check" }, luci.http.getenv("HTTP_X_REQUESTED_WITH") == "XMLHttpRequest")
 end
 
 function action_install_core()
@@ -129,7 +129,7 @@ function action_install_core()
 		luci.http.status(400, "Bad Request")
 		return
 	end
-	start_operation({ UPDATE_MANAGER, "install-core", version_key })
+	start_operation({ UPDATE_MANAGER, "install-core", version_key }, luci.http.getenv("HTTP_X_REQUESTED_WITH") == "XMLHttpRequest")
 end
 
 function action_install_core_upload()
@@ -230,5 +230,5 @@ function action_install_runtime()
 		luci.http.status(400, "Bad Request")
 		return
 	end
-	start_operation({ UPDATE_MANAGER, "install-runtime", version_key })
+	start_operation({ UPDATE_MANAGER, "install-runtime", version_key }, luci.http.getenv("HTTP_X_REQUESTED_WITH") == "XMLHttpRequest")
 end

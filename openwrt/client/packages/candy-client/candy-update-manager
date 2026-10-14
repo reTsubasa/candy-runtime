@@ -11,6 +11,8 @@ CATALOG_SIGNATURE=$STATE_ROOT/stable.json.sig
 SEQUENCE_FILE=$STATE_ROOT/sequence
 CATALOG_HASH_FILE=$STATE_ROOT/catalog.sha256
 CHECKED_AT_FILE=$STATE_ROOT/checked-at
+STATUS_CATALOG=$STATE_ROOT/status-catalog.json
+STATUS_BINDING=$STATE_ROOT/status-catalog.binding
 OPENWRT_RELEASE_FILE=${CANDY_OPENWRT_RELEASE_FILE:-/etc/openwrt_release}
 OPERATION_FILE=${CANDY_UPDATE_OPERATION_FILE:-/tmp/candy-update-operation.json}
 CORE_OPERATION_FILE=${CANDY_CORE_OPERATION_FILE:-/tmp/candy-core-operation.json}
@@ -28,6 +30,16 @@ PRESERVE_CLOUD_UPGRADE_WORKER=${CANDY_UPDATE_PRESERVE_CLOUD_UPGRADE_WORKER:-0}
 RUNTIME_VERSION=${CANDY_RUNTIME_VERSION:-0.4.0}
 RUNTIME_RELEASE=${CANDY_RUNTIME_RELEASE:-2}
 SUPPORTED_OPENWRT_RELEASE=25.12.4
+
+supported_openwrt_series() {
+	case "$1" in
+		25.12.*)
+			local patch="${1#25.12.}"
+			case "$patch" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac
+			;;
+		*) return 1 ;;
+	esac
+}
 SUPPORTED_TARGET=
 SUPPORTED_ARCH=
 RUNTIME_TARGET_KEY=
@@ -54,14 +66,16 @@ RUNTIME_PAIR_DETAIL=
 
 json_string() {
 	printf '"'
-	printf '%s' "$1" | awk '
+	printf '%s\n' "$1" | awk '
+		BEGIN { for (i = 1; i < 32; i++) escapes[sprintf("%c", i)] = sprintf("\\u%04x", i) }
 		NR > 1 { printf "\\n" }
 		{
-			gsub(/\\/, "\\\\")
-			gsub(/"/, "\\\"")
-			gsub(/\t/, "\\t")
-			gsub(/\r/, "\\r")
-			printf "%s", $0
+			for (i = 1; i <= length($0); i++) {
+				c = substr($0, i, 1)
+				if (c == "\\" || c == "\"") printf "\\%s", c
+				else if (c in escapes) printf "%s", escapes[c]
+				else printf "%s", c
+			}
 		}
 	'
 	printf '"'
@@ -292,7 +306,7 @@ require_supported_platform() {
 	release=$(platform_release)
 	target=$(platform_target)
 	arch=$(platform_arch)
-	[ "$release" = "$SUPPORTED_OPENWRT_RELEASE" ] || return 1
+	supported_openwrt_series "$release" || return 1
 	case "$target:$arch" in
 		x86/64:x86_64|x86/64:amd64)
 			SUPPORTED_TARGET=x86/64
@@ -419,7 +433,7 @@ validate_core_entry() {
 }
 
 validate_catalog() {
-	local catalog="$1" schema sequence channel runtime_latest core_latest
+	local catalog="$1" schema sequence channel runtime_latest core_latest entry_target compatible=0
 	schema=$(catalog_field "$catalog" '@.schema_version')
 	sequence=$(catalog_field "$catalog" '@.sequence')
 	channel=$(catalog_field "$catalog" '@.channel')
@@ -427,8 +441,22 @@ validate_catalog() {
 	[ -n "$(catalog_field "$catalog" '@.published_at')" ] || return 1
 	runtime_latest=$(catalog_field "$catalog" '@.runtime.latest')
 	core_latest=$(catalog_field "$catalog" '@.core.latest')
-	validate_runtime_entry "$catalog" "$runtime_latest" || return 1
-	validate_core_entry "$catalog" "$core_latest" || return 1
+	valid_version_key "$runtime_latest" && valid_version_key "$core_latest" || return 1
+	[ "$runtime_latest" = "$(expected_runtime_key "$(runtime_entry_field "$catalog" "$runtime_latest" version)" "$(runtime_entry_field "$catalog" "$runtime_latest" revision)")" ] || return 1
+	[ "$core_latest" = "$(expected_core_key "$(core_entry_field "$catalog" "$core_latest" version)")" ] || return 1
+	# Each install/candidate path validates its own platform entry. A missing
+	# Runtime target must not hide a compatible, independently signed Core.
+	entry_target=$(runtime_entry_field "$catalog" "$runtime_latest" "targets.$RUNTIME_TARGET_KEY.target")
+	case "$entry_target" in
+		''|null) ;;
+		*) validate_runtime_entry "$catalog" "$runtime_latest" || return 1; compatible=1 ;;
+	esac
+	entry_target=$(core_entry_field "$catalog" "$core_latest" "targets.$CORE_TARGET_KEY.target")
+	case "$entry_target" in
+		''|null) ;;
+		*) validate_core_entry "$catalog" "$core_latest" || return 1; compatible=1 ;;
+	esac
+	[ "$compatible" = 1 ]
 }
 
 cached_catalog_valid() {
@@ -440,9 +468,89 @@ cached_catalog_valid() {
 	[ "$sequence" = "$recorded" ] && valid_unsigned_integer "$recorded"
 }
 
+status_source_binding() {
+	sha256sum "$CATALOG_FILE" "$CATALOG_SIGNATURE" "$CATALOG_KEY" 2>/dev/null
+	printf '%s\n' "status-projection-v1:$RUNTIME_TARGET_KEY:$CORE_TARGET_KEY"
+}
+
+project_release_entry() {
+	local file="$1" family="$2" target="$3"
+	printf '{"version":'; json_string "$(catalog_field "$file" '@.version')"
+	if [ "$family" = runtime ]; then
+		printf ',"revision":%s,"display_version":' "$(catalog_field "$file" '@.revision')"
+		json_string "$(catalog_field "$file" '@.display_version')"
+	else
+		printf ',"process_api_version":%s,"core_api_version":%s' "$(catalog_field "$file" '@.process_api_version')" "$(catalog_field "$file" '@.core_api_version')"
+	fi
+	printf ',"targets":{'; json_string "$target"; printf ':'
+	local entry
+	entry=$(catalog_field "$file" "@.targets.$target")
+	printf '%s}}' "${entry:-null}"
+}
+
+# This projection is display-only. Install paths continue verifying the full
+# signed catalog and never authorize packages from this derived cache.
+prepare_status_catalog() (
+	local binding stored projection_hash directory latest versions version key entry first=1 count=0
+	verify_catalog_signature "$CATALOG_FILE" "$CATALOG_SIGNATURE" || exit 1
+	[ "$(catalog_field "$CATALOG_FILE" '@.sequence')" = "$(cat "$SEQUENCE_FILE" 2>/dev/null)" ] || exit 1
+	binding=$(status_source_binding | sha256sum | awk '{print $1}')
+	stored=$(sed -n '1p' "$STATUS_BINDING" 2>/dev/null || true)
+	if [ "$stored" = "$binding" ] && regular_bounded_file "$STATUS_BINDING" 512 && regular_bounded_file "$STATUS_CATALOG" 262144; then
+		projection_hash=$(sha256sum "$STATUS_CATALOG" | awk '{print $1}')
+		[ "$projection_hash" != "$(sed -n '2p' "$STATUS_BINDING" 2>/dev/null)" ] || exit 0
+	fi
+	# Polling must stay bounded, including after an upgrade or a failed check.
+	# Only an explicit background catalog check rebuilds the display cache.
+	[ "${1:-build}" != cached ] || exit 1
+	directory=$(mktemp -d "$STATE_ROOT/.status-XXXXXX") || exit 1
+	trap 'rm -rf "$directory"' EXIT
+	trap 'exit 1' HUP INT TERM
+	chmod 0700 "$directory" || exit 1
+	cp "$CATALOG_FILE" "$directory/source.json" || exit 1
+	cp "$CATALOG_SIGNATURE" "$directory/source.sig" || exit 1
+	verify_catalog_signature "$directory/source.json" "$directory/source.sig" || exit 1
+	validate_catalog "$directory/source.json" || exit 1
+	latest=$(catalog_field "$directory/source.json" '@.runtime.latest')
+	{
+		printf '{"schema_version":1,"sequence":%s,"channel":"stable","published_at":' "$(catalog_field "$directory/source.json" '@.sequence')"
+		json_string "$(catalog_field "$directory/source.json" '@.published_at')"
+		printf ',"runtime":{"latest":'; json_string "$latest"
+		printf ',"releases":{'; json_string "$latest"; printf ':'
+		catalog_field "$directory/source.json" "@.runtime.releases.$latest" > "$directory/runtime.json"
+		project_release_entry "$directory/runtime.json" runtime "$RUNTIME_TARGET_KEY"
+		printf '}},"core":{"latest":'; json_string "$(catalog_field "$directory/source.json" '@.core.latest')"
+		printf ',"releases":{'
+		versions=$(jsonfilter -i "$directory/source.json" -e '@.core.releases[*].version' | awk -F. '
+			/^[0-9]+\.[0-9]+\.[0-9]+([+.-].*)?$/ { split($3,p,/[-+]/); printf "%010d.%010d.%010d\t%s\n",$1,$2,p[1],$0 }' | sort -r | cut -f2)
+		for version in $versions; do
+			key=$(expected_core_key "$version")
+			entry=$(catalog_field "$directory/source.json" "@.core.releases.$key")
+			printf '{"core":{"releases":{"%s":%s}}}\n' "$key" "${entry:-null}" > "$directory/entry.json"
+			validate_core_entry "$directory/entry.json" "$key" || continue
+			printf '%s\n' "$entry" > "$directory/core.json"
+			[ "$first" = 1 ] || printf ','
+			first=0
+			json_string "$key"; printf ':'
+			project_release_entry "$directory/core.json" core "$CORE_TARGET_KEY"
+			count=$((count + 1))
+			[ "$count" -lt 5 ] || break
+		done
+		printf '}}}\n'
+	} > "$directory/projection.json"
+	regular_bounded_file "$directory/projection.json" 262144 || exit 1
+	# A concurrent catalog check must not bind a projection to another catalog.
+	[ "$binding" = "$(status_source_binding | sha256sum | awk '{print $1}')" ] || exit 1
+	projection_hash=$(sha256sum "$directory/projection.json" | awk '{print $1}')
+	printf '%s\n%s\n' "$binding" "$projection_hash" > "$directory/binding"
+	chmod 0600 "$directory/projection.json" "$directory/binding" || exit 1
+	mv -f "$directory/projection.json" "$STATUS_CATALOG" || exit 1
+	mv -f "$directory/binding" "$STATUS_BINDING"
+)
+
 check_catalog() {
 	local downloaded_ref downloaded_catalog downloaded_signature catalog_commit catalog_url signature_url new_sequence old_sequence old_hash new_hash checked_at attempt verified cache_key
-	require_supported_platform || fail "this Runtime package does not support the current OpenWrt platform"
+	require_supported_platform || fail_stage platform platform_incompatible "Unsupported OpenWrt release=$(platform_release) target=$(platform_target) package_abi=$(platform_arch); required=25.12.x with x86_64 or IPQ40xx Cortex-A7 NEON/VFPv4"
 	[ -f "$CATALOG_KEY" ] && [ ! -L "$CATALOG_KEY" ] || fail "catalog signing key is unavailable"
 	mkdir -p "$STATE_ROOT" || fail "cannot create update state directory"
 	[ ! -L "$STATE_ROOT" ] || fail "update state directory must not be a symbolic link"
@@ -501,6 +609,7 @@ check_catalog() {
 	atomic_write "$CATALOG_HASH_FILE" "$new_hash" || fail "cannot store catalog hash"
 	checked_at=$(date +%s 2>/dev/null || printf 0)
 	atomic_write "$CHECKED_AT_FILE" "$checked_at" || fail "cannot store catalog check time"
+	prepare_status_catalog || log_update warn catalog_checked status status_projection_failed "Signed catalog accepted; display projection will be retried"
 	log_update info catalog_checked catalog accepted "Accepted stable catalog sequence $new_sequence"
 	printf '%s\n' "catalog sequence $new_sequence accepted"
 }
@@ -963,7 +1072,10 @@ status_json() {
 	require_supported_platform >/dev/null 2>&1 || true
 	checked_at=$(cat "$CHECKED_AT_FILE" 2>/dev/null || printf 0)
 	case "$checked_at" in ''|*[!0-9]*) checked_at=0 ;; esac
-	if cached_catalog_valid; then catalog_valid=1; fi
+	if require_supported_platform >/dev/null 2>&1 && prepare_status_catalog cached; then
+		CATALOG_FILE=$STATUS_CATALOG
+		catalog_valid=1
+	fi
 	if [ -x "$CORE_MANAGER" ]; then
 		core_status=$("$CORE_MANAGER" status 2>/dev/null || true)
 		[ "${#core_status}" -le 524288 ] || core_status=
@@ -980,6 +1092,8 @@ status_json() {
 	printf ',"target":'; json_string "$target"
 	printf ',"arch":'; json_string "$arch"
 	printf '},"runtime_current":'; json_string "$RUNTIME_VERSION-r$RUNTIME_RELEASE"
+	printf ',"runtime_compatible":'
+	if [ "$catalog_valid" = 1 ] && validate_runtime_entry "$CATALOG_FILE" "$(catalog_field "$CATALOG_FILE" '@.runtime.latest')"; then printf true; else printf false; fi
 	printf ',"core_current":'; if [ -n "$core_current" ]; then json_string "$core_current"; else printf null; fi
 	printf ',"core":'; if [ -n "$core_status" ]; then printf '%s' "$core_status"; else printf null; fi
 	printf ',"core_candidates":'

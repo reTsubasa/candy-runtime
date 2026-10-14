@@ -406,13 +406,15 @@ end
 
 local function read_core_update_status()
 	local jsonc = require "luci.jsonc"
-	local ok, output = process.capture({ CORE_UPDATE_MANAGER, "status" }, { timeout = 5 })
+	local ok, output, error_code = process.capture({ CORE_UPDATE_MANAGER, "status" }, { timeout = 10 })
 	if not ok or not output or #output > MAX_UPDATE_STATUS_BYTES then
 		return {
 			schema_version = 1,
 			core = read_core_status(),
 			core_candidates = {},
-			error = "Update manager is unavailable"
+			error = "Update manager is unavailable",
+			error_code = error_code or "status_unavailable",
+			detail = output
 		}
 	end
 	local status = jsonc.parse(output)
@@ -1375,8 +1377,6 @@ function action_status_json()
 	status.sdwan.performance = read_sdwan_performance()
 	status.fault = read_fault_status()
 	status.core = read_core_status()
-	status.version = status.version or "0.4.0"
-	status.release = status.release or "1"
 	status.nodes = status.nodes or {}
 	status.candy_nodes = {}
 	for _, node in ipairs(status.nodes) do
@@ -1543,8 +1543,51 @@ local function redirect_gfwlist(status)
 	luci.http.redirect(url)
 end
 
+local function provider_update_json(provider)
+	local jsonc = require "luci.jsonc"
+	local fs = require "nixio.fs"
+	local uci = require "luci.model.uci".cursor()
+	local geo = provider == "cn-ip"
+	local option = geo and "geo_update_url" or "gfwlist_update_url"
+	local normalize = geo and normalize_geo_update_url or normalize_gfwlist_update_url
+	local url = normalize(luci.http.formvalue("url") or uci:get("candy", "client", option) or "")
+	local output = geo and "/etc/candy/rulesets/cn-ip.cidr" or "/etc/candy/rulesets/gfwlist.domains"
+	local active = geo and "/var/run/candy/rulesets/cn-ip.cidr" or "/var/run/candy/rulesets/gfwlist.domains"
+	local log_path = geo and "/tmp/candy-geo-update.log" or "/tmp/candy-gfwlist-update.log"
+	local function respond(ok, code, detail, activated)
+		luci.http.header("Cache-Control", "no-store")
+		luci.http.prepare_content("application/json")
+		luci.http.write(jsonc.stringify({ ok = ok, code = code, module = "provider_update", provider = provider,
+			detail = detail, activated = activated == true }))
+	end
+	if not url then return respond(false, "invalid_url", "Expected an HTTPS rule data URL.") end
+	local ok, detail, code = process.capture({ "/usr/bin/candy-client", geo and "geo" or "dns", "update", provider,
+		"--url", url, "--output", output }, { timeout = 60 })
+	fs.writefile(log_path, detail or "")
+	if not ok then
+		local reason = (detail or ""):match("Error: ([^\r\n]+)") or (detail or ""):sub(-4096)
+		return respond(false, code or "provider_update_failed", reason)
+	end
+	-- Persist only the accepted source. Updating rules must not submit the
+	-- Advanced form, whose commit handler also restarts the transport.
+	uci:set("candy", "client", option, url)
+	if not uci:commit("candy") then return respond(false, "source_save_failed", "Rules downloaded but source configuration could not be saved.") end
+	if not candy_service_running() then
+		return respond(true, "saved_service_stopped", "Rules saved. Candy is not running.")
+	end
+	local loaded, load_detail, load_code = process.capture({ "/etc/init.d/candy", "reload_runtime" }, { timeout = 90 })
+	if not loaded then
+		return respond(false, load_code or "provider_activation_failed", "Rules saved; loading failed. " .. (load_detail or ""):sub(-4096))
+	end
+	if not process.run({ "/usr/bin/cmp", "-s", output, active }, { timeout = 5 }) then
+		return respond(true, "saved_not_active", "Rules saved but not selected by the current routing policy.")
+	end
+	return respond(true, "provider_updated", (detail or ""):match("(updated [^\r\n]+)") or "Rules updated.", true)
+end
+
 function action_geo_update()
 	if not require_post() then return end
+	if luci.http.formvalue("format") == "json" then return provider_update_json("cn-ip") end
 	local uci = require "luci.model.uci".cursor()
 	local url, err = normalize_geo_update_url(luci.http.formvalue("url") or uci:get("candy", "client", "geo_update_url") or GEO_DEFAULT_URL)
 
@@ -1567,6 +1610,7 @@ end
 
 function action_gfwlist_update()
 	if not require_post() then return end
+	if luci.http.formvalue("format") == "json" then return provider_update_json("gfwlist") end
 	local uci = require "luci.model.uci".cursor()
 	local url, err = normalize_gfwlist_update_url(luci.http.formvalue("url") or uci:get("candy", "client", "gfwlist_update_url") or GFWLIST_DEFAULT_URL)
 

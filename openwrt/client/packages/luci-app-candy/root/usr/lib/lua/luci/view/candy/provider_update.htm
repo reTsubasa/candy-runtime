@@ -1,0 +1,57 @@
+<% local jsonc = require "luci.jsonc" %>
+<%+cbi/valueheader%>
+<div id="candy-provider-actions">
+	<button type="button" class="cbi-button cbi-button-action" data-provider="gfwlist"><%:Update GFWList now%></button>
+	<button type="button" class="cbi-button cbi-button-action" data-provider="geo"><%:Update China IP now%></button>
+</div>
+<div id="candy-provider-result" role="status" aria-live="polite" hidden style="margin-top:.5em;white-space:pre-wrap;overflow-wrap:anywhere"></div>
+<script>
+(function() {
+	var buttons = document.querySelectorAll("#candy-provider-actions button");
+	var result = document.getElementById("candy-provider-result");
+	var endpoints = {
+		geo: <%=jsonc.stringify(luci.dispatcher.build_url("admin", "services", "candy", "geo_update"))%>,
+		gfwlist: <%=jsonc.stringify(luci.dispatcher.build_url("admin", "services", "candy", "gfwlist_update"))%>
+	};
+	var token = <%=jsonc.stringify(luci.dispatcher.context.authsession or "")%>;
+	var labels = {
+		pending: <%=jsonc.stringify(translate("Updating rules..."))%>,
+		active: <%=jsonc.stringify(translate("Rules updated and loaded."))%>,
+		saved: <%=jsonc.stringify(translate("Rules updated; loading is pending."))%>,
+		failed: <%=jsonc.stringify(translate("Rule update failed."))%>,
+		timeout: <%=jsonc.stringify(translate("Request timed out; check the rule update log before retrying."))%>
+	};
+	function done(message, failed) {
+		result.hidden = false;
+		result.textContent = message;
+		result.style.color = failed ? "#b91c1c" : "";
+		for (var i = 0; i < buttons.length; i++) buttons[i].disabled = false;
+	}
+	for (var i = 0; i < buttons.length; i++) buttons[i].addEventListener("click", function() {
+		var provider = this.getAttribute("data-provider");
+		var field = document.getElementsByName("cbid.candy.client." + (provider === "geo" ? "geo_update_url" : "gfwlist_update_url"))[0];
+		for (var j = 0; j < buttons.length; j++) buttons[j].disabled = true;
+		result.hidden = false;
+		result.textContent = labels.pending;
+		result.style.color = "";
+		var xhr = new XMLHttpRequest();
+		xhr.open("POST", endpoints[provider] + "?format=json", true);
+		xhr.timeout = 180000;
+		xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+		xhr.onload = function() {
+			var data;
+			try { data = JSON.parse(xhr.responseText); } catch (error) {
+				done(labels.failed + " HTTP " + xhr.status + " (invalid_response)", true);
+				return;
+			}
+			var failed = xhr.status !== 200 || data.ok !== true;
+			var message = failed ? labels.failed : (data.activated ? labels.active : labels.saved);
+			done(message + "\ncode=" + (data.code || "unknown") + " module=" + (data.module || "provider_update") + "\n" + (data.detail || ""), failed);
+		};
+		xhr.onerror = function() { done(labels.failed + " code=network_error module=provider_update", true); };
+		xhr.ontimeout = function() { done(labels.timeout + " code=request_timeout module=provider_update", true); };
+		xhr.send("token=" + encodeURIComponent(token) + "&url=" + encodeURIComponent(field ? field.value : ""));
+	});
+})();
+</script>
+<%+cbi/valuefooter%>

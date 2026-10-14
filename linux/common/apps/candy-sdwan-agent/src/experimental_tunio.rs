@@ -119,6 +119,17 @@ pub(super) fn recovery_disposition(path: &Path) -> Result<RecoveryDisposition> {
     let io = plan.independent_supervision.as_ref().unwrap();
     if cfg!(feature = "experimental-tunio-rebind") {
         if let Ok(record) = crate::process_record::read(&io.process_record) {
+            let io_alive = process_is_current(ProcessIdentity {
+                pid: record.pid,
+                start_ticks: record.process_start_ticks,
+            });
+            let pair_recorded = crate::process_record::read(&worker.process_record).is_ok();
+            if pair_recovery_precedes_renewal(io_alive, pair_recorded) {
+                preserve_unrecorded_endpoint(&io.control_socket)?;
+                return Ok(RecoveryDisposition::RecoverPair);
+            }
+        }
+        if let Ok(record) = crate::process_record::read(&io.process_record) {
             if process_is_current(ProcessIdentity {
                 pid: record.pid,
                 start_ticks: record.process_start_ticks,
@@ -227,6 +238,10 @@ pub(super) fn recovery_disposition(path: &Path) -> Result<RecoveryDisposition> {
             Ok(RecoveryDisposition::Start)
         }
     }
+}
+
+fn pair_recovery_precedes_renewal(io_alive: bool, pair_recorded: bool) -> bool {
+    !io_alive && pair_recorded
 }
 
 fn preserve_unrecorded_endpoint(endpoint: &Path) -> Result<()> {
@@ -964,7 +979,22 @@ fn recovery_plan(desired: Plan) -> Result<Plan> {
         }
         return Ok(desired);
     }
-    let candidate = read_plan(&path)?;
+    let mut candidate = read_plan(&path)?;
+    if let Some(worker) = &desired.independent_worker {
+        if let Ok(record) = crate::process_record::read(&worker.process_record) {
+            if let Some(effective) = &record.effective_plan_file {
+                let committed = read_plan(effective)?;
+                if committed.io_epoch == candidate.io_epoch
+                    && committed.worker_epoch >= candidate.worker_epoch
+                    && committed.pair_recovery.is_some()
+                    && committed.infrastructure == candidate.infrastructure
+                    && committed.domain_id == candidate.domain_id
+                {
+                    candidate = committed;
+                }
+            }
+        }
+    }
     project_recovered_io(desired, candidate)
 }
 
@@ -1805,8 +1835,34 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
         .as_ref()
         .context("pair recovery requires independent Core")?;
     let old_worker = crate::process_record::read(&worker.process_record)?;
-    let mut plan = effective_worker_plan(desired.clone(), &old_worker)?;
-    let io = plan
+    let retired = match &old_worker.effective_plan_file {
+        Some(path) => read_plan(path)?,
+        None => desired.clone(),
+    };
+    if retired.infrastructure != desired.infrastructure
+        || retired.domain_id != desired.domain_id
+        || !same_io_lineage(&retired, &desired)
+    {
+        bail!("retired pair differs from desired immutable infrastructure");
+    }
+    let (_, desired_report) = compile_verified_plan(desired.clone())?;
+    let desired_hash = desired_report["authorization_snapshot_sha256"]
+        .as_str()
+        .context("desired signed hash absent")?
+        .to_owned();
+    let new_grant =
+        old_worker.authorization_snapshot_sha256.as_deref() != Some(desired_hash.as_str());
+    let mut plan = if new_grant {
+        recovered.clone()
+    } else {
+        retired.clone()
+    };
+    // A changed grant is verified independently; its new IO still needs a fresh signed transaction.
+    if new_grant {
+        plan.authority = retired.authority.clone();
+        plan.authorization_snapshot_sha256 = Some(desired_hash.clone());
+    }
+    let io = retired
         .independent_supervision
         .as_ref()
         .context("pair recovery requires independent IO")?;
@@ -1819,12 +1875,12 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
         bail!("code=pair_recovery_io_alive module=process_supervisor detail=refusing replacement while original IO process is live");
     }
     preserve_unrecorded_endpoint(&io.control_socket)?;
-    if old_io.infrastructure_generation != plan.infrastructure.generation
-        || old_worker.infrastructure_generation != plan.infrastructure.generation
-        || old_io.policy_generation != plan.signed_generation
-        || old_worker.policy_generation != plan.signed_generation
-        || old_io.auth_deadline_unix != plan.auth_deadline_unix
-        || old_worker.auth_deadline_unix != plan.auth_deadline_unix
+    if old_io.infrastructure_generation != retired.infrastructure.generation
+        || old_worker.infrastructure_generation != retired.infrastructure.generation
+        || old_io.policy_generation != retired.signed_generation
+        || old_worker.policy_generation != retired.signed_generation
+        || old_io.auth_deadline_unix != retired.auth_deadline_unix
+        || old_worker.auth_deadline_unix != retired.auth_deadline_unix
     {
         bail!("pair recovery process records differ from verified domain authorization");
     }
@@ -1857,11 +1913,13 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
         bail!("pair recovery original forwarding authorization receipt absent");
     };
     for owner in std::iter::once(&previous).chain(candidate_owner.iter()) {
-        if owner.domain_id != plan.domain_id || owner.signed_generation != plan.signed_generation {
+        if owner.domain_id != retired.domain_id
+            || owner.signed_generation != retired.signed_generation
+        {
             bail!("pair recovery cannot revoke another domain or signed generation");
         }
     }
-    let cap = std::iter::once(previous.auth_deadline_mono_ms)
+    let old_cap = std::iter::once(previous.auth_deadline_mono_ms)
         .chain(
             candidate_owner
                 .iter()
@@ -1875,6 +1933,18 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
         )
         .min()
         .unwrap();
+    let remaining = Duration::from_secs(plan.auth_deadline_unix)
+        .checked_sub(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?)
+        .filter(|remaining| !remaining.is_zero())
+        .context("verified pair recovery grant expired")?;
+    let verified_cap = monotonic_ms()?
+        .checked_add(u64::try_from(remaining.as_millis())?)
+        .context("pair recovery deadline overflow")?;
+    let cap = if new_grant {
+        verified_cap
+    } else {
+        verified_cap.min(old_cap)
+    };
     if cap <= monotonic_ms()? || unix_time()? >= plan.auth_deadline_unix {
         bail!("pair recovery original authorization expired");
     }
@@ -1925,8 +1995,24 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
     ));
     plan.core_status = desired.core_status.clone();
     plan.independent_worker = desired.independent_worker.clone();
+    let mut snapshot_cleanup = if new_grant && plan.authority.is_none() {
+        let snapshot = crate::signed_snapshot::Snapshot::capture(
+            &plan.core_config,
+            plan.core_status
+                .parent()
+                .context("pair snapshot parent absent")?,
+        )?;
+        let cleanup = crate::signed_snapshot::CleanupGuard::new(&snapshot);
+        plan.core_config = snapshot.config;
+        Some(cleanup)
+    } else {
+        None
+    };
     // Persist consumed epochs and the original clock cap before any destructive transition.
     signed_renewal::publish_plan(&plan)?;
+    if let Some(cleanup) = &mut snapshot_cleanup {
+        cleanup.transfer();
+    }
     let worker_identity = ProcessIdentity {
         pid: old_worker.pid,
         start_ticks: old_worker.process_start_ticks,
@@ -2365,6 +2451,12 @@ mod tests {
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
+    #[test]
+    fn io_death_takes_priority_even_when_new_authority_is_waiting() {
+        assert!(pair_recovery_precedes_renewal(false, true));
+        assert!(!pair_recovery_precedes_renewal(true, true));
+        assert!(!pair_recovery_precedes_renewal(false, false));
+    }
     #[test]
     fn recovery_epoch_advances_all_consumed_receipts_and_never_wraps() {
         assert_eq!(next_recovery_epoch([1, 9, 3, 2]).unwrap(), 10);

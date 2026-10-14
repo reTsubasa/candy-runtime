@@ -7,7 +7,6 @@ local function js_string(value)
 end
 %>
 
-<h3 id="candy-core-lifecycle"><%:Core lifecycle%></h3>
 
 <style>
 .candy-core-actions { display: flex; flex-wrap: wrap; gap: .5em; align-items: center; }
@@ -57,12 +56,10 @@ end
 </div>
 
 <script type="text/javascript">
-var candyCoreStatusUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core_status')%>";
 var candyCoreActivateUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core_activate')%>";
 var candyCoreRemoveUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core_remove')%>";
 var candyCoreInstallUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'candy', 'core_install')%>";
 var candyCoreToken = <%=js_string(auth_token)%>;
-var candyCoreTimer = null;
 var candyCoreLabels = {
 	latest: <%=js_string(i18n.translate("Latest"))%>,
 	current: <%=js_string(i18n.translate("Current"))%>,
@@ -121,7 +118,9 @@ function candyCoreBindForm(form, url, field, value, confirmation) {
 	form.dataset.candyCoreAsync = "1";
 	form.addEventListener("submit", function(event) {
 		event.preventDefault();
+		if (candyUpdateSubmitting) return false;
 		if (confirmation && !window.confirm(confirmation.replace("%s", value || ""))) return false;
+		candyUpdateSubmitting = true;
 		var button = form.getElementsByTagName("button")[0];
 		if (button) button.disabled = true;
 		var operationNode = document.getElementById("candy-core-operation");
@@ -132,20 +131,24 @@ function candyCoreBindForm(form, url, field, value, confirmation) {
 		}
 		var xhr = new XMLHttpRequest();
 		xhr.open("POST", url, true);
+		xhr.timeout = 15000;
 		xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
 		xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
 		xhr.onreadystatechange = function() {
 			if (xhr.readyState !== 4) return;
+			candyUpdateSubmitting = false;
 			if (xhr.status >= 200 && xhr.status < 300) {
-				refreshCandyCoreStatus();
+				refreshCandyUpdateStatus();
 				return;
 			}
 			if (button) button.disabled = false;
+			candyUpdateError(candyCoreLabels.submitFailed + " (HTTP " + xhr.status + "): " + String(xhr.responseText || "").slice(0, 300));
 			if (operationNode) {
 				operationNode.className = "candy-core-operation error";
 				operationNode.style.display = "";
 				operationNode.textContent = candyCoreLabels.submitFailed;
 			}
+			refreshCandyUpdateStatus();
 		};
 		var parts = ["token=" + encodeURIComponent(candyCoreToken)];
 		if (field) parts.push(encodeURIComponent(field) + "=" + encodeURIComponent(value || ""));
@@ -247,22 +250,8 @@ function candyCoreRender(data) {
 	});
 }
 
-function refreshCandyCoreStatus() {
-	var xhr = new XMLHttpRequest();
-	if (candyCoreTimer !== null) { clearTimeout(candyCoreTimer); candyCoreTimer = null; }
-	xhr.open("GET", candyCoreStatusUrl + "?_=" + Date.now(), true);
-	xhr.onreadystatechange = function() {
-		if (xhr.readyState !== 4) return;
-		if (xhr.status === 200) {
-			try { candyCoreRender(JSON.parse(xhr.responseText || "{}")); } catch (e) {}
-		}
-		candyCoreTimer = setTimeout(refreshCandyCoreStatus, 2000);
-	};
-	xhr.send(null);
-}
-
 var candyCoreRollbackForm = document.getElementById("candy-core-rollback-form");
 if (candyCoreRollbackForm) candyCoreBindForm(candyCoreRollbackForm, candyCoreRollbackForm.action, null, null, null);
 
-refreshCandyCoreStatus();
+document.addEventListener("candy-update-status", function(event) { candyCoreRender(event.detail); });
 </script>

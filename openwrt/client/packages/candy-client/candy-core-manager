@@ -36,14 +36,16 @@ SERVICE_LOCK_HELD=0
 
 json_string() {
 	printf '"'
-	printf '%s' "$1" | awk '
+	printf '%s\n' "$1" | awk '
+		BEGIN { for (i = 1; i < 32; i++) escapes[sprintf("%c", i)] = sprintf("\\u%04x", i) }
 		NR > 1 { printf "\\n" }
 		{
-			gsub(/\\/, "\\\\")
-			gsub(/"/, "\\\"")
-			gsub(/\t/, "\\t")
-			gsub(/\r/, "\\r")
-			printf "%s", $0
+			for (i = 1; i <= length($0); i++) {
+				c = substr($0, i, 1)
+				if (c == "\\" || c == "\"") printf "\\%s", c
+				else if (c in escapes) printf "%s", escapes[c]
+				else printf "%s", c
+			}
 		}
 	'
 	printf '"'
@@ -184,7 +186,7 @@ host_arch_matches() {
 	# NEON or VFPv4 compatibility required by the IPQ40xx Core build.
 	distro_arch=$(sed -n "s/^DISTRIB_ARCH='\([^']*\)'/\1/p; s/^DISTRIB_ARCH=\"\([^\"]*\)\"/\1/p" "$OPENWRT_RELEASE_FILE" 2>/dev/null | head -1)
 	case "$distro_arch:$target_arch" in
-		x86_64:x86_64|arm_cortex-a7_neon-vfpv4:armv7|arm_cortex_a7_neon_vfpv4:armv7)
+		x86_64:x86_64|arm_cortex-a7_neon-vfpv4:arm|arm_cortex_a7_neon_vfpv4:arm|arm_cortex-a7_neon-vfpv4:armv7|arm_cortex_a7_neon_vfpv4:armv7)
 			return 0
 		;;
 	esac
@@ -277,6 +279,11 @@ validate_manifest_file() {
 	[ "$core_target_arch" = "$target_arch" ] || validation_error manifest arch_mismatch "Core and artifact target architecture values do not match" || return 1
 	[ "$libc" = musl ] || validation_error manifest libc_incompatible "Core libc ${libc:-missing} is not compatible with OpenWrt" || return 1
 	[ -n "$target_arch" ] || validation_error manifest arch_missing "Core target architecture is missing" || return 1
+	case "$target_arch" in
+		arm|armv7)
+			[ "$(manifest_field "$manifest" '@.artifact.target')" = armv7-unknown-linux-musleabihf ] || validation_error manifest target_incompatible "ARM Core requires the ARMv7 musl hard-float target" || return 1
+			;;
+	esac
 	host_arch_matches "$target_arch" || {
 		validation_error manifest arch_incompatible "Core target architecture $target_arch does not match OpenWrt package ABI $(host_architecture_label)" || return 1
 	}
@@ -333,7 +340,11 @@ validate_core_directory() {
 	[ "$info_api" = "$EXPECTED_CORE_API" ] || validation_error process_probe core_api_incompatible "Core process returned an incompatible Core API" || return 1
 	[ "$info_version" = "$expected_version" ] || validation_error process_probe version_mismatch "Core process returned a different version" || return 1
 	[ "$info_target_os" = "$expected_target_os" ] || validation_error process_probe os_mismatch "Core process returned a different target OS" || return 1
-	[ "$info_target_arch" = "$expected_target_arch" ] || validation_error process_probe arch_mismatch "Core process returned a different target architecture" || return 1
+	# Older signed ARMv7 bundles used the ISA name while Rust reports arm.
+	# The manifest triple and exact package ABI have already been verified.
+	if [ "$info_target_arch:$expected_target_arch" != arm:armv7 ]; then
+		[ "$info_target_arch" = "$expected_target_arch" ] || validation_error process_probe arch_mismatch "Core process architecture $info_target_arch differs from signed architecture $expected_target_arch" || return 1
+	fi
 	rm -f "$info"
 }
 

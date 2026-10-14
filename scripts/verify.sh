@@ -24,13 +24,16 @@ CANDY_CORE_BINARY="$docker_e2e_core_binary" linux/server/tests/candy_core_docker
 packaging/linux/server_package_test.sh
 sh -n openwrt/client/packages/candy-client/candy.init
 openwrt/client/tests/init_config_test.sh
+sh openwrt/client/tests/json_dns_rule_test.sh
 sh openwrt/client/tests/lifecycle_diagnostics_test.sh
 lua openwrt/client/tests/log_diagnostics_test.lua openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/controller/candy.lua
+lua openwrt/client/tests/provider_update_test.lua openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/controller/candy.lua
 scripts/openwrt_core_manager_test.sh
 scripts/openwrt_update_manager_test.sh
 scripts/openwrt_runtime_health_check_test.sh
 openwrt/client/tests/luci_package_test.sh
 openwrt/client/tests/update_luci_test.sh
+lua openwrt/client/tests/process_timeout_test.lua openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/candy/process.lua
 openwrt/client/tests/sdwan_luci_upload_test.sh
 openwrt/client/tests/cloud_sync_loop_test.sh
 openwrt/client/tests/sdwan_productization_test.sh

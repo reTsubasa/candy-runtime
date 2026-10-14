@@ -470,6 +470,21 @@ CANDY_UPDATE_TEST_TARGET=ipq40xx/generic CANDY_UPDATE_TEST_ARCH=arm_cortex-a7_ne
 CANDY_UPDATE_TEST_TARGET=ipq40xx/chromium CANDY_UPDATE_TEST_ARCH=arm_cortex-a7_neon-vfpv4 "$manager" check >/dev/null
 CANDY_UPDATE_TEST_TARGET=ipq40xx/mikrotik CANDY_UPDATE_TEST_ARCH=arm_cortex_a7_neon_vfpv4 "$manager" check >/dev/null
 
+for patch in 0 5 99; do
+	CANDY_UPDATE_TEST_OPENWRT_RELEASE="25.12.$patch" CANDY_UPDATE_TEST_TARGET=ipq40xx/generic CANDY_UPDATE_TEST_ARCH=arm_cortex-a7_neon-vfpv4 "$manager" check >/dev/null
+done
+for release in 25.11.5 26.12.5 25.12.5-vendor 25.12.; do
+	if CANDY_UPDATE_TEST_OPENWRT_RELEASE="$release" "$manager" check >/dev/null 2>&1; then
+		echo "unsupported OpenWrt release $release was accepted" >&2
+		exit 1
+	fi
+done
+
+# Missing Runtime platform entries must not hide a valid Core candidate.
+jq 'del(.runtime.releases.v0_4_0_r3.targets.openwrt_25_12_4_arm_cortex_a7_neon_vfpv4) | .sequence = 5' "$FAKE_CATALOG" > "$tmp/core-only.json"
+cp "$tmp/core-only.json" "$FAKE_CATALOG"
+CANDY_UPDATE_TEST_OPENWRT_RELEASE=25.12.5 CANDY_UPDATE_TEST_TARGET=ipq40xx/generic CANDY_UPDATE_TEST_ARCH=arm_cortex-a7_neon-vfpv4 "$manager" check >/dev/null
+
 # The production jsonfilter wildcard syntax must yield a compatible ARMv7
 # Core candidate, not an empty list hidden by the local test shim.
 ipq_status=$(CANDY_UPDATE_TEST_TARGET=ipq40xx/generic CANDY_UPDATE_TEST_ARCH=arm_cortex-a7_neon-vfpv4 "$manager" status)
@@ -477,6 +492,7 @@ printf '%s\n' "$ipq_status" | jq -e '.core_candidates | map(select(.version == "
 	echo "IPQ40xx status omitted the compatible ARMv7 Core candidate" >&2
 	exit 1
 }
+printf '%s\n' "$ipq_status" | jq -e '.catalog_valid == true and .runtime_compatible == false' >/dev/null
 
 "$manager" check >/dev/null
 
@@ -696,7 +712,7 @@ tail -n +$((apk_lines_before + 1)) "$FAKE_APK_LOG" | grep -F 'candy-client-0.4.0
 tail -n +$((apk_lines_before + 1)) "$FAKE_APK_LOG" | grep -F -- '--force-old-apk' >/dev/null
 [ "$(cat "$FAKE_INSTALLED_VERSION")" = 0.4.0-r2 ]
 
-make_catalog 5 3 0.3.4
+make_catalog 6 3 0.3.4
 "$manager" check >/dev/null
 replacement_status=$("$manager" status)
 printf '%s\n' "$replacement_status" | jq -e '.core_candidates[] | select(.version == "0.3.4") | .installed == true and .active == true and .update_available == true' >/dev/null || {
@@ -726,7 +742,7 @@ if "$manager" install-core-upload "$tmp/outside.tar.gz" >/dev/null 2>&1; then
 	exit 1
 fi
 
-make_catalog 6 1 0.3.5
+make_catalog 7 1 0.3.5
 "$manager" check >/dev/null
 if "$manager" install-runtime v0_4_0_r1 >/dev/null 2>&1; then
 	echo "Runtime downgrade was accepted" >&2
@@ -736,7 +752,7 @@ fi
 # The status contract exposes the five newest compatible catalog releases,
 # independently of the latest pointer.
 cp "$assets/candy-core-0.3.5-x86_64-unknown-linux-musl.tar.gz" "$assets/candy-core-0.3.9-x86_64-unknown-linux-musl.tar.gz"
-make_catalog 7 3 0.3.9
+make_catalog 8 3 0.3.9
 base_entry=$(jq -c '.core.releases.v0_3_9' "$FAKE_CATALOG")
 for candidate in 0.3.4 0.3.5 0.3.6 0.3.7 0.3.8; do
 	key="v$(printf '%s' "$candidate" | tr . _)"
@@ -749,6 +765,23 @@ mv "$FAKE_CATALOG.next" "$FAKE_CATALOG"
 "$manager" check >/dev/null
 status=$($manager status)
 printf '%s\n' "$status" | jq -e '.core_candidates | length == 5 and .[0].version == "0.3.9" and .[4].version == "0.3.5"' >/dev/null
+
+# Release history can exceed LuCI's capture limit. Only display data may be
+# projected; download authorization must still use the signed original.
+jq '.sequence=9 | .unrelated_history=("x" * 1300000)' "$FAKE_CATALOG" > "$FAKE_CATALOG.next"
+mv "$FAKE_CATALOG.next" "$FAKE_CATALOG"
+"$manager" check >/dev/null
+status=$("$manager" status)
+[ "${#status}" -lt 65536 ] || { echo "status returned full catalog history" >&2; exit 1; }
+printf '%s\n' "$status" | jq -e '.catalog.sequence == 9 and .core_candidates[0].version == "0.3.9" and (.catalog | has("unrelated_history") | not)' >/dev/null
+printf '%s\n' corrupt > "$state/status-catalog.json"
+"$manager" status | jq -e '.catalog_valid == false' >/dev/null
+"$manager" check >/dev/null
+"$manager" status | jq -e '.catalog_valid == true and .catalog.sequence == 9' >/dev/null
+cp "$state/stable.json.sig" "$tmp/trusted-status.sig"
+printf '%s\n' bad-signature > "$state/stable.json.sig"
+"$manager" status | jq -e '.catalog_valid == false and (.core_candidates | length == 0)' >/dev/null
+cp "$tmp/trusted-status.sig" "$state/stable.json.sig"
 
 if "$manager" install-core '../../bad' >/dev/null 2>&1; then
 	echo "invalid version key was accepted" >&2
