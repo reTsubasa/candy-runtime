@@ -90,6 +90,49 @@ restarts_after=$(docker exec "$container" systemctl show candy-sdwan.service -p 
 [ "$active" = active ] || die "Agent did not recover"
 [ "$agent_recovered" != "$agent_after" ] || die "Agent PID did not change after SIGKILL"
 [ "$restarts_after" -gt "$restarts_before" ] || die "NRestarts did not increase"
-result=$(printf '{"pid1":"systemd","systemd_state":"running","netd_restart_isolated":true,"agent_crash_recovered":true,"netd_pid_before":%s,"netd_pid_after":%s,"agent_pid_before":%s,"agent_pid_after_netd_restart":%s,"agent_pid_after_sigkill":%s,"n_restarts_before":%s,"n_restarts_after":%s,"scope":"fake payloads in isolated Docker; no TUN/Cloud/production"}' "$netd_before" "$netd_after" "$agent_before" "$agent_after" "$agent_recovered" "$restarts_before" "$restarts_after")
+docker exec "$container" systemctl stop candy-sdwan.service
+docker exec "$container" sh -eu -c '
+  printf "%s\n" "#!/bin/sh" "echo invalid-start >>/run/candy-gate/invalid.log" "exit 78" >/usr/local/libexec/candy-invalid-gate
+  chmod +x /usr/local/libexec/candy-invalid-gate
+  cat >/etc/systemd/system/candy-sdwan.service.d/invalid.conf <<"EOF"
+[Service]
+ExecStart=
+ExecStart=/usr/local/libexec/candy-invalid-gate
+EOF
+  systemctl daemon-reload
+  systemctl reset-failed candy-sdwan.service
+  systemctl start candy-sdwan.service || true
+'
+limited=0
+for _ in $(seq 1 25); do
+  failure=$(docker exec "$container" systemctl show candy-sdwan.service -p Result --value)
+  failure_state=$(docker exec "$container" systemctl show candy-sdwan.service -p ActiveState --value)
+  attempts=$(docker exec "$container" sh -c 'wc -l </run/candy-gate/invalid.log')
+  [ "$failure_state" = failed ] && [ "$attempts" -eq 5 ] && { limited=1; break; }
+  sleep 1
+done
+[ "$limited" = 1 ] || {
+  docker exec "$container" systemctl show candy-sdwan.service -p ActiveState -p Result -p NRestarts -p StartLimitBurst -p StartLimitIntervalUSec
+  docker exec "$container" journalctl --no-pager -u candy-sdwan.service -n 25
+  die "persistent invalid candidate was not stopped by StartLimit"
+}
+invalid_attempts=$(docker exec "$container" sh -c 'wc -l </run/candy-gate/invalid.log')
+[ "$invalid_attempts" -eq 5 ] || die "invalid candidate ran $invalid_attempts times instead of configured burst 5"
+sleep 3
+invalid_attempts_after=$(docker exec "$container" sh -c 'wc -l </run/candy-gate/invalid.log')
+[ "$invalid_attempts_after" -eq "$invalid_attempts" ] || die "Agent continued restarting after StartLimit"
+[ "$(docker exec "$container" systemctl is-active candy-netd.service)" = active ] || die "invalid Agent candidate stopped netd"
+docker exec "$container" sh -eu -c '
+  rm /etc/systemd/system/candy-sdwan.service.d/invalid.conf
+  systemctl daemon-reload
+  systemctl reset-failed candy-sdwan.service
+  systemctl start candy-sdwan.service
+'
+[ "$(docker exec "$container" systemctl is-active candy-sdwan.service)" = active ] || die "valid Agent did not start after reset-failed"
+docker exec "$container" systemctl stop candy-sdwan.service
+[ "$(docker exec "$container" systemctl show candy-sdwan.service -p ActiveState --value)" = inactive ] || die "Agent did not stop cleanly"
+[ "$(docker exec "$container" systemctl show candy-sdwan.service -p MainPID --value)" = 0 ] || die "stopped Agent still has a MainPID"
+[ "$(docker exec "$container" systemctl is-active candy-netd.service)" = active ] || die "Agent stop cascaded into netd"
+result=$(printf '{"pid1":"systemd","systemd_state":"running","netd_restart_isolated":true,"agent_crash_recovered":true,"invalid_candidate_bounded":true,"invalid_candidate_attempts":%s,"invalid_candidate_result":"%s","valid_candidate_after_reset":true,"agent_stop_preserves_netd":true,"netd_pid_before":%s,"netd_pid_after":%s,"agent_pid_before":%s,"agent_pid_after_netd_restart":%s,"agent_pid_after_sigkill":%s,"n_restarts_before":%s,"n_restarts_after":%s,"scope":"packaged units with fake payloads in isolated Docker; no TUN/Cloud/production"}' "$invalid_attempts" "$failure" "$netd_before" "$netd_after" "$agent_before" "$agent_after" "$agent_recovered" "$restarts_before" "$restarts_after")
 printf '%s\n' "$result"
 if [ -n "$report" ]; then mkdir -p "$(dirname "$report")"; printf '%s\n' "$result" >"$report"; fi
