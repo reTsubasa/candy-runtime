@@ -403,7 +403,9 @@ pub(crate) fn start(
 ) -> Result<()> {
     let socket = packet_control_path(&supervision_socket);
     crate::control::private_parent(&socket)?;
-    let listener = UnixListener::bind(&socket)?;
+    let listener = UnixListener::bind(&socket).with_context(|| {
+        format!("code=control_bind_failed module=tunio_packet_control path={} detail=bind PacketPort endpoint", socket.display())
+    })?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
     let runtime = tokio::runtime::Handle::current();

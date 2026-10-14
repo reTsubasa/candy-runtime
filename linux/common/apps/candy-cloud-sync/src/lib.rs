@@ -6797,6 +6797,7 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod cloud_fault_tests;
     #[test]
     fn chunked_response_is_bounded_before_collecting_the_entire_body() {
         use std::net::TcpListener;

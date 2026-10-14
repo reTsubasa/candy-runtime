@@ -244,7 +244,9 @@ pub fn start(
         registration: Some(registration),
         authority: crate::authority_control::AuthorityState::default(),
     };
-    let listener = UnixListener::bind(&socket)?;
+    let listener = UnixListener::bind(&socket).with_context(|| {
+        format!("code=control_bind_failed module=tunio_control path={} detail=bind supervision endpoint", socket.display())
+    })?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
     state.publish()?;

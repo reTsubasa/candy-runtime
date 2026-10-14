@@ -20,6 +20,9 @@ mod linux {
     };
     use sha2::{Digest, Sha256};
 
+    // Journal embeds one bounded Plan for crash recovery, plus snapshot and receipt metadata.
+    const MAX_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
+
     #[derive(Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Journal {
@@ -36,6 +39,14 @@ mod linux {
     }
 
     fn publish<T: Serialize>(path: &Path, object: &T) -> Result<()> {
+        publish_with_limit(path, object, MAX_JOURNAL_BYTES)
+    }
+
+    fn publish_with_limit<T: Serialize>(path: &Path, object: &T, limit: u64) -> Result<()> {
+        let bytes = serde_json::to_vec(object)?;
+        if bytes.len() as u64 > limit {
+            bail!("code=renewal_state_size_exceeded module=sdwan_activation detail=serialized renewal state exceeds explicit budget");
+        }
         let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
         let mut file = OpenOptions::new()
             .write(true)
@@ -43,7 +54,7 @@ mod linux {
             .mode(0o600)
             .open(&temporary)?;
         let result = (|| {
-            file.write_all(&serde_json::to_vec(object)?)?;
+            file.write_all(&bytes)?;
             file.sync_all()?;
             fs::rename(&temporary, path)?;
             OpenOptions::new()
@@ -59,11 +70,12 @@ mod linux {
     }
 
     pub(in crate::experimental_tunio) fn publish_plan(plan: &Plan) -> Result<()> {
-        publish(
+        publish_with_limit(
             plan.effective_plan_file
                 .as_ref()
                 .context("effective immutable plan path absent")?,
             plan,
+            MAX_SIGNED_CONFIG_BYTES,
         )
     }
 
@@ -74,13 +86,13 @@ mod linux {
             .open(path)?;
         let metadata = file.metadata()?;
         if !metadata.is_file()
-            || metadata.len() > 1024 * 1024
+            || metadata.len() > MAX_JOURNAL_BYTES
             || metadata.uid() != nix::unistd::geteuid().as_raw()
             || metadata.mode() & 0o777 != 0o600
         {
             bail!("renewal journal must be private bounded regular file");
         }
-        Ok(serde_json::from_reader(file.take(1024 * 1024 + 1))?)
+        Ok(serde_json::from_reader(file.take(MAX_JOURNAL_BYTES + 1))?)
     }
 
     fn stop_record(

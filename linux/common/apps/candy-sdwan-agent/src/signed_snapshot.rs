@@ -9,8 +9,9 @@ use std::{
 };
 use toml_edit::{value, DocumentMut, Item};
 
-const FILE_LIMIT: u64 = 1024 * 1024;
-const CLOSURE_LIMIT: u64 = 16 * FILE_LIMIT;
+const FILE_LIMIT: u64 = 8 * 1024 * 1024;
+// Keep the entire referenced closure bounded at 16 MiB: at most two maximum-sized files.
+const CLOSURE_LIMIT: u64 = 16 * 1024 * 1024;
 const FILE_COUNT_LIMIT: usize = 128;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -176,6 +177,9 @@ impl Builder {
     }
 
     fn write(&mut self, name: String, bytes: &[u8]) -> Result<PathBuf> {
+        if bytes.len() as u64 > FILE_LIMIT {
+            bail!("signed snapshot generated file exceeds eight MiB input budget");
+        }
         self.total = self
             .total
             .checked_add(bytes.len() as u64)
@@ -372,6 +376,68 @@ mod tests {
             total: CLOSURE_LIMIT - 16,
         };
         assert!(builder.read(&input).is_err());
+    }
+
+    #[test]
+    fn signed_file_limit_accepts_large_geo_inputs_and_rejects_over_limit_without_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let input = root.path().join("geo-routes");
+        let active = root.path().join("active-config");
+        fs::write(&input, vec![b'4'; (1024 * 1024) + 1]).unwrap();
+        fs::write(&active, b"currently-active").unwrap();
+
+        assert_eq!(read_bounded(&input).unwrap().len(), (1024 * 1024) + 1);
+        fs::write(&input, vec![b'4'; FILE_LIMIT as usize]).unwrap();
+        assert_eq!(read_bounded(&input).unwrap().len() as u64, FILE_LIMIT);
+        fs::write(&input, vec![b'4'; FILE_LIMIT as usize + 1]).unwrap();
+        assert!(read_bounded(&input).is_err());
+        assert_eq!(fs::read(active).unwrap(), b"currently-active");
+    }
+
+    #[test]
+    fn signed_closure_keeps_sixteen_mib_total_budget_for_multiple_large_files() {
+        let root = tempfile::tempdir().unwrap();
+        let mut builder = Builder {
+            directory: root.path().to_path_buf(),
+            files: Vec::new(),
+            total: 0,
+        };
+        let large = vec![0; (8 * 1024 * 1024) as usize];
+        builder.write("first".into(), &large).unwrap();
+        builder.write("second".into(), &large).unwrap();
+        assert!(builder.write("third".into(), b"x").is_err());
+    }
+
+    #[test]
+    fn oversized_candidate_snapshot_preserves_existing_active_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        for name in ["segment", "projection"] {
+            fs::write(root.path().join(name), name).unwrap();
+        }
+        let config = root.path().join("config");
+        fs::write(
+            &config,
+            format!(
+                "segment_snapshot = {:?}\nsite_projection = {:?}\n",
+                root.path().join("segment"),
+                root.path().join("projection")
+            ),
+        )
+        .unwrap();
+        let active = Snapshot::capture(&config, root.path()).unwrap();
+        let active_config = fs::read(&active.config).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(root.path().join("projection"))
+            .unwrap()
+            .set_len(FILE_LIMIT + 1)
+            .unwrap();
+        assert!(Snapshot::capture(&config, root.path()).is_err());
+        active.verify().unwrap();
+        assert_eq!(fs::read(&active.config).unwrap(), active_config);
+        active.retire().unwrap();
     }
 
     #[test]

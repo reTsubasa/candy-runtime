@@ -19,6 +19,9 @@ use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+const MAX_SIGNED_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_RECOVERY_INPUT_BYTES: u64 = 32 * 1024 * 1024;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Plan {
@@ -274,23 +277,55 @@ fn preserve_unrecorded_endpoint(endpoint: &Path) -> Result<()> {
     }
 }
 
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+fn remove_retired_control_endpoint(endpoint: &Path) -> Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+    preserve_unrecorded_endpoint(endpoint)?;
+    match fs::symlink_metadata(endpoint) {
+        Ok(metadata)
+            if metadata.file_type().is_socket()
+                && metadata.uid() == nix::unistd::geteuid().as_raw() =>
+        {
+            fs::remove_file(endpoint).with_context(|| {
+                format!("code=retired_control_remove_failed module=process_supervisor path={} detail=remove proven-dead private socket", endpoint.display())
+            })
+        }
+        Ok(_) => bail!("retired control endpoint is not an owned Unix socket"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub(super) fn recovery_inputs(path: &Path) -> Result<Vec<u8>> {
     let plan = read_plan(path)?;
     let mut inputs = Vec::new();
-    for path in [path, plan.core_config.as_path()] {
+    for (path, limit) in [
+        (path, MAX_SIGNED_CONFIG_BYTES),
+        (plan.core_config.as_path(), MAX_SIGNED_CONFIG_BYTES),
+    ] {
         let file = OpenOptions::new()
             .read(true)
             .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
             .open(path)?;
         let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        if !metadata.is_file() || metadata.len() > limit {
             bail!("recovery inputs require bounded regular files");
         }
-        file.take(1024 * 1024 + 1).read_to_end(&mut inputs)?;
+        let before = inputs.len();
+        file.take(limit + 1).read_to_end(&mut inputs)?;
+        if inputs.len() as u64 > MAX_RECOVERY_INPUT_BYTES {
+            bail!("code=recovery_input_budget_exceeded module=sdwan_activation detail=plan and signed inputs exceed 32 MiB");
+        }
+        if (inputs.len() - before) as u64 > limit {
+            bail!("code=recovery_input_file_limit module=sdwan_activation detail=plan or Core config exceeds 8 MiB");
+        }
         inputs.push(0);
     }
     #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
     inputs.extend(crate::signed_snapshot::fingerprint(&plan.core_config)?);
+    if inputs.len() as u64 > MAX_RECOVERY_INPUT_BYTES {
+        bail!("code=recovery_input_budget_exceeded module=sdwan_activation detail=plan and signed inputs exceed 32 MiB");
+    }
     Ok(inputs)
 }
 
@@ -318,13 +353,14 @@ fn read_plan(path: &Path) -> Result<Plan> {
     if !metadata.is_file()
         || metadata.permissions().mode() & 0o777 != 0o600
         || metadata.uid() != nix::unistd::geteuid().as_raw()
-        || metadata.len() > 1024 * 1024
+        || metadata.len() > MAX_SIGNED_CONFIG_BYTES
     {
         bail!("experimental plan requires private bounded 0600 regular file");
     }
     let mut bytes = Vec::new();
-    file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > 1024 * 1024 {
+    file.take(MAX_SIGNED_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_SIGNED_CONFIG_BYTES {
         bail!("experimental plan too large");
     }
     let plan: Plan = serde_json::from_slice(&bytes)?;
@@ -616,6 +652,26 @@ fn confirm_registration(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn wait_io_registration(
+    record: &crate::process_record::ManagedProcessRecord,
+    executable: &Path,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if shutdown_requested() || unix_time()? >= record.auth_deadline_unix {
+            bail!("code=io_registration_cancelled module=process_supervisor detail=shutdown or authorization expiry while awaiting active IO proof");
+        }
+        match record.validate_infrastructure_current(executable) {
+            Ok(()) => return Ok(()),
+            Err(error) if Instant::now() >= deadline => {
+                return Err(error.context(format!("code=io_registration_timeout module=process_supervisor pid={} status={} detail=registration ACK preceded active infrastructure publication", record.pid,record.status_path.display())));
+            }
+            Err(_) => thread::sleep(Duration::from_millis(20)),
+        }
+    }
+}
+
 fn inherit_packet_socket(command: &mut Command, socket: &UnixDatagram) {
     let fd = socket.as_raw_fd();
     // Clear only the selected socket in the child, leaving every other parent fd CLOEXEC.
@@ -700,7 +756,7 @@ fn unix_time() -> Result<u64> {
 }
 
 fn bounded_compile_control(command: &mut Command, timeout: Duration) -> Result<Output> {
-    const MAX_OUTPUT: usize = 1024 * 1024;
+    const MAX_OUTPUT: usize = MAX_SIGNED_CONFIG_BYTES as usize;
     fn drain(pipe: &mut impl Read, bytes: &mut Vec<u8>) -> Result<()> {
         let mut chunk = [0_u8; 8192];
         loop {
@@ -708,7 +764,7 @@ fn bounded_compile_control(command: &mut Command, timeout: Duration) -> Result<O
                 Ok(0) => return Ok(()),
                 Ok(count) => {
                     if bytes.len().saturating_add(count) > MAX_OUTPUT {
-                        bail!("code=signed_control_output_limit module=sdwan_activation detail=Core verification output exceeds one MiB");
+                        bail!("code=signed_control_output_limit module=sdwan_activation detail=Core verification output exceeds eight MiB");
                     }
                     bytes.extend_from_slice(&chunk[..count]);
                 }
@@ -1016,6 +1072,8 @@ fn project_recovered_io(mut desired: Plan, candidate: Plan) -> Result<Plan> {
     // Policy and authorization remain the newly verified desired values. Only local IO identity
     // survives recovery, so signed renewal can advance a grant on that same infrastructure.
     desired.io_epoch = candidate.io_epoch;
+    desired.worker_epoch = desired.worker_epoch.max(candidate.worker_epoch);
+    desired.fencing_token = desired.fencing_token.max(candidate.fencing_token);
     desired.pair_recovery = Some(recovery.clone());
     Ok(desired)
 }
@@ -1028,7 +1086,7 @@ fn compile_verified_plan(mut plan: Plan) -> Result<(Plan, serde_json::Value)> {
         Duration::from_secs(10),
     )
     .context("verify signed control before infrastructure activation")?;
-    if !compiled.status.success() || compiled.stdout.len() > 1024 * 1024 {
+    if !compiled.status.success() || compiled.stdout.len() as u64 > MAX_SIGNED_CONFIG_BYTES {
         bail!(
             "code=signed_control_compile_failed module=sdwan_activation detail={}",
             String::from_utf8_lossy(&compiled.stderr)
@@ -1217,7 +1275,9 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
             record.io_epoch = Some(plan.io_epoch);
             record.packet_binding_file = Some(plan.binding_file.clone());
             crate::process_record::publish(&io.process_record, &record)?;
-            confirm_registration(&record, &io.control_socket, plan.auth_deadline_unix)
+            confirm_registration(&record, &io.control_socket, plan.auth_deadline_unix)?;
+            // Probe ACK publishes registration intent; the IO task publishes active proof later.
+            wait_io_registration(&record, &plan.tunio)
         })();
         if let Err(error) = registration {
             stop(&mut io_child);
@@ -2053,6 +2113,21 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
     if process_is_current(io_identity) || process_is_current(worker_identity) {
         return Err(ManagedProofPending.into());
     }
+    // Core cannot bind over a socket left by an abrupt exit. Only unlink a proven dead,
+    // same-owner Unix endpoint after both process epochs have retired.
+    remove_retired_control_endpoint(&desired.independent_worker.as_ref().unwrap().control_socket)?;
+    let io_control = &desired
+        .independent_supervision
+        .as_ref()
+        .unwrap()
+        .control_socket;
+    for endpoint in [
+        io_control.clone(),
+        candy_tunio::attach_control::packet_control_path(io_control),
+        candy_tunio::authority_control::authority_control_path(io_control),
+    ] {
+        remove_retired_control_endpoint(&endpoint)?;
+    }
     if plan.authority.is_some() {
         let archived = signed_renewal::archive_retired_io_transaction(&desired, &old_io)?;
         plan.pair_recovery.as_mut().unwrap().retired_renewal_journal = archived;
@@ -2400,6 +2475,63 @@ pub(super) fn rebind_core(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "experimental-tunio-rebind")]
+    #[test]
+    fn retired_core_control_is_removed_only_after_kernel_proves_no_live_endpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("core.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(remove_retired_control_endpoint(&path)
+            .unwrap_err()
+            .is::<ManagedProofPending>());
+        assert!(path.exists());
+        drop(listener);
+        remove_retired_control_endpoint(&path).unwrap();
+        let replacement = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        drop(replacement);
+        remove_retired_control_endpoint(&path).unwrap();
+        fs::write(&path, "unrelated").unwrap();
+        assert!(remove_retired_control_endpoint(&path).is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), "unrelated");
+    }
+
+    #[cfg(feature = "experimental-tunio-rebind")]
+    #[test]
+    fn failed_pair_start_retains_consumed_worker_epoch_and_fence_for_next_attempt() {
+        let desired: Plan = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"netd_socket":"/tmp/netd","tunio":"/tmp/tunio","core":"/tmp/core",
+            "core_config":"/tmp/core.toml","core_status":"/tmp/core-status","binding_file":"/tmp/binding",
+            "instance_id":vec![1u8;16],"domain_id":vec![2u8;16],"io_epoch":1,"worker_epoch":1,"fencing_token":1,
+            "signed_generation":1,"auth_deadline_unix":9999999999u64,
+            "infrastructure":{"infra_id":vec![3u8;16],"generation":1,"netns_device":1,"netns_inode":1,"overlay_router_ipv4":[10,0,0,1],"mtu":1398},
+            "declaration":{"table_id":20001,"overlay_router_ipv4":[10,0,0,1],"effective_mtu":1398,"routes":[],"exclusions":[],"firewall":{"allow_forward":true,"clamp_tcp_mss":false,"require_ipv4_forwarding":true,"manage_rp_filter":false}}
+        })).unwrap();
+        let mut failed = desired.clone();
+        failed.io_epoch = 2;
+        failed.worker_epoch = 7;
+        failed.fencing_token = 9;
+        failed.pair_recovery = Some(PairRecovery {
+            original_io_epoch: 1,
+            boot_id: fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                .unwrap()
+                .trim()
+                .into(),
+            auth_deadline_mono_ms: monotonic_ms().unwrap() + 60000,
+            retired_renewal_journal: None,
+            authorization_snapshot_sha256: None,
+        });
+        let persisted: Plan =
+            serde_json::from_slice(&serde_json::to_vec(&failed).unwrap()).unwrap();
+        let recovered = project_recovered_io(desired, persisted).unwrap();
+        assert_eq!(next_recovery_epoch([recovered.io_epoch, 1]).unwrap(), 3);
+        assert_eq!(next_recovery_epoch([recovered.worker_epoch, 1]).unwrap(), 8);
+        assert_eq!(
+            next_recovery_epoch([recovered.fencing_token, 1]).unwrap(),
+            10
+        );
+    }
+
     #[test]
     fn unrecorded_live_endpoint_blocks_replacement_without_granting_adoption() {
         let directory = tempfile::tempdir().unwrap();
@@ -2542,6 +2674,82 @@ mod snapshot_tests {
 #[cfg(test)]
 mod compile_tests {
     use super::*;
+
+    #[test]
+    fn plan_accepts_eight_mib_and_rejects_excess_before_replacing_active_plan() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("desired.json");
+        let active = directory.path().join("active.json");
+        let mut value = serde_json::json!({
+            "schema_version":1,"netd_socket":"/tmp/netd","tunio":"/tmp/tunio","core":"/tmp/core",
+            "core_config":"/tmp/core.toml","core_status":"/tmp/core-status","binding_file":"/tmp/binding",
+            "instance_id":vec![1u8;16],"domain_id":vec![2u8;16],"io_epoch":1,"worker_epoch":1,"fencing_token":1,
+            "signed_generation":1,"auth_deadline_unix":9999999999u64,
+            "infrastructure":{"infra_id":vec![3u8;16],"generation":1,"netns_device":1,"netns_inode":1,"overlay_router_ipv4":[10,0,0,1],"mtu":1398},
+            "declaration":{"table_id":20001,"overlay_router_ipv4":[10,0,0,1],"effective_mtu":1398,"routes":[],"exclusions":[],"firewall":{"allow_forward":true,"clamp_tcp_mss":false,"require_ipv4_forwarding":true,"manage_rp_filter":false}}
+        });
+        value["declaration"]["routes"] =
+            serde_json::to_value(vec![candy_netd_proto::RouteDeclaration {
+                prefix: crate::parse_prefix("10.2.0.0/16").unwrap(),
+                kind: candy_netd_proto::RouteKind::Remote,
+            }])
+            .unwrap();
+        value["declaration"]["exclusions"] =
+            serde_json::to_value(vec![candy_netd_proto::UnderlayExclusion {
+                prefix: crate::parse_prefix("192.0.2.1/32").unwrap(),
+                kind: candy_netd_proto::UnderlayKind::HubEndpoint,
+            }])
+            .unwrap();
+        let original = serde_json::to_vec(&value).unwrap();
+        fs::write(&active, &original).unwrap();
+        fs::set_permissions(&active, fs::Permissions::from_mode(0o600)).unwrap();
+        for size in [(1024 * 1024) + 1, MAX_SIGNED_CONFIG_BYTES as usize] {
+            let mut bytes = original.clone();
+            bytes.resize(size, b' ');
+            fs::write(&path, bytes).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(read_plan(&path).unwrap().signed_generation, 1);
+        }
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_SIGNED_CONFIG_BYTES + 1)
+            .unwrap();
+        assert!(read_plan(&path).is_err());
+        assert_eq!(read_plan(&active).unwrap().signed_generation, 1);
+        assert_eq!(fs::read(active).unwrap(), original);
+    }
+
+    #[test]
+    fn signed_preflight_accepts_large_output_through_eight_mib() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report");
+        for size in [(1024 * 1024) + 1, MAX_SIGNED_CONFIG_BYTES as usize] {
+            fs::write(&path, vec![b' '; size]).unwrap();
+            let output = bounded_compile_control(
+                Command::new("/bin/cat").arg(&path),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout.len(), size);
+        }
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_SIGNED_CONFIG_BYTES + 1)
+            .unwrap();
+        assert!(bounded_compile_control(
+            Command::new("/bin/cat").arg(path),
+            Duration::from_secs(2)
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("signed_control_output_limit"));
+    }
+
     #[test]
     fn signed_preflight_timeout_stops_the_compiler_process() {
         let start = Instant::now();

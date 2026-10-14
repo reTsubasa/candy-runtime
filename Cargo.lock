@@ -189,6 +189,7 @@ dependencies = [
  "ed25519-dalek",
  "nix 0.29.0",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
