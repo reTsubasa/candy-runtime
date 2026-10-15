@@ -10,6 +10,23 @@ import sys
 
 runtime = Path(__file__).resolve().parents[1]
 core = runtime.parent / "candy-core"
+snapshot_root = os.environ.get("CANDY_SIGNED_SOURCE_SNAPSHOT")
+snapshot_entries = []
+if snapshot_root:
+    snapshot = Path(snapshot_root).resolve()
+    freeze = json.loads((snapshot / "freeze.json").read_text())
+    raw_manifest = (snapshot / "source-manifest.json").read_bytes()
+    if hashlib.sha256(raw_manifest).hexdigest() != freeze["manifest_sha256"]:
+        raise SystemExit("frozen source manifest checksum mismatch")
+    snapshot_entries = json.loads(raw_manifest)
+    for entry in snapshot_entries:
+        relative = Path(entry["path"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise SystemExit("unsafe snapshot path")
+        if hashlib.sha256((snapshot / relative).read_bytes()).hexdigest() != entry["sha256"]:
+            raise SystemExit("frozen source file checksum mismatch: " + str(relative))
+    runtime = snapshot / "candy-runtime"
+    core = snapshot / "candy-core"
 evidence = Path(sys.argv[1]).resolve()
 if evidence.exists():
     raise SystemExit("choose a fresh evidence directory")
@@ -25,10 +42,15 @@ tests = os.environ.get("CANDY_SIGNED_GATE_TESTS", "signed_cli_two_candidate_loss
 if not tests or any(not name.startswith("signed_cli_") or not name.replace("_", "").isalnum() for name in tests):
     raise SystemExit("explicit signed_cli test names required")
 for label, repo in [("core", core), ("runtime", runtime)]:
-    files = subprocess.check_output(["git", "-C", str(repo), "ls-files", "-z"]).split(b"\0")
+    if snapshot_root:
+        files = [str(Path(entry["path"]).relative_to("candy-" + label)).encode()
+                 for entry in snapshot_entries if entry["path"].startswith("candy-" + label + "/")]
+    else:
+        files = subprocess.check_output(["git", "-C", str(repo), "ls-files", "-z"]).split(b"\0")
     # Freeze legitimate in-progress source files too (for example a newly
     # introduced module); ignore build outputs and interpreter caches.
-    files += [name for name in subprocess.check_output(["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"]).split(b"\0") if name.startswith((b"apps/", b"crates/", b"linux/", b"shared/", b"scripts/"))]
+    if not snapshot_root:
+        files += [name for name in subprocess.check_output(["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"]).split(b"\0") if name.startswith((b"apps/", b"crates/", b"linux/", b"shared/", b"scripts/"))]
     if label == "runtime":
         files += [b"linux/common/apps/candy-tunio/tests/fixtures/candidate_failover.rs", b"linux/common/apps/candy-sdwan-agent/src/cloud_plan_bridge.rs"]
     hashes = {}
@@ -41,11 +63,18 @@ for label, repo in [("core", core), ("runtime", runtime)]:
         source = repo / name
         if not source.is_file(): continue
         data = source.read_bytes()
+        if snapshot_root:
+            expected = next(entry for entry in snapshot_entries
+                            if entry["path"] == "candy-" + label + "/" + name)
+            if hashlib.sha256(data).hexdigest() != expected["sha256"]:
+                raise SystemExit("frozen source changed during copy: " + name)
         target = evidence / "frozen" / label / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
+        target.chmod(source.stat().st_mode & 0o777)
         hashes[name] = hashlib.sha256(data).hexdigest()
-    manifest[label] = {"git_sha":subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip(),"status":subprocess.check_output(["git", "-C", str(repo), "status", "--short"], text=True),"files":hashes}
+    revision = freeze["revisions"]["candy-" + label] if snapshot_root else {"head": subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip(), "status": subprocess.check_output(["git", "-C", str(repo), "status", "--short"], text=True)}
+    manifest[label] = {"git_sha": revision["head"], "status": revision["status"], "files": hashes}
 (evidence / "source-manifest.json").write_text(json.dumps(manifest, indent=2))
 def docker(args):
     return subprocess.check_output(["docker", *args], text=True)
