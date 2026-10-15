@@ -1,5 +1,39 @@
 # SD-WAN 实施与门禁状态（2026-10-14）
 
+## 最新集成结论（2026-10-15，release v8）
+
+本节优先于历史记录。完整 G0–G6 **仍未通过**，不签名发布或更新生产。
+
+- 六产物冻结构建 PASS：Core `4703269`、Runtime `9931110`；manifest
+  `cea491dff7713eec7c792d940bc71ef7445813c9b07e1e278f488d1f9832f860`。
+  六个二进制与 source manifest SHA256 逐项复核通过。首次 v8 因 Runtime 根锁遗漏
+  TUNIO 日志传递依赖而失败，原目录保留；同步根锁后继续使用 `--locked --offline`。
+- 独占 4 × 60 秒、4 TCP 流、750 Mbps offered load 完成：上传
+  749.997 / 749.993 Mbps，下载 750.009 / 750.008 Mbps。诊断吞吐 PASS；
+  **完整性 FAIL**：TUNIO→Core deadline 393（r1 193，r3 200）。Core 两端 drop、
+  stream read/write error、全部 admission subtype、TUNIO→TUN drop 均为零。
+  参数仍为 100 ms、256 packets / 512 KiB，不以扩大期限关闭故障。
+- 两次 deadline 突发的证据不同：02:38:29Z 主要是 expired-before-write，
+  queue 约 143.6 ms，同期独立 guest heartbeat 最大约 43 ms，host event loop
+  最大 66 ms；02:40:44Z 同时有 pending-send 约 125.8 ms 和 expired-before-write，
+  独立 client heartbeat 最大 117.3 ms。两个上传样本客户端 quota throttling 均为零。
+  跨轮仅一次对照不足以证明 TX yield 解释全部改善，也不能认定剩余全是 VM 调度。
+- Core `af95057` 已修复完整 TransportOwner 身份过滤与重复/拒绝 prepared candidate
+  误关活动连接。SD-WAN 42/42、严格 runtime Clippy PASS；该提交晚于 v8 冻结，
+  不将 v8 吞吐归属于它。
+- Runtime `ebc9d06` 已修复真实只读 v1/v2 健康探测、总期限和响应校验。3 probe、
+  1 CLI、24 service/infrastructure 及 OpenWrt init shell PASS；新版目标二进制
+  OpenWrt VM 复验仍在进行。此前 OpenWrt 25.12.5 v7 已通过真实 procd/TUN/journal
+  的受限专项，完整生产 Agent/Core、升级回退和 IPQ 硬件仍 NOT RUN。
+- 已采用 Nginx 代际切换基线，见 `sdwan-nginx-master-worker-design-20261015.md`。
+  mixed listener 注册、Runtime receipt、原子快照与 drain 接线仍在实施，尚未测试通过。
+
+证据位于工作区 `docs/artifacts/sdwan-20261015/`：
+`fairness-release-v8-tx-yield/`（失败）、`fairness-release-v8-lock-fixed/`（构建通过）、
+`perf-fairness-comparison-v8/{summary.json,scheduler-analysis.json}`。
+容器已清理；未操作生产。800 Mbps 正式矩阵、p99、UDP、多 worker mixed、
+两小时续期、当前平台安装及 Android 签名升级仍未关闭。
+
 ## 最新集成结论（2026-10-15，release v7）
 
 本节优先于下文历史记录。完整 G0–G6 **仍未通过**，不签名发布或更新生产。
