@@ -40,6 +40,23 @@ struct Response {
     live_domains: usize,
     completed_domains: usize,
     max_domains: usize,
+    #[serde(default)]
+    exit_code: Option<i32>,
+    #[serde(default)]
+    detail: Option<String>,
+}
+
+fn terminal_status(response: Response) -> Option<ExitStatus> {
+    if response.running {
+        return None;
+    }
+    // Old hosts omit exit status. An unknown completion is never success.
+    let code = response.exit_code.unwrap_or(1);
+    if code != 0 {
+        eprintln!("level=error code={} module=sdwan_host instance={} exit_code={} detail={} action=preserve_other_domains_recover_failed_domain",
+            response.code, response.instance, code, response.detail.as_deref().unwrap_or("domain completion status unavailable"));
+    }
+    Some(ExitStatus::from_raw(code << 8))
 }
 
 fn exchange(
@@ -93,6 +110,12 @@ fn exchange(
         "shared worker accounting exceeds domain budget"
     );
     anyhow::ensure!(
+        response
+            .exit_code
+            .is_none_or(|code| (0..=255).contains(&code)),
+        "shared worker exit status is invalid"
+    );
+    anyhow::ensure!(
         response.schema_version == 1
             && response.pid == host.identity.pid
             && response.accepted
@@ -138,6 +161,9 @@ impl SharedDomain {
     }
     pub fn stop(&self) -> Result<()> {
         if !self.running()? {
+            if candy_process_control::process_is_current(self.host.identity) {
+                exchange(&self.host, &self.instance, "forget", &[], &[])?;
+            }
             return Ok(());
         }
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -177,10 +203,7 @@ impl BusinessWorker {
     pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
         match self {
             Self::Dedicated(child) => child.try_wait(),
-            Self::Shared(domain) => domain
-                .running()
-                .map(|running| (!running).then(|| ExitStatus::from_raw(0)))
-                .map_err(std::io::Error::other),
+            Self::Shared(domain) => domain.completion().map_err(std::io::Error::other),
         }
     }
     pub fn kill(&mut self) -> std::io::Result<()> {
@@ -192,16 +215,32 @@ impl BusinessWorker {
     pub fn wait(&mut self) -> std::io::Result<ExitStatus> {
         match self {
             Self::Dedicated(child) => child.wait(),
-            Self::Shared(domain) => {
-                if domain.running().map_err(std::io::Error::other)? {
-                    return Err(std::io::Error::new(
+            Self::Shared(domain) => domain
+                .completion()
+                .map_err(std::io::Error::other)?
+                .ok_or_else(|| {
+                    std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
                         "shared domain is still running",
-                    ));
-                }
-                Ok(ExitStatus::from_raw(0))
-            }
+                    )
+                }),
         }
+    }
+}
+
+impl SharedDomain {
+    fn completion(&self) -> Result<Option<ExitStatus>> {
+        if !candy_process_control::process_is_current(self.host.identity) {
+            eprintln!("level=error code=shared_host_exited module=sdwan_host instance={} pid={} action=recover_affected_domains_preserve_infrastructure", self.instance, self.host.identity.pid);
+            return Ok(Some(ExitStatus::from_raw(1 << 8)));
+        }
+        Ok(terminal_status(exchange(
+            &self.host,
+            &self.instance,
+            "probe",
+            &[],
+            &[],
+        )?))
     }
 }
 
@@ -243,4 +282,36 @@ pub(super) fn retire_host(host: &SharedWorker) -> Result<()> {
 pub(super) fn probe_host(host: &SharedWorker) -> Result<()> {
     exchange(host, "", "probe", &[], &[])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn response(running: bool, exit_code: Option<i32>) -> Response {
+        Response {
+            schema_version: 1,
+            pid: 1,
+            instance: "domain".into(),
+            accepted: true,
+            running,
+            code: "domain_stopped".into(),
+            live_domains: usize::from(running),
+            completed_domains: usize::from(!running),
+            max_domains: 1,
+            exit_code,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn failed_or_unknown_domain_completion_cannot_be_reported_as_success() {
+        assert!(terminal_status(response(true, None)).is_none());
+        assert!(terminal_status(response(false, Some(0))).unwrap().success());
+        assert_eq!(
+            terminal_status(response(false, Some(1))).unwrap().code(),
+            Some(1)
+        );
+        assert!(!terminal_status(response(false, None)).unwrap().success());
+    }
 }

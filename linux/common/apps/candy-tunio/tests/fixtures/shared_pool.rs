@@ -27,6 +27,10 @@ impl Drop for Host {
 }
 
 fn request(socket: &Path, operation: &str) -> serde_json::Value {
+    request_for_domain(socket, operation, "")
+}
+
+fn request_for_domain(socket: &Path, operation: &str, instance: &str) -> serde_json::Value {
     let mut stream = UnixStream::connect(socket).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(1)))
@@ -38,7 +42,7 @@ fn request(socket: &Path, operation: &str) -> serde_json::Value {
     let body = serde_json::json!({
         "schema_version": 1,
         "operation": operation,
-        "instance": "",
+        "instance": instance,
         "arguments": [],
         "namespace": false
     });
@@ -49,6 +53,66 @@ fn request(socket: &Path, operation: &str) -> serde_json::Value {
     let mut reply = Vec::new();
     stream.read_to_end(&mut reply).unwrap();
     serde_json::from_slice(&reply).unwrap()
+}
+
+fn verify_failed_domain_isolated(host: &Host) {
+    use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
+    use std::io::IoSlice;
+    use std::os::unix::net::UnixDatagram;
+
+    let (packet, _peer) = UnixDatagram::pair().unwrap();
+    let descriptors = [packet.as_raw_fd()];
+    let mut stream = UnixStream::connect(&host.socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    assert_eq!(
+        sendmsg::<()>(
+            stream.as_raw_fd(),
+            &[IoSlice::new(&[0])],
+            &[ControlMessage::ScmRights(&descriptors)],
+            MsgFlags::empty(),
+            None
+        )
+        .unwrap(),
+        1
+    );
+    let body = serde_json::json!({"schema_version":1,"operation":"start",
+        "instance":"invalid-domain-fixture","arguments":["run","--invalid-domain-fixture"],
+        "namespace":false});
+    stream
+        .write_all(&serde_json::to_vec(&body).unwrap())
+        .unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut reply = Vec::new();
+    stream.read_to_end(&mut reply).unwrap();
+    let accepted: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+    assert_eq!(accepted["accepted"], true, "{accepted}");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let response = request_for_domain(&host.socket, "probe", "invalid-domain-fixture");
+        if response["running"] == false {
+            assert_eq!(response["exit_code"], 1, "{response}");
+            assert_eq!(response["code"], "domain_failed", "{response}");
+            assert!(response["detail"]
+                .as_str()
+                .unwrap()
+                .contains("invalid-domain-fixture"));
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "invalid domain failed to terminate"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        request_for_domain(&host.socket, "forget", "invalid-domain-fixture")["accepted"],
+        true
+    );
+    let response = request(&host.socket, "probe");
+    assert_eq!(response["live_domains"], 0);
+    assert_eq!(response["completed_domains"], 0);
 }
 
 fn start(root: &Path, id: usize) -> Host {
@@ -121,6 +185,7 @@ pub(super) fn verify() {
             assert!(!host.slot.as_os_str().is_empty());
         }
         assert_eq!(hosts.len(), desired);
+        verify_failed_domain_isolated(&hosts[0]);
         for (index, host) in hosts.iter().enumerate() {
             let response = request(&host.socket, "probe");
             assert_eq!(response["accepted"], true, "host {index}: {response}");

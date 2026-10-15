@@ -22,7 +22,8 @@ CORE = RUNTIME.parent / "candy-core"
 IMAGE = os.environ.get("CANDY_BUILD_IMAGE", "candy-core-diag-builder:rust-1.88.0")
 CACHE = RUNTIME / "target-linux-netd-v2"
 EXCLUDES = {".git", ".codegraph", "node_modules", "dist"}
-PREFIXES = ("Cargo", ".cargo", "apps/", "crates/", "linux/", "shared/", "scripts/", "vendor/")
+PREFIXES = ("Cargo", ".cargo", "apps/", "crates/", "linux/", "shared/", "scripts/", "vendor/",
+            "openwrt/", "interop/")
 ARTIFACTS = {
     "candy-core": "/build/release/candy-core",
     "candy-netd": "/build/release/candy-netd",
