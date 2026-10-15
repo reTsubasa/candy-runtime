@@ -157,8 +157,10 @@ impl PacketOutput {
         let metrics = Arc::new(OutputMetrics::default());
         let task_metrics = metrics.clone();
         let queue_depth = Arc::new(AtomicUsize::new(0));
+        let diagnostics = crate::executor_diagnostics::configured();
+        let task_diagnostics = diagnostics.clone();
         let task = tokio::spawn(crate::executor_diagnostics::Observed::new(
-            crate::executor_diagnostics::configured(),
+            diagnostics.clone(),
             "packet_output_writer",
             async move {
                 let mut batch = Vec::with_capacity(OUTPUT_DRAIN_BATCH);
@@ -199,7 +201,11 @@ impl PacketOutput {
                         let result = if write_started >= packet.deadline {
                             Err(())
                         } else {
-                            match port.try_send_packet(&packet.packet) {
+                            match crate::executor_diagnostics::observe_sync(
+                                task_diagnostics.as_ref(),
+                                "packet_output_queued_send",
+                                || port.try_send_packet(&packet.packet),
+                            ) {
                                 Ok(true) => Ok(Ok(())),
                                 Err(error) => Ok(Err(error)),
                                 Ok(false) => tokio::select! {
@@ -288,7 +294,13 @@ impl PacketOutput {
             joined: false,
             outstanding: Arc::new(AtomicUsize::new(0)),
             queue_depth,
-            try_send: Box::new(move |packet| try_port.try_send_packet(packet)),
+            try_send: Box::new(move |packet| {
+                crate::executor_diagnostics::observe_sync(
+                    diagnostics.as_ref(),
+                    "packet_output_direct_send",
+                    || try_port.try_send_packet(packet),
+                )
+            }),
             max_packet_size,
         }
     }

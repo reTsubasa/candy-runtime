@@ -1,30 +1,30 @@
 {
   "files": {
     "Cargo.toml": "ce65fe9046d4e4868c7213874319a6b2bfd2d007ae4e3bc78a9ffba238ff2206",
-    "src/executor_diagnostics.rs": "59d28b992584eb0d7391aff1b5681eadd469f230a23bfc0d20e8cf708b4bba27",
+    "src/executor_diagnostics.rs": "b568fbedcc9029cb9a53fb70906214ae6fdef921c07069c004aa9d329b6d0a54",
     "src/fd.rs": "88004a466a58adb1be9b1620dc57b5421f2fa35787fc9c5cf5929925abc3daee",
     "src/lib.rs": "b3f0f9bbcfaa45cca9209144f253cf29dc452e421eaf91b94c5d483bcd16c555",
-    "src/packet_port.rs": "01bfa2fcd11952f8f376515b94898ad78b3281a19a81b9f5ca7d7f043a663091",
+    "src/packet_port.rs": "8ce8e8c77b5c24cc7855b861e3583826408cffffd3dc99b42f1427106b6410e3",
     "src/packet_port_ipc.rs": "4a6401c1781417e23479f4ee30e6a73d299c098b6f1b089249a037813ff77e9b",
-    "src/packet_port_manager.rs": "2bb6c12c7e19229a22bc83909f058fa9d4a7b9f0b4a2aa725d574d474a641000",
+    "src/packet_port_manager.rs": "d42733a0f73029fdac60e485d263e744c64b3653bf3f8b050a23a6379faa7bbd",
     "src/packet_port_transaction_tests.rs": "4ea141f059ddb13a0369176b0f79c01175ee61836e97967bbcb2f83e12821144"
   },
   "note": "Fixed public source package from a development worktree; base commit alone is not its content identity.",
   "origin": "https://github.com/reTsubasa/candy-core",
-  "origin_base_commit": "fff68273df5d45164003b26295a17c0df5001923",
+  "origin_base_commit": "0c1e1a8ac6234b088c8e9dc0570a194a3dd22c32",
   "origin_path": "crates/candy-packet-port",
-  "origin_worktree_content_sha256": "ba6e46acc30881c5051680ef3924a8ab2876f7586b2d69643a8a8e93417e0446",
+  "origin_worktree_content_sha256": "e2ad4f7a088b6725e72b33f6fb75983dfbc2fa7170313192fad1da5408f44483",
   "package": "candy-packet-port",
-  "package_content_sha256": "e63f6ab83c0252331b0753acadd73bed9b1283c2e25c6f008443f8fcb67c14a0",
+  "package_content_sha256": "918e3cc9665a5b08bcd3a81034d3e2c17854ae4da67b5f15f1653f9394ebbb2f",
   "schema_version": 1,
   "source_files": {
     "Cargo.toml": "515d8fd53b652607579c4030669f71110390d69b057950ac929db7bbc0efd421",
-    "src/executor_diagnostics.rs": "59d28b992584eb0d7391aff1b5681eadd469f230a23bfc0d20e8cf708b4bba27",
+    "src/executor_diagnostics.rs": "b568fbedcc9029cb9a53fb70906214ae6fdef921c07069c004aa9d329b6d0a54",
     "src/fd.rs": "88004a466a58adb1be9b1620dc57b5421f2fa35787fc9c5cf5929925abc3daee",
     "src/lib.rs": "b3f0f9bbcfaa45cca9209144f253cf29dc452e421eaf91b94c5d483bcd16c555",
-    "src/packet_port.rs": "01bfa2fcd11952f8f376515b94898ad78b3281a19a81b9f5ca7d7f043a663091",
+    "src/packet_port.rs": "8ce8e8c77b5c24cc7855b861e3583826408cffffd3dc99b42f1427106b6410e3",
     "src/packet_port_ipc.rs": "4a6401c1781417e23479f4ee30e6a73d299c098b6f1b089249a037813ff77e9b",
-    "src/packet_port_manager.rs": "2bb6c12c7e19229a22bc83909f058fa9d4a7b9f0b4a2aa725d574d474a641000",
+    "src/packet_port_manager.rs": "d42733a0f73029fdac60e485d263e744c64b3653bf3f8b050a23a6379faa7bbd",
     "src/packet_port_transaction_tests.rs": "4ea141f059ddb13a0369176b0f79c01175ee61836e97967bbcb2f83e12821144"
   }
 }

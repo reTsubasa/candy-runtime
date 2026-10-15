@@ -1,5 +1,18 @@
 # SD-WAN 实施与门禁状态（2026-10-14）
 
+## 最新集成结论（2026-10-15，owner v10）
+
+Core `72b08f2`、Runtime `2b006c3` 六产物冻结构建及 hashes 复核 PASS。
+独占四轮 60 秒、4 TCP 流、750 Mbps offered load：上传 749.9851/750.0041、
+下载 749.9912/750.0041 Mbps。本轮吞吐与输出完整性均 PASS：Core 两端与
+客户端 TUNIO 两方向全部 drop/error/admission subtype 为零。100 ms 与
+256 packets/512 KiB 保持原值；两端 quota throttling 均为零。
+
+这是一轮稳态对照，尚未触发续期或两阶段切换；不能证明历史间歇停顿已消除，
+也不能代替混合 listener、候选失败保旧、drain/reap 或同域横向扩展。
+完整 G0–G6 仍未通过。冻结不含未提交的 mixed listener 与后续细分诊断。
+详见 `sdwan-owner-performance-20261015.md`；未操作生产或签名发布。
+
 ## 最新集成结论（2026-10-15，executor v9）
 
 完整 G0–G6 仍未通过。Core `bb9228e`、Runtime `531a6d1` 的六产物冻结构建

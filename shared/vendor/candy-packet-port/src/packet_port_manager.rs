@@ -245,6 +245,7 @@ impl Owner {
 struct OwnerFence {
     active: Mutex<bool>,
     retired: watch::Sender<bool>,
+    diagnostics: Option<crate::executor_diagnostics::Diagnostics>,
 }
 
 impl OwnerFence {
@@ -252,14 +253,20 @@ impl OwnerFence {
         Self {
             active: Mutex::new(true),
             retired: watch::channel(false).0,
+            diagnostics: crate::executor_diagnostics::configured(),
         }
     }
 
     fn while_active<T>(&self, operation: impl FnOnce() -> T) -> io::Result<T> {
-        let active = self
-            .active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let active = crate::executor_diagnostics::observe_sync(
+            self.diagnostics.as_ref(),
+            "packet_owner_lock",
+            || {
+                self.active
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            },
+        );
         if !*active {
             return Err(authorization_failure(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -437,12 +444,21 @@ impl<P: PacketPort> PacketPort for DeadlinePort<P> {
     fn try_send_packet(&self, packet: &[u8]) -> io::Result<bool> {
         self.fence.while_active(|| {
             if let Some(authorization) = &self.authorization {
-                authorization().map_err(authorization_failure)?;
+                crate::executor_diagnostics::observe_sync(
+                    self.fence.diagnostics.as_ref(),
+                    "packet_owner_authorization",
+                    || authorization(),
+                )
+                .map_err(authorization_failure)?;
             }
             if Instant::now() >= *self.deadline.borrow() {
                 return Ok(false);
             }
-            self.port.try_send_packet(packet)
+            crate::executor_diagnostics::observe_sync(
+                self.fence.diagnostics.as_ref(),
+                "packet_owner_nonblocking_write",
+                || self.port.try_send_packet(packet),
+            )
         })?
     }
     async fn recv_packet(&self) -> io::Result<Vec<u8>> {
@@ -473,11 +489,15 @@ impl<P: PacketPort> PacketPort for DeadlinePort<P> {
                 result = std::future::poll_fn(|cx| {
                     self.fence.while_active(|| {
                         if let Some(authorization) = &self.authorization {
-                            if let Err(error) = authorization() {
+                            if let Err(error) = crate::executor_diagnostics::observe_sync(
+                                self.fence.diagnostics.as_ref(), "packet_owner_authorization", || authorization(),
+                            ) {
                                 return std::task::Poll::Ready(Err(authorization_failure(error)));
                             }
                         }
-                        send.as_mut().poll(cx)
+                        crate::executor_diagnostics::observe_sync(
+                            self.fence.diagnostics.as_ref(), "packet_owner_send_poll", || send.as_mut().poll(cx),
+                        )
                     }).unwrap_or_else(|error| std::task::Poll::Ready(Err(error)))
                 }) => return result,
             }

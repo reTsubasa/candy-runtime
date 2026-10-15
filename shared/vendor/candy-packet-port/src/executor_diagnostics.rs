@@ -65,10 +65,10 @@ impl Event {
             monotonic_ns: self.monotonic_ns,
             wall_ns: self.wall_ns,
             thread_cpu_ns: self.thread_cpu_ns,
-            cpu_scope: if self.kind == "heartbeat" {
-                "thread_interval"
-            } else {
-                "poll"
+            cpu_scope: match self.kind {
+                "heartbeat" => "thread_interval",
+                "sync" => "operation",
+                _ => "poll",
             },
             ready: self.ready,
             lost_events,
@@ -237,6 +237,37 @@ pub fn configured() -> Option<Diagnostics> {
     }
 }
 
+/// Time one synchronous operation without allocating or reading clocks when
+/// disabled. Nested operations overlap and their durations must not be summed.
+pub fn observe_sync<T>(
+    diagnostics: Option<&Diagnostics>,
+    label: &'static str,
+    operation: impl FnOnce() -> T,
+) -> T {
+    let Some(diagnostics) = diagnostics else {
+        return operation();
+    };
+    let started = Instant::now();
+    let cpu_started = thread_cpu_ns();
+    let result = operation();
+    let elapsed = started.elapsed();
+    let cpu_finished = thread_cpu_ns();
+    if elapsed >= SLOW_POLL {
+        diagnostics.record(Event {
+            kind: "sync",
+            label,
+            monotonic_ns: monotonic_ns(),
+            thread_id: thread_id(),
+            wall_ns: nanos(elapsed),
+            thread_cpu_ns: cpu_finished
+                .zip(cpu_started)
+                .map(|(end, start)| end.saturating_sub(start)),
+            ready: true,
+        });
+    }
+    result
+}
+
 pub struct HeartbeatGuard(tokio::task::JoinHandle<()>);
 impl Drop for HeartbeatGuard {
     fn drop(&mut self) {
@@ -332,6 +363,41 @@ thread_local! { static CLOCK_READS: std::cell::Cell<usize> = const { std::cell::
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn synchronous_operation_preserves_result_and_disabled_path_reads_no_clocks() {
+        let before = CLOCK_READS.with(|count| count.get());
+        let mut calls = 0;
+        let result: io::Result<usize> = observe_sync(None, "disabled_sync", || {
+            calls += 1;
+            Err(io::Error::from_raw_os_error(libc::EAGAIN))
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EAGAIN));
+        assert_eq!(CLOCK_READS.with(|count| count.get()), before);
+    }
+
+    #[test]
+    fn synchronous_operation_reports_its_own_wall_and_cpu_scope() {
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let diagnostics = Diagnostics(Arc::new(Recorder {
+            sender,
+            lost: Arc::new(AtomicU64::new(0)),
+        }));
+        let result = observe_sync(Some(&diagnostics), "test_operation", || {
+            std::thread::sleep(Duration::from_millis(15));
+            42
+        });
+        assert_eq!(result, 42);
+        let event = receiver.try_recv().unwrap();
+        assert_eq!(event.kind, "sync");
+        assert_eq!(event.label, "test_operation");
+        assert!(event.wall_ns >= 5_000_000);
+        assert!(event.ready);
+        let exported = event.for_export(0);
+        assert_eq!(exported.cpu_scope, "operation");
+        assert!(receiver.try_recv().is_err());
+    }
 
     #[tokio::test]
     async fn disabled_preserves_pending_ready_and_cancellation_without_clock_reads() {
