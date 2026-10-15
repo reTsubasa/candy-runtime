@@ -111,6 +111,10 @@ are diagnostic data and cannot count as accepted performance.
 Independent lightweight processes in both namespaces record scheduling gaps
 over 20 ms with bounded history. Their observations can identify coincident
 pauses; they do not measure packet latency or prove the cause of a stall.
+Each bulk stream also records the sender's and receiver's actual thread CPU
+seconds and context-switch deltas across warmup, integrity checking and drain.
+These generator diagnostics exclude latency processes and kernel softirq;
+they are not product CPU measurements or grounds to waive a failed floor.
 
 `udp.py` validates exact payloads at 100 PPS for each modern payload size,
 then injects a bounded 4096-packet burst and verifies a fresh UDP flow and TCP

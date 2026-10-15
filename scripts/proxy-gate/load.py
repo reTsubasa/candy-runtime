@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import resource
 import socket
 import struct
 import subprocess
@@ -16,6 +17,23 @@ import time
 BLOCK = 65536
 SERVER = '10.202.0.2'
 PORT = 19003
+
+
+def generator_thread_sample():
+    usage = resource.getrusage(resource.RUSAGE_THREAD)
+    return {'monotonic': time.monotonic(), 'user_seconds': usage.ru_utime,
+            'system_seconds': usage.ru_stime, 'voluntary_switches': usage.ru_nvcsw,
+            'involuntary_switches': usage.ru_nivcsw}
+
+
+def generator_thread_delta(before):
+    after = generator_thread_sample()
+    delta = {key: after[key] - value for key, value in before.items()}
+    elapsed = delta.pop('monotonic')
+    delta.update(elapsed_seconds=elapsed,
+                 cpu_fraction=(delta['user_seconds'] + delta['system_seconds']) / elapsed,
+                 scope='one bulk generator thread including warmup, integrity and drain; excludes latency process and kernel softirq')
+    return delta
 
 
 def receive(conn, count):
@@ -60,6 +78,7 @@ def tcp_info(conn):
 
 
 def transfer(conn, sender, seed, start, end, warmup):
+    generator_before = generator_thread_sample()
     expected = hashlib.shake_256(seed.encode()).digest(BLOCK)
     digest = hashlib.sha256()
     count = 0
@@ -77,11 +96,13 @@ def transfer(conn, sender, seed, start, end, warmup):
         if report['blocks'] != count or report['stream_sha256'] != digest.hexdigest():
             raise RuntimeError('sender/receiver payload digest or count mismatch')
         report['sender_tcp_info'] = tcp_info(conn)
+        report['sender_generator_resources'] = generator_thread_delta(generator_before)
         # The sender has half-closed its data socket. Persist its final kernel
         # counters through the fixture's shared evidence mount, not app bytes.
         path = Path('/gate') / ('sender-' + hashlib.sha256(seed.encode()).hexdigest() + '.json')
         temporary = path.with_suffix('.tmp')
-        temporary.write_text(json.dumps(report['sender_tcp_info']))
+        temporary.write_text(json.dumps({'tcp_info': report['sender_tcp_info'],
+                                         'generator_resources': report['sender_generator_resources']}))
         temporary.replace(path)
         return report
     first = last = None
@@ -103,6 +124,7 @@ def transfer(conn, sender, seed, start, end, warmup):
     report = {'blocks': count, 'measured_payload_bytes': measured,
               'stream_sha256': digest.hexdigest(), 'payload_verified': True,
               'receiver_tcp_info': tcp_info(conn),
+              'receiver_generator_resources': generator_thread_delta(generator_before),
               'first_measured_at': first, 'last_measured_at': last}
     write_json(conn, report)
     return report
@@ -259,7 +281,9 @@ def run_round(kind, direction, flows, seconds, case, warmup, connections=1):
                 if time.monotonic() >= deadline:
                     raise RuntimeError('missing confirmed sender kernel counters')
                 time.sleep(.01)
-            receiver['sender_tcp_info'] = json.loads(path.read_text())
+            sender = json.loads(path.read_text())
+            receiver['sender_tcp_info'] = sender['tcp_info']
+            receiver['sender_generator_resources'] = sender['generator_resources']
             receiver.update(plan[index])
         result.update(clock_checks=clock_checks, receiver_streams=receivers,
                       latency_observations=rows, start=start, end=end)

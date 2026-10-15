@@ -5,6 +5,9 @@ fault matrices contain historical statements such as "no process manager";
 those statements must not be used as the current implementation inventory.
 Neither API existence nor passing a related fixture closes an end-to-end gate.
 
+Current iteration and frozen v14/v15 outcomes:
+[P0/P1 progress](p0-p1-progress-20261015.md).
+
 ## Verified Subsets
 
 | Area | Evidence | Exact boundary |
@@ -17,6 +20,7 @@ Neither API existence nor passing a related fixture closes an end-to-end gate.
 | Concurrent admission ordering | Core `65f83b3` | ID allocation and owner publication share one mutex; transport 192, server 79 and application 84 tests, strict Clippy, frozen Linux build and v7 compatibility pass |
 | Worker logging isolation | Core `2b68729`, Linux v12/v13 | Dedicated bounded exporter; all three actual exporters blocked while a held flow and 640 fresh requests pass without master/worker replacement; recovery reports 389 dropped records in v12. Application 88 tests and strict Clippy pass |
 | Legacy peer UNKNOWN containment | Core `5c51322` | Original transaction/owners retained; durable intent prevents replacement after uncertain Commit; original terminal reason retained; not automatic actor/transport reconstruction |
+| Runtime UNKNOWN containment | Runtime `cbd5d75` | Optional process proof distinguishes absence from unreadable/corrupt files; fallible liveness and typed-context retry preserve ownership on unknown state. This does not restore a lost actor/transport or complete make-before-break |
 | Signed routing and TUN recovery | Existing signed Linux v12 and mixed-listener v10 reports | Prior frozen/source-worktree scopes remain valid; not silently promoted to current frozen release acceptance |
 
 ## Open Implementation And Acceptance
@@ -80,6 +84,15 @@ also retains slow replies after the measurement boundary in the original offered
 cohort; four focused tests and re-analysis of v13 raw observations verify this
 correction. A fresh full valid measurement is still needed, along with the
 implementation gaps listed above.
+
+V14's four-independent-client bidirectional diagnostic passes compatibility but
+fails performance: worker upload 784.02 Mbps versus B0 946.34 Mbps, CPU cost
+126.9% of B0, and loaded p99 above the original limit. Direct download is only
+629.98 Mbps. V15 adds actual generator thread CPU/context-switch counters and
+repeats compatibility successfully; direct upload/download are
+953.52/872.68 Mbps and the next B0 round fails the unchanged 20 ms generator
+limit at 27.269 ms. No V15 worker performance cell completes. These short runs
+do not close the full performance matrix or prove a product/host root cause.
 
 ## Rollout Boundary
 
