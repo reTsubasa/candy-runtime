@@ -175,7 +175,7 @@ pub(super) enum RecoveryDisposition {
 }
 
 pub(super) fn recovery_disposition(path: &Path) -> Result<RecoveryDisposition> {
-    use candy_process_control::{process_is_current, ProcessIdentity};
+    use candy_process_control::{process_is_current_confirmed, ProcessIdentity};
     let plan = recovery_plan(verified_plan(path)?)?;
     let Some(worker) = &plan.independent_worker else {
         if plan.binding_file.try_exists()? {
@@ -184,23 +184,27 @@ pub(super) fn recovery_disposition(path: &Path) -> Result<RecoveryDisposition> {
         return Ok(RecoveryDisposition::Start);
     };
     let io = plan.independent_supervision.as_ref().unwrap();
+    let io_record =
+        crate::process_record::read_optional(&io.process_record).context(ManagedProofPending)?;
+    let worker_record = crate::process_record::read_optional(&worker.process_record)
+        .context(ManagedProofPending)?;
     if cfg!(feature = "experimental-tunio-rebind") {
-        if let Ok(record) = crate::process_record::read(&io.process_record) {
-            let io_alive = process_is_current(ProcessIdentity {
+        if let Some(record) = &io_record {
+            let io_alive = process_is_current_confirmed(ProcessIdentity {
                 pid: record.pid,
                 start_ticks: record.process_start_ticks,
-            });
-            let pair_recorded = crate::process_record::read(&worker.process_record).is_ok();
+            })?;
+            let pair_recorded = worker_record.is_some();
             if pair_recovery_precedes_renewal(io_alive, pair_recorded) {
                 preserve_unrecorded_endpoint(&io.control_socket)?;
                 return Ok(RecoveryDisposition::RecoverPair);
             }
         }
-        if let Ok(record) = crate::process_record::read(&io.process_record) {
-            if process_is_current(ProcessIdentity {
+        if let Some(record) = &io_record {
+            if process_is_current_confirmed(ProcessIdentity {
                 pid: record.pid,
                 start_ticks: record.process_start_ticks,
-            }) {
+            })? {
                 record.validate_infrastructure_current(&plan.tunio)?;
                 if record.infrastructure_generation != plan.infrastructure.generation
                     || record.io_epoch.is_some_and(|epoch| epoch != plan.io_epoch)
@@ -214,7 +218,7 @@ pub(super) fn recovery_disposition(path: &Path) -> Result<RecoveryDisposition> {
                 }
             }
         }
-        if let Ok(record) = crate::process_record::read(&worker.process_record) {
+        if let Some(record) = &worker_record {
             if let Some(effective) = &record.effective_plan_file {
                 let current = read_plan(effective)?;
                 if current.infrastructure != plan.infrastructure
@@ -227,9 +231,9 @@ pub(super) fn recovery_disposition(path: &Path) -> Result<RecoveryDisposition> {
                     return Ok(RecoveryDisposition::RenewAuthority);
                 }
             }
-            if let Some(hash) = record.authorization_snapshot_sha256 {
+            if let Some(hash) = &record.authorization_snapshot_sha256 {
                 let (_, report) = compile_verified_plan(plan.clone())?;
-                if report["authorization_snapshot_sha256"] != hash {
+                if report["authorization_snapshot_sha256"].as_str() != Some(hash.as_str()) {
                     return Ok(RecoveryDisposition::RenewAuthority);
                 }
             }
@@ -237,25 +241,16 @@ pub(super) fn recovery_disposition(path: &Path) -> Result<RecoveryDisposition> {
     }
     let mut live = Vec::new();
     let mut records = 0;
-    for (record_path, executable, endpoint) in [
-        (&worker.process_record, &plan.core, &worker.control_socket),
-        (&io.process_record, &plan.tunio, &io.control_socket),
+    for (record, executable, endpoint) in [
+        (worker_record.as_ref(), &plan.core, &worker.control_socket),
+        (io_record.as_ref(), &plan.tunio, &io.control_socket),
     ] {
-        let record = match crate::process_record::read(record_path) {
-            Ok(record) => record,
-            Err(error)
-                if error.chain().any(|cause| {
-                    cause
-                        .downcast_ref::<std::io::Error>()
-                        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
-                }) =>
-            {
+        let record = match record {
+            Some(record) => record,
+            None => {
                 preserve_unrecorded_endpoint(endpoint)?;
                 live.push(false);
                 continue;
-            }
-            Err(error) => {
-                return Err(error.context("cannot safely inspect existing process record"))
             }
         };
         records += 1;
@@ -322,11 +317,13 @@ fn pair_recovery_precedes_renewal(io_alive: bool, pair_recorded: bool) -> bool {
 
 fn preserve_unrecorded_endpoint(endpoint: &Path) -> Result<()> {
     match candy_process_control::inspect_endpoint_process(endpoint) {
-        Ok(identity) if candy_process_control::process_is_current(identity) => {
-            // A kernel-authenticated live endpoint is a reason to wait, never adoption proof.
-            Err(ManagedProofPending.into())
+        Ok(identity) => {
+            if candy_process_control::process_is_current_confirmed(identity)? {
+                // A live endpoint is a reason to wait, never adoption proof.
+                return Err(ManagedProofPending.into());
+            }
+            Ok(())
         }
-        Ok(_) => Ok(()),
         Err(error)
             if error.chain().any(|cause| {
                 cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
@@ -739,7 +736,7 @@ fn business_is_current(
     plan: &Plan,
     identity: candy_process_control::ProcessIdentity,
 ) -> Result<bool> {
-    if !candy_process_control::process_is_current(identity) {
+    if !candy_process_control::process_is_current_confirmed(identity)? {
         return Ok(false);
     }
     if let Some(host) = plan
@@ -779,7 +776,7 @@ fn confirm_registration(
         if shutdown_requested() || unix_time()? >= auth_deadline_unix {
             bail!("managed process registration cancelled or authorization expired");
         }
-        if !candy_process_control::process_is_current(managed) {
+        if !candy_process_control::process_is_current_confirmed(managed)? {
             return Err(CoreRecoveryRequired.into());
         }
         let request = candy_process_control::ControlRequest {
@@ -1235,7 +1232,7 @@ fn sync_failed_prefixes(
     worker_identity: candy_process_control::ProcessIdentity,
     previous: &mut Option<FailureSnapshot>,
 ) -> Result<()> {
-    if !candy_process_control::process_is_current(worker_identity) {
+    if !candy_process_control::process_is_current_confirmed(worker_identity)? {
         bail!("code=forward_snapshot_process_changed module=sdwan_activation detail=Core PID epoch no longer current");
     }
     let Some(status) =
@@ -1706,6 +1703,7 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
             error.is::<DesiredStateChanged>()
                 || error.is::<CoreRecoveryRequired>()
                 || error.is::<ManagedProofPending>()
+                || error.is::<candy_process_control::ProcessLivenessUnconfirmed>()
         }) {
             return result;
         }
@@ -1942,7 +1940,7 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
 
 pub fn adopt(record_path: &Path, executable: &Path, socket: &Path, gate: bool) -> Result<()> {
     use candy_process_control::{
-        exchange, process_identity, process_is_current, ControlOperation, ControlRequest,
+        exchange, process_identity, process_is_current_confirmed, ControlOperation, ControlRequest,
         ProcessIdentity,
     };
     if !gate {
@@ -1968,7 +1966,7 @@ pub fn adopt(record_path: &Path, executable: &Path, socket: &Path, gate: bool) -
     install_shutdown_handlers()?;
     eprintln!("level=info code=tunio_supervision_adopted module=process_supervisor pid={} controller_epoch={} auth_deadline_unix={} action=preserve_existing_authorization",managed.pid,adopted.controller_epoch,record.auth_deadline_unix);
     while !shutdown_requested() {
-        if !process_is_current(managed) {
+        if !process_is_current_confirmed(managed)? {
             bail!("code=tunio_process_exited module=process_supervisor detail=managed process epoch no longer exists");
         }
         let reply = exchange(socket, managed, &request(ControlOperation::Probe))?;
@@ -1979,10 +1977,10 @@ pub fn adopt(record_path: &Path, executable: &Path, socket: &Path, gate: bool) -
     }
     exchange(socket, managed, &request(ControlOperation::Stop))?;
     let deadline = Instant::now() + Duration::from_secs(2);
-    while process_is_current(managed) && Instant::now() < deadline {
+    while process_is_current_confirmed(managed)? && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(20));
     }
-    if process_is_current(managed) {
+    if process_is_current_confirmed(managed)? {
         bail!("code=tunio_stop_pending module=process_supervisor detail=authenticated stop acknowledged but process still live");
     }
     Ok(())
@@ -1994,7 +1992,7 @@ pub fn adopt_worker(path: &Path, gate: bool) -> Result<()> {
 
 pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) -> Result<()> {
     use candy_process_control::{
-        exchange, process_identity, process_is_current, ControlOperation, ControlRequest,
+        exchange, process_identity, process_is_current_confirmed, ControlOperation, ControlRequest,
         ProcessIdentity,
     };
     if !gate {
@@ -2274,7 +2272,7 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
             _ => (),
         }
         if let Some((identity, token, epoch, socket)) = &io {
-            if !process_is_current(*identity) {
+            if !process_is_current_confirmed(*identity)? {
                 return Err(PairRecoveryRequired.into());
             }
             let probe = ControlRequest {
@@ -2314,13 +2312,13 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
                 token_sha256: token,
                 nonce: uuid::Uuid::new_v4().simple().to_string(),
             };
-            if process_is_current(identity) {
+            if process_is_current_confirmed(identity)? {
                 exchange(&socket, identity, &stop)?;
                 let deadline = Instant::now() + Duration::from_secs(2);
-                while process_is_current(identity) && Instant::now() < deadline {
+                while process_is_current_confirmed(identity)? && Instant::now() < deadline {
                     thread::sleep(Duration::from_millis(20));
                 }
-                if process_is_current(identity) {
+                if process_is_current_confirmed(identity)? {
                     bail!("adopted I/O stop remains pending");
                 }
             }
@@ -2347,7 +2345,7 @@ fn next_recovery_epoch(values: impl IntoIterator<Item = u64>) -> Result<u64> {
 #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
 pub(super) fn recover_pair(path: &Path) -> Result<()> {
     use candy_process_control::{
-        exchange, process_is_current, ControlOperation, ControlRequest, ProcessIdentity,
+        exchange, process_is_current_confirmed, ControlOperation, ControlRequest, ProcessIdentity,
     };
     let desired = verified_plan(path)?;
     let recovered = recovery_plan(desired.clone())?;
@@ -2392,7 +2390,7 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
         pid: old_io.pid,
         start_ticks: old_io.process_start_ticks,
     };
-    if process_is_current(io_identity) {
+    if process_is_current_confirmed(io_identity)? {
         bail!("code=pair_recovery_io_alive module=process_supervisor detail=refusing replacement while original IO process is live");
     }
     preserve_unrecorded_endpoint(&io.control_socket)?;
@@ -2579,7 +2577,7 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
         }
     }
     // A surviving Core can retain the old socket. Retire it before releasing any queue lease.
-    if process_is_current(io_identity) || old_worker.business_is_current()? {
+    if process_is_current_confirmed(io_identity)? || old_worker.business_is_current()? {
         return Err(ManagedProofPending.into());
     }
     // Core cannot bind over a socket left by an abrupt exit. Only unlink a proven dead,
@@ -2634,7 +2632,7 @@ pub(super) fn rebind_core(_: &Path) -> Result<()> {
 #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
 pub(super) fn rebind_core(path: &Path) -> Result<()> {
     use candy_process_control::{
-        exchange, process_identity, process_is_current, ControlOperation, ControlRequest,
+        exchange, process_identity, process_is_current_confirmed, ControlOperation, ControlRequest,
         ProcessIdentity,
     };
     use candy_tunio::attach_control::{
@@ -2863,7 +2861,7 @@ pub(super) fn rebind_core(path: &Path) -> Result<()> {
             if child.try_wait()?.is_some() {
                 return Err(CoreRecoveryRequired.into());
             }
-            if !process_is_current(managed_io) {
+            if !process_is_current_confirmed(managed_io)? {
                 bail!("I/O epoch exited during Core recovery");
             }
             if matches!(
@@ -2931,7 +2929,10 @@ pub(super) fn rebind_core(path: &Path) -> Result<()> {
     if result
         .as_ref()
         .err()
-        .is_some_and(|error| error.is::<DesiredStateChanged>())
+        .is_some_and(|error| {
+            error.is::<DesiredStateChanged>()
+                || error.is::<candy_process_control::ProcessLivenessUnconfirmed>()
+        })
     {
         return result;
     }

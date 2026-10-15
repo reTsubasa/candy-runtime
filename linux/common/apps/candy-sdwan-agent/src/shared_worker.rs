@@ -68,7 +68,7 @@ fn exchange(
 ) -> Result<Response> {
     use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
     anyhow::ensure!(
-        candy_process_control::process_is_current(host.identity),
+        candy_process_control::process_is_current_confirmed(host.identity)?,
         "code=shared_worker_identity_changed module=sdwan_host"
     );
     let mut stream = UnixStream::connect(&host.socket)?;
@@ -154,14 +154,14 @@ impl SharedDomain {
         })
     }
     pub fn running(&self) -> Result<bool> {
-        if !candy_process_control::process_is_current(self.host.identity) {
+        if !candy_process_control::process_is_current_confirmed(self.host.identity)? {
             return Ok(false);
         }
         Ok(exchange(&self.host, &self.instance, "probe", &[], &[])?.running)
     }
     pub fn stop(&self) -> Result<()> {
         if !self.running()? {
-            if candy_process_control::process_is_current(self.host.identity) {
+            if candy_process_control::process_is_current_confirmed(self.host.identity)? {
                 exchange(&self.host, &self.instance, "forget", &[], &[])?;
             }
             return Ok(());
@@ -230,7 +230,7 @@ impl BusinessWorker {
 
 impl SharedDomain {
     fn completion(&self) -> Result<Option<ExitStatus>> {
-        if !candy_process_control::process_is_current(self.host.identity) {
+        if !candy_process_control::process_is_current_confirmed(self.host.identity)? {
             eprintln!("level=error code=shared_host_exited module=sdwan_host instance={} pid={} action=recover_affected_domains_preserve_infrastructure", self.instance, self.host.identity.pid);
             return Ok(Some(ExitStatus::from_raw(1 << 8)));
         }
@@ -245,7 +245,7 @@ impl SharedDomain {
 }
 
 pub(super) fn domain_running(host: &SharedWorker, instance: &Path) -> Result<bool> {
-    if !candy_process_control::process_is_current(host.identity) {
+    if !candy_process_control::process_is_current_confirmed(host.identity)? {
         return Ok(false);
     }
     Ok(exchange(

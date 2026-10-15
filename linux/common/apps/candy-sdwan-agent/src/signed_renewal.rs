@@ -40,7 +40,7 @@ mod linux {
     use crate::signed_snapshot::Snapshot;
     use candy_netd_proto::v2::{ForwardAuthority, ForwardAuthorityReceipt};
     use candy_process_control::{
-        exchange, process_identity, process_is_current, ControlOperation, ControlRequest,
+        exchange, process_identity, process_is_current_confirmed, ControlOperation, ControlRequest,
         ProcessIdentity,
     };
     use candy_tunio::authority_control::{
@@ -136,7 +136,7 @@ mod linux {
             if let (Some(host), Some(instance)) =
                 (&record.shared_worker, &record.shared_domain_instance)
             {
-                if candy_process_control::process_is_current(host.identity) {
+                if process_is_current_confirmed(host.identity).context(ManagedProofPending)? {
                     crate::shared_worker::forget_domain(host, instance)?;
                 }
             }
@@ -442,7 +442,7 @@ mod linux {
             pid: retired_io.pid,
             start_ticks: retired_io.process_start_ticks,
         };
-        if process_is_current(identity) {
+        if process_is_current_confirmed(identity).context(ManagedProofPending)? {
             bail!("cannot archive a live IO transaction");
         }
         let path = desired
@@ -466,8 +466,10 @@ mod linux {
         {
             bail!("retired IO transaction scope differs; refusing unsafe journal replacement");
         }
-        if let Ok(record) = crate::process_record::read(&journal.candidate_record) {
-            if record.business_is_current()? {
+        if let Some(record) = crate::process_record::read_optional(&journal.candidate_record)
+            .context(ManagedProofPending)?
+        {
+            if record.business_is_current().context(ManagedProofPending)? {
                 bail!("retired IO transaction has a live candidate Core");
             }
         } else if let Some(worker) = &candidate.independent_worker {
@@ -562,7 +564,8 @@ mod linux {
             .process_record
             .parent()
             .context("missing private owner directory")?;
-        let old_worker = crate::process_record::read(&original_worker.process_record).ok();
+        let old_worker = crate::process_record::read_optional(&original_worker.process_record)
+            .context(ManagedProofPending)?;
         let journal_path = original_worker
             .process_record
             .with_extension("renewal.json");
@@ -616,8 +619,9 @@ mod linux {
                     bail!("renewal journal scope differs");
                 }
                 if previous_journal.envelope.is_none() {
-                    if let Ok(record) =
-                        crate::process_record::read(&previous_journal.candidate_record)
+                    if let Some(record) =
+                        crate::process_record::read_optional(&previous_journal.candidate_record)
+                            .context(ManagedProofPending)?
                     {
                         stop_record(&record, &previous_plan)?;
                     } else {
@@ -632,12 +636,17 @@ mod linux {
                 }
                 if let Some(envelope) = previous_journal.envelope.as_ref() {
                     let record =
-                        crate::process_record::read(&previous_journal.candidate_record).ok();
+                        crate::process_record::read_optional(&previous_journal.candidate_record)
+                            .context(ManagedProofPending)?;
+                    let business_current = record
+                        .as_ref()
+                        .map(|record| record.business_is_current())
+                        .transpose()
+                        .context(ManagedProofPending)?
+                        .unwrap_or(false);
                     if actual.active.as_ref() == Some(envelope)
                         && actual.owner_active
-                        && record
-                            .as_ref()
-                            .is_some_and(|record| record.business_is_current().unwrap_or(false))
+                        && business_current
                     {
                         let record = record.unwrap();
                         let (verified, report) = compile_verified_plan(previous_plan.clone())?;
@@ -1196,7 +1205,7 @@ mod linux {
                 if shutdown_requested() || monotonic_ms()? > cap {
                     bail!("renewal candidate cancelled/expired");
                 }
-                if !process_is_current(io_identity) {
+                if !process_is_current_confirmed(io_identity).context(ManagedProofPending)? {
                     return Err(PairRecoveryRequired.into());
                 }
                 if !business_is_current(&plan, candidate)? {
@@ -1298,7 +1307,10 @@ mod linux {
         if result
             .as_ref()
             .err()
-            .is_some_and(|error| error.is::<DesiredStateChanged>())
+            .is_some_and(|error| {
+                error.is::<DesiredStateChanged>()
+                    || error.is::<candy_process_control::ProcessLivenessUnconfirmed>()
+            })
         {
             return result;
         }
@@ -1309,7 +1321,7 @@ mod linux {
                 }) {
                     return result;
                 }
-                return Err(ManagedProofPending.into());
+                return result.map_err(|error| error.context(ManagedProofPending));
             }
             return result;
         }

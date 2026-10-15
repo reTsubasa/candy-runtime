@@ -24,22 +24,7 @@ pub fn process_identity(pid: u32) -> Result<ProcessIdentity> {
             bail!("invalid process PID");
         }
         let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-        let fields = stat
-            .rsplit_once(')')
-            .context("invalid process stat")?
-            .1
-            .split_whitespace()
-            .collect::<Vec<_>>();
-        if fields
-            .first()
-            .is_none_or(|state| matches!(*state, "Z" | "X" | "x"))
-        {
-            bail!("process exited");
-        }
-        Ok(ProcessIdentity {
-            pid,
-            start_ticks: fields.get(19).context("missing process epoch")?.parse()?,
-        })
+        parse_optional_process_identity(pid, Ok(stat))?.context("process exited")
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -50,6 +35,66 @@ pub fn process_identity(pid: u32) -> Result<ProcessIdentity> {
 
 pub fn process_is_current(identity: ProcessIdentity) -> bool {
     process_identity(identity.pid).is_ok_and(|actual| actual == identity)
+}
+
+#[derive(Debug)]
+pub struct ProcessLivenessUnconfirmed {
+    pub identity: ProcessIdentity,
+}
+
+impl std::fmt::Display for ProcessLivenessUnconfirmed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter,
+            "code=process_liveness_unconfirmed module=process_control pid={} start_ticks={} action=preserve_owner_and_retry",
+            self.identity.pid, self.identity.start_ticks)
+    }
+}
+
+impl std::error::Error for ProcessLivenessUnconfirmed {}
+
+/// Recovery may retire ownership only with proof of exit or a changed epoch.
+/// Permission, IO and malformed procfs errors leave ownership unknown.
+pub fn process_is_current_confirmed(identity: ProcessIdentity) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        let result = parse_optional_process_identity(
+            identity.pid,
+            fs::read_to_string(format!("/proc/{}/stat", identity.pid)),
+        );
+        result
+            .map(|actual| actual == Some(identity))
+            .context(ProcessLivenessUnconfirmed { identity })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = identity;
+        bail!("process ownership requires Linux procfs");
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_optional_process_identity(
+    pid: u32,
+    stat: std::io::Result<String>,
+) -> Result<Option<ProcessIdentity>> {
+    anyhow::ensure!(pid > 0 && pid <= i32::MAX as u32, "invalid process PID");
+    let stat = match stat {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let fields = stat
+        .rsplit_once(')')
+        .context("invalid process stat")?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    let state = *fields.first().context("missing process state")?;
+    let start_ticks = fields.get(19).context("missing process epoch")?.parse()?;
+    if matches!(state, "Z" | "X" | "x") {
+        return Ok(None);
+    }
+    Ok(Some(ProcessIdentity { pid, start_ticks }))
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -257,6 +302,65 @@ fn connect_bounded(path: &Path) -> Result<UnixStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn liveness_unknown_is_distinct_from_exit_and_epoch_change() {
+        use std::io::{Error, ErrorKind};
+        let stat = |state| {
+            let mut fields = vec!["0"; 20];
+            fields[0] = state;
+            fields[19] = "1234";
+            Ok(format!("42 (worker (name)) {}", fields.join(" ")))
+        };
+        assert_eq!(
+            parse_optional_process_identity(42, stat("S")).unwrap(),
+            Some(ProcessIdentity {
+                pid: 42,
+                start_ticks: 1234
+            })
+        );
+        for state in ["Z", "X", "x"] {
+            assert_eq!(
+                parse_optional_process_identity(42, stat(state)).unwrap(),
+                None
+            );
+        }
+        assert_eq!(
+            parse_optional_process_identity(42, Err(Error::from(ErrorKind::NotFound))).unwrap(),
+            None
+        );
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::Interrupted,
+            ErrorKind::InvalidData,
+        ] {
+            let error = parse_optional_process_identity(42, Err(Error::from(kind))).unwrap_err();
+            assert_eq!(error.downcast_ref::<Error>().unwrap().kind(), kind);
+        }
+        for malformed in ["", "42 (worker)", "42 (worker) S", "42 worker S 0"] {
+            assert!(parse_optional_process_identity(42, Ok(malformed.into())).is_err());
+        }
+        assert!(parse_optional_process_identity(0, stat("S")).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn confirmed_liveness_checks_real_process_epoch_and_reaped_child() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let identity = process_identity(child.id()).unwrap();
+        assert!(process_is_current_confirmed(identity).unwrap());
+        assert!(!process_is_current_confirmed(ProcessIdentity {
+            start_ticks: identity.start_ticks + 1,
+            ..identity
+        })
+        .unwrap());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!process_is_current_confirmed(identity).unwrap());
+    }
 
     #[test]
     fn trickled_control_request_cannot_extend_total_read_deadline() {

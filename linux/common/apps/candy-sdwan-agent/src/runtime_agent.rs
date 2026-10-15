@@ -395,33 +395,36 @@ fn cloud_loop(
 }
 
 fn transient_error(error: &anyhow::Error) -> bool {
-    if error.is::<crate::experimental_tunio::NetdUnavailable>() {
+    // anyhow context values participate in Error::is/downcast_ref, but are
+    // not exposed as their original type by std::error::Error::source.
+    if error.is::<crate::experimental_tunio::NetdUnavailable>()
+        || error.is::<crate::experimental_tunio::CoreRecoveryRequired>()
+        || error.is::<crate::experimental_tunio::PairRecoveryRequired>()
+        || error.is::<crate::experimental_tunio::ManagedProofPending>()
+        || error.is::<candy_process_control::ProcessLivenessUnconfirmed>()
+        || error.is::<crate::experimental_tunio::DesiredStateChanged>()
+        || error
+            .downcast_ref::<crate::experimental_tunio::NetdActivationFailure>()
+            .is_some_and(|error| error.retryable())
+    {
         return true;
     }
     error.chain().any(|cause| {
-        cause.is::<crate::experimental_tunio::CoreRecoveryRequired>()
-            || cause.is::<crate::experimental_tunio::PairRecoveryRequired>()
-            || cause.is::<crate::experimental_tunio::NetdUnavailable>()
-            || cause.is::<crate::experimental_tunio::ManagedProofPending>()
-            || cause.is::<crate::experimental_tunio::DesiredStateChanged>()
-            || cause
-                .downcast_ref::<crate::experimental_tunio::NetdActivationFailure>()
-                .is_some_and(|error| error.retryable())
-            || cause
-                .downcast_ref::<nix::errno::Errno>()
-                .is_some_and(|error| {
-                    matches!(
-                        *error,
-                        nix::errno::Errno::EINTR
-                            | nix::errno::Errno::EAGAIN
-                            | nix::errno::Errno::ENOMEM
-                            | nix::errno::Errno::EBUSY
-                            | nix::errno::Errno::ECONNRESET
-                            | nix::errno::Errno::ECONNREFUSED
-                            | nix::errno::Errno::EPIPE
-                            | nix::errno::Errno::ETIMEDOUT
-                    )
-                })
+        cause
+            .downcast_ref::<nix::errno::Errno>()
+            .is_some_and(|error| {
+                matches!(
+                    *error,
+                    nix::errno::Errno::EINTR
+                        | nix::errno::Errno::EAGAIN
+                        | nix::errno::Errno::ENOMEM
+                        | nix::errno::Errno::EBUSY
+                        | nix::errno::Errno::ECONNRESET
+                        | nix::errno::Errno::ECONNREFUSED
+                        | nix::errno::Errno::EPIPE
+                        | nix::errno::Errno::ETIMEDOUT
+                )
+            })
             || cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
                 matches!(
                     error.kind(),
@@ -751,6 +754,15 @@ mod tests {
     #[test]
     fn only_transient_io_errors_retry_without_new_policy() {
         assert!(transient_error(
+            &anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                .context(candy_process_control::ProcessLivenessUnconfirmed {
+                    identity: candy_process_control::ProcessIdentity {
+                        pid: 42,
+                        start_ticks: 1234
+                    },
+                })
+        ));
+        assert!(transient_error(
             &std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into()
         ));
         assert!(transient_error(
@@ -771,6 +783,26 @@ mod tests {
         ));
         assert!(!transient_error(
             &std::io::Error::from(std::io::ErrorKind::NotFound).into()
+        ));
+    }
+    #[test]
+    fn context_wrapped_recovery_signals_keep_the_existing_bounded_retry() {
+        use crate::experimental_tunio::{
+            CoreRecoveryRequired, DesiredStateChanged, ManagedProofPending, NetdUnavailable,
+            PairRecoveryRequired,
+        };
+        let signals: Vec<anyhow::Error> = vec![
+            anyhow::anyhow!("original proof failure").context(ManagedProofPending),
+            anyhow::anyhow!("original core failure").context(CoreRecoveryRequired),
+            anyhow::anyhow!("original pair failure").context(PairRecoveryRequired),
+            anyhow::anyhow!("original netd failure").context(NetdUnavailable),
+            anyhow::anyhow!("original desired state").context(DesiredStateChanged),
+        ];
+        for error in signals {
+            assert!(transient_error(&error.context("renewal recovery")));
+        }
+        assert!(!transient_error(
+            &anyhow::anyhow!("invalid signed authorization").context("renewal recovery")
         ));
     }
     #[test]

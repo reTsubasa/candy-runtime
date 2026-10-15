@@ -80,10 +80,12 @@ fn process_identity(_: u32) -> Result<(u64, u32, u64, u64)> {
 
 impl ManagedProcessRecord {
     pub fn business_is_current(&self) -> Result<bool> {
-        if !candy_process_control::process_is_current(candy_process_control::ProcessIdentity {
-            pid: self.pid,
-            start_ticks: self.process_start_ticks,
-        }) {
+        if !candy_process_control::process_is_current_confirmed(
+            candy_process_control::ProcessIdentity {
+                pid: self.pid,
+                start_ticks: self.process_start_ticks,
+            },
+        )? {
             return Ok(false);
         }
         match (&self.shared_worker, &self.shared_domain_instance) {
@@ -243,6 +245,18 @@ impl ManagedProcessRecord {
 
 pub fn read(path: &Path) -> Result<ManagedProcessRecord> {
     read_private_json(path, MAX_RECORD_BYTES)
+}
+
+/// Missing proof and unreadable proof are different recovery states.
+pub fn read_optional(path: &Path) -> Result<Option<ManagedProcessRecord>> {
+    match read(path) {
+        Ok(record) => Ok(Some(record)),
+        Err(error) if error.downcast_ref::<std::io::Error>()
+            .is_some_and(|cause| cause.kind() == std::io::ErrorKind::NotFound) => Ok(None),
+        Err(error) => Err(error.context(format!(
+            "code=managed_record_unconfirmed module=process_record path={} action=preserve_owner_and_reconcile_original_record", path.display()
+        ))),
+    }
 }
 
 fn read_private_json<T: serde::de::DeserializeOwned>(path: &Path, bound: u64) -> Result<T> {
@@ -406,5 +420,34 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(record.validate_current(&executable, 99).is_err());
+    }
+}
+
+#[cfg(test)]
+mod optional_record_tests {
+    use super::*;
+
+    #[test]
+    fn only_absence_is_optional_corrupt_unsafe_and_symlink_records_remain_unknown() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("record.json");
+        assert!(read_optional(&path).unwrap().is_none());
+        fs::write(&path, b"{invalid").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let error = read_optional(&path).unwrap_err();
+        assert!(error.to_string().contains("managed_record_unconfirmed"));
+        assert!(error.chain().any(|cause| cause.is::<serde_json::Error>()));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_optional(&path).is_err());
+        fs::remove_file(&path).unwrap();
+        symlink(directory.path().join("missing-target"), &path).unwrap();
+        assert!(
+            read_optional(&path).is_err(),
+            "dangling symlink is not an absent record"
+        );
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(read_optional(&path).is_err());
     }
 }
