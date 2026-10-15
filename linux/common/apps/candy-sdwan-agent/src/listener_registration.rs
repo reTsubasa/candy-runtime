@@ -9,7 +9,7 @@ pub(super) struct ListenerPlan {
     pub worker_id: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Master {
     schema_version: u8,
@@ -44,8 +44,10 @@ pub(super) fn validate(plan: &Plan) -> Result<()> {
     let Some(listener) = &plan.shared_listener else {
         return Ok(());
     };
-    if !cfg!(all(feature = "experimental-tunio-rebind", target_os = "linux"))
-        || plan.independent_worker.is_none()
+    if !cfg!(all(
+        feature = "experimental-tunio-rebind",
+        target_os = "linux"
+    )) || plan.independent_worker.is_none()
         || !listener.directory.is_absolute()
         || !listener.server_config.is_absolute()
         || listener.worker_id == 0
@@ -173,30 +175,27 @@ fn publish_registration(plan: &Plan, owner_path: &Path, prepared_ingress: bool) 
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
         .open(listener.directory.join(format!("{domain}.lock")))?;
+    let metadata = lock.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file()
+            && metadata.uid() == nix::unistd::geteuid().as_raw()
+            && metadata.mode() & 0o077 == 0,
+        "code=listener_registration_lock_invalid module=listener_registry detail=private regular lock required"
+    );
     // SAFETY: this is an owned regular descriptor and flock does not access memory.
-    if unsafe { nix::libc::flock(lock.as_raw_fd(), nix::libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
+    if unsafe { nix::libc::flock(lock.as_raw_fd(), nix::libc::LOCK_EX | nix::libc::LOCK_NB) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("code=listener_registration_busy module=listener_registry action=retry_preserve_active_owner");
     }
     match private_json::<Registration>(&destination) {
         Ok(current) => {
             if current == registration {
                 return verify_activation(listener, &registration);
             }
-            if prepared_ingress
-                && !current.prepared_ingress
-                && (
-                    current.worker_epoch,
-                    current.pid,
-                    current.process_start_ticks,
-                ) == (
-                    registration.worker_epoch,
-                    registration.pid,
-                    registration.process_start_ticks,
-                )
-            {
-                return Ok(());
+            if is_committed_equivalent(&current, &registration) {
+                return verify_activation(listener, &current);
             }
             if current.worker_epoch > registration.worker_epoch
                 || (current.worker_epoch == registration.worker_epoch
@@ -232,7 +231,27 @@ fn publish_registration(plan: &Plan, owner_path: &Path, prepared_ingress: bool) 
     verify_activation(listener, &registration)
 }
 
+fn is_committed_equivalent(current: &Registration, proposed: &Registration) -> bool {
+    if !proposed.prepared_ingress || current.prepared_ingress {
+        return false;
+    }
+    let mut committed = proposed.clone();
+    committed.prepared_ingress = false;
+    *current == committed
+}
+
 fn verify_activation(listener: &ListenerPlan, expected: &Registration) -> Result<()> {
+    let master_path = listener.directory.join("listener-master.json");
+    let master: Master = private_json(&master_path)
+        .context("code=listener_master_unavailable module=listener_registry action=retry_preserve_active_owner")?;
+    anyhow::ensure!(
+        master.schema_version == 1
+            && master.instance == expected.master_instance
+            && master.transport_id != 0
+            && master.uid == expected.uid
+            && candy_process_control::process_is_current(master.process),
+        "code=listener_master_stale module=listener_registry action=retry_preserve_active_owner"
+    );
     let domain = expected
         .routing_domain_id
         .iter()
@@ -243,6 +262,12 @@ fn verify_activation(listener: &ListenerPlan, expected: &Registration) -> Result
     if active != *expected {
         bail!("code=listener_activation_ack_mismatch module=listener_registry action=retry_preserve_forwarding_state");
     }
+    let current: Master = private_json(&master_path)
+        .context("code=listener_master_unavailable module=listener_registry action=retry_preserve_active_owner")?;
+    anyhow::ensure!(
+        current == master && candy_process_control::process_is_current(current.process),
+        "code=listener_master_changed module=listener_registry action=retry_preserve_active_owner"
+    );
     Ok(())
 }
 
@@ -319,7 +344,7 @@ pub(super) fn publish_prepared_pending(plan: &Plan) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
@@ -331,6 +356,24 @@ mod tests {
             server_config: root.path().join("server.toml"),
             worker_id: 1,
         };
+        let process = candy_process_control::process_identity(std::process::id()).unwrap();
+        let master = Master {
+            schema_version: 1,
+            instance: "master-generation".into(),
+            process,
+            transport_id: 1,
+            uid: nix::unistd::geteuid().as_raw(),
+        };
+        let mut master_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.path().join("listener-master.json"))
+            .unwrap();
+        master_file
+            .write_all(&serde_json::to_vec(&master).unwrap())
+            .unwrap();
+        master_file.sync_all().unwrap();
         let expected = Registration {
             schema_version: 1,
             master_instance: "master-generation".into(),
@@ -349,6 +392,21 @@ mod tests {
             prepared_ingress: false,
         };
         let path = root.path().join(format!("{}.activation", "01".repeat(16)));
+        let mut prepared = expected.clone();
+        prepared.prepared_ingress = true;
+        assert!(is_committed_equivalent(&expected, &prepared));
+        for fault in 0..6 {
+            let mut changed = prepared.clone();
+            match fault {
+                0 => changed.master_instance = "old-master".into(),
+                1 => changed.worker_epoch += 1,
+                2 => changed.authorization_sha256 = "cd".repeat(32),
+                3 => changed.policy_generation += 1,
+                4 => changed.dispatch = root.path().join("wrong.sock"),
+                _ => changed.auth_deadline_unix -= 1,
+            }
+            assert!(!is_committed_equivalent(&expected, &changed));
+        }
         assert!(verify_activation(&listener, &expected).is_err());
         for fault in 0..6 {
             let mut changed = expected.clone();
@@ -372,6 +430,23 @@ mod tests {
             assert!(verify_activation(&listener, &expected).is_err());
         }
         fs::write(&path, serde_json::to_vec(&expected).unwrap()).unwrap();
+        verify_activation(&listener, &expected).unwrap();
+        let master_path = root.path().join("listener-master.json");
+        // An exact ACK from the previous incarnation cannot prove activation by
+        // a replacement master, even while the old PID is still alive.
+        for fault in 0..5 {
+            let mut changed = master.clone();
+            match fault {
+                0 => changed.instance = "replacement-master".into(),
+                1 => changed.process.start_ticks += 1,
+                2 => changed.process.pid = 0,
+                3 => changed.transport_id = 0,
+                _ => changed.uid = changed.uid.wrapping_add(1),
+            }
+            fs::write(&master_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            assert!(verify_activation(&listener, &expected).is_err());
+        }
+        fs::write(&master_path, serde_json::to_vec(&master).unwrap()).unwrap();
         verify_activation(&listener, &expected).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(verify_activation(&listener, &expected).is_err());

@@ -725,6 +725,16 @@ fn bind_shared_record(plan: &Plan, record: &mut crate::process_record::ManagedPr
     });
 }
 
+// The shared-listener fields are opt-in. Keep the ordinary Linux agent build
+// complete without the experimental feature; callers still persist the normal
+// process identity and never silently claim shared ownership.
+#[cfg(all(not(feature = "experimental-tunio-rebind"), target_os = "linux"))]
+fn bind_shared_record(
+    _plan: &Plan,
+    _record: &mut crate::process_record::ManagedProcessRecord,
+) {
+}
+
 fn business_is_current(
     plan: &Plan,
     identity: candy_process_control::ProcessIdentity,

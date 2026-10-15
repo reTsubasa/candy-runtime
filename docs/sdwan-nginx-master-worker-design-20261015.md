@@ -242,3 +242,20 @@ master；worker reload 与 master 可执行文件升级必须分别验收。
   `sdwan-owner-performance-v11-20261015.md`。详细诊断保持默认关闭。
 
 以上补充不关闭完整 G0-G6，也不授权依据局部 PASS 进行生产切换。
+
+### 9.5 激活确认不能跨 master 代际复用
+
+注册发布采用非阻塞独占锁；竞争时返回 `listener_registration_busy`，保留
+当前业务并交给下一轮 reconcile 重试，不能阻塞续期或其他域的维护循环。
+激活 ACK 必须匹配当前 master instance、存活的 PID/start_ticks、UID、非零
+transport id 及完整 registration。读取 ACK 前后再次核对 master 身份，
+避免重启前残留的精确 ACK 被误当作新 master 已激活的证据。
+
+重复 prepared 发布遇到同一代 committed registration 时，仅允许 phase
+不同；其余字段必须完全相同，并仍须核验 committed activation ACK。
+只比较 PID/epoch 然后返回成功会漏掉 master 重启、授权变化或路径变化。
+
+Linux 默认构建和 `experimental-tunio-rebind` 模式的注册测试均已执行通过
+（分别 1/1），实验模式严格 Clippy 通过。测试覆盖 ACK 缺失/字段不符、
+master 更代、错误 start_ticks/PID/UID、零 transport id 和不安全文件权限。
+这是本地控制面身份门禁，不代替端到端候选交接、ACK 丢失恢复或性能验收。
