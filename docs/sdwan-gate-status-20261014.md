@@ -23,10 +23,17 @@
   不将 v8 吞吐归属于它。
 - Runtime `ebc9d06` 已修复真实只读 v1/v2 健康探测、总期限和响应校验。3 probe、
   1 CLI、24 service/infrastructure 及 OpenWrt init shell PASS；新版目标二进制
-  OpenWrt VM 复验仍在进行。此前 OpenWrt 25.12.5 v7 已通过真实 procd/TUN/journal
-  的受限专项，完整生产 Agent/Core、升级回退和 IPQ 硬件仍 NOT RUN。
+  OpenWrt 25.12.5 VM v8 复验 PASS_NARROW_PROCD，涵盖真实 v2 健康探测、恢复、
+  隔离和三次持久化有界重试，无虚假 netd_v2_request_failed。此轮未重跑真实 TUN
+  专项；v7 已通过受限真实 procd/TUN/journal。完整生产 Agent/Core、升级回退和
+  IPQ 硬件仍 NOT RUN。
+- v8 冻结 shared-host lifecycle 与四域扩缩/隔离各实际执行 1 项测试，均 PASS；
+  这是隔离 release fixture 证据，不等价于混合公共 listener 或同域 1/2/4 worker。
 - 已采用 Nginx 代际切换基线，见 `sdwan-nginx-master-worker-design-20261015.md`。
   mixed listener 注册、Runtime receipt、原子快照与 drain 接线仍在实施，尚未测试通过。
+  入口精确激活 ACK、候选 attachment 不抢占、旧 QUIC 新 session fencing、
+  Runtime 旧 PID reap 和同域横向扩展须分别闭环。当前 stop-old 续期存在业务
+  切换窗口；master 重启会关闭 QUIC，均不能称为 Nginx 式无损交接。
 
 证据位于工作区 `docs/artifacts/sdwan-20261015/`：
 `fairness-release-v8-tx-yield/`（失败）、`fairness-release-v8-lock-fixed/`（构建通过）、

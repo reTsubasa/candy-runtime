@@ -16,23 +16,23 @@ Nginx 的信号语义映射为本项目的事务语义：`reload` 对应 prepare
 
 ```text
 procd/systemd
-  +-- Runtime Agent (唯一业务生命周期协调者)
+  +-- Runtime Agent (配置与发布协调者)
   |     | Cloud 同步、续期、prepare/commit、registry、drain/reap
   |     +-- Transport Listener Master (UDP/QUIC、TLS、identity、replay/admission、IPC)
-  |     |     +-- Proxy worker pool (N 个)
+  |     |     +-- Proxy worker pool (N 个，master 内 manager 唯一监督)
   |     |     +-- SD-WAN worker pool (M 个)
-  |     +-- 业务 worker 的唯一监督、恢复和有界退避
+  |     +-- SD-WAN worker 的唯一监督、恢复和有界退避
   +-- netd/TUNIO infrastructure (独立常驻，不属于任一业务 worker)
 ```
 
-这是职责与监督关系，不新增第三套 supervisor。Runtime Agent 管理业务生命周期，Transport master 接受其发布的路由与注册表，不再另起独立 Cloud/续期/worker 重启循环。netd/TUNIO 的具体启动路径须与现有进程身份和 journal 一致，禁止由多个层级竞争监督同一个 PID。
+这是职责与监督关系，不新增第三套 supervisor。Runtime Agent 协调配置发布，Transport master 接受已提交的路由与注册表。当前实现中，Proxy PID 的唯一本地监督者为 `ManagedProxyWorkerHost` manager，SD-WAN PID 的唯一本地监督者为 Runtime；registry 不启动或重启 worker。master 不另起 Cloud/续期循环，Agent 不竞争重启 Proxy PID。netd/TUNIO 的具体启动路径须与现有进程身份和 journal 一致，禁止由多个层级竞争监督同一个 PID。
 
 ### Runtime Agent
 
 - 读取并验证 Cloud candidate、签名、版本、能力、资源预算和路由域。
 - 生成 immutable `PlanSnapshot`，执行 `prepare -> ready receipt -> atomic publish`。
-- 维护 domain/role/worker registry、owner epoch、drain deadline、失败重试和有界退避。
-- 只发送控制消息，不逐包参与数据面；业务 worker 的启动、重启和退避只在此处实现，procd/systemd 仅兜底 Agent/基础设施。
+- 协调 domain/role/worker registry、owner epoch、drain deadline 和发布重试；监督 SD-WAN worker。
+- 只发送控制消息，不逐包参与数据面；Proxy worker 生命周期委托 master 的已有 manager，procd/systemd 仅兜底 Agent/基础设施。
 
 ### procd/systemd
 
@@ -45,6 +45,7 @@ procd/systemd
 - 独占公共 UDP listener、QUIC/TLS handshake、完整 `TransportOwner` 身份和全局 admission/replay。
 - 根据已激活的内存 registry 选择 role/domain worker；域 hint 只能缩小候选，不能授权。
 - 维护 IPC 通道、连接到 worker 的 sticky owner、旧 epoch 过滤、FD 传递和统计聚合。
+- 使用已有 manager 唯一监督 Proxy worker 的 ready/退出/退避；SD-WAN worker 从 Runtime 注册表取得，不竞争其监督权。
 - 不持有 Proxy session 或 SD-WAN peer/prefix 状态，不读取 TUN 数据。
 
 ### Proxy worker
@@ -70,13 +71,25 @@ procd/systemd
 每次配置或续期使用单调 `plan_generation`，每个 worker 使用单调 `worker_epoch`，每个连接使用完整 `(role, transport_id, connection_id, worker_id, owner_epoch)`。
 
 1. **validate**：解析、签名、能力、域唯一性、资源预算、路径权限和版本兼容性检查；失败记录错误并保留 active snapshot。
-2. **prepare**：启动或复用 worker，发送受限 plan，建立 IPC、认证和 PacketPort receipt；此阶段不能接收新业务。
+2. **prepare**：启动或复用 worker，发送受限 plan，建立 IPC、认证和 PacketPort receipt。`PreparedIngress` 只允许经签名验证的候选进行认证和就绪握手，TUN/netd forwarding 继续 fencing；不得抢占仍有效的 committed owner，也不得承载未提交的用户流量。
 3. **ready**：worker 返回包含 PID/start_ticks、role、domain、epoch、plan hash、auth deadline、能力和资源额度的 receipt；master 重新核对身份。
 4. **commit**：master 在控制面原子发布 registry snapshot。新连接只读新 snapshot；旧连接仍使用旧 owner。
 5. **drain**：旧 worker 标记 `draining`，关闭 accept/新 session，已有连接继续处理；数据和控制队列有界，超过 deadline 的对象按协议重试、reset 或丢弃。
 6. **reap**：连接、FD、credit、task、receipt 全部归还后回收旧 worker。超时只终止该 worker，并保留其他 worker、listener、TUNIO/netd。
 
 任何阶段失败都只撤销 candidate。已发布 snapshot 不回滚到半成品；下一次 reconcile 才重试。重复 commit、迟到 receipt、旧 epoch 和重复 unregister 必须幂等。
+
+### 3.1 候选入口与激活确认
+
+inbound-only 域必须先能接收认证握手才能 ready。禁止形成 `等待 Ready -> 发布入口 -> 才能 Ready` 的环，也禁止通过跳过 Ready 消除该环。候选入口与业务 forwarding 分开授权：签名候选、受限 PacketPort 和完整进程身份准备完成后，可以发布 prepared receipt；数据转发仍受 netd commit fence 约束。
+
+文件落盘只证明发布意图，不能证明 master 已激活。Runtime 须持久化 pending publication，master 完成校验和原子切换后返回匹配的 `(master incarnation, domain, plan generation/hash, worker id/epoch, PID/start_ticks, receipt hash)` ACK。迟到或不同候选的 ACK 不得提交 journal。master 重启后须重新验证和确认，不能复用上一 master 的 ACK。
+
+### 3.2 续期、排空与回收
+
+Nginx 的候选代准备规则要求：旧授权有效期间，candidate 失败不能停止旧业务。当前远端 attachment 在新连接建立时可能直接替换旧 lane；必须先建立不抢占的 prepared attachment，再提交接管。只把 `spawn` 移到 `stop` 前面会造成新旧端反复抢占，不满足该规则。所有等待仍受旧授权 deadline 限制，不延长过期授权。
+
+drain 同时约束新连接和已有 QUIC 连接上的新 session。现有 session 的数据、FIN/reset、必要控制与探测继续处理；新 session 返回可重试错误。排空终态由 supervisor 可观察的 receipt/ACK 确认，超时后只回收匹配 PID/start_ticks/epoch 的旧 worker。registry 删除条目不是进程已经 reap 的证据。
 
 ## 4. 性能约束
 
@@ -105,3 +118,19 @@ procd/systemd
 - [Nginx process cycle](https://github.com/nginx/nginx/blob/master/src/os/unix/ngx_process_cycle.c)：master reconfigure/reap、channel command 和 worker event loop。
 
 Nginx master 通常不承载应用连接数据；本项目当前 Transport master 仍执行 QUIC 加解密与物理收发，因此是额外的数据面瓶颈和故障域。业务 worker 数量增加不能消除该上限。须将其 CPU、延迟、队列与退出影响纳入测试；只有实测证明 Transport 饱和后才引入 CID-aware Transport shard。继承 UDP fd 或普通 `SO_REUSEPORT` 不能迁移 Quinn 的用户态连接状态，也不能据此承诺 master 热升级时 QUIC 连接无损。
+
+## 7. 实施顺序与未关闭差距
+
+以下是目标与实际实现的差距，不能由 API 或多域 fixture 通过推定完成。
+
+| 顺序 | 需补齐的契约 | 当前差距 | 必须保留的验收证据 |
+| --- | --- | --- | --- |
+| 1 | PreparedIngress 与 committed forwarding 分离 | 混合入口接线进行中，严格 Ready 存在入站启动依赖环 | 从 Runtime 启动，经同一公共 listener 完成两个签名域真实双向流量；候选未提交时不能转发 |
+| 2 | master 精确激活 ACK 与 durable pending | 写 registration 文件及日志不足以确认激活 | master 拒绝、重启、丢 ACK、重复 ACK、迟到 ACK；旧 committed generation 保留 |
+| 3 | attachment prepare/commit/abort | 续期仍使用 ForwardGuard 后 stop-old，再 spawn candidate；保基础设施，但有业务切换窗口 | 候选启动失败、认证失败、远端拒绝时旧流继续；成功接管后旧事件不夺回 lane |
+| 4 | session quiesce、drained receipt、精确 reap | registry drain 已撤销到期 lease，但尚不能证明拒绝已有 QUIC 上的新 session，或 Runtime 已回收旧 PID | 长连接持续流量；旧 QUIC 新 session 被拒绝；正常排空与超时回收后 FD/credit/PID 均无泄漏 |
+| 5 | 同域 worker set 与 sticky placement | domain 到单 PID/epoch；四域分散不是同域横向扩展 | 同一 domain 1/2/4/2/1；只有一个 TUN reader，peer/prefix ownership 唯一，故障只影响所属 owner |
+| 6 | 独立维护与有界退出 | Proxy spawn/reconcile 不得推迟其他域授权到期与 drain；独立维护任务正在实施 | Proxy ready 超时期间另一域 deadline 仍按时执行；退出可取消维护任务，无悬挂 |
+| 7 | master 故障恢复 | master 仍持有 QUIC 状态，重启会断开现有连接 | 记录连接中断与重连收敛时间、其他基础设施保持；不将其称为无损热升级 |
+
+先完成入口与确认，再完成远端 attachment 事务，然后验证会话排空/进程回收，最后实现同域扩展及 1/2/4 性能矩阵。维护任务隔离与诊断可并行推进。每一步都使用失败注入与连续双向业务检验；失败记录保留，使用新目录复测，不放宽原有流量存活、授权或完整性断言。

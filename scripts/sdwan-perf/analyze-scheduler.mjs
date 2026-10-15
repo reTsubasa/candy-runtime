@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 // All values are offline observations; schedstat wait is cumulative runnable wait,
@@ -44,7 +45,8 @@ function interval(before, after) {
   const total = ticks.reduce((sum, value) => sum + value, 0);
   const pressure = row => Object.fromEntries(String(row.cpu_pressure || '').split('\n').filter(Boolean)
     .map(line => [line.split(' ')[0], Number(line.match(/total=(\d+)/)?.[1])]));
-  return {start_unix_ms: before.unix_ns / 1e6, end_unix_ms: after.unix_ns / 1e6, elapsed_s,
+  return {start_unix_ms: before.unix_ns / 1e6, end_unix_ms: after.unix_ns / 1e6,
+    end_monotonic_ns: after.monotonic_ns, elapsed_s,
     cgroup: delta(counters(before.cpu_stat), counters(after.cpu_stat)),
     cpu_pressure_usec: delta(pressure(before), pressure(after)),
     independent_heartbeat: after.heartbeat ? {
@@ -126,6 +128,64 @@ function readHost(root) {
   }));
   return {available: true, sample_count: rows.length, intervals};
 }
+function executorRows(raw) {
+  const lines = raw.split('\n');
+  const rows = [];
+  let partial_final_line = false;
+  for (let index = 0; index < lines.length; index++) {
+    if (!lines[index].trim()) continue;
+    try { rows.push(JSON.parse(lines[index])); }
+    catch (error) {
+      if (index !== lines.length - 1) throw error;
+      partial_final_line = true;
+    }
+  }
+  return {rows, partial_final_line};
+}
+function readExecutors(root, scheduler) {
+  const evidence = [];
+  for (const side of ['client', 'server']) {
+    const directory = path.join(root, 'executor-diagnostics', side);
+    if (!fs.existsSync(directory)) continue;
+    const timing = scheduler[side].intervals[0];
+    for (const file of fs.readdirSync(directory).filter(name => name.endsWith('.jsonl')).sort()) {
+      const {rows, partial_final_line} = executorRows(fs.readFileSync(path.join(directory, file), 'utf8'));
+      const labels = new Map();
+      const slow = [];
+      for (const row of rows) {
+        if (!row || !['heartbeat', 'poll'].includes(row.kind) || typeof row.label !== 'string'
+          || row.cpu_scope !== (row.kind === 'poll' ? 'poll' : 'thread_interval')
+          || !Number.isSafeInteger(row.pid) || row.pid <= 0
+          || !Number.isSafeInteger(row.tid) || row.tid <= 0
+          || !Number.isFinite(row.monotonic_ns) || row.monotonic_ns < 0
+          || !Number.isFinite(row.wall_ns) || row.wall_ns < 0
+          || !(row.thread_cpu_ns === null || (Number.isFinite(row.thread_cpu_ns) && row.thread_cpu_ns >= 0))
+          || (row.kind === 'poll' && typeof row.ready !== 'boolean')
+          || !Number.isFinite(row.lost_events) || row.lost_events < 0) {
+          throw new Error(`invalid executor evidence: ${side}/${file}`);
+        }
+        // Multiple runtime threads may enqueue in a different timestamp order.
+        const key = `${row.kind}/${row.label}`;
+        const summary = labels.get(key) ?? {kind: row.kind, label: row.label, cpu_scope: row.cpu_scope,
+          count: 0, max_wall_ms: 0, max_thread_cpu_ms: null};
+        summary.count++;
+        summary.max_wall_ms = Math.max(summary.max_wall_ms, row.wall_ns / 1e6);
+        if (row.thread_cpu_ns !== null && Number.isFinite(row.thread_cpu_ns)) {
+          summary.max_thread_cpu_ms = Math.max(summary.max_thread_cpu_ms ?? 0, row.thread_cpu_ns / 1e6);
+        }
+        labels.set(key, summary);
+        if (row.wall_ns >= 50e6) slow.push({...row, wall_ms: row.wall_ns / 1e6,
+          approximate_unix_ms: timing ? timing.end_unix_ms + (row.monotonic_ns - timing.end_monotonic_ns) / 1e6 : null});
+      }
+      evidence.push({side, file, record_count: rows.length, partial_final_line,
+        max_reported_lost_events: rows.length ? rows.reduce((maximum, row) => Math.max(maximum, row.lost_events), 0) : null,
+        labels: [...labels.values()], slow_events: slow,
+        shutdown_tail_verified: false});
+    }
+  }
+  return {available: evidence.length > 0, files: evidence,
+    limitations: 'Opt-in probes change timing and need an uninstrumented comparison. Export does not block process shutdown: queued tail records can be lost even without a partial line. Missing records do not establish absence of long polls. Heartbeat CPU is a thread interval; poll CPU is measured around one synchronous poll. Guest-to-wall alignment uses the first scheduler clock sample.'};
+}
 function analyze(root) {
   const scheduler = Object.fromEntries(['client', 'server'].map(side => [side, readScheduler(root, side)]));
   const host = readHost(root);
@@ -153,6 +213,7 @@ function analyze(root) {
     ], scheduler: Object.fromEntries(Object.entries(scheduler).map(([side, data]) => [side,
       {...data, intervals: undefined, summary: summarizeIntervals(data.intervals)}])), samples,
     host,
+    executors: readExecutors(root, scheduler),
     deadline_log_records: events.map(event => ({...event,
       nearby_host: host.intervals.filter(row => row.end_unix_ms >= event.unix_ms - 1000 && row.start_unix_ms <= event.unix_ms + 1000),
       nearby_scheduler: Object.fromEntries(Object.entries(scheduler).map(([side, data]) => [side,
@@ -177,6 +238,37 @@ if (process.argv[2] === '--self-check') {
   assert.equal(summarizeIntervals([observed]).independent_heartbeat.late_50ms_probes, 1);
   assert.equal(summarizeIntervals([result]).independent_heartbeat.max_lateness_ms, null);
   assert.equal(percentile([1, 3, 2], 0.95), 3);
+  assert.deepEqual(executorRows('{"kind":"poll"}\n{"kind":'), {rows: [{kind: 'poll'}], partial_final_line: true});
+  assert.throws(() => executorRows('invalid\n{"kind":"poll"}\n'));
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'candy-executor-analysis-'));
+  try {
+    const directory = path.join(fixture, 'executor-diagnostics', 'client');
+    fs.mkdirSync(directory, {recursive: true});
+    const poll = {kind: 'poll', label: 'actor', pid: 42, tid: 43, monotonic_ns: 2e9,
+      wall_ns: 60e6, thread_cpu_ns: 4e6, cpu_scope: 'poll', ready: false, lost_events: 3};
+    const heartbeat = {...poll, kind: 'heartbeat', monotonic_ns: 1.5e9, wall_ns: 70e6,
+      thread_cpu_ns: null, cpu_scope: 'thread_interval'};
+    const filename = path.join(directory, 'core-42-1.jsonl');
+    const observedScheduler = {client: {intervals: [result]}, server: {intervals: []}};
+    fs.writeFileSync(filename, [poll, heartbeat].map(JSON.stringify).join('\n') + '\n{"kind":');
+    const evidence = readExecutors(fixture, observedScheduler);
+    assert.equal(evidence.available, true);
+    assert.equal(evidence.files[0].record_count, 2);
+    assert.equal(evidence.files[0].partial_final_line, true);
+    assert.equal(evidence.files[0].max_reported_lost_events, 3);
+    assert.equal(evidence.files[0].shutdown_tail_verified, false);
+    assert.equal(evidence.files[0].slow_events[0].approximate_unix_ms, 2000);
+    assert.equal(evidence.files[0].labels[0].max_thread_cpu_ms, 4);
+    assert.equal(evidence.files[0].labels[1].max_thread_cpu_ms, null);
+    const unaligned = readExecutors(fixture, {client: {intervals: []}, server: {intervals: []}});
+    assert.equal(unaligned.files[0].slow_events[0].approximate_unix_ms, null);
+    for (const invalid of [null, {...poll, cpu_scope: 'thread_interval'}, {...poll, thread_cpu_ns: -1}]) {
+      fs.writeFileSync(filename, JSON.stringify(invalid) + '\n');
+      assert.throws(() => readExecutors(fixture, observedScheduler), /invalid executor evidence/);
+    }
+  } finally {
+    fs.rmSync(fixture, {recursive: true});
+  }
   console.log(JSON.stringify({self_check: 'PASS'}));
 } else {
   const [directory, output] = process.argv.slice(2);
