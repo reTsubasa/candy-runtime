@@ -7,6 +7,7 @@ publish, sign, or touch an existing evidence directory.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -20,7 +21,7 @@ from pathlib import Path
 RUNTIME = Path(__file__).resolve().parents[1]
 CORE = RUNTIME.parent / "candy-core"
 IMAGE = os.environ.get("CANDY_BUILD_IMAGE", "candy-core-diag-builder:rust-1.88.0")
-CACHE = RUNTIME / "target-linux-netd-v2"
+CACHE = RUNTIME / "target-linux-release-freeze"
 EXCLUDES = {".git", ".codegraph", "node_modules", "dist"}
 PREFIXES = ("Cargo", ".cargo", "apps/", "crates/", "linux/", "shared/", "scripts/", "vendor/",
             "openwrt/", "interop/")
@@ -54,6 +55,20 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def acquire_build_cache(cache: Path):
+    """Keep frozen release outputs separate from mutable integration builds."""
+    cache.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(cache / ".freeze-build.lock",
+                         os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    lock = os.fdopen(descriptor, "a")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        lock.close()
+        raise RuntimeError(f"frozen release cache is already in use: {cache}") from error
+    return lock
 
 
 def git_state(repo: Path) -> dict[str, str]:
@@ -167,11 +182,21 @@ def self_check() -> None:
             pass
         else:
             raise AssertionError("existing evidence directory was accepted")
+        cache = Path(directory) / "build-cache"
+        with acquire_build_cache(cache):
+            try:
+                acquire_build_cache(cache)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("simultaneous frozen builds shared output cache")
+        with acquire_build_cache(cache):
+            pass
     print(json.dumps({"self_check": "PASS", "checks": [
         "committed HEAD source freeze excludes dirty modifications, deletions, and untracked files",
         "pinned source revision remains stable after HEAD advances",
         "manifest hash roundtrip", "exact signed_cli Cargo artifact selection",
-        "existing evidence directory rejection"]}, indent=2))
+        "existing evidence directory rejection", "exclusive release cache and lock release"]}, indent=2))
 
 
 def ensure_fresh_evidence(evidence: Path) -> None:
@@ -207,8 +232,6 @@ def main() -> int:
         raise SystemExit(str(error))
     if not CORE.is_dir():
         raise SystemExit(f"missing sibling Core checkout: {CORE}")
-    if not CACHE.is_dir():
-        raise SystemExit(f"required Cargo cache is missing: {CACHE}")
     if args.self_check:
         if not source_blobs(CORE) or not source_blobs(RUNTIME):
             raise SystemExit("committed source manifest is empty")
@@ -234,6 +257,7 @@ def main() -> int:
     }
     (evidence / "source-freeze.json").write_text(json.dumps(source_freeze, indent=2) + "\n")
     provenance = {"image": IMAGE, "cache": str(CACHE), "flags": "--release --locked --offline",
+                  "cache_ownership": "dedicated frozen-release cache; exclusive process lock",
                   "runtime_features": ["candy-sdwan-agent/experimental-tunio-rebind"],
                   "artifacts": {}, "git": manifest["revisions"]}
     freeze_metadata = {
@@ -253,7 +277,9 @@ def main() -> int:
               "-v", f"{CACHE}:/build:rw",
               "-v", f"{Path.home()}/.cargo/registry:/usr/local/cargo/registry:ro"]
     name = "candy-freeze-build-" + hashlib.sha256(str(evidence).encode()).hexdigest()[:12]
+    cache_lock = None
     try:
+        cache_lock = acquire_build_cache(CACHE)
         run_build(["docker", "run", "--name", name, "--rm", "--network", "none", "--cpus", "2",
              "--memory", "4g", *mounts, IMAGE, "cargo", "build", "--manifest-path",
              "/workspace/candy-core/Cargo.toml", "--target-dir", "/build", "--release", "--locked", "--offline",
@@ -310,6 +336,8 @@ def main() -> int:
         raise
     finally:
         (evidence / "build-provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
+        if cache_lock is not None:
+            cache_lock.close()
     (evidence / "result.json").write_text(json.dumps({"gate": "BUILD_PASS", "performance": "NOT_RUN",
                                                        "manifest_sha256": manifest_digest}, indent=2) + "\n")
     return 0

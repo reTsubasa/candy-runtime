@@ -166,3 +166,44 @@ Nginx master 通常不承载应用连接数据；本项目当前 Transport maste
   incarnation 的私有目录并验证旧子进程退出。失败证据保留，未据 v5 宣称通过。
 - owner v10 四轮稳态 750 Mbps 对照吞吐与输出完整性通过；未触发续期或候选事务。
   详细范围见 `sdwan-owner-performance-20261015.md`，完整 G0–G6 仍未关闭。
+
+## 9. Nginx 方法的具体落地与恢复边界
+
+| Nginx 的生命周期行为 | Candy 的执行与证据 | 失败时的处理 |
+| --- | --- | --- |
+| HUP 前验证配置并准备资源 | 验证签名和原期限，准备候选进程、入口、远端 lane、本地 owner 与 netd；以实际 receipt 和候选 packet proof 判定就绪 | commit intent 持久化前失败只清理候选，旧授权有效的业务继续 |
+| 启动新代，再让旧代退出 | 所有必要参与者 Prepare 后持久化同一提交决定，核对实际 Commit receipt，再发布新连接路由 | 确认丢失按 UNKNOWN 查询并继续同一决定，不能把超时推定为撤销成功 |
+| 旧 worker 停止接受新工作 | 既禁止新连接，也禁止旧 QUIC 上的新 session；客户端收到明确的排空通知后只把新请求转到新连接 | 普通配额不足不能触发整连接重置；现有 session 的数据和 FIN 继续 |
+| QUIT 后处理已有连接 | 保留旧 transport 至对端关闭或原 drain deadline，汇总连接、reservation、credit 和 task 的实际状态 | deadline 到期只处理匹配的 owner，不停止另一 role/domain 或 TUN |
+| CHLD 后 reap 并重建缺失 worker | 唯一 supervisor 核对 PID/start_ticks/epoch 后回收；有界退避只重建需要的 slot | registration 删除或进程发送退出 ACK 均不能代替实际 reap |
+
+这里不能直接套用 Nginx 的 listener FD 继承来宣称无损升级：现有 master
+仍持有 Quinn 连接状态。正常 reload、worker 排空和 master SIGKILL 必须分开
+测试。SIGKILL 是无关闭通知的黑洞，恢复时间包含已配置的失效检测、重连退避、
+握手和入口激活时间。Linux 默认 keepalive 15 秒、idle timeout 120 秒的测试，
+不能在 10 秒后仅凭未重连就认定永久失效；缩短 fixture 的显式超时也不代表
+生产默认值已经改善。须记录实际配置、检测时间与业务恢复时间。
+
+### 9.1 客户端也是排空契约的参与者
+
+目前服务端 quiesce 使用 `RESOURCE_EXHAUSTED` 拒绝新 session，只证明服务端
+停止接收新工作。这个通用错误不能表达 owner 正在排空；客户端若继续复用旧
+QUIC，新请求可能持续失败到原 drain deadline。完整交接还须明确的、经能力协商
+的 drain/GOAWAY 通知，绑定连接 owner 与原期限，撤销该连接的新请求资格并
+准备替代连接。不得将所有 `RESOURCE_EXHAUSTED` 都当作连接故障，也不能为了
+重试而中断旧连接已有请求。此项在通知及客户端接线完成前保持未关闭。
+
+master 重启回归还发现一次性 speculative TCP 任务与常驻 listener 任务使用
+同一 critical JoinSet；重连后的单个请求结束会被监督器当成客户端服务退出。
+修复须将有限请求放入 attempt 所有的独立 task set，结束时取消并 join，归还
+permit；回归须证明请求正常结束、取消或失败都不终止 listener，后续请求仍可用。
+
+### 9.2 每次变更的验证顺序
+
+1. 先执行状态机、重复命令、旧 epoch、原期限和精确进程身份的窄测。
+2. 在两个隔离端运行连续双向流量，分别注入候选失败、ACK 丢失、worker 退出
+   与 master 重启；保留每次失败证据，核对旧业务和基础设施身份。
+3. 提交确定源码后冻结并构建，复核 source manifest 与六个产物的 hash。
+4. 在无并发构建或测试负载的窗口测量默认和诊断模式；吞吐、输出完整性与
+   恢复时间分别报告，稳态 PASS 不能代替交接 PASS。
+5. 完成同域 1/2/4、mixed、两小时续期及目标平台门禁后，才签名发布或更新生产。
