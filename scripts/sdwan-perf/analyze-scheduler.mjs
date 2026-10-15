@@ -189,6 +189,8 @@ function readExecutors(root, scheduler) {
 function analyze(root) {
   const scheduler = Object.fromEntries(['client', 'server'].map(side => [side, readScheduler(root, side)]));
   const host = readHost(root);
+  const interferenceFile = path.join(root, 'environment-interference.json');
+  const interference = fs.existsSync(interferenceFile) ? JSON.parse(fs.readFileSync(interferenceFile, 'utf8')) : null;
   const events = deadlineLogs(root);
   const samples = [];
   for (const filename of fs.readdirSync(root).filter(name => /^sample-.*\.json$/.test(name) && !/-(before|after)\.json$/.test(name)).sort()) {
@@ -212,7 +214,7 @@ function analyze(root) {
       'Independent guest heartbeat lateness and host event-loop delay show observation windows, not exact packet-event causation or a same-executor heartbeat.',
     ], scheduler: Object.fromEntries(Object.entries(scheduler).map(([side, data]) => [side,
       {...data, intervals: undefined, summary: summarizeIntervals(data.intervals)}])), samples,
-    host,
+    host, environment_interference: interference,
     executors: readExecutors(root, scheduler),
     deadline_log_records: events.map(event => ({...event,
       nearby_host: host.intervals.filter(row => row.end_unix_ms >= event.unix_ms - 1000 && row.start_unix_ms <= event.unix_ms + 1000),
