@@ -64,6 +64,7 @@ def main() -> int:
     parser.add_argument("evidence", type=Path, nargs="?")
     parser.add_argument("test", choices=TESTS, nargs="?", default=TESTS[0])
     parser.add_argument("--self-check", action="store_true")
+    parser.add_argument("--build", type=Path, help="run verified frozen release artifacts directly")
     args = parser.parse_args()
     if args.self_check:
         self_check()
@@ -98,6 +99,29 @@ def main() -> int:
                    "-w", "/workspace/linux/common/apps/candy-tunio", "candy-sdwan-perf-runner:20261013",
                    "timeout", "240", "cargo", "test", "--test", "signed_cli", args.test,
                    "--offline", "--", "--exact", "--ignored", "--nocapture"]
+        if args.build:
+            build = args.build.resolve()
+            if json.loads((build / "result.json").read_text())["gate"] != "BUILD_PASS":
+                raise ValueError("frozen release build has not passed")
+            hashes = json.loads((build / "binary-hashes.json").read_text())
+            paths = {"CANDY_CORE_TEST_BINARY": "candy-core", "CANDY_NETD_TEST_BINARY": "candy-netd",
+                     "CANDY_AGENT_TEST_BINARY": "candy-agent", "CANDY_SIGNED_FIXTURE_BINARY": "sdwan_signed_cli_fixture"}
+            for label in (*paths.values(), "candy-tunio", "signed_cli_helper"):
+                if hashlib.sha256((build / "binaries" / label).read_bytes()).hexdigest() != hashes[label]:
+                    raise ValueError(f"frozen release binary checksum mismatch: {label}")
+            source = json.loads((build / "source-freeze.json").read_text())
+            result["scope"] = "isolated frozen release fixture; no platform or performance acceptance"
+            result["build"] = str(build)
+            result["manifest_sha256"] = source["manifest_sha256"]
+            result["binary_hashes"] = hashes
+            command = ["docker", "run", "--name", name, "--rm", "--network", "none", "--privileged",
+                       "--cpus", "3", "--memory", "3g", "--pids-limit", "512",
+                       "-v", f"{build / 'binaries'}:/binaries:ro", "-v", f"{evidence}:/evidence",
+                       "-e", "CANDY_NETD_ISOLATED_KERNEL_TEST=1", "-e", "CANDY_SIGNED_EVIDENCE_DIR=/evidence"]
+            for variable, label in paths.items():
+                command.extend(["-e", f"{variable}=/binaries/{label}"])
+            command.extend(["candy-sdwan-perf-runner:20261013", "timeout", "240",
+                            "/binaries/signed_cli_helper", "--exact", args.test, "--ignored", "--nocapture"])
         exit_code = bounded_run(command, evidence / "test.log", 300)
         log = (evidence / "test.log").read_text()
         accepted = exit_code == 0 and exactly_one_pass(log, args.test)
