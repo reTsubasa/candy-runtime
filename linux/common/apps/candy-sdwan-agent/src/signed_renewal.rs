@@ -307,6 +307,7 @@ mod linux {
         crate::process_record::publish(io_record_path, &updated_io)?;
         journal.phase = "committed".into();
         publish(journal_path, journal)?;
+        listener_registration::publish_pending(plan, owner_record);
         retire_candidate_record(journal, owner_record)?;
         Ok(())
     }
@@ -741,6 +742,7 @@ mod linux {
                         let deadline = Instant::now() + Duration::from_secs(20);
                         let mut failed = None;
                         loop {
+                            listener_registration::publish_prepared_pending(&previous_plan);
                             exact_ready(&previous_plan, &record, envelope)?;
                             if matches!(
                                 read_core_readiness_with_policy(
@@ -1190,6 +1192,7 @@ mod linux {
             let deadline = Instant::now() + Duration::from_secs(20);
             let mut failed_snapshot = None;
             loop {
+                listener_registration::publish_prepared_pending(&plan);
                 if shutdown_requested() || monotonic_ms()? > cap {
                     bail!("renewal candidate cancelled/expired");
                 }

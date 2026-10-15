@@ -1,0 +1,561 @@
+//! Actual Runtime registrations and PacketPort supervisors behind one listener.
+use super::*;
+use std::io::{Read, Write};
+use std::net::TcpStream;
+
+struct Link(String);
+impl Drop for Link {
+    fn drop(&mut self) {
+        let _ = Command::new("ip").args(["link", "del", &self.0]).status();
+    }
+}
+
+struct Evidence(PathBuf);
+impl Drop for Evidence {
+    fn drop(&mut self) {
+        let Some(destination) = std::env::var_os("CANDY_SIGNED_EVIDENCE_DIR") else {
+            return;
+        };
+        fn copy(source: &Path, target: &Path) -> std::io::Result<()> {
+            fs::create_dir_all(target)?;
+            for entry in fs::read_dir(source)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    copy(&entry.path(), &target.join(entry.file_name()))?;
+                } else if matches!(
+                    entry.path().extension().and_then(|value| value.to_str()),
+                    Some("json" | "log" | "journal" | "domain" | "activation")
+                ) {
+                    fs::copy(entry.path(), target.join(entry.file_name()))?;
+                }
+            }
+            Ok(())
+        }
+        let _ = copy(
+            &self.0,
+            &PathBuf::from(destination).join("mixed-listener-state"),
+        );
+    }
+}
+
+fn spawn(command: &mut Command, path: &Path) -> Process {
+    let log = fs::File::create(path).unwrap();
+    Process(
+        command
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    )
+}
+
+fn prefix(value: &str) -> Ipv4Prefix {
+    let (address, length) = value.split_once('/').unwrap();
+    Ipv4Prefix::new(
+        address.parse::<std::net::Ipv4Addr>().unwrap().octets(),
+        length.parse().unwrap(),
+    )
+    .unwrap()
+}
+
+fn declaration(report: &serde_json::Value) -> PrepareDeclaration {
+    let netd = &report["netd"];
+    let mut routes = netd["local_prefixes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| RouteDeclaration {
+            prefix: prefix(value.as_str().unwrap()),
+            kind: RouteKind::Local,
+        })
+        .chain(
+            netd["remote_routes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| RouteDeclaration {
+                    prefix: prefix(value["destination"].as_str().unwrap()),
+                    kind: RouteKind::Remote,
+                }),
+        )
+        .collect::<Vec<_>>();
+    routes.sort_by_key(|route| (route.prefix, route.kind as u64));
+    PrepareDeclaration {
+        table_id: netd["table_id"].as_u64().unwrap() as u32,
+        overlay_router_ipv4: netd["overlay_router_ipv4"]
+            .as_str()
+            .unwrap()
+            .parse::<std::net::Ipv4Addr>()
+            .unwrap()
+            .octets(),
+        effective_mtu: netd["max_inner_mtu"].as_u64().unwrap() as u16,
+        routes,
+        exclusions: netd["underlay_ipv4_exclusions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| UnderlayExclusion {
+                prefix: prefix(value.as_str().unwrap()),
+                kind: UnderlayKind::HubEndpoint,
+            })
+            .collect(),
+        firewall: FirewallPolicy {
+            allow_forward: true,
+            clamp_tcp_mss: true,
+            require_ipv4_forwarding: true,
+            manage_rp_filter: true,
+        },
+    }
+}
+
+fn probe_proxy() {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let success = (|| -> std::io::Result<()> {
+            let mut stream = TcpStream::connect_timeout(
+                &"127.0.0.1:19002".parse().unwrap(),
+                Duration::from_millis(200),
+            )?;
+            stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+            stream.write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")?;
+            let mut response = [0; 12];
+            stream.read_exact(&mut response)?;
+            if &response[..8] != b"HTTP/1.0" {
+                return Err(std::io::Error::other("proxy HTTP response mismatch"));
+            }
+            Ok(())
+        })()
+        .is_ok();
+        if success {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Proxy failed through the shared listener"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn committed_ack(registry: &Path, seed: u8) -> bool {
+    let name = format!("{seed:02x}").repeat(16);
+    let receipt = status(&registry.join(format!("{name}.domain")));
+    let acknowledgement = status(&registry.join(format!("{name}.activation")));
+    receipt.is_some_and(|receipt| {
+        receipt["prepared_ingress"] == false && acknowledgement.as_ref() == Some(&receipt)
+    })
+}
+
+fn master_workers(pid: u32) -> Vec<candy_process_control::ProcessIdentity> {
+    let marker = format!("CANDY_WORKER_MANAGER_PID={pid}");
+    fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| {
+            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+            let environment = fs::read(entry.path().join("environ")).ok()?;
+            if !environment
+                .split(|byte| *byte == 0)
+                .any(|value| value == marker.as_bytes())
+            {
+                return None;
+            }
+            candy_process_control::process_identity(pid).ok()
+        })
+        .collect()
+}
+
+pub(super) fn verify() {
+    assert_eq!(
+        std::env::var("CANDY_NETD_ISOLATED_KERNEL_TEST").as_deref(),
+        Ok("1")
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+    let _evidence = Evidence(root.to_owned());
+    let bridge = Link(format!("cmx{}", std::process::id()));
+    ip(&["link", "add", &bridge.0, "type", "bridge"]);
+    ip(&["addr", "add", "10.200.0.2/24", "dev", &bridge.0]);
+    ip(&["link", "set", &bridge.0, "up"]);
+    let registry = root.join("registry");
+    let master_directory = root.join("master");
+    for directory in [&registry, &master_directory] {
+        fs::create_dir(directory).unwrap();
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut processes = Vec::new();
+    let mut namespaces = Vec::new();
+    let mut client_names = Vec::new();
+    let mut server_plans = Vec::new();
+    let mut plans = Vec::new();
+    for domain in 0..2 {
+        let base = root.join(format!("domain-{domain}"));
+        fs::create_dir(&base).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        let fixture = base.join("fixture");
+        let mut generator = Command::new(std::env::var("CANDY_SIGNED_FIXTURE_BINARY").unwrap());
+        generator
+            .arg(&fixture)
+            .env(
+                "CANDY_SIGNED_FIXTURE_DOMAIN_SEED",
+                (40 + domain).to_string(),
+            )
+            .env("CANDY_SIGNED_FIXTURE_ENDPOINT", "10.200.0.2:18443")
+            .env("CANDY_SIGNED_FIXTURE_GRANT_TTL_SECS", "600");
+        if domain != 0 {
+            generator.env(
+                "CANDY_SIGNED_FIXTURE_CERT_SOURCE",
+                root.join("domain-0/fixture"),
+            );
+        }
+        let output = generator.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let client = fixture.join("client.toml");
+        let text = fs::read_to_string(&client)
+            .unwrap()
+            .replace("[[peers]]", "[[peers]]\nshared_listener = true");
+        fs::write(&client, &text).unwrap();
+        let inbound = fixture.join("inbound.toml");
+        let text = text
+            .split("[[peers]]")
+            .next()
+            .unwrap()
+            .replace("site.projection", "server.projection");
+        fs::write(&inbound, text).unwrap();
+        fs::set_permissions(&inbound, fs::Permissions::from_mode(0o600)).unwrap();
+        for side in 0..2 {
+            let path = base.join(if side == 0 { "client" } else { "server" });
+            fs::create_dir(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            let namespace = Namespace(format!("cmx-{}-{domain}-{side}", std::process::id()));
+            ip(&["netns", "add", &namespace.0]);
+            ip(&["-n", &namespace.0, "link", "set", "lo", "up"]);
+            ip(&["-n", &namespace.0, "link", "add", "lan0", "type", "dummy"]);
+            let lan = if side == 0 {
+                "10.251.1.10/24"
+            } else {
+                "10.251.2.10/24"
+            };
+            ip(&["-n", &namespace.0, "addr", "add", lan, "dev", "lan0"]);
+            ip(&["-n", &namespace.0, "link", "set", "lan0", "up"]);
+            if side == 0 {
+                let a = format!("cm{domain}a{}", std::process::id());
+                let b = format!("cm{domain}b{}", std::process::id());
+                ip(&["link", "add", &a, "type", "veth", "peer", "name", &b]);
+                ip(&["link", "set", &a, "master", &bridge.0]);
+                ip(&["link", "set", &a, "up"]);
+                ip(&["link", "set", &b, "netns", &namespace.0]);
+                ip(&[
+                    "-n",
+                    &namespace.0,
+                    "addr",
+                    "add",
+                    &format!("10.200.0.{}/24", 10 + domain),
+                    "dev",
+                    &b,
+                ]);
+                ip(&["-n", &namespace.0, "link", "set", &b, "up"]);
+                client_names.push(namespace.0.clone());
+            }
+            let config = if side == 0 { &client } else { &inbound };
+            let output = Command::new(core())
+                .args(["client", "sdwan", "compile-control", "--config"])
+                .arg(config)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let compiled: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let declaration = declaration(&compiled);
+            let domain_id = [40 + domain as u8; 16];
+            let infra_id = [80 + domain as u8 * 2 + side as u8; 16];
+            let ns_path = PathBuf::from(format!("/var/run/netns/{}", namespace.0));
+            let ns = fs::metadata(&ns_path).unwrap();
+            let spec = InfraSpec {
+                infra_id,
+                generation: 1,
+                netns_device: ns.dev(),
+                netns_inode: ns.ino(),
+                overlay_router_ipv4: declaration.overlay_router_ipv4,
+                mtu: declaration.effective_mtu,
+            };
+            private_json(
+                &path.join("domains.json"),
+                &serde_json::json!({"budgets":{"max_domains":1,"front_control_threads":2,"max_control_threads":3,"thread_stack_bytes":262144,"max_total_stack_bytes":786432,"max_pending_control_requests":4,"max_pending_control_bytes":16777216,"max_reserved_fds":128},"domains":[{"domain_id":domain_id,"infra_id":infra_id,"namespace_path":ns_path,"journal_path":path.join("domain.journal"),"table_id":declaration.table_id}]}),
+            );
+            processes.push(spawn(
+                Command::new(std::env::var("CANDY_NETD_TEST_BINARY").unwrap())
+                    .args(["--protocol-v2", "--socket"])
+                    .arg(path.join("netd.sock"))
+                    .args([
+                        "--allowed-uid",
+                        "0",
+                        "--allowed-gid",
+                        "0",
+                        "--domain-config",
+                    ])
+                    .arg(path.join("domains.json")),
+                &path.join("netd.log"),
+            ));
+            wait_socket(&path.join("netd.sock"));
+            let mut plan = serde_json::json!({"schema_version":1,"netd_socket":path.join("netd.sock"),"tunio":env!("CARGO_BIN_EXE_candy-tunio"),"core":core(),"core_config":config,"core_status":path.join("core-status.json"),"binding_file":path.join("binding.json"),"instance_id":domain_id,"infrastructure":spec,"domain_id":domain_id,"io_epoch":1,"worker_epoch":1,"fencing_token":1,"signed_generation":1,"auth_deadline_unix":compiled["authorization_expires_at_unix"],"declaration":declaration,"routing_namespace":ns_path,"independent_supervision":{"control_socket":path.join("io.sock"),"status":path.join("io-status.json"),"process_record":path.join("io-process.json")},"independent_worker":{"control_socket":path.join("core.sock"),"process_record":path.join("process.json")}});
+            if side == 1 {
+                plan["shared_listener"] = serde_json::json!({"directory":registry,"server_config":fixture.join("server.toml"),"worker_id":domain+1});
+                server_plans.push(path.join("plan.json"));
+            }
+            private_json(&path.join("plan.json"), &plan);
+            plans.push(path.join("plan.json"));
+            namespaces.push(namespace);
+        }
+    }
+    let fixture = root.join("domain-0/fixture");
+    let master = root.join("master.toml");
+    // SIGKILL is a QUIC blackhole: negotiate an explicit bounded idle timeout
+    // so the fault gate measures recovery rather than the Linux 120s default.
+    fs::write(&master, format!("listen = \"10.200.0.2:18443\"\ncert_pem = {:?}\nkey_pem = {:?}\n[transport]\nkeep_alive_seconds = 1\nidle_timeout_seconds = 4\n[[users]]\nkey_id = \"alice\"\nsecret = \"shared-listener-test-secret-2026\"\n", fixture.join("server.cert.pem"), fixture.join("server.key.pem"))).unwrap();
+    fs::set_permissions(&master, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut master_index = processes.len();
+    processes.push(spawn(
+        Command::new(core())
+            .args(["server", "proxy-master", "--config"])
+            .arg(&master)
+            .arg("--directory")
+            .arg(&master_directory)
+            .arg("--sdwan-registry-directory")
+            .arg(&registry),
+        &root.join("master.log"),
+    ));
+    wait_socket(&registry.join("listener-master.json"));
+    // Client and server are separate logical hosts. Each Agent owns one
+    // supervisor per domain; their infrastructure identities are independent.
+    for side in ["client", "server"] {
+        let cloud = root.join(format!("cloud-{side}"));
+        fs::create_dir(&cloud).unwrap();
+        fs::set_permissions(&cloud, fs::Permissions::from_mode(0o700)).unwrap();
+        let agent = root.join(format!("agent-{side}.json"));
+        let side_plans: Vec<_> = plans
+            .iter()
+            .filter(|path| path.parent().unwrap().file_name().unwrap() == side)
+            .collect();
+        private_json(
+            &agent,
+            &serde_json::json!({"schema_version":1,"status":root.join(format!("agent-{side}-status.json")),"budgets":{"max_domain_supervisors":2,"max_managed_threads":3,"thread_stack_bytes":1048576,"max_managed_stack_bytes":3145728,"event_capacity":8,"cloud_iteration_deadline_ms":1000,"shutdown_timeout_ms":10000},"cloud":{"state_dir":cloud,"run_dir":root,"interval_ms":100,"retry_initial_ms":100,"retry_max_ms":1000},"domain_plans":side_plans}),
+        );
+        processes.push(spawn(
+            Command::new(std::env::var("CANDY_AGENT_TEST_BINARY").unwrap())
+                .args([
+                    "experimental-runtime-agent",
+                    "--experimental-packet-port-ipc",
+                    "--config",
+                ])
+                .arg(agent),
+            &root.join(format!("agent-{side}.log")),
+        ));
+    }
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        for process in processes.iter_mut().rev().take(2) {
+            assert!(
+                process.0.try_wait().unwrap().is_none(),
+                "Runtime Agent exited during activation"
+            );
+        }
+        let active = (40..42).all(|seed| committed_ack(&registry, seed));
+        let traffic = client_names.iter().all(|namespace| {
+            Command::new("ip")
+                .args([
+                    "netns",
+                    "exec",
+                    namespace,
+                    "ping",
+                    "-q",
+                    "-I",
+                    "10.251.1.10",
+                    "-c",
+                    "1",
+                    "-W",
+                    "1",
+                    "10.251.2.10",
+                ])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        });
+        if active && traffic {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Runtime shared listener failed exact activation and real ICMP"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Keep both actual Runtime workers alive while admitting Proxy work.
+    let transport = fs::read_to_string(fixture.join("transport.toml")).unwrap();
+    let pin = transport
+        .lines()
+        .find(|line| line.starts_with("server_pin ="))
+        .unwrap();
+    let proxy = root.join("proxy.toml");
+    fs::write(&proxy, format!("server = \"10.200.0.2:18443\"\nserver_name = \"peer.candy.test\"\n{pin}\nkey_id = \"alice\"\nsecret = \"shared-listener-test-secret-2026\"\n[[forwards]]\nnetwork = \"tcp\"\nlocal = \"127.0.0.1:19002\"\ntarget = \"127.0.0.1:19001\"\n")).unwrap();
+    fs::set_permissions(&proxy, fs::Permissions::from_mode(0o600)).unwrap();
+    processes.push(spawn(
+        Command::new("python3").args(["-m", "http.server", "19001", "--bind", "127.0.0.1"]),
+        &root.join("http.log"),
+    ));
+    processes.push(spawn(
+        Command::new(core())
+            .args(["client", "--format", "carrier-toml", "--config"])
+            .arg(proxy),
+        &root.join("proxy.log"),
+    ));
+    probe_proxy();
+    let before: Vec<_> = server_plans
+        .iter()
+        .map(|path| status(&path.with_file_name("io-process.json")).unwrap())
+        .collect();
+    let victim = status(&server_plans[0].with_file_name("process.json")).unwrap()["pid"]
+        .as_u64()
+        .unwrap();
+    assert!(Command::new("kill")
+        .args(["-KILL", &victim.to_string()])
+        .status()
+        .unwrap()
+        .success());
+    probe_proxy();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let record = status(&server_plans[0].with_file_name("process.json"));
+        if record
+            .as_ref()
+            .is_some_and(|record| record["pid"].as_u64() != Some(victim))
+            && (40..42).all(|seed| committed_ack(&registry, seed))
+            && client_names.iter().all(|namespace| {
+                Command::new("ip")
+                    .args([
+                        "netns",
+                        "exec",
+                        namespace,
+                        "ping",
+                        "-q",
+                        "-I",
+                        "10.251.1.10",
+                        "-c",
+                        "1",
+                        "-W",
+                        "1",
+                        "10.251.2.10",
+                    ])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            })
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Runtime failed to restore domain worker"
+        );
+    }
+    for (path, before) in server_plans.iter().zip(before) {
+        assert_eq!(
+            status(&path.with_file_name("io-process.json")).unwrap()["pid"],
+            before["pid"],
+            "domain worker recovery replaced TUNIO"
+        );
+    }
+    probe_proxy();
+    for round in 0..2 {
+        let master_identity = status(&registry.join("listener-master.json")).unwrap();
+        let workers: Vec<_> = server_plans
+            .iter()
+            .map(|path| status(&path.with_file_name("process.json")).unwrap())
+            .collect();
+        let old_master_workers = master_workers(processes[master_index].0.id());
+        assert_eq!(
+            old_master_workers.len(),
+            1,
+            "initial Proxy worker population differs"
+        );
+        processes[master_index].0.kill().unwrap();
+        processes[master_index].0.wait().unwrap();
+        master_index = processes.len();
+        processes.push(spawn(
+            Command::new(core())
+                .args(["server", "proxy-master", "--config"])
+                .arg(&master)
+                .arg("--directory")
+                .arg(&master_directory)
+                .arg("--sdwan-registry-directory")
+                .arg(&registry),
+            &root.join(format!("master-restarted-{round}.log")),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let fresh = status(&registry.join("listener-master.json"))
+                .is_some_and(|value| value["instance"] != master_identity["instance"]);
+            let traffic = client_names.iter().all(|namespace| {
+                Command::new("ip")
+                    .args([
+                        "netns",
+                        "exec",
+                        namespace,
+                        "ping",
+                        "-q",
+                        "-I",
+                        "10.251.1.10",
+                        "-c",
+                        "1",
+                        "-W",
+                        "1",
+                        "10.251.2.10",
+                    ])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            });
+            if fresh && (40..42).all(|seed| committed_ack(&registry, seed)) && traffic {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "master restart failed fresh exact ACK and real ICMP"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        for (path, worker) in server_plans.iter().zip(workers) {
+            assert_eq!(
+                status(&path.with_file_name("process.json")).unwrap()["pid"],
+                worker["pid"],
+                "master restart replaced Runtime worker"
+            );
+        }
+        probe_proxy();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while old_master_workers
+            .iter()
+            .any(|identity| candy_process_control::process_is_current(*identity))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "old master left a live orphan worker"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    eprintln!("runtime_shared_listener domains=2 exact_activation_ack=true real_icmp=true proxy_http=true worker_recovery=true tunio_preserved=true master_restarts=2 domain_workers_preserved=true no_live_orphan_workers=true");
+    drop(processes);
+    drop(namespaces);
+}

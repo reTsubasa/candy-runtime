@@ -17,7 +17,8 @@ import time
 RUNTIME = Path(__file__).resolve().parents[1]
 CORE = RUNTIME.parent / "candy-core"
 TESTS = ("signed_cli_shared_pool_scales_and_isolates_four_domains",
-         "signed_cli_shared_host_lifecycle_scale_gate")
+         "signed_cli_shared_host_lifecycle_scale_gate",
+         "signed_cli_runtime_shared_listener_routes_two_domains")
 
 
 def bounded_run(command: list[str], log: Path, seconds: float) -> int:

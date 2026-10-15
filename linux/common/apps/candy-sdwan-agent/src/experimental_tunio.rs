@@ -57,6 +57,8 @@ struct Plan {
     pair_recovery: Option<PairRecovery>,
     #[serde(default)]
     placement: Option<WorkerPlacement>,
+    #[serde(default)]
+    shared_listener: Option<listener_registration::ListenerPlan>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -136,6 +138,8 @@ struct AuthorityProof {
     transaction_id: String,
 }
 
+#[path = "listener_registration.rs"]
+mod listener_registration;
 #[path = "signed_renewal.rs"]
 mod signed_renewal;
 
@@ -475,6 +479,7 @@ fn read_plan(path: &Path) -> Result<Plan> {
             bail!("independent worker requires independent TUN I/O and absolute private paths");
         }
     }
+    listener_registration::validate(&plan)?;
     if let Some(placement) = &plan.placement {
         if !cfg!(all(
             feature = "experimental-tunio-rebind",
@@ -917,6 +922,7 @@ fn spawn_business_worker_with_slot(
                     authority.transaction_id.clone(),
                 ]);
             }
+            arguments.extend(listener_registration::arguments(plan)?);
             let namespace = plan
                 .routing_namespace
                 .as_ref()
@@ -996,6 +1002,7 @@ fn spawn_business_worker_with_slot(
             .arg("--worker-slot-file")
             .arg(placement.slot_file());
     }
+    command.args(listener_registration::arguments(plan)?);
     command
         .spawn()
         .map(crate::shared_worker::BusinessWorker::Dedicated)
@@ -1570,7 +1577,9 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
         &mut netd,
         Operation::InfraEnsure(plan.infrastructure.clone()),
     )?;
-    if plan.authority.is_none() && plan.pair_recovery.is_none() {
+    // Shared inbound bootstrap creates its sole forwarding owner in the signed
+    // transaction after IO acquisition; a legacy pending owner would block it.
+    if plan.authority.is_none() && plan.pair_recovery.is_none() && plan.shared_listener.is_none() {
         expect_ack(
             &mut netd,
             Operation::ForwardPrepare {
@@ -1679,7 +1688,7 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
         }
     }
     #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
-    if plan.pair_recovery.is_some() {
+    if plan.pair_recovery.is_some() || plan.shared_listener.is_some() {
         // Every new IO epoch needs a fresh signed transaction, including a legacy bootstrap.
         drop(worker_socket);
         let result = signed_renewal::run_with_plan(path, plan.clone());
@@ -1713,6 +1722,7 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
             publish_worker_record(&plan, worker.id(), &token)?;
             let readiness_deadline = Instant::now() + Duration::from_secs(20);
             loop {
+                listener_registration::publish_prepared_pending(&plan);
                 if shutdown_requested() {
                     return Ok(());
                 }
@@ -1792,6 +1802,7 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
                     }
                     eprintln!("level=warn code=managed_process_record_write module=process_supervisor detail={error:#}");
                 }
+                listener_registration::publish_pending(&plan, &record_path);
             }
             eprintln!("level=info code=packet_port_activation_committed module=sdwan_activation worker_pid={} tunio_pid={} tunfd_in_worker=false",worker.id(),io_child.id());
             let mut next_renewal = Instant::now();
@@ -1804,6 +1815,9 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
             while !shutdown_requested() {
                 if Instant::now() >= next_plan_check {
                     next_plan_check = Instant::now() + Duration::from_secs(1);
+                    if let Some(worker) = &plan.independent_worker {
+                        listener_registration::publish_pending(&plan, &worker.process_record);
+                    }
                     if plan.independent_worker.is_some()
                         && recovery_inputs(path).is_ok_and(|inputs| inputs != initial_inputs)
                     {
@@ -2204,6 +2218,7 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
     }
     install_shutdown_handlers()?;
     eprintln!("level=info code=core_supervision_adopted module=process_supervisor pid={} controller_epoch={} fencing_token={} auth_deadline_unix={} action=preserve_existing_signed_authorization",managed.pid,adopted.controller_epoch,owner.fencing_token,record.auth_deadline_unix);
+    listener_registration::publish_pending(&plan, &supervision.process_record);
     let mut next_renewal = Instant::now();
     let mut next_plan_check = Instant::now();
     while !shutdown_requested()
@@ -2212,6 +2227,7 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
     {
         if Instant::now() >= next_plan_check {
             next_plan_check = Instant::now() + Duration::from_secs(1);
+            listener_registration::publish_pending(&plan, &supervision.process_record);
             if recovery_inputs(path).is_ok_and(|inputs| inputs != initial_inputs) {
                 return Err(DesiredStateChanged.into());
             }
@@ -2780,6 +2796,14 @@ pub(super) fn rebind_core(path: &Path) -> Result<()> {
     };
     let (io_socket, worker_socket) = UnixDatagram::pair()?;
     let token = uuid::Uuid::new_v4().simple().to_string();
+    if let Some(previous) = &plan.effective_plan_file {
+        plan.effective_plan_file = Some(previous.with_file_name(format!(
+            "rebind-{}-{}-plan.json",
+            plan.worker_epoch,
+            uuid::Uuid::new_v4().simple()
+        )));
+        signed_renewal::publish_plan(&plan)?;
+    }
     let mut child = spawn_business_worker(&plan, &worker_socket, &token)?;
     drop(worker_socket);
     let request = |operation| PacketControlRequest {
@@ -2822,6 +2846,7 @@ pub(super) fn rebind_core(path: &Path) -> Result<()> {
         attached = true;
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
+            listener_registration::publish_prepared_pending(&plan);
             if shutdown_requested() || unix_time()? >= plan.auth_deadline_unix {
                 bail!("Core recovery cancelled or authorization expired");
             }
@@ -2888,6 +2913,7 @@ pub(super) fn rebind_core(path: &Path) -> Result<()> {
                 owner: owner.clone(),
             },
         )?;
+        listener_registration::publish_pending(&plan, &worker.process_record);
         eprintln!("level=info code=core_rebind_committed module=process_supervisor old_pid={} new_pid={} tunio_pid={} owner_epoch={} signed_generation={} auth_deadline_unix={} action=keep_original_tun_and_authorization",old_worker.pid,child.id(),managed_io.pid,plan.worker_epoch,plan.signed_generation,plan.auth_deadline_unix);
         // The shared adoption loop owns lease renewal and complete failure snapshots.
         adopt_worker_with_io(path, true, true)

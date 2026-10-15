@@ -15,6 +15,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[path = "fixtures/candidate_failover.rs"]
 mod candidate_failover;
+#[path = "fixtures/shared_listener.rs"]
+mod shared_listener;
 #[path = "fixtures/shared_pool.rs"]
 mod shared_pool;
 #[path = "fixtures/slot_rotation.rs"]
@@ -30,6 +32,12 @@ fn signed_cli_shared_host_lifecycle_scale_gate() {
 #[ignore = "requires disposable privileged Linux with four real signed domains"]
 fn signed_cli_shared_pool_scales_and_isolates_four_domains() {
     shared_pool::verify_domains();
+}
+
+#[test]
+#[ignore = "requires disposable privileged Linux with actual Runtime mixed-listener domains"]
+fn signed_cli_runtime_shared_listener_routes_two_domains() {
+    shared_listener::verify();
 }
 
 struct Process(Child);
