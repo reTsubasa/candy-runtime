@@ -1,6 +1,7 @@
 //! Packet I/O and authenticated ownership boundaries without Candy transport dependencies.
 #![cfg(unix)]
 
+pub mod executor_diagnostics;
 pub mod fd;
 pub mod packet_port;
 pub mod packet_port_ipc;

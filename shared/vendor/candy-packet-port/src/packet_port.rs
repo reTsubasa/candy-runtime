@@ -157,121 +157,126 @@ impl PacketOutput {
         let metrics = Arc::new(OutputMetrics::default());
         let task_metrics = metrics.clone();
         let queue_depth = Arc::new(AtomicUsize::new(0));
-        let task = tokio::spawn(async move {
-            let mut batch = Vec::with_capacity(OUTPUT_DRAIN_BATCH);
-            loop {
-                let received = tokio::select! {
-                    biased;
-                    changed = epoch_rx.changed() => {
-                        if changed.is_err() { return Ok(()); }
-                        observed_tx.send_replace(*epoch_rx.borrow_and_update());
-                        continue;
-                    }
-                    received = receiver.recv_many(&mut batch, OUTPUT_DRAIN_BATCH) => received,
-                };
-                if received == 0 {
-                    return Ok(());
-                }
-                for mut packet in batch.drain(..) {
-                    if let Some(error) = packet.failure.take() {
-                        return Err(error);
-                    }
-                    if packet.epoch != *epoch_rx.borrow() {
-                        task_metrics.stale_drops.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    }
-                    let write_started = tokio::time::Instant::now();
-                    task_metrics
-                        .queued_write_attempts
-                        .fetch_add(1, Ordering::Relaxed);
-                    record_elapsed(
-                        &task_metrics.queue_wait_micros,
-                        &task_metrics.queue_wait_max_micros,
-                        write_started
-                            .saturating_duration_since(packet.deadline - OUTPUT_WRITE_TIMEOUT),
-                    );
-                    // timeout_at polls its inner future first. Reject expired
-                    // packets before a ready fd can write them, including when
-                    // readiness and the deadline become ready together.
-                    let result = if write_started >= packet.deadline {
-                        Err(())
-                    } else {
-                        match port.try_send_packet(&packet.packet) {
-                            Ok(true) => Ok(Ok(())),
-                            Err(error) => Ok(Err(error)),
-                            Ok(false) => tokio::select! {
-                                biased;
-                                changed = epoch_rx.changed() => {
-                                    if changed.is_err() { return Ok(()); }
-                                    observed_tx.send_replace(*epoch_rx.borrow_and_update());
-                                    task_metrics.stale_drops.fetch_add(1, Ordering::Relaxed);
-                                    continue;
-                                }
-                                _ = tokio::time::sleep_until(packet.deadline) => Err(()),
-                                result = port.send_packet(&packet.packet) => Ok(result),
-                            },
+        let task = tokio::spawn(crate::executor_diagnostics::Observed::new(
+            crate::executor_diagnostics::configured(),
+            "packet_output_writer",
+            async move {
+                let mut batch = Vec::with_capacity(OUTPUT_DRAIN_BATCH);
+                loop {
+                    let received = tokio::select! {
+                        biased;
+                        changed = epoch_rx.changed() => {
+                            if changed.is_err() { return Ok(()); }
+                            observed_tx.send_replace(*epoch_rx.borrow_and_update());
+                            continue;
                         }
+                        received = receiver.recv_many(&mut batch, OUTPUT_DRAIN_BATCH) => received,
                     };
-                    record_elapsed(
-                        &task_metrics.send_elapsed_micros,
-                        &task_metrics.send_elapsed_max_micros,
-                        write_started.elapsed(),
-                    );
-                    match result {
-                        Ok(Ok(())) => {
-                            task_metrics.sent_packets.fetch_add(1, Ordering::Relaxed);
-                            task_metrics
-                                .sent_bytes
-                                .fetch_add(packet.packet.len() as u64, Ordering::Relaxed);
+                    if received == 0 {
+                        return Ok(());
+                    }
+                    for mut packet in batch.drain(..) {
+                        if let Some(error) = packet.failure.take() {
+                            return Err(error);
                         }
-                        Ok(Err(error)) if is_packet_scoped_write_error(&error) => {
-                            let count = task_metrics
-                                .backpressure_drops
-                                .fetch_add(1, Ordering::Relaxed)
-                                + 1;
-                            if count.is_power_of_two() {
-                                tracing::warn!(code = "tun_write_backpressure", module = "sdwan_packet_output",
+                        if packet.epoch != *epoch_rx.borrow() {
+                            task_metrics.stale_drops.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
+                        let write_started = tokio::time::Instant::now();
+                        task_metrics
+                            .queued_write_attempts
+                            .fetch_add(1, Ordering::Relaxed);
+                        record_elapsed(
+                            &task_metrics.queue_wait_micros,
+                            &task_metrics.queue_wait_max_micros,
+                            write_started
+                                .saturating_duration_since(packet.deadline - OUTPUT_WRITE_TIMEOUT),
+                        );
+                        // timeout_at polls its inner future first. Reject expired
+                        // packets before a ready fd can write them, including when
+                        // readiness and the deadline become ready together.
+                        let result = if write_started >= packet.deadline {
+                            Err(())
+                        } else {
+                            match port.try_send_packet(&packet.packet) {
+                                Ok(true) => Ok(Ok(())),
+                                Err(error) => Ok(Err(error)),
+                                Ok(false) => tokio::select! {
+                                    biased;
+                                    changed = epoch_rx.changed() => {
+                                        if changed.is_err() { return Ok(()); }
+                                        observed_tx.send_replace(*epoch_rx.borrow_and_update());
+                                        task_metrics.stale_drops.fetch_add(1, Ordering::Relaxed);
+                                        continue;
+                                    }
+                                    _ = tokio::time::sleep_until(packet.deadline) => Err(()),
+                                    result = port.send_packet(&packet.packet) => Ok(result),
+                                },
+                            }
+                        };
+                        record_elapsed(
+                            &task_metrics.send_elapsed_micros,
+                            &task_metrics.send_elapsed_max_micros,
+                            write_started.elapsed(),
+                        );
+                        match result {
+                            Ok(Ok(())) => {
+                                task_metrics.sent_packets.fetch_add(1, Ordering::Relaxed);
+                                task_metrics
+                                    .sent_bytes
+                                    .fetch_add(packet.packet.len() as u64, Ordering::Relaxed);
+                            }
+                            Ok(Err(error)) if is_packet_scoped_write_error(&error) => {
+                                let count = task_metrics
+                                    .backpressure_drops
+                                    .fetch_add(1, Ordering::Relaxed)
+                                    + 1;
+                                if count.is_power_of_two() {
+                                    tracing::warn!(code = "tun_write_backpressure", module = "sdwan_packet_output",
                                     os_code = error.raw_os_error(), detail = %error,
                                     action = "drop_packet_keep_port", dropped_packets = count);
+                                }
                             }
-                        }
-                        Ok(Err(error)) => return Err(error),
-                        Err(_) => {
-                            let count =
-                                task_metrics.deadline_drops.fetch_add(1, Ordering::Relaxed) + 1;
-                            if count.is_power_of_two() {
-                                tracing::warn!(
-                                    code = "tun_write_deadline",
-                                    module = "sdwan_packet_output",
-                                    port = std::any::type_name::<P>(),
-                                    timeout_stage = if write_started >= packet.deadline {
-                                        "expired_before_write"
-                                    } else {
-                                        "pending_send"
-                                    },
-                                    queue_wait_us = write_started
-                                        .saturating_duration_since(
-                                            packet.deadline - OUTPUT_WRITE_TIMEOUT
-                                        )
-                                        .as_micros()
-                                        as u64,
-                                    send_elapsed_us = write_started.elapsed().as_micros() as u64,
-                                    deadline_overrun_us = tokio::time::Instant::now()
-                                        .saturating_duration_since(packet.deadline)
-                                        .as_micros()
-                                        as u64,
-                                    packet_bytes = packet.packet.len(),
-                                    timeout_ms = OUTPUT_WRITE_TIMEOUT.as_millis() as u64,
-                                    action = "drop_packet_keep_port",
-                                    dropped_packets = count
-                                );
+                            Ok(Err(error)) => return Err(error),
+                            Err(_) => {
+                                let count =
+                                    task_metrics.deadline_drops.fetch_add(1, Ordering::Relaxed) + 1;
+                                if count.is_power_of_two() {
+                                    tracing::warn!(
+                                        code = "tun_write_deadline",
+                                        module = "sdwan_packet_output",
+                                        port = std::any::type_name::<P>(),
+                                        timeout_stage = if write_started >= packet.deadline {
+                                            "expired_before_write"
+                                        } else {
+                                            "pending_send"
+                                        },
+                                        queue_wait_us = write_started
+                                            .saturating_duration_since(
+                                                packet.deadline - OUTPUT_WRITE_TIMEOUT
+                                            )
+                                            .as_micros()
+                                            as u64,
+                                        send_elapsed_us =
+                                            write_started.elapsed().as_micros() as u64,
+                                        deadline_overrun_us = tokio::time::Instant::now()
+                                            .saturating_duration_since(packet.deadline)
+                                            .as_micros()
+                                            as u64,
+                                        packet_bytes = packet.packet.len(),
+                                        timeout_ms = OUTPUT_WRITE_TIMEOUT.as_millis() as u64,
+                                        action = "drop_packet_keep_port",
+                                        dropped_packets = count
+                                    );
+                                }
                             }
                         }
                     }
+                    tokio::task::yield_now().await;
                 }
-                tokio::task::yield_now().await;
-            }
-        });
+            },
+        ));
         Self {
             queue,
             credit,

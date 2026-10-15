@@ -14,7 +14,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "shared/vendor/candy-packet-port"
-PUBLIC_DEPENDENCIES = {"libc", "nix", "serde", "tokio", "tracing", "tempfile"}
+PUBLIC_DEPENDENCIES = {"libc", "nix", "serde", "serde_json", "tokio", "tracing", "tempfile"}
 
 
 def digest(data):

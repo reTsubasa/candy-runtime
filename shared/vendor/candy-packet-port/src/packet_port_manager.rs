@@ -328,6 +328,25 @@ pub async fn run_managed_packet_port_bridge<P: PacketPort>(
 pub async fn run_observed_packet_port_bridge<P: PacketPort>(
     tun: P,
     infrastructure: PacketPortBinding,
+    updates: mpsc::Receiver<PacketPortOwnerUpdate>,
+    shutdown: watch::Receiver<bool>,
+    diagnostics: Option<watch::Sender<PacketBridgeOutputStatus>>,
+) -> io::Result<PacketBridgeCounters> {
+    let executor = crate::executor_diagnostics::configured();
+    let _heartbeat = executor
+        .as_ref()
+        .map(|probe| probe.heartbeat("managed_packet_bridge"));
+    crate::executor_diagnostics::Observed::new(
+        executor,
+        "managed_packet_bridge",
+        run_packet_port_bridge_inner(tun, infrastructure, updates, shutdown, diagnostics),
+    )
+    .await
+}
+
+async fn run_packet_port_bridge_inner<P: PacketPort>(
+    tun: P,
+    infrastructure: PacketPortBinding,
     mut updates: mpsc::Receiver<PacketPortOwnerUpdate>,
     mut shutdown: watch::Receiver<bool>,
     diagnostics: Option<watch::Sender<PacketBridgeOutputStatus>>,
