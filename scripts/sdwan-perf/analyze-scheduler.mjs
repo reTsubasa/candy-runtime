@@ -47,6 +47,12 @@ function interval(before, after) {
   return {start_unix_ms: before.unix_ns / 1e6, end_unix_ms: after.unix_ns / 1e6, elapsed_s,
     cgroup: delta(counters(before.cpu_stat), counters(after.cpu_stat)),
     cpu_pressure_usec: delta(pressure(before), pressure(after)),
+    independent_heartbeat: after.heartbeat ? {
+      probes: after.heartbeat.probes,
+      late_50ms_probes: after.heartbeat.late_50ms_probes,
+      max_lateness_ms: after.heartbeat.max_lateness_ns / 1e6,
+      snapshot_elapsed_ms: after.heartbeat.snapshot_elapsed_ns / 1e6,
+    } : null,
     vm_busy_percent: total > 0 ? 100 * (total - ticks[3] - ticks[4]) / total : null,
     vm_total_ticks: total,
     vm_cpu_count: String(after.vm_softirq || '').split('\n')[0].match(/CPU\d+/g)?.length ?? null,
@@ -95,12 +101,34 @@ function summarizeIntervals(intervals) {
     }
   }
   return {interval_count: intervals.length, observed_seconds: intervals.reduce((sum, row) => sum + row.elapsed_s, 0),
+    independent_heartbeat: {
+      intervals_available: intervals.filter(row => row.independent_heartbeat).length,
+      probes: intervals.reduce((sum, row) => sum + (row.independent_heartbeat?.probes ?? 0), 0),
+      late_50ms_probes: intervals.reduce((sum, row) => sum + (row.independent_heartbeat?.late_50ms_probes ?? 0), 0),
+      max_lateness_ms: intervals.some(row => row.independent_heartbeat)
+        ? Math.max(...intervals.map(row => row.independent_heartbeat?.max_lateness_ms ?? 0)) : null,
+    },
     max_observer_interval_seconds: intervals.length ? Math.max(...intervals.map(row => row.elapsed_s)) : null,
     cgroup: sums, vm_busy_percent_p95: percentile(intervals.map(row => row.vm_busy_percent).filter(Number.isFinite), 0.95),
     threads: [...threads.values()].sort((a, b) => b.runqueue_wait_ms - a.runqueue_wait_ms)};
 }
+function readHost(root) {
+  const filename = path.join(root, 'scheduler-host.jsonl');
+  if (!fs.existsSync(filename)) return {available: false, intervals: []};
+  const rows = fs.readFileSync(filename, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line));
+  const intervals = rows.slice(1).map((row, index) => ({
+    start_unix_ms: rows[index].unix_millis,
+    end_unix_ms: row.unix_millis,
+    elapsed_ms: Number(BigInt(row.monotonic_ns) - BigInt(rows[index].monotonic_ns)) / 1e6,
+    event_loop_samples: row.event_loop_samples,
+    event_loop_max_ms: row.event_loop_max_millis,
+    event_loop_p99_ms: row.event_loop_p99_millis,
+  }));
+  return {available: true, sample_count: rows.length, intervals};
+}
 function analyze(root) {
   const scheduler = Object.fromEntries(['client', 'server'].map(side => [side, readScheduler(root, side)]));
+  const host = readHost(root);
   const events = deadlineLogs(root);
   const samples = [];
   for (const filename of fs.readdirSync(root).filter(name => /^sample-.*\.json$/.test(name) && !/-(before|after)\.json$/.test(name)).sort()) {
@@ -121,9 +149,12 @@ function analyze(root) {
       'iperf timestamps have one-second resolution; sample boundary alignment is approximate.',
       'Deadline logs are sampled; do not sum dropped_packets fields. Status counter deltas establish exact totals.',
       'VM CPU is shared by both containers; CPU quota throttling and scheduler contention are distinct observations.',
+      'Independent guest heartbeat lateness and host event-loop delay show observation windows, not exact packet-event causation or a same-executor heartbeat.',
     ], scheduler: Object.fromEntries(Object.entries(scheduler).map(([side, data]) => [side,
       {...data, intervals: undefined, summary: summarizeIntervals(data.intervals)}])), samples,
+    host,
     deadline_log_records: events.map(event => ({...event,
+      nearby_host: host.intervals.filter(row => row.end_unix_ms >= event.unix_ms - 1000 && row.start_unix_ms <= event.unix_ms + 1000),
       nearby_scheduler: Object.fromEntries(Object.entries(scheduler).map(([side, data]) => [side,
         data.intervals.filter(row => row.end_unix_ms >= event.unix_ms - 1000 && row.start_unix_ms <= event.unix_ms + 1000)]))}))};
 }
@@ -138,6 +169,13 @@ if (process.argv[2] === '--self-check') {
   assert.equal(result.threads[0].runqueue_wait_ms, 20);
   assert.equal(result.cgroup.nr_throttled, 2);
   assert.equal(result.vm_busy_percent, 20);
+  const heartbeating = {...row(2, 10000100, 20000200, 2), heartbeat: {
+    probes: 90, late_50ms_probes: 1, max_lateness_ns: 125000000, snapshot_elapsed_ns: 2000000,
+  }};
+  const observed = interval(row(1, 100, 200, 0), heartbeating);
+  assert.equal(observed.independent_heartbeat.max_lateness_ms, 125);
+  assert.equal(summarizeIntervals([observed]).independent_heartbeat.late_50ms_probes, 1);
+  assert.equal(summarizeIntervals([result]).independent_heartbeat.max_lateness_ms, null);
   assert.equal(percentile([1, 3, 2], 0.95), 3);
   console.log(JSON.stringify({self_check: 'PASS'}));
 } else {
