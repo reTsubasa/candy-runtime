@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawnSync, execFile} from 'node:child_process';
 import {promisify} from 'node:util';
+import {observeHost} from './host-observer.mjs';
 
 const [buildDirectory, destination, mode = 'renewal-smoke'] = process.argv.slice(2);
 if (!buildDirectory || !destination || !['renewal-smoke', 'comparison', 'diagnostic', 'soak'].includes(mode)) {
@@ -31,7 +32,7 @@ const execAsync = promisify(execFile);
 const docker = async (...args) => (await execAsync('docker', args, {encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120000})).stdout;
 const inClient = async (...args) => docker('exec', identity.client, ...args);
 const readPrivate = async filename => JSON.parse(await inClient('cat', filename));
-let identity, stop = false, renewalError, renewalCount = 0, renewalTask;
+let identity, stop = false, renewalError, renewalCount = 0, renewalTask, stopHostObserver;
 const status = async () => {
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
@@ -94,6 +95,8 @@ try {
   write('renewal-run.json', {mode, require_output_diagnostics: requireOutputs, ttl_seconds: ttl, policy_ttl_seconds: policyTtl, renewal_interval_seconds: renewalInterval, rounds, seconds, runner_sha256: crypto.createHash('sha256').update(fs.readFileSync(new URL(import.meta.url))).digest('hex'), scope: 'isolated aarch64 Docker renewal stability; not physical-link acceptance'});
   phase('setup');
   identity = read('run-identity.json');
+  stopHostObserver = observeHost(path.join(root, 'scheduler-host.jsonl'));
+  write('host-observer.json', {sha256: crypto.createHash('sha256').update(fs.readFileSync(new URL('./host-observer.mjs', import.meta.url))).digest('hex'), interval_seconds: 1, event_loop_resolution_millis: 10, scope: 'host aggregate CPU and event-loop delay; no process arguments or credentials'});
   const initial = await status();
   if (initial.record.auth_deadline_unix - Math.floor(Date.now() / 1000) < ttl - 15) throw new Error('initial verified authorization cannot support renewal interval');
   renewalTask = (async () => {
@@ -138,5 +141,6 @@ try {
 } finally {
   stop = true;
   if (renewalTask) await renewalTask;
+  if (stopHostObserver) write('host-observer-result.json', stopHostObserver());
   phase('cleanup');
 }

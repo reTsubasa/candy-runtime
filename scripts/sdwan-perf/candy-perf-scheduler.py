@@ -51,12 +51,36 @@ def main():
     with args.output.open("x") as output:
         count = 0
         next_sample = time.monotonic()
+        probe_interval = min(0.01, args.interval)
+        next_probe = next_sample
+        probes = 0
+        late_probes = 0
+        max_lateness = 0.0
         while args.samples is None or count < args.samples:
-            output.write(json.dumps(sample(), separators=(",", ":")) + "\n")
-            output.flush()
-            count += 1
-            next_sample += args.interval
-            time.sleep(max(0, next_sample - time.monotonic()))
+            now = time.monotonic()
+            lateness = max(0, now - next_probe)
+            probes += 1
+            late_probes += lateness >= 0.05
+            max_lateness = max(max_lateness, lateness)
+            if now >= next_sample:
+                started = time.monotonic_ns()
+                row = sample()
+                row["heartbeat"] = {
+                    "probe_interval_seconds": probe_interval,
+                    "probes": probes,
+                    "late_50ms_probes": late_probes,
+                    "max_lateness_ns": round(max_lateness * 1e9),
+                    "snapshot_elapsed_ns": time.monotonic_ns() - started,
+                }
+                output.write(json.dumps(row, separators=(",", ":")) + "\n")
+                output.flush()
+                count += 1
+                probes = late_probes = 0
+                max_lateness = 0.0
+                next_sample = now + args.interval
+            # Skip missed probes instead of introducing a catch-up busy loop.
+            next_probe = time.monotonic() + probe_interval
+            time.sleep(probe_interval)
 
 
 if __name__ == "__main__":
