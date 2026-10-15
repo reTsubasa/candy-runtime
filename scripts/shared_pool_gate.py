@@ -116,7 +116,8 @@ def main() -> int:
             result["binary_hashes"] = hashes
             command = ["docker", "run", "--name", name, "--rm", "--network", "none", "--privileged",
                        "--cpus", "3", "--memory", "3g", "--pids-limit", "512",
-                       "-v", f"{build / 'binaries'}:/binaries:ro", "-v", f"{evidence}:/evidence",
+                       "-v", f"{build / 'binaries'}:/binaries:ro",
+                       "-v", f"{build / 'binaries'}:/build/release:ro", "-v", f"{evidence}:/evidence",
                        "-e", "CANDY_NETD_ISOLATED_KERNEL_TEST=1", "-e", "CANDY_SIGNED_EVIDENCE_DIR=/evidence"]
             for variable, label in paths.items():
                 command.extend(["-e", f"{variable}=/binaries/{label}"])
