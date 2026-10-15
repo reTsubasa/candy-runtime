@@ -2,7 +2,7 @@
 """Acceptance metrics must retain delayed, failed and missing observations."""
 import unittest
 
-from load import summarize_latency
+from load import stream_plan, summarize_latency
 
 
 class LatencyCohortTest(unittest.TestCase):
@@ -41,6 +41,22 @@ class LatencyCohortTest(unittest.TestCase):
         for rows in (missing, duplicate, outside):
             with self.subTest(rows=rows), self.assertRaisesRegex(RuntimeError, 'offered sequence'):
                 summarize_latency(rows, 10, 11)
+
+
+class LoadMatrixTest(unittest.TestCase):
+    def test_bidirectional_has_equal_simultaneous_streams_on_distinct_connections(self):
+        rows = stream_plan('bidirectional', 16, 4)
+        self.assertEqual(len(rows), 128)
+        self.assertEqual(len({tuple(row.values()) for row in rows}), 128)
+        for connection in range(4):
+            for direction in ('upload', 'download'):
+                self.assertEqual([row['flow'] for row in rows if row['connection'] == connection
+                                  and row['direction'] == direction], list(range(16)))
+
+    def test_invalid_matrix_cannot_silently_produce_an_empty_pass(self):
+        for args in [('both', 1, 1), ('upload', 0, 1), ('download', 4, 0)]:
+            with self.assertRaises(ValueError):
+                stream_plan(*args)
 
 
 if __name__ == '__main__':

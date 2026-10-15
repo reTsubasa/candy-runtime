@@ -18,8 +18,15 @@ python3 scripts/proxy-gate/run.py --binary /absolute/path/candy-core \
   --evidence /absolute/path/new-evidence-directory
 ```
 
-Add `--performance` for the 1/2/4 worker, upload/download, 1/4 flow matrix.
-Bulk throughput uses one client QUIC connection with one or four TCP streams.
+Add `--performance` for the 1/2/4 worker, upload/download/bidirectional,
+1/4/16 flow matrix. `--connections 1` uses one client QUIC connection;
+`--connections 4` uses four independent packaged Runtime client processes.
+Run both connection matrices in separate evidence directories. Every connection
+has the selected number of streams **per direction**; bidirectional starts
+upload and download simultaneously with one common measurement window.
+Report each direction separately, including its 900 Mbps direct and 800 Mbps
+Proxy floor and comparison to B0. Aggregate throughput cannot hide one slow
+direction. Every independent Rust client's resources enter CPU/RSS/FD totals.
 `--workers`, `--directions` and `--flows` select diagnostic subsets; sixteen
 streams are also supported. Direct, same-source in-process B0 and master/worker rounds are interleaved and the
 first measured kind alternates between repeats. A subset never establishes
@@ -137,9 +144,10 @@ after receiver confirmation. Half-close remains part of the integrity contract;
 sender counters cross the fixture's shared evidence mount, not application bytes.
 The benchmark proves distribution separately; it does not claim aggregate
 multi-connection throughput scaling from the single-connection bulk result.
-The default matrix still lacks a released-artifact B0 comparison, bidirectional
-traffic, sixteen streams and long-duration renewal. Duration
-compliance alone is not full G3-G6 acceptance.
+The default invocation uses one connection; a four-connection run, a
+released-artifact B0 comparison and long-duration renewal still require
+separate evidence. Duration compliance and a selected subset alone are not
+full G3-G6 acceptance. A valid passing subset is recorded as `INCOMPLETE`.
 
 Raw receiver, hash and timestamp observations, command outcomes, process logs,
 applied status and binary/wrapper/script SHA-256 are retained. Earlier runner

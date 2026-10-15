@@ -200,22 +200,33 @@ def summarize_latency(rows, start, end):
             'generator_max_lag_ms': maximum_lag}
 
 
-def run_round(kind, direction, flows, seconds, case, warmup):
+def stream_plan(direction, flows, connections=1):
+    if direction not in ('upload', 'download', 'bidirectional') or flows not in (1, 4, 16) or connections not in (1, 4):
+        raise ValueError('invalid bounded load matrix')
+    directions = ('upload', 'download') if direction == 'bidirectional' else (direction,)
+    return [{'connection': connection, 'direction': axis, 'flow': flow}
+            for connection in range(connections) for axis in directions for flow in range(flows)]
+
+
+def run_round(kind, direction, flows, seconds, case, warmup, connections=1):
     sockets = []
     latency_process = None
     result = {'gate': 'FAIL', 'kind': kind, 'direction': direction, 'flows': flows,
               'scope': 'shared Linux monotonic clock; two isolated namespaces',
               'block_bytes': BLOCK, 'seconds': seconds, 'warmup_seconds': warmup,
+              'independent_connections': connections, 'flows_per_connection_per_direction': flows,
               'generator_cpu_affinity': sorted(os.sched_getaffinity(0))}
     try:
-        address = (SERVER, PORT) if kind == 'direct' else ('127.0.0.1', 19303 if kind == 'baseline' else 15303)
+        plan = stream_plan(direction, flows, connections)
         clock_checks = []
-        for index in range(flows):
+        for index, stream in enumerate(plan):
+            address = (SERVER, PORT) if kind == 'direct' else (
+                '127.0.0.1', (19303 if kind == 'baseline' else 15303) + stream['connection'] * 100)
             conn = socket.create_connection(address, timeout=5)
             sockets.append(conn)
             conn.settimeout(10)
             before = time.monotonic()
-            write_json(conn, {'direction': direction, 'seed': f'{case}:{index}'})
+            write_json(conn, {'direction': stream['direction'], 'seed': f'{case}:{index}'})
             ready = read_json(conn)
             after = time.monotonic()
             if not ready['ready'] or not before - .01 <= ready['monotonic'] <= after + .01:
@@ -232,8 +243,8 @@ def run_round(kind, direction, flows, seconds, case, warmup):
                  '--start', str(start), '--end', str(end)],
                 stdout=output, stderr=error_output, start_new_session=True)
             result['latency_process_pid'] = latency_process.pid
-            with concurrent.futures.ThreadPoolExecutor(max_workers=flows) as executor:
-                transfers = [executor.submit(transfer, conn, direction == 'upload',
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(plan)) as executor:
+                transfers = [executor.submit(transfer, conn, plan[index]['direction'] == 'upload',
                                             f'{case}:{index}', start, end, warmup)
                              for index, conn in enumerate(sockets)]
                 receivers = [future.result(timeout=seconds + warmup + 15) for future in transfers]
@@ -249,11 +260,15 @@ def run_round(kind, direction, flows, seconds, case, warmup):
                     raise RuntimeError('missing confirmed sender kernel counters')
                 time.sleep(.01)
             receiver['sender_tcp_info'] = json.loads(path.read_text())
+            receiver.update(plan[index])
         result.update(clock_checks=clock_checks, receiver_streams=receivers,
                       latency_observations=rows, start=start, end=end)
         summary = summarize_latency(rows, start, end)
         payload = sum(row['measured_payload_bytes'] for row in receivers)
         result.update(receiver_mbps=payload * 8 / seconds / 1e6,
+                      receiver_mbps_by_direction={axis: sum(row['measured_payload_bytes'] for row in receivers
+                                                           if row['direction'] == axis) * 8 / seconds / 1e6
+                                                  for axis in sorted({stream['direction'] for stream in plan})},
                       measured_payload_bytes=payload, payload_integrity='PASS',
                       loaded_latency=summary)
         maximum_lag = summary['generator_max_lag_ms']
@@ -285,7 +300,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['target', 'round', 'latency'])
     parser.add_argument('--kind', choices=['direct', 'baseline', 'proxy'], default='proxy')
-    parser.add_argument('--direction', choices=['upload', 'download'], default='download')
+    parser.add_argument('--direction', choices=['upload', 'download', 'bidirectional'], default='download')
+    parser.add_argument('--connections', type=int, choices=[1, 4], default=1)
     parser.add_argument('--flows', type=int, choices=[1, 4, 16], default=1)
     parser.add_argument('--seconds', type=int, default=10)
     parser.add_argument('--warmup', type=int, default=10)
@@ -305,7 +321,7 @@ def main():
             '127.0.0.1', 19000 if args.kind == 'baseline' else 15000)
         print(json.dumps(latency(address, args.start, args.end)))
         return 0
-    result = run_round(args.kind, args.direction, args.flows, args.seconds, args.case, args.warmup)
+    result = run_round(args.kind, args.direction, args.flows, args.seconds, args.case, args.warmup, args.connections)
     print(json.dumps(result))
     return 0 if result['gate'] == 'PASS' else 1
 

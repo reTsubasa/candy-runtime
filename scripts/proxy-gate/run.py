@@ -22,8 +22,10 @@ def main():
     parser.add_argument('--rounds', type=int, default=5)
     parser.add_argument('--warmup', type=int, default=10)
     parser.add_argument('--workers', type=int, nargs='+', choices=(1, 2, 4), default=[1, 2, 4])
-    parser.add_argument('--directions', nargs='+', choices=('upload', 'download'), default=['upload', 'download'])
-    parser.add_argument('--flows', type=int, nargs='+', choices=(1, 4, 16), default=[1, 4])
+    parser.add_argument('--directions', nargs='+', choices=('upload', 'download', 'bidirectional'), default=['upload', 'download', 'bidirectional'])
+    parser.add_argument('--flows', type=int, nargs='+', choices=(1, 4, 16), default=[1, 4, 16])
+    parser.add_argument('--connections', type=int, choices=(1, 4), default=1,
+                        help='independent Runtime clients; run both 1 and 4 connection matrices for acceptance')
     parser.add_argument('--scaling-attempts', type=int, choices=range(1, 13), default=12)
     parser.add_argument('--image', default='candy-proxy-netem-runner:20261015')
     parser.add_argument('--pin-cpus', action='store_true',
@@ -52,12 +54,14 @@ def main():
     owned = []
     observers = []
     baseline_owned = False
+    extra_clients = []
     performance_started = False
     rows, perf = [], []
     result = {'schema_version': 1, 'gate': 'FAIL', 'client': 'Runtime candy-client -> Rust candy-core client',
               'scope': 'isolated aarch64 Linux containers with 1 Gbps veth; no physical-platform acceptance',
               'deprecated_profiles': ['legacy_datagram_only_without_fragmentation_or_stream_fallback'],
               'requested_matrix': {'workers': args.workers, 'directions': args.directions,
+                                   'independent_connections': args.connections,
                                    'flows': args.flows, 'rounds': args.rounds,
                                    'seconds': args.seconds, 'warmup_seconds': args.warmup},
               'release_acceptance': 'INCOMPLETE',
@@ -126,6 +130,9 @@ def main():
 
     def stop():
         nonlocal baseline_owned
+        for label in reversed(extra_clients):
+            guest(client, 'stop', label=label)
+        extra_clients.clear()
         if baseline_owned:
             guest(client, 'stop', label='baseline')
             guest(server, 'stop', label='baseline-master')
@@ -135,6 +142,18 @@ def main():
                 guest(client, 'stop', label=label)
         guest(client, 'stop')
         guest(server, 'stop', label='master')
+
+    def service_snapshot(name, label):
+        snapshot = json.loads(guest(name, 'snapshot', label=label).stdout)
+        if name == client:
+            kind = 'baseline' if label == 'baseline' else 'proxy'
+            for index in range(1, args.connections):
+                extra = json.loads(guest(name, 'snapshot', label=f'bench-{kind}-{index}').stdout)
+                snapshot['processes'].extend(extra['processes'])
+            identities = [(row['pid'], row['start_ticks']) for row in snapshot['processes']]
+            if len(identities) != len(set(identities)):
+                raise RuntimeError('independent client resource snapshots overlap')
+        return snapshot
 
     def scaling(workers, case):
         for attempt in range(args.scaling_attempts):
@@ -338,27 +357,36 @@ def main():
                 baseline_tree = json.loads(guest(server, 'snapshot', label='baseline-master').stdout)
                 if len(baseline_tree['processes']) != 1:
                     raise RuntimeError('in-process baseline spawned unexpected child processes')
+                for kind in ('proxy', 'baseline'):
+                    for index in range(1, args.connections):
+                        extra_label = f'bench-{kind}-{index}'
+                        guest(client, 'client', profile='recommended', label=extra_label)
+                        extra_clients.append(extra_label)
+                        ready(extra_label, port=(19000 if kind == 'baseline' else 15000) + index * 100,
+                              process_labels=(extra_label,))
+                        write(f'{extra_label}-w{workers}-verified-status.json', status('recommended', extra_label))
                 for direction in args.directions:
                     for flows in args.flows:
                         for round_id in range(args.rounds):
                             for kind in (('direct', 'baseline', 'proxy') if round_id % 2 == 0 else ('proxy', 'baseline', 'direct')):
-                                label = f'{kind}-w{workers}-{direction}-p{flows}-r{round_id}'
+                                label = f'{kind}-w{workers}-{direction}-p{flows}-c{args.connections}-r{round_id}'
                                 process_labels = [('client', client, 'baseline' if kind == 'baseline' else 'client'),
                                                   ('server', server, 'baseline-master' if kind == 'baseline' else 'master')]
-                                before = {side: json.loads(guest(name, 'snapshot', label=process_label).stdout)
+                                before = {side: service_snapshot(name, process_label)
                                           for side, name, process_label in process_labels}
                                 status_path = root / 'recommended' / ('baseline-status.json' if kind == 'baseline' else 'client-status.json')
                                 status_before = json.loads(status_path.read_text())
                                 measured = dex(client, 'python3', '/gate/load.py', 'round',
                                                '--kind', kind, '--direction', direction,
                                                '--flows', str(flows), '--seconds', str(args.seconds),
+                                               '--connections', str(args.connections),
                                                '--case', label, '--warmup', str(args.warmup), timeout=args.seconds + args.warmup + 40,
                                                check=False)
                                 raw = json.loads(measured.stdout)
                                 raw['client_status_before'] = status_before
                                 raw['service_before'] = before
                                 raw['service_after'] = {
-                                    side: json.loads(guest(name, 'snapshot', label=process_label).stdout)
+                                    side: service_snapshot(name, process_label)
                                     for side, name, process_label in process_labels}
                                 if args.pin_cpus:
                                     for side, cpus in [('client', '0-2'), ('server', '3-5')]:
@@ -395,6 +423,8 @@ def main():
                                                           ticks / after['clock_ticks'] / delivered_gib}
                                 perf.append({'kind': kind, 'workers': workers, 'direction': direction,
                                              'flows': flows, 'round': round_id, 'receiver_mbps': mbps,
+                                             'independent_connections': args.connections,
+                                             'receiver_mbps_by_direction': raw['receiver_mbps_by_direction'],
                                              'loaded_latency': latency, 'payload_integrity': 'PASS',
                                              'measurement_window': [raw['start'], raw['end']],
                                              'service_resources': resource})
@@ -419,24 +449,36 @@ def main():
                         proxy_cpu = median(cpu(x) for x in sample if x['kind'] == 'proxy')
                         latency_pass = all(x['loaded_latency']['p99_ms'] <= max(1.2 * baseline_p99, baseline_p99 + 2)
                                            for x in sample if x['kind'] == 'proxy')
+                        axes = ('upload', 'download') if direction == 'bidirectional' else (direction,)
+                        per_direction = {
+                            axis: {kind: median(x['receiver_mbps_by_direction'][axis]
+                                                for x in sample if x['kind'] == kind)
+                                   for kind in ('direct', 'baseline', 'proxy')}
+                            for axis in axes}
                         groups.append({'workers': workers, 'direction': direction, 'flows': flows,
+                                       'independent_connections': args.connections,
+                                       'direction_median_mbps': per_direction,
                                        'direct_median_mbps': direct, 'proxy_median_mbps': proxy,
                                        'baseline_median_mbps': baseline,
                                        'direct_p99_ms': direct_p99, 'proxy_p99_ms': proxy_p99,
                                        'baseline_p99_ms': baseline_p99,
                                        'baseline_cpu_seconds_per_measured_gib': baseline_cpu,
                                        'proxy_cpu_seconds_per_measured_gib': proxy_cpu,
-                                       'architecture_goodput_gate': 'PASS' if proxy >= baseline * .95 else 'FAIL',
+                                       'architecture_goodput_gate': 'PASS' if all(x['proxy'] >= x['baseline'] * .95 for x in per_direction.values()) else 'FAIL',
                                        'cpu_gate': 'PASS' if proxy_cpu <= baseline_cpu * 1.2 else 'FAIL',
                                        'latency_gate': 'PASS' if latency_pass else 'FAIL',
-                                       'goodput_gate': 'PASS' if direct >= 900 and proxy >= 800 else 'FAIL'})
+                                       'goodput_gate': 'PASS' if all(x['direct'] >= 900 and x['proxy'] >= 800 for x in per_direction.values()) else 'FAIL'})
             result['goodput'] = groups
             result['performance_observed_gate'] = 'PASS' if all(
                 all(x[key] == 'PASS' for key in ('goodput_gate', 'latency_gate', 'architecture_goodput_gate', 'cpu_gate'))
                 for x in groups) else 'FAIL'
             result['performance_gate'] = result['performance_observed_gate']
             result['measurement_duration_standard_met'] = args.seconds >= 60 and args.rounds >= 5 and args.warmup >= 10
-            if not result['measurement_duration_standard_met'] and result['performance_gate'] == 'PASS':
+            result['requested_matrix_complete'] = (set(args.workers) == {1, 2, 4}
+                and set(args.directions) == {'upload', 'download', 'bidirectional'}
+                and set(args.flows) == {1, 4, 16})
+            result['connection_matrix'] = 'separate evidence required for both --connections 1 and 4'
+            if (not result['measurement_duration_standard_met'] or not result['requested_matrix_complete']) and result['performance_gate'] == 'PASS':
                 result['performance_gate'] = 'INCOMPLETE'
         else:
             result['performance_gate'] = 'NOT_RUN'

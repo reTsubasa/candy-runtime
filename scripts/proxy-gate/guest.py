@@ -236,6 +236,14 @@ def configure(workers, profile):
         host, port = forward['local'].rsplit(':', 1)
         forward['local'] = f'{host}:{int(port) + 4000}'
     write_json(directory / 'baseline.json', baseline)
+    for index in range(1, 4):
+        for kind, original in [('proxy', config), ('baseline', baseline)]:
+            extra = json.loads(json.dumps(original))
+            extra['name'] = f'independent-{kind}-{index}'
+            for forward in extra['forwards']:
+                host, port = forward['local'].rsplit(':', 1)
+                forward['local'] = f'{host}:{int(port) + index * 100}'
+            write_json(directory / f'bench-{kind}-{index}.json', extra)
     for label in ('bad_auth', 'bad_pin'):
         bad = json.loads(json.dumps(config))
         bad['nodes'][0]['auth' if label == 'bad_auth' else 'pin'] = (

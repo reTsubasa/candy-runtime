@@ -23,13 +23,13 @@ Neither API existence nor passing a related fixture closes an end-to-end gate.
 
 | Priority | Gap | Required change or verification |
 | --- | --- | --- |
-| P0 | Legacy `serve_peer_commit_barrier` sends Ready/CommitAck without proving staged/installed actor state | Connect the authenticated responder to actor-owned prepare/commit/query receipts; bind identity, transaction, candidate hash, fence and original deadline. Lost ACK must query/retry that original context. Keep the candidate capabilities unadvertised until the real two-end gate passes |
+| P0 | Legacy peer replacement has no staged/installed actor proof | Unsafe success removed: ordinary responders return tuple-bound Abort, keep the transport and do not advance its fence; outbound hot replacement is rejected before ordinary OPEN can evict the old remote lane. Still connect the authenticated candidate initiator to actor prepare/commit/query receipts and pass the real two-end gate before enabling capabilities |
 | P0 | UNKNOWN after process restart blocks replacement but does not rebuild the original coordinator's actor/transport | Reconcile the persisted original tuple against live participant receipts; reconstruct only authorized matching context; preserve old valid forwarding and TUN; do not convert absence of a reply into Abort or invent a fresh transaction |
 | P0 | Full same-domain make-before-break remains incomplete | Integrate Runtime caller, remote staged attachment, candidate selector, PacketPort/netd commit and exact Installed confirmation. A prepared listener receipt is not proof of user forwarding or remote installation |
 | P1 | Same-domain 1/2/4/2/1 continuous scaling | Implement/validate the domain worker set with unique peer/prefix owners, sticky sessions, bounded target reservation, drain and exact OS reap. Four independent domains or static Proxy worker counts do not close this gate |
 | P1 | Complete negotiated Proxy drain on Linux | Run retained-tail/FIN, unsent-Open withdrawal, failed replacement auth, existing UDP ownership and final reap with actual Linux Runtime clients. Keep feature bit 20 off until supported callers pass |
 | P1 | Frozen mixed-role failure and quota chain | Repeat two signed Runtime domains plus Proxy on one listener with current frozen binaries. Inject per-role exhaustion/slow worker/death while proving healthy-role traffic and unchanged TUN infrastructure |
-| P1 | Performance floor and architecture cost | Use interleaved direct, same-source in-process B0 and worker paths; 10 s warmup, 60 s samples, five repeats. Enforce >=800 Mbps, <=5% goodput regression, <=20% CPU increase and original p99 criterion. Add bidirectional, 16-stream and independent-connection aggregate groups |
+| P1 | Performance floor and architecture cost | Runner now supports simultaneous bidirectional, 16 streams per connection per direction, and four independent packaged Rust clients, with every client's resource cost and per-direction floors. Actual full valid measurements remain required: direct/B0/worker, 10 s warmup, 60 s samples, five repeats, >=800 Mbps, <=5% goodput regression, <=20% CPU increase and original p99 criterion |
 | P1 | Long-duration renewal | Two hours of actual signed renewal and mixed traffic; retain PID/start identities, authorization deadlines, TUN identity, bytes/FD/credit trends and all fault/recovery observations |
 | P2 | Dead master generation directory recovery | Add bounded control-plane cleanup only with exact dead master and exited child proofs, private ownership/modes and no-follow traversal. Preserve unknown generations; never unlink a live dispatch endpoint to make startup succeed |
 | P2 | Cross-platform package acceptance | Current Linux arm64 Docker evidence does not verify x86_64/OpenWrt ARMv7/IPQ40xx/Android installation, rollback or physical performance. Use the corresponding builds and dedicated platform gates |
@@ -82,6 +82,16 @@ correction. A fresh full valid measurement is still needed, along with the
 implementation gaps listed above.
 
 ## Rollout Boundary
+
+The P0 containment patch bounds candidate reply delivery to two seconds and
+the original authorization deadline, handles shutdown/transport loss, and
+retains the original controller/receipt on uncertain delivery. Process-bound
+version 2 authorization caps reject reused Quinn IDs and recreated owner tuples
+after actor restart. This prevents false recovery; it does not reconstruct a
+lost actor or close the UNKNOWN recovery gate. Core application 93 and runtime
+317 tests pass, including actual QUIC rejection followed by data on the same
+connection. See Core `docs/sdwan-p0-containment-20261015.md` for the intentional
+outbound hot-replacement restriction and remaining integration work.
 
 Master still owns Quinn state. A master restart requires reconnection and is not
 an nginx-style lossless executable handoff. Existing ordinary production
