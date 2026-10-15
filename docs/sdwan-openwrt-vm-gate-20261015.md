@@ -1,0 +1,116 @@
+# OpenWrt VM Platform Evidence, 2026-10-15
+
+## Scope
+
+This gate adds a disposable, actual OpenWrt/procd environment. It does not
+substitute a lifecycle probe for the production Agent/Core implementation.
+The worker in the procd case is a shell lifecycle probe. The infrastructure
+process is the current static x86_64 musl `candy-netd`.
+
+The kernel case executes the real ignored Rust test
+`real_linux_tun_survives_forward_revoke_and_netd_restart` from
+`candy-netd/tests/infrastructure_v2.rs`. It exercises actual TUN and Linux
+network state, with the service reconstructed from its journal in the test
+process. This is distinct from production signed configuration, Cloud
+renewal, a complete Agent/Core packet path, or TUN recovery under procd.
+
+## Trusted Environment
+
+- Checked the official release directory: both 25.12.4 and 25.12.5 exist;
+  25.12.5 is the latest stable 25.12.x listed at verification time.
+- Image: `openwrt-25.12.5-x86-64-generic-ext4-combined.img.gz`.
+- SHA256: `23e2538e8ab0eb52dfed1c65d608ecdb71ffd432dd54885da138ae67cd9e4461`.
+- Official `sha256sums` verified using usign key `b5043e70f9a75cde`.
+  The public key is pinned in the runner, independently obtained from the
+  official `openwrt/keyring` repository, Git blob
+  `82d7677e2370c7abf87e70abd2e77c4daf660331`.
+- QEMU 9.0.0, x86_64 TCG, one vCPU, 512 MiB, snapshot disk.
+- User networking has `restrict=on`; the only host forward binds 127.0.0.1.
+  No production addresses, credentials, routing, or TUN devices are used.
+- A fresh SSH key and known_hosts are created per VM and removed afterward.
+  Child process groups are stopped and reaped on completion or timeout.
+
+## Build Evidence
+
+`scripts/build_openwrt_netd_gate.py` copies source into a private temporary
+directory and limits Cargo to one job. It keeps the source workspace lock
+unchanged. The initial locked build correctly rejected the pending logging
+dependency changes. The isolated offline build resolved those dependencies
+and saved both locks and a full source-file SHA256 map.
+
+- Compiler: Rust 1.93.1, LLVM 21.1.8, native macOS rust-lld.
+- Target: `x86_64-unknown-linux-musl`; no ELF interpreter, static PIE.
+- Source HEAD at capture: `8eb0b5f0cbf67849db50bea890901dffc6fc23a3` plus
+  the source-file hashes in the build report.
+- netd SHA256: `8830f85acbe8226886f97fb0cca97605a77ac4f0e52dd655668e8f69b449bddf`.
+- Kernel test SHA256: `f76de1e9272107c977c05a61b2d9b66db21a063e006f80b269404409bd081949`.
+- The test lock adds ten packages required by tracing-subscriber. This is
+  a platform test build, not a signed release or Rust 1.88 compatibility gate.
+
+## Results
+
+| Case | Result | Boundary |
+| --- | --- | --- |
+| Runner manifest/ELF input checks | 4/4 PASS | Missing/duplicate checksum, wrong arch, dynamic interpreter rejected |
+| Official image checksum/signature | PASS | Actual official image, not a fixture |
+| Real procd lifecycle, v3 and v7 | PASS | Current real netd; lifecycle probe worker |
+| Real Linux TUN/journal case, v7 | PASS | 1 actual kernel test passed in 6.31 seconds |
+| Official offline APK repository trust, v7 | PASS | ip-full/libbpf1/libelf1/kmod-tun; no trust bypass |
+| Production candy.init plus real Agent/Core | NOT RUN | Requires signed product activation and complete x86 artifacts |
+| Upgrade, rollback and config retention on real OpenWrt | NOT RUN | Existing mocks alone do not close this gate |
+| IPQ40xx hardware | NOT RUN | Generic QEMU ARM is not an IPQ40xx replacement |
+| Android Rust integration and upgrade signer | NOT RUN / signer conflict | See offline audit |
+
+The procd case checks repeated start does not duplicate/replace instances,
+worker SIGKILL recovery, netd SIGKILL recovery, no cascading restart,
+bounded persistent-fault retries, and explicit recovery after removing the
+fault. The kernel case checks actual interface/address/route continuity and
+an already connected UDP socket through forwarding guard and journal recovery.
+
+## Retained Failed Attempts
+
+- v1: image download and signature PASS; console bootstrap was interrupted.
+  The initial report is a download-only report, not a VM execution verdict.
+- v2: console activation succeeded, but bootstrap ran before br-lan existed;
+  interrupted and VM reaped. The runner now waits for the interface.
+- v4: an early SSH handshake exceeded five seconds; VM reaped. The runner
+  now retries individual handshakes within the overall deadline.
+- v5: local package installation failed with `UNTRUSTED signature`.
+  OpenWrt package trust is carried by signed repository indexes; no
+  `--allow-untrusted` bypass was used. The runner now includes the official
+  base/kmods indexes and performs offline repository installation.
+- v6: the harness recorded an old PID after asynchronous stop/start, causing
+  an incorrect infrastructure-restart assertion. The harness now waits for
+  both old processes to exit and clears readiness before a fresh start.
+  The original failure and logs remain retained; v7 passed the corrected gate.
+
+The v7 report records two persistent-fault attempts before procd's configured
+crash bound stopped the probe, successful explicit recovery, and a reaped VM.
+All downloaded package/index hashes are recorded in the report. The static
+build source map, resolved lock SHA256 and lock diff are retained under
+`docs/artifacts/sdwan-20261015/openwrt-musl-build-v1/`; the official image
+checksum manifest, signature and key are retained in `openwrt-official-image-v1/`.
+
+One implementation issue remains separately tracked: `--probe-socket` only
+connects then closes, producing `netd_v2_request_failed` warnings. A subsequent
+fix must use a read-only protocol request and validate the response. The v7
+results describe the exact pre-fix netd hash above.
+
+All raw attempts remain under `docs/artifacts/sdwan-20261015/openwrt-vm-v*/`.
+
+## Reproduce
+
+```sh
+python3 scripts/openwrt_vm_gate_test.py
+python3 scripts/build_openwrt_netd_gate.py \
+  --out /tmp/candy-openwrt-netd-build --kernel-test
+python3 scripts/openwrt_vm_gate.py \
+  --out /tmp/candy-openwrt-platform-gate --timeout 360 \
+  --netd /tmp/candy-openwrt-netd-build/candy-netd \
+  --kernel-test /tmp/candy-openwrt-netd-build/kernel-test
+```
+
+The runner downloads only bounded official artifacts. Repository signatures
+must be accepted by the trust keys already present in the authenticated
+OpenWrt image. The result always keeps `whole_platform=NOT_RUN` until the
+remaining production integration cases have separate evidence.

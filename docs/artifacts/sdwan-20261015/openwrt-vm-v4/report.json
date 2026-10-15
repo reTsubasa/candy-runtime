@@ -1,0 +1,32 @@
+{
+  "status": "FAIL",
+  "scope": "OpenWrt real procd with lifecycle probe; optional real netd; no complete SD-WAN acceptance",
+  "whole_platform": "NOT_RUN",
+  "runner_sha256": "863b04588f50f5f52d75e7e9f7ede389c943974610f60ea340b1285aa780fabd",
+  "guest_script_sha256": "4a517eaa098e88def0921bbe683a65fe81a716db5346fd8397abe25a0ef16959",
+  "remaining": [
+    "packaged production init integration",
+    "signed Agent/Core/TUN packet path",
+    "update and rollback",
+    "IPQ40xx physical platform",
+    "Android Rust integration"
+  ],
+  "official_image": {
+    "release": "25.12.5",
+    "url": "https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-25.12.5-x86-64-generic-ext4-combined.img.gz",
+    "sha256": "23e2538e8ab0eb52dfed1c65d608ecdb71ffd432dd54885da138ae67cd9e4461",
+    "manifest_sha256": "0787db220cdc4a2e2d0ba8c19e8e28f2ee88e67d464a159e78974e323824d5b5",
+    "usign_fingerprint": "b5043e70f9a75cde",
+    "signature_verified": true
+  },
+  "qemu": {
+    "vcpus": 1,
+    "memory_mib": 512,
+    "snapshot": true,
+    "guest_egress": "restricted",
+    "ssh_bind": "127.0.0.1",
+    "timeout_s": 300
+  },
+  "qemu_process_reaped": true,
+  "error": "TimeoutExpired: Command '['ssh', '-F', '/dev/null', '-i', '/var/folders/ht/sp1p14p103d2hh5x2k_mrbnr0000gn/T/candy-openwrt-gate-nj4cfpfn/id_ed25519', '-p', '51549', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'UserKnownHostsFile=/var/folders/ht/sp1p14p103d2hh5x2k_mrbnr0000gn/T/candy-openwrt-gate-nj4cfpfn/known_hosts', 'root@127.0.0.1', 'true']' timed out after 5 seconds"
+}

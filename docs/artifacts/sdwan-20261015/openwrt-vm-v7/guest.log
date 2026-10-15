@@ -1,0 +1,4 @@
+stage=procd_start
+stage=official_offline_packages
+stage=real_linux_tun_kernel_test
+PASS narrow real procd lifecycle gate; full SD-WAN platform NOT RUN

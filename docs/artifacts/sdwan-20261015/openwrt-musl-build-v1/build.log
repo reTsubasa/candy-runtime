@@ -1,0 +1,12 @@
+     Locking 10 packages to latest compatible versions
+      Adding aho-corasick v1.1.4
+      Adding matchers v0.2.0
+      Adding nu-ansi-term v0.50.3
+      Adding regex-automata v0.4.16
+      Adding regex-syntax v0.8.11
+      Adding sharded-slab v0.1.7
+      Adding thread_local v1.1.10
+      Adding tracing-log v0.2.0
+      Adding tracing-subscriber v0.3.23
+      Adding valuable v0.1.1
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.32s

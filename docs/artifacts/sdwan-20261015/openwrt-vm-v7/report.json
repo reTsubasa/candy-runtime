@@ -1,0 +1,96 @@
+{
+  "status": "PASS_NARROW_PROCD",
+  "scope": "OpenWrt real procd with lifecycle probe; optional real netd; no complete SD-WAN acceptance",
+  "whole_platform": "NOT_RUN",
+  "runner_sha256": "eb38b7bc7d9e6aab5ced51942447f0dc7d4df00eae66d004a9a420cc4c8f3d76",
+  "guest_script_sha256": "7be4610dc3e76af751dd6069b689280bb168f6f4fb03beba9d638cac5d7af8c6",
+  "remaining": [
+    "packaged production init integration",
+    "signed Agent/Core/TUN packet path",
+    "update and rollback",
+    "IPQ40xx physical platform",
+    "Android Rust integration"
+  ],
+  "official_image": {
+    "release": "25.12.5",
+    "url": "https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-25.12.5-x86-64-generic-ext4-combined.img.gz",
+    "sha256": "23e2538e8ab0eb52dfed1c65d608ecdb71ffd432dd54885da138ae67cd9e4461",
+    "manifest_sha256": "0787db220cdc4a2e2d0ba8c19e8e28f2ee88e67d464a159e78974e323824d5b5",
+    "usign_fingerprint": "b5043e70f9a75cde",
+    "signature_verified": true
+  },
+  "kernel_packages": [
+    {
+      "url": "https://downloads.openwrt.org/releases/25.12.5/packages/x86_64/base/packages.adb",
+      "sha256": "2ae87a1c06a16ef53e5a8b993cf096a814db1ac991538b71cd0795a965d7b611",
+      "trust": "guest signed APK repository verification required"
+    },
+    {
+      "url": "https://downloads.openwrt.org/releases/25.12.5/packages/x86_64/base/ip-full-6.18.0-r2.apk",
+      "sha256": "ccb056ae416635ceeedec2bf1d137c1b9a181069f818e0f1404547e8e16ad22d",
+      "trust": "guest signed APK repository verification required"
+    },
+    {
+      "url": "https://downloads.openwrt.org/releases/25.12.5/packages/x86_64/base/libbpf1-1.6.2-r1.apk",
+      "sha256": "60511f7f251599c0c27246aaa3c2cc46f267d52dd76070195eb9f707124f1699",
+      "trust": "guest signed APK repository verification required"
+    },
+    {
+      "url": "https://downloads.openwrt.org/releases/25.12.5/packages/x86_64/base/libelf1-0.192-r1.apk",
+      "sha256": "27690446490fb6adaef378f0840c8146132261ffd8aa2d145be6351b374a72b7",
+      "trust": "guest signed APK repository verification required"
+    },
+    {
+      "url": "https://downloads.openwrt.org/releases/25.12.5/packages/x86_64/base/libmnl0-1.0.5-r1.apk",
+      "sha256": "971eb9cffd0f85f0b2efb285cc1e2aeaef53c57d4f91fc0c8465e347592d5411",
+      "trust": "guest signed APK repository verification required"
+    },
+    {
+      "url": "https://downloads.openwrt.org/releases/25.12.5/packages/x86_64/base/zlib-1.3.1-r1.apk",
+      "sha256": "2e72549472ec1c1aee38a149f5757aa0a216a6978bf3cd567312538cdee78d5f",
+      "trust": "guest signed APK repository verification required"
+    },
+    {
+      "url": "https://downloads.openwrt.org/releases/25.12.5/packages/x86_64/base/libcap-2.69-r1.apk",
+      "sha256": "ebdac94c4c55789fc6fa3166d588b3fd53cbb665d9d304f36d58aa00a017183c",
+      "trust": "guest signed APK repository verification required"
+    },
+    {
+      "url": "https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/kmods/6.12.94-1-a7bc15f451f9652701ba04af9cfb0b95/packages.adb",
+      "sha256": "396d8d908ed765664564a86df328ed55d5b7390ea5dfc00dac2931cc3bc3172d",
+      "trust": "guest signed APK repository verification required"
+    },
+    {
+      "url": "https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/kmods/6.12.94-1-a7bc15f451f9652701ba04af9cfb0b95/kmod-tun-6.12.94-r1.apk",
+      "sha256": "5c2c0bb48ba096334c139615db8470e51a5247c63ef747f3297a637b8f286d1b",
+      "trust": "guest signed APK repository verification required"
+    }
+  ],
+  "qemu": {
+    "vcpus": 1,
+    "memory_mib": 512,
+    "snapshot": true,
+    "guest_egress": "restricted",
+    "ssh_bind": "127.0.0.1",
+    "timeout_s": 360
+  },
+  "netd_sha256": "8830f85acbe8226886f97fb0cca97605a77ac4f0e52dd655668e8f69b449bddf",
+  "kernel_test_sha256": "f76de1e9272107c977c05a61b2d9b66db21a063e006f80b269404409bd081949",
+  "guest": {
+    "pid1": "procd",
+    "openwrt": "25.12.5",
+    "real_netd": true,
+    "worker_payload": "lifecycle_probe",
+    "duplicate_start_idempotent": true,
+    "worker_sigkill_recovered": true,
+    "worker_failure_preserves_infrastructure": true,
+    "infrastructure_sigkill_recovered": true,
+    "infrastructure_restart_preserves_worker": true,
+    "persistent_fault_bounded": true,
+    "fault_attempts": 2,
+    "manual_recovery_after_fault": true,
+    "kernel_tun_guard_and_journal_recovery": "PASS",
+    "whole_platform": "NOT_RUN"
+  },
+  "qemu_process_reaped": true
+}
