@@ -15,8 +15,22 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[path = "fixtures/candidate_failover.rs"]
 mod candidate_failover;
+#[path = "fixtures/shared_pool.rs"]
+mod shared_pool;
 #[path = "fixtures/slot_rotation.rs"]
 mod slot_rotation;
+
+#[test]
+#[ignore = "requires disposable privileged Linux with actual shared Core domains"]
+fn signed_cli_shared_host_lifecycle_scale_gate() {
+    shared_pool::verify();
+}
+
+#[test]
+#[ignore = "requires disposable privileged Linux with four real signed domains"]
+fn signed_cli_shared_pool_scales_and_isolates_four_domains() {
+    shared_pool::verify_domains();
+}
 
 struct Process(Child);
 impl Drop for Process {

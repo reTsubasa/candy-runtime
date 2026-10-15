@@ -65,6 +65,8 @@ struct WorkerPlacement {
     revision: u64,
     target_worker_id: u64,
     pool_directory: PathBuf,
+    #[serde(default)]
+    shared: Option<crate::shared_worker::SharedWorker>,
 }
 
 impl WorkerPlacement {
@@ -253,10 +255,7 @@ pub(super) fn recovery_disposition(path: &Path) -> Result<RecoveryDisposition> {
             }
         };
         records += 1;
-        let current = process_is_current(ProcessIdentity {
-            pid: record.pid,
-            start_ticks: record.process_start_ticks,
-        });
+        let current = record.business_is_current()?;
         if current {
             record.validate_identity(executable, unix_time()?)?;
             if record.policy_generation != plan.signed_generation
@@ -699,12 +698,54 @@ fn publish_worker_record(plan: &Plan, pid: u32, token: &str) -> Result<()> {
     record.packet_binding_file = Some(plan.binding_file.clone());
     record.effective_plan_file = plan.effective_plan_file.clone();
     record.authorization_snapshot_sha256 = plan.authorization_snapshot_sha256.clone();
+    bind_shared_record(plan, &mut record);
     crate::process_record::publish(&worker.process_record, &record)?;
     confirm_registration(&record, &worker.control_socket, plan.auth_deadline_unix)?;
     if plan.placement.is_some() {
         validate_worker_placement(plan, &record, &record.private_status()?)?;
     }
     Ok(())
+}
+
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+fn bind_shared_record(plan: &Plan, record: &mut crate::process_record::ManagedProcessRecord) {
+    record.shared_worker = plan
+        .placement
+        .as_ref()
+        .and_then(|placement| placement.shared.clone());
+    record.shared_domain_instance = record.shared_worker.as_ref().and_then(|_| {
+        plan.independent_worker
+            .as_ref()
+            .map(|worker| worker.control_socket.clone())
+    });
+}
+
+fn business_is_current(
+    plan: &Plan,
+    identity: candy_process_control::ProcessIdentity,
+) -> Result<bool> {
+    if !candy_process_control::process_is_current(identity) {
+        return Ok(false);
+    }
+    if let Some(host) = plan
+        .placement
+        .as_ref()
+        .and_then(|placement| placement.shared.as_ref())
+    {
+        anyhow::ensure!(
+            host.identity == identity,
+            "shared worker live identity differs"
+        );
+        return crate::shared_worker::domain_running(
+            host,
+            &plan
+                .independent_worker
+                .as_ref()
+                .context("shared worker domain control absent")?
+                .control_socket,
+        );
+    }
+    Ok(true)
 }
 
 #[cfg(target_os = "linux")]
@@ -784,6 +825,9 @@ fn reserve_worker_slot(plan: &Plan) -> Result<Option<File>> {
     let Some(placement) = &plan.placement else {
         return Ok(None);
     };
+    if placement.shared.is_some() {
+        return Ok(None);
+    }
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -809,7 +853,11 @@ fn reserve_worker_slot(plan: &Plan) -> Result<Option<File>> {
     Ok(Some(file))
 }
 
-fn spawn_business_worker(plan: &Plan, socket: &UnixDatagram, token: &str) -> Result<Child> {
+fn spawn_business_worker(
+    plan: &Plan,
+    socket: &UnixDatagram,
+    token: &str,
+) -> Result<crate::shared_worker::BusinessWorker> {
     spawn_business_worker_with_slot(plan, socket, token, reserve_worker_slot(plan)?)
 }
 
@@ -818,7 +866,75 @@ fn spawn_business_worker_with_slot(
     socket: &UnixDatagram,
     token: &str,
     slot: Option<File>,
-) -> Result<Child> {
+) -> Result<crate::shared_worker::BusinessWorker> {
+    if let Some(placement) = &plan.placement {
+        if let Some(host) = &placement.shared {
+            let worker = plan
+                .independent_worker
+                .as_ref()
+                .context("shared worker requires private domain control")?;
+            let mut arguments = vec![
+                "run".to_owned(),
+                "--experimental-packet-port-ipc".to_owned(),
+                "--experimental-independent-worker".to_owned(),
+            ];
+            for (name, value) in [
+                ("--config", plan.core_config.display().to_string()),
+                (
+                    "--packet-port-binding-file",
+                    plan.binding_file.display().to_string(),
+                ),
+                ("--status", plan.core_status.display().to_string()),
+                ("--readiness-token", token.to_owned()),
+                (
+                    "--worker-control-socket",
+                    worker.control_socket.display().to_string(),
+                ),
+                (
+                    "--worker-auth-deadline-unix",
+                    plan.auth_deadline_unix.to_string(),
+                ),
+                (
+                    "--worker-placement-revision",
+                    placement.revision.to_string(),
+                ),
+            ] {
+                arguments.extend([name.to_owned(), value]);
+            }
+            if let Some(recovery) = &plan.pair_recovery {
+                arguments.extend([
+                    "--worker-auth-deadline-mono-ms".to_owned(),
+                    recovery.auth_deadline_mono_ms.to_string(),
+                ]);
+            }
+            if let Some(authority) = &plan.authority {
+                arguments.extend([
+                    "--worker-authority-revision".to_owned(),
+                    authority.revision.to_string(),
+                    "--worker-authority-sha256".to_owned(),
+                    authority.sha256.clone(),
+                    "--worker-transaction-id".to_owned(),
+                    authority.transaction_id.clone(),
+                ]);
+            }
+            let namespace = plan
+                .routing_namespace
+                .as_ref()
+                .map(File::open)
+                .transpose()?
+                .map(std::os::fd::OwnedFd::from);
+            return Ok(crate::shared_worker::BusinessWorker::Shared(
+                crate::shared_worker::SharedDomain::start(
+                    host.clone(),
+                    &worker.control_socket,
+                    token,
+                    &arguments,
+                    socket.as_raw_fd(),
+                    namespace.as_ref(),
+                )?,
+            ));
+        }
+    }
     let mut command = Command::new(&plan.core);
     enter_routing_namespace(&mut command, plan)?;
     protect_child_lifetime(&mut command);
@@ -880,7 +996,10 @@ fn spawn_business_worker_with_slot(
             .arg("--worker-slot-file")
             .arg(placement.slot_file());
     }
-    command.spawn().context("spawn packet-port business worker")
+    command
+        .spawn()
+        .map(crate::shared_worker::BusinessWorker::Dedicated)
+        .context("spawn packet-port business worker")
 }
 
 fn create_binding(plan: &Plan) -> Result<()> {
@@ -897,6 +1016,13 @@ fn create_binding(plan: &Plan) -> Result<()> {
 }
 
 fn stop(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+fn stop_business(child: &mut crate::shared_worker::BusinessWorker) {
     if child.try_wait().ok().flatten().is_none() {
         let _ = child.kill();
     }
@@ -1633,6 +1759,7 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
                 record.packet_binding_file = Some(plan.binding_file.clone());
                 record.effective_plan_file = plan.effective_plan_file.clone();
                 record.authorization_snapshot_sha256 = plan.authorization_snapshot_sha256.clone();
+                bind_shared_record(&plan, &mut record);
                 let record_path = plan.independent_worker.as_ref().map_or_else(
                     || plan.core_status.with_extension("process.json"),
                     |worker| worker.process_record.clone(),
@@ -1753,7 +1880,7 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
             Ok(())
         })();
         if !preserve_worker {
-            stop(&mut worker);
+            stop_business(&mut worker);
         }
         result
     })();
@@ -2000,53 +2127,87 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
             return Err(error.context(ManagedProofPending));
         }
     }
-    expect_ack(
-        &mut netd,
-        Operation::ForwardPrepare {
-            infra_id: plan.infrastructure.infra_id,
-            infra_generation: plan.infrastructure.generation,
-            owner: owner.clone(),
-            declaration: plan.declaration.clone(),
-        },
-    )?;
     let mut snapshot = None;
-    let ready_deadline = Instant::now() + Duration::from_secs(20);
-    while snapshot.is_none() {
-        sync_failed_prefixes(
-            &mut netd,
-            &plan,
-            managed.pid,
-            &token,
-            &owner,
-            managed,
-            &mut snapshot,
-        )?;
-        if snapshot.is_none() {
-            if shutdown_requested()
-                || !process_is_current(managed)
-                || Instant::now() >= ready_deadline
-            {
-                return Err(ManagedProofPending.into());
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-    }
-    if plan.authority.is_some() {
-        signed_renewal::commit_authorized(&plan, &record, &owner, &mut netd)?;
-    } else {
+    let preparation = (|| -> Result<()> {
         expect_ack(
             &mut netd,
-            Operation::ForwardCommit {
+            Operation::ForwardPrepare {
+                infra_id: plan.infrastructure.infra_id,
+                infra_generation: plan.infrastructure.generation,
                 owner: owner.clone(),
+                declaration: plan.declaration.clone(),
             },
         )?;
+        let ready_deadline = Instant::now() + Duration::from_secs(20);
+        while snapshot.is_none() {
+            sync_failed_prefixes(
+                &mut netd,
+                &plan,
+                managed.pid,
+                &token,
+                &owner,
+                managed,
+                &mut snapshot,
+            )?;
+            if snapshot.is_none() {
+                if shutdown_requested()
+                    || !business_is_current(&plan, managed)?
+                    || Instant::now() >= ready_deadline
+                {
+                    return Err(ManagedProofPending.into());
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+        if plan.authority.is_some() {
+            signed_renewal::commit_authorized(&plan, &record, &owner, &mut netd)?;
+        } else {
+            expect_ack(
+                &mut netd,
+                Operation::ForwardCommit {
+                    owner: owner.clone(),
+                },
+            )?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = preparation {
+        // Adoption has no renewal journal. Retire only its exact uncommitted
+        // candidate so a dead business process cannot poison later recovery.
+        match netd.exchange(Operation::ForwardStatus) {
+            Ok((
+                Body::ForwardStatus {
+                    candidate_owner: Some(candidate),
+                    ..
+                },
+                None,
+            )) if candidate == owner => {
+                if let Err(cleanup) = expect_ack(
+                    &mut netd,
+                    Operation::ForwardRevoke {
+                        owner: owner.clone(),
+                    },
+                ) {
+                    return Err(cleanup.context(format!(
+                        "adoption candidate cleanup pending after {error:#}"
+                    )));
+                }
+            }
+            Ok(_) => (),
+            Err(cleanup) => {
+                return Err(cleanup.context(format!(
+                    "adoption candidate inspection pending after {error:#}"
+                )))
+            }
+        }
+        return Err(error);
     }
     install_shutdown_handlers()?;
     eprintln!("level=info code=core_supervision_adopted module=process_supervisor pid={} controller_epoch={} fencing_token={} auth_deadline_unix={} action=preserve_existing_signed_authorization",managed.pid,adopted.controller_epoch,owner.fencing_token,record.auth_deadline_unix);
     let mut next_renewal = Instant::now();
     let mut next_plan_check = Instant::now();
     while !shutdown_requested()
-        && process_is_current(managed)
+        && business_is_current(&plan, managed)?
         && monotonic_ms()? < owner.auth_deadline_mono_ms
     {
         if Instant::now() >= next_plan_check {
@@ -2105,14 +2266,14 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
         thread::sleep(Duration::from_millis(250));
     }
     if !shutdown_requested()
-        && !process_is_current(managed)
+        && !business_is_current(&plan, managed)?
         && unix_time()? < record.auth_deadline_unix
         && cfg!(feature = "experimental-tunio-rebind")
     {
         return Err(CoreRecoveryRequired.into());
     }
     expect_ack(&mut netd, Operation::ForwardRevoke { owner })?;
-    if process_is_current(managed) {
+    if business_is_current(&plan, managed)? {
         exchange(
             &supervision.control_socket,
             managed,
@@ -2359,7 +2520,7 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
         pid: old_worker.pid,
         start_ticks: old_worker.process_start_ticks,
     };
-    if process_is_current(worker_identity) {
+    if old_worker.business_is_current()? {
         old_worker.validate_infrastructure_identity(&plan.core)?;
         let endpoint = old_worker
             .effective_plan_file
@@ -2384,15 +2545,15 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
             )?;
         }
         let deadline = Instant::now() + Duration::from_secs(2);
-        while process_is_current(worker_identity) && Instant::now() < deadline {
+        while old_worker.business_is_current()? && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
         }
-        if process_is_current(worker_identity) {
+        if old_worker.business_is_current()? {
             return Err(ManagedProofPending.into());
         }
     }
     // A surviving Core can retain the old socket. Retire it before releasing any queue lease.
-    if process_is_current(io_identity) || process_is_current(worker_identity) {
+    if process_is_current(io_identity) || old_worker.business_is_current()? {
         return Err(ManagedProofPending.into());
     }
     // Core cannot bind over a socket left by an abrupt exit. Only unlink a proven dead,
@@ -2483,10 +2644,7 @@ pub(super) fn rebind_core(path: &Path) -> Result<()> {
         .independent_worker
         .as_ref()
         .context("effective Core plan absent")?;
-    if process_is_current(ProcessIdentity {
-        pid: old_worker.pid,
-        start_ticks: old_worker.process_start_ticks,
-    }) {
+    if old_worker.business_is_current()? {
         bail!("refusing replacement of a live Core process epoch");
     }
     if io_record.policy_generation != plan.signed_generation
@@ -2704,6 +2862,7 @@ pub(super) fn rebind_core(path: &Path) -> Result<()> {
         record.packet_binding_file = Some(plan.binding_file.clone());
         record.effective_plan_file = plan.effective_plan_file.clone();
         record.authorization_snapshot_sha256 = plan.authorization_snapshot_sha256.clone();
+        bind_shared_record(&plan, &mut record);
         if plan.effective_plan_file.is_some() {
             signed_renewal::publish_plan(&plan)?;
         }
@@ -2740,7 +2899,7 @@ pub(super) fn rebind_core(path: &Path) -> Result<()> {
     {
         return result;
     }
-    stop(&mut child);
+    stop_business(&mut child);
     if result.is_err() {
         let _ = expect_ack(&mut netd, Operation::ForwardRevoke { owner });
         if attached {
@@ -2878,6 +3037,7 @@ mod snapshot_tests {
             revision: 3,
             target_worker_id: 1,
             pool_directory: "/private/pool".into(),
+            shared: None,
         };
         assert!(!placement_changed(Some(&current), Some(&current)).unwrap());
         let mut next = current.clone();

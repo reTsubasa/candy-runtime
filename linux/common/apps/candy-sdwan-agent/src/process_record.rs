@@ -42,6 +42,10 @@ pub struct ManagedProcessRecord {
     #[serde(default)]
     pub authorization_snapshot_sha256: Option<String>,
     pub auth_deadline_unix: u64,
+    #[serde(default)]
+    pub shared_worker: Option<crate::shared_worker::SharedWorker>,
+    #[serde(default)]
+    pub shared_domain_instance: Option<PathBuf>,
 }
 
 #[cfg(target_os = "linux")]
@@ -75,6 +79,26 @@ fn process_identity(_: u32) -> Result<(u64, u32, u64, u64)> {
 }
 
 impl ManagedProcessRecord {
+    pub fn business_is_current(&self) -> Result<bool> {
+        if !candy_process_control::process_is_current(candy_process_control::ProcessIdentity {
+            pid: self.pid,
+            start_ticks: self.process_start_ticks,
+        }) {
+            return Ok(false);
+        }
+        match (&self.shared_worker, &self.shared_domain_instance) {
+            (Some(host), Some(instance)) => {
+                anyhow::ensure!(
+                    host.identity.pid == self.pid
+                        && host.identity.start_ticks == self.process_start_ticks,
+                    "shared business record host differs"
+                );
+                crate::shared_worker::domain_running(host, instance)
+            }
+            (None, None) => Ok(true),
+            _ => anyhow::bail!("shared business record incomplete"),
+        }
+    }
     pub fn private_status(&self) -> Result<serde_json::Value> {
         read_private_json(&self.status_path, MAX_STATUS_BYTES)
     }
@@ -99,6 +123,8 @@ impl ManagedProcessRecord {
         }
         Ok(Self {
             schema_version: 1,
+            shared_worker: None,
+            shared_domain_instance: None,
             pid,
             process_start_ticks,
             uid,

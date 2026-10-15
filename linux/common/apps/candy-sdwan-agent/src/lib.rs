@@ -3,6 +3,8 @@ mod cloud_plan_bridge;
 mod experimental_tunio;
 mod process_record;
 mod runtime_agent;
+mod shared_pool;
+mod shared_worker;
 #[cfg(any(all(feature = "experimental-tunio-rebind", target_os = "linux"), test))]
 mod signed_snapshot;
 use candy_netd_client::{IpcError, NetdClient};

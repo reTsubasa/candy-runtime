@@ -132,7 +132,14 @@ mod linux {
             pid: record.pid,
             start_ticks: record.process_start_ticks,
         };
-        if !process_is_current(identity) {
+        if !record.business_is_current()? {
+            if let (Some(host), Some(instance)) =
+                (&record.shared_worker, &record.shared_domain_instance)
+            {
+                if candy_process_control::process_is_current(host.identity) {
+                    crate::shared_worker::forget_domain(host, instance)?;
+                }
+            }
             return Ok(());
         }
         record.validate_infrastructure_identity(&plan.core)?;
@@ -153,18 +160,25 @@ mod linux {
             )?;
         }
         let deadline = Instant::now() + Duration::from_secs(2);
-        while process_is_current(identity) && Instant::now() < deadline {
+        while record.business_is_current()? && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
         }
-        if process_is_current(identity) {
+        if record.business_is_current()? {
             bail!("code=renewal_old_core_stop_pending module=process_supervisor detail=authenticated stop did not retire old Core within deadline");
         }
-        unsafe {
-            nix::libc::waitpid(
-                identity.pid as i32,
-                std::ptr::null_mut(),
-                nix::libc::WNOHANG,
-            );
+        if let (Some(host), Some(instance)) =
+            (&record.shared_worker, &record.shared_domain_instance)
+        {
+            crate::shared_worker::forget_domain(host, instance)?;
+        }
+        if record.shared_worker.is_none() {
+            unsafe {
+                nix::libc::waitpid(
+                    identity.pid as i32,
+                    std::ptr::null_mut(),
+                    nix::libc::WNOHANG,
+                );
+            }
         }
         Ok(())
     }
@@ -224,10 +238,7 @@ mod linux {
         let old_plan = match &old.effective_plan_file {
             Some(path) if path.try_exists()? => read_plan(path)?,
             Some(_) => {
-                if process_is_current(ProcessIdentity {
-                    pid: old.pid,
-                    start_ticks: old.process_start_ticks,
-                }) {
+                if old.business_is_current()? {
                     bail!("code=renewal_old_core_cleanup_pending module=process_supervisor detail=old Core remains alive but immutable plan is absent");
                 }
                 return Ok(());
@@ -455,10 +466,7 @@ mod linux {
             bail!("retired IO transaction scope differs; refusing unsafe journal replacement");
         }
         if let Ok(record) = crate::process_record::read(&journal.candidate_record) {
-            if process_is_current(ProcessIdentity {
-                pid: record.pid,
-                start_ticks: record.process_start_ticks,
-            }) {
+            if record.business_is_current()? {
                 bail!("retired IO transaction has a live candidate Core");
             }
         } else if let Some(worker) = &candidate.independent_worker {
@@ -583,10 +591,7 @@ mod linux {
                     && new_plan.placement == desired.placement
                     && candidate.authorization_snapshot_sha256
                         == new_plan.authorization_snapshot_sha256
-                    && process_is_current(ProcessIdentity {
-                        pid: candidate.pid,
-                        start_ticks: candidate.process_start_ticks,
-                    })
+                    && candidate.business_is_current()?
                 {
                     return adopt_worker_with_io(path, true, true);
                 }
@@ -629,12 +634,9 @@ mod linux {
                         crate::process_record::read(&previous_journal.candidate_record).ok();
                     if actual.active.as_ref() == Some(envelope)
                         && actual.owner_active
-                        && record.as_ref().is_some_and(|record| {
-                            process_is_current(ProcessIdentity {
-                                pid: record.pid,
-                                start_ticks: record.process_start_ticks,
-                            })
-                        })
+                        && record
+                            .as_ref()
+                            .is_some_and(|record| record.business_is_current().unwrap_or(false))
                     {
                         let record = record.unwrap();
                         let (verified, report) = compile_verified_plan(previous_plan.clone())?;
@@ -1194,7 +1196,7 @@ mod linux {
                 if !process_is_current(io_identity) {
                     return Err(PairRecoveryRequired.into());
                 }
-                if !process_is_current(candidate) {
+                if !business_is_current(&plan, candidate)? {
                     return Err(CoreRecoveryRequired.into());
                 }
                 snapshot.verify()?;
@@ -1308,7 +1310,7 @@ mod linux {
             }
             return result;
         }
-        stop(&mut child);
+        stop_business(&mut child);
         let _ = expect_ack(&mut netd, Operation::ForwardRevoke { owner });
         let operation = if attached {
             AuthorityControlOperation::RevokeExact

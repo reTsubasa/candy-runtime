@@ -90,6 +90,8 @@ struct Config {
     domain_plans: Vec<PathBuf>,
     #[serde(default)]
     cloud_activation_bindings: Vec<crate::cloud_plan_bridge::Binding>,
+    #[serde(default)]
+    shared_pool: Option<crate::shared_pool::Config>,
 }
 
 fn private_parent(path: &Path) -> Result<()> {
@@ -551,8 +553,17 @@ pub(super) fn run(path: &Path, gate: bool) -> Result<()> {
     if !gate {
         bail!("explicit experimental-packet-port-ipc gate required");
     }
-    let config = read_config(path)?;
+    let mut config = read_config(path)?;
     let _owner_lock = owner_lock(&config.status)?;
+    let pool_plans = config.domain_plans.clone();
+    let mut shared_pool = config
+        .shared_pool
+        .take()
+        .map(crate::shared_pool::Manager::new)
+        .transpose()?;
+    if let Some(pool) = &mut shared_pool {
+        pool.reconcile(&pool_plans)?;
+    }
     crate::install_shutdown_handlers()?;
     let states = Arc::new(Mutex::new(
         std::iter::once(TaskState::new("cloud", 0))
@@ -621,6 +632,13 @@ pub(super) fn run(path: &Path, gate: bool) -> Result<()> {
     let mut published_revision = Vec::new();
     loop {
         let now = crate::monotonic_ms()?;
+        if !crate::shutdown_requested() {
+            if let Some(pool) = &mut shared_pool {
+                if let Err(error) = pool.reconcile(&pool_plans) {
+                    eprintln!("level=warn code=shared_pool_reconcile_pending module=runtime_agent detail={error:#} action=retry_preserve_healthy_domains");
+                }
+            }
+        }
         {
             let mut all = states.lock().unwrap_or_else(|poison| poison.into_inner());
             for (slot, worker) in &workers {
@@ -680,6 +698,9 @@ pub(super) fn run(path: &Path, gate: bool) -> Result<()> {
         worker
             .join()
             .map_err(|_| anyhow::anyhow!("runtime Agent managed task panicked"))?;
+    }
+    if let Some(pool) = &mut shared_pool {
+        pool.retire_empty()?;
     }
     if let Some(error) = startup_error {
         return Err(error);
