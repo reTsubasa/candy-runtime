@@ -77,7 +77,18 @@ procd/systemd
 5. **drain**：旧 worker 标记 `draining`，关闭 accept/新 session，已有连接继续处理；数据和控制队列有界，超过 deadline 的对象按协议重试、reset 或丢弃。
 6. **reap**：连接、FD、credit、task、receipt 全部归还后回收旧 worker。超时只终止该 worker，并保留其他 worker、listener、TUNIO/netd。
 
-任何阶段失败都只撤销 candidate。已发布 snapshot 不回滚到半成品；下一次 reconcile 才重试。重复 commit、迟到 receipt、旧 epoch 和重复 unregister 必须幂等。
+提交决定持久化之前，准备失败只撤销 candidate，保留旧的有效业务。已发布 snapshot
+不回滚到半成品。重复 commit、迟到 receipt、旧 epoch 和重复 unregister 必须幂等。
+
+这里的原子性只属于单一组件的 snapshot/CAS，不能推定 listener、TUNIO、netd
+和远端 actor 跨进程、跨网络同时生效。协调者在首个可能生效的 Commit 前，必须
+持久化完整事务身份、各参与者原状态、期限与 commit intent。Commit 发送失败、
+超时或 ACK 丢失均属于结果未知，不能据此停止旧业务、盲目 Abort 已安装新代，
+或递增 epoch 后重新开始。恢复先查询各参与者的实际 receipt，再按同一决定
+幂等继续；在原授权范围内收敛，不能重新计算期限。授权到期只 fence 相应业务。
+只有所有必要参与者确认实际提交，才写 committed；只有旧代数据面与进程回收
+分别确认后，才删除其 journal。TUNIO 重启丢失的内存历史必须作为 unknown
+处理，再核对基础设施 incarnation 和实际 owner，不能把缺失 receipt 当作 Abort。
 
 ### 3.1 候选入口与激活确认
 
@@ -90,6 +101,12 @@ inbound-only 域必须先能接收认证握手才能 ready。禁止形成 `等�
 Nginx 的候选代准备规则要求：旧授权有效期间，candidate 失败不能停止旧业务。当前远端 attachment 在新连接建立时可能直接替换旧 lane；必须先建立不抢占的 prepared attachment，再提交接管。只把 `spawn` 移到 `stop` 前面会造成新旧端反复抢占，不满足该规则。所有等待仍受旧授权 deadline 限制，不延长过期授权。
 
 drain 同时约束新连接和已有 QUIC 连接上的新 session。现有 session 的数据、FIN/reset、必要控制与探测继续处理；新 session 返回可重试错误。排空终态由 supervisor 可观察的 receipt/ACK 确认，超时后只回收匹配 PID/start_ticks/epoch 的旧 worker。registry 删除条目不是进程已经 reap 的证据。
+
+session registry 为空、relay task join 或 FIN 已进入发送队列都不证明对端已经
+收完尾部数据。当前 transport 没有可用于该证明的 FIN 送达 ACK，因此不得以
+registry 为空为由提前关闭 QUIC。先保留既有连接直到对端关闭或原 drain deadline；
+只有连接、保留任务、handoff reservation 与 credit 都归零，才报告 owner drained。
+若后续引入 GOAWAY/确认式优雅关闭，必须作为明确协议能力及独立尾部完整性门禁。
 
 ## 4. 性能约束
 
@@ -134,3 +151,18 @@ Nginx master 通常不承载应用连接数据；本项目当前 Transport maste
 | 7 | master 故障恢复 | master 仍持有 QUIC 状态，重启会断开现有连接 | 记录连接中断与重连收敛时间、其他基础设施保持；不将其称为无损热升级 |
 
 先完成入口与确认，再完成远端 attachment 事务，然后验证会话排空/进程回收，最后实现同域扩展及 1/2/4 性能矩阵。维护任务隔离与诊断可并行推进。每一步都使用失败注入与连续双向业务检验；失败记录保留，使用新目录复测，不放宽原有流量存活、授权或完整性断言。
+
+## 8. 本轮已取得的证据
+
+- Core `fff6827`、Runtime `8f294b0`：本地 PacketPort 两阶段 owner 及 opt-in
+  authority schema 3 已完成窄测。schema 2 保持兼容；Agent 默认调用顺序尚待接入。
+- Core `72b08f2`、`9c4f64f`：远端 StageLane 与真实候选 packet-stream nonce
+  探测基础已完成窄测。bit 18 尚未 advertise，应用层签名授权、候选选择及 barrier
+  接线未完成；不能由 API 存在推定 Ready/CommitAck 已闭环。
+- `runtime-mixed-listener-v5`：两个签名域经同一公共入口的实际 ICMP、Proxy HTTP、
+  单 worker 故障恢复与 TUNIO PID 保持通过。这里只是 source-worktree/debug
+  冷启动集成；不是同域新旧代并存或平台发布验收。
+- master 重启追加测试暴露旧 driver socket 生命周期问题，正在改为每个 master
+  incarnation 的私有目录并验证旧子进程退出。失败证据保留，未据 v5 宣称通过。
+- owner v10 四轮稳态 750 Mbps 对照吞吐与输出完整性通过；未触发续期或候选事务。
+  详细范围见 `sdwan-owner-performance-20261015.md`，完整 G0–G6 仍未关闭。
