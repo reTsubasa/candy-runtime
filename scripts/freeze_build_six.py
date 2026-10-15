@@ -87,10 +87,10 @@ def select_signed_cli_executable(raw: str) -> str:
     return hits[0]
 
 
-def source_blobs(repo: Path) -> list[tuple[Path, bytes, int]]:
-    """Read committed blobs directly from HEAD; never consult the worktree."""
+def source_blobs(repo: Path, revision: str = "HEAD") -> list[tuple[Path, bytes, int]]:
+    """Read committed blobs at one revision; never consult the worktree."""
     raw = subprocess.check_output(
-        ["git", "ls-tree", "-r", "-z", "--full-tree", "HEAD"], cwd=repo)
+        ["git", "ls-tree", "-r", "-z", "--full-tree", revision], cwd=repo)
     files = []
     for record in raw.rstrip(b"\0").split(b"\0"):
         meta, name = record.split(b"\t", 1)
@@ -121,6 +121,7 @@ def self_check() -> None:
         env.update({"GIT_AUTHOR_NAME": "freeze-self-check", "GIT_AUTHOR_EMAIL": "freeze@example.invalid",
                     "GIT_COMMITTER_NAME": "freeze-self-check", "GIT_COMMITTER_EMAIL": "freeze@example.invalid"})
         subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repo, env=env, check=True)
+        pinned = git_state(repo)["head"]
         (repo / "apps/committed.rs").write_text("dirty worktree\n")
         (repo / "apps/deleted.rs").unlink()
         (repo / "apps/untracked.rs").write_text("untracked source\n")
@@ -128,6 +129,9 @@ def self_check() -> None:
         paths = {path.as_posix(): data for path, data, _ in frozen}
         assert paths == {"apps/committed.rs": b"committed HEAD\n",
                          "apps/deleted.rs": b"still in HEAD\n"}, paths
+        run(["git", "add", "apps"], cwd=repo)
+        subprocess.run(["git", "commit", "-qm", "advance HEAD"], cwd=repo, env=env, check=True)
+        assert {path.as_posix(): data for path, data, _ in source_blobs(repo, pinned)} == paths
 
         entries = [{"path": f"candy-runtime/{path}",
                     "sha256": hashlib.sha256(data).hexdigest(), "mode": mode & 0o777}
@@ -163,6 +167,7 @@ def self_check() -> None:
             raise AssertionError("existing evidence directory was accepted")
     print(json.dumps({"self_check": "PASS", "checks": [
         "committed HEAD source freeze excludes dirty modifications, deletions, and untracked files",
+        "pinned source revision remains stable after HEAD advances",
         "manifest hash roundtrip", "exact signed_cli Cargo artifact selection",
         "existing evidence directory rejection"]}, indent=2))
 
@@ -175,8 +180,7 @@ def ensure_fresh_evidence(evidence: Path) -> None:
 def freeze(repo: Path, root: Path, label: str) -> dict:
     state = git_state(repo)
     entries = []
-    for relative, data, mode in source_blobs(repo):
-        source = repo / relative
+    for relative, data, mode in source_blobs(repo, state["head"]):
         destination = root / f"candy-{label}" / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(data)
@@ -191,6 +195,8 @@ def main() -> int:
     parser.add_argument("evidence", type=Path)
     parser.add_argument("--self-check", action="store_true",
                         help="validate repository inputs and refuse to build")
+    parser.add_argument("--freeze-only", action="store_true",
+                        help="record a committed snapshot without requiring Docker")
     args = parser.parse_args()
     evidence = args.evidence.resolve()
     try:
@@ -228,10 +234,19 @@ def main() -> int:
     provenance = {"image": IMAGE, "cache": str(CACHE), "flags": "--release --locked --offline",
                   "runtime_features": ["candy-sdwan-agent/experimental-tunio-rebind"],
                   "artifacts": {}, "git": manifest["revisions"]}
-    (evidence / "freeze.json").write_text(json.dumps({
+    freeze_metadata = {
         "source_mode": manifest["source_mode"], "manifest_sha256": manifest_digest,
+        "revisions": manifest["revisions"],
         "working_tree_status": manifest["revisions"], "excluded": sorted(EXCLUDES),
-    }, indent=2) + "\n")
+    }
+    for directory in (evidence, frozen):
+        (directory / "freeze.json").write_text(json.dumps(freeze_metadata, indent=2) + "\n")
+        (directory / "source-manifest.json").write_bytes(manifest_body)
+    if args.freeze_only:
+        (evidence / "result.json").write_text(json.dumps({
+            "gate": "SOURCE_FROZEN", "build": "NOT_RUN", "performance": "NOT_RUN",
+            "manifest_sha256": manifest_digest}, indent=2) + "\n")
+        return 0
     mounts = ["-v", f"{frozen}:/workspace:ro", "-v", f"{evidence}:/evidence:rw",
               "-v", f"{CACHE}:/build:rw"]
     name = "candy-freeze-build-" + hashlib.sha256(str(evidence).encode()).hexdigest()[:12]
