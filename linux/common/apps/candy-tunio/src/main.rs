@@ -16,6 +16,8 @@ use tokio::net::UnixDatagram;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
+mod logging;
+
 #[derive(Parser)]
 struct Args {
     #[arg(long)]
@@ -67,6 +69,7 @@ fn read_binding(path: &PathBuf) -> Result<PacketPortBinding> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    logging::init()?;
     control::install_startup_guard()?;
     let args = Args::parse();
     if !args.experimental_packet_port_ipc {
