@@ -36,7 +36,7 @@ root=/tmp/candy-gate
 echo "$(cut -d ' ' -f 1 /proc/uptime) $$" >>"$root/attempts"
 test ! -f "$root/fault" || exit 78
 if [ -x "$root/candy-netd" ]; then
-    "$root/candy-netd" --probe-socket "$root/netd.sock"
+    "$root/candy-netd" --probe-socket "$root/netd.sock" --probe-protocol v2
 else
     test -s "$root/infrastructure-probe.pid"
 fi
@@ -148,6 +148,19 @@ rm -f "$root/worker-ready.pid"
 wait_ready
 ubus call service list '{"name":"candy-platform-probe"}' >"$evidence/services-after.json"
 logread >"$evidence/logread.log"
+protocol_probe=NOT_RUN
+if [ "$real_netd" = true ]; then
+    i=0
+    while [ "$i" -lt 3 ]; do
+        "$root/candy-netd" --probe-socket "$root/netd.sock" --probe-protocol v2 || fail 'protocol-v2 probe failed'
+        i=$((i + 1))
+    done
+    logread >"$evidence/logread.log"
+    if grep -q 'code=netd_v2_request_failed' "$evidence/logread.log"; then
+        fail 'health checks produced netd request warnings'
+    fi
+    protocol_probe=PASS
+fi
 kernel_tun_test=NOT_RUN
 if [ -f "$root/kernel-test" ]; then
     echo 'stage=official_offline_packages'
@@ -166,7 +179,7 @@ if [ -f "$root/kernel-test" ]; then
     kernel_tun_test=PASS
 fi
 cat >"$evidence/result.json" <<EOF
-{"pid1":"procd","openwrt":"$(. /etc/openwrt_release; echo "$DISTRIB_RELEASE")","real_netd":$real_netd,"worker_payload":"lifecycle_probe","duplicate_start_idempotent":true,"worker_sigkill_recovered":true,"worker_failure_preserves_infrastructure":true,"infrastructure_sigkill_recovered":true,"infrastructure_restart_preserves_worker":true,"persistent_fault_bounded":true,"fault_attempts":$((attempts_after - attempts_before)),"manual_recovery_after_fault":true,"kernel_tun_guard_and_journal_recovery":"$kernel_tun_test","whole_platform":"NOT_RUN"}
+{"pid1":"procd","openwrt":"$(. /etc/openwrt_release; echo "$DISTRIB_RELEASE")","real_netd":$real_netd,"worker_payload":"lifecycle_probe","duplicate_start_idempotent":true,"worker_sigkill_recovered":true,"worker_failure_preserves_infrastructure":true,"infrastructure_sigkill_recovered":true,"infrastructure_restart_preserves_worker":true,"persistent_fault_bounded":true,"fault_attempts":$((attempts_after - attempts_before)),"manual_recovery_after_fault":true,"protocol_v2_health_probe":"$protocol_probe","kernel_tun_guard_and_journal_recovery":"$kernel_tun_test","whole_platform":"NOT_RUN"}
 EOF
 /etc/init.d/candy-platform-probe stop
 echo 'PASS narrow real procd lifecycle gate; full SD-WAN platform NOT RUN'

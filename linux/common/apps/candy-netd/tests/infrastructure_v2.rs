@@ -1200,6 +1200,35 @@ fn authoritative_failure_revision_recovers_in_same_generation_and_rejects_replay
 }
 
 #[test]
+fn capabilities_probe_does_not_recover_or_mutate_live_infrastructure() {
+    let mut fixture = Fixture::new("read_only_probe");
+    fixture.ensure();
+    fixture.prepare();
+    fixture.commit();
+    let journal = fs::read(fixture.path.join("infra.journal")).unwrap();
+    let events = fixture.observed.lock().unwrap().events.clone();
+    // Even an overdue lease is recovered by the maintenance loop, never by a probe.
+    let (body, fd) = fixture.call(Operation::Capabilities, 3000).unwrap();
+    assert_eq!(
+        body,
+        Body::Capabilities {
+            version: 2,
+            independent_infrastructure: true,
+            multi_domain: false
+        }
+    );
+    assert!(fd.is_none());
+    assert_eq!(
+        fs::read(fixture.path.join("infra.journal")).unwrap(),
+        journal
+    );
+    let observed = fixture.observed.lock().unwrap();
+    assert_eq!(observed.events, events);
+    assert_eq!(observed.ifindex, Some(17));
+    assert!(observed.firewall_present);
+}
+
+#[test]
 fn lease_renewal_cannot_change_authorization_cap_or_mutate_rejected_state() {
     let mut fixture = Fixture::new("lease_authorization_cap");
     fixture.ensure();

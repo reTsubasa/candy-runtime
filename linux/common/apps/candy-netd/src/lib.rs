@@ -494,6 +494,19 @@ impl<T: TunFactory, N: NetworkController> NetdService<T, N> {
             ));
         }
 
+        // Health checks use a separate identity and must not acquire or change ownership.
+        if request.operation == NetdOperation::Status {
+            return Ok((
+                NetdResponse {
+                    request_id: request.request_id,
+                    body: ResponseBody::Status {
+                        phase: self.session.phase(),
+                        generation: request.owner.generation,
+                    },
+                },
+                None,
+            ));
+        }
         let mut next_session = self.session.clone();
         if let Err(error) = next_session.apply(&request) {
             return Ok((

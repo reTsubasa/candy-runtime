@@ -461,6 +461,17 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
                 "socket credentials do not match request",
             ));
         }
+        // A readiness probe must not execute expiry recovery or mutate durable state.
+        if request.operation == Operation::Capabilities {
+            return Ok((
+                Body::Capabilities {
+                    version: 2,
+                    independent_infrastructure: true,
+                    multi_domain: false,
+                },
+                None,
+            ));
+        }
         self.recover_expired(now)?;
         let authenticated_commit =
             if let Operation::ForwardCommitAuthorized { owner, receipt } = &request.operation {
@@ -535,16 +546,7 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
                     "scoped requests require configured namespace domain routing",
                 ));
             }
-            Operation::Capabilities => {
-                return Ok((
-                    Body::Capabilities {
-                        version: 2,
-                        independent_infrastructure: true,
-                        multi_domain: false,
-                    },
-                    None,
-                ))
-            }
+            Operation::Capabilities => unreachable!("capabilities returned before recovery"),
             Operation::InfraStatus => {
                 return Ok((
                     Body::InfraStatus {

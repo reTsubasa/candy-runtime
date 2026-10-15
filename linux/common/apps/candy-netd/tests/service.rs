@@ -148,6 +148,22 @@ fn authenticated_owner_runs_two_phase_lifecycle_and_gets_one_tun_fd() {
     );
     assert_eq!(creates.load(Ordering::SeqCst), 1);
 
+    let mut probe = prepare.clone();
+    probe.owner.instance_id = [9; 16];
+    probe.owner.generation = 1;
+    probe.operation = NetdOperation::Status;
+    assert_eq!(
+        exchange(&mut service, &probe, peer),
+        (
+            ResponseBody::Status {
+                phase: candy_netd_proto::SessionPhase::Prepared,
+                generation: 1
+            },
+            false
+        )
+    );
+    assert_eq!(creates.load(Ordering::SeqCst), 1);
+
     let commit = NetdRequest {
         request_id: 2,
         owner: owner(),

@@ -91,10 +91,9 @@ build source map, resolved lock SHA256 and lock diff are retained under
 `docs/artifacts/sdwan-20261015/openwrt-musl-build-v1/`; the official image
 checksum manifest, signature and key are retained in `openwrt-official-image-v1/`.
 
-One implementation issue remains separately tracked: `--probe-socket` only
-connects then closes, producing `netd_v2_request_failed` warnings. A subsequent
-fix must use a read-only protocol request and validate the response. The v7
-results describe the exact pre-fix netd hash above.
+The v7 netd still uses the old connection-only health probe. The subsequent
+protocol probe correction below has separate unit/integration evidence;
+the v7 result must not be attributed to its newer source or binary.
 
 All raw attempts remain under `docs/artifacts/sdwan-20261015/openwrt-vm-v*/`.
 
@@ -114,3 +113,46 @@ The runner downloads only bounded official artifacts. Repository signatures
 must be accepted by the trust keys already present in the authenticated
 OpenWrt image. The result always keeps `whole_platform=NOT_RUN` until the
 remaining production integration cases have separate evidence.
+
+## Protocol Health Probe Correction
+
+`--probe-socket` now sends a read-only request, with explicit
+`--probe-protocol v1|v2` selection (default v1 for legacy callers).
+It verifies framing, response request ID, expected response body, absence of
+descriptors, and for v2, ABI version 2 and independent infrastructure support.
+The framed request/response has a shared 750 ms deadline. OpenWrt retains its
+outer process timeout, including connection establishment.
+
+- Production `candy.init` currently starts v1 netd and now explicitly probes v1.
+  This correction does not claim to migrate production Agent/Core to v2.
+- The isolated VM explicitly probes its v2 infrastructure service with v2.
+- Legacy Status checks from the configured UID/GID use a read-only service
+  path. They cannot claim ownership, change a lease, or invalidate an active
+  owner's next transaction. PID/UID/GID authentication remains enforced.
+- V2 Capabilities returns after authentication and before expiry recovery.
+  Expiry remains the maintenance loop's responsibility. A health check does
+  not mutate forwarding, TUN, authorization, or journal state.
+- Stop completion uses the existing daemon PID query, avoiding an incorrect
+  readiness failure when the stop caller is root and the permitted IPC client
+  is the unprivileged SD-WAN account.
+
+Focused results before the exclusive performance window:
+
+| Check | Result |
+| --- | --- |
+| Probe framing, response validation, and stalled peer | 3/3 PASS |
+| CLI probe/server argument compatibility | 1/1 PASS |
+| Netd service and infrastructure integration | 24/24 PASS |
+| OpenWrt init config/lifecycle shell suite | PASS |
+
+The infrastructure test snapshots the real journal bytes and backend events
+before a Capabilities request made after lease expiry, then confirms both
+remain unchanged and the same TUN ifindex/firewall remain present. The legacy
+test probes using a distinct instance/generation between Prepare and Commit,
+then verifies the original owner can still commit without creating another TUN.
+
+On macOS, changing `SO_RCVTIMEO` after the peer closes can return `EINVAL`.
+The protocol unit tests synchronize endpoint lifetime explicitly; this is
+separate from the Linux/OpenWrt daemon target and is not evidence of Linux
+CLI behavior. A fresh Linux/OpenWrt probe gate is required after the performance
+window before claiming that target's new binary has passed.

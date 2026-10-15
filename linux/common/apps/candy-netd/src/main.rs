@@ -23,6 +23,9 @@ use std::time::Duration;
 struct Args {
     #[arg(long, conflicts_with_all = ["socket", "allowed_uid", "allowed_gid", "journal", "recover"])]
     probe_socket: Option<PathBuf>,
+    /// IPC ABI expected by the read-only health check; never auto-detect a different ABI.
+    #[arg(long, value_enum, default_value = "v1", requires = "probe_socket")]
+    probe_protocol: ProbeProtocol,
     #[arg(long, required_unless_present_any = ["probe_socket", "recover", "check_domain_resources"])]
     socket: Option<PathBuf>,
     #[arg(long, required_unless_present_any = ["probe_socket", "recover", "allowed_user", "check_domain_resources"])]
@@ -57,6 +60,41 @@ struct Args {
     check_domain_resources: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum ProbeProtocol {
+    V1,
+    V2,
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+
+    #[test]
+    fn probe_protocol_is_explicit_and_server_arguments_still_work() {
+        assert!(Args::try_parse_from([
+            "candy-netd",
+            "--socket",
+            "/tmp/test.sock",
+            "--allowed-uid",
+            "0",
+            "--allowed-gid",
+            "0"
+        ])
+        .is_ok());
+        let probe = Args::try_parse_from([
+            "candy-netd",
+            "--probe-socket",
+            "/tmp/test.sock",
+            "--probe-protocol",
+            "v2",
+        ])
+        .unwrap();
+        assert!(matches!(probe.probe_protocol, ProbeProtocol::V2));
+        assert!(Args::try_parse_from(["candy-netd", "--probe-protocol", "v2"]).is_err());
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     return run_linux(Args::parse());
@@ -83,7 +121,11 @@ fn run_linux(args: Args) -> anyhow::Result<()> {
         return Ok(());
     }
     if let Some(path) = args.probe_socket {
-        std::os::unix::net::UnixStream::connect(path)?;
+        let protocol = match args.probe_protocol {
+            ProbeProtocol::V1 => candy_netd_client::probe::Protocol::V1,
+            ProbeProtocol::V2 => candy_netd_client::probe::Protocol::V2,
+        };
+        candy_netd_client::probe::socket(&path, protocol, Duration::from_millis(750))?;
         return Ok(());
     }
     if args.recover {

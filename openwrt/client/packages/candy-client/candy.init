@@ -596,13 +596,7 @@ stop_candy_clients_for_fail_open() {
 }
 
 wait_for_netd_exit() {
-	local waited=0 wait_seconds="${1:-3}"
-	while run_with_timeout 1 "$CANDY_NETD_BIN" --probe-socket "$CANDY_NETD_SOCKET" >/dev/null 2>&1; do
-		[ "$waited" -lt "$wait_seconds" ] || return 1
-		waited=$((waited + 1))
-		sleep 1
-	done
-	return 0
+	wait_for_sdwan_pid_query sdwan_netd_daemon_pids "${1:-3}"
 }
 
 current_readiness() {
@@ -1346,7 +1340,7 @@ start_sdwan_supervision() {
 
 wait_for_sdwan_netd() {
 	local waited=0
-	while ! run_with_timeout 2 "$CANDY_NETD_BIN" --probe-socket "$CANDY_NETD_SOCKET" >/dev/null 2>&1; do
+	while ! run_with_timeout 2 "$CANDY_NETD_BIN" --probe-socket "$CANDY_NETD_SOCKET" --probe-protocol v1 >/dev/null 2>&1; do
 		[ "$waited" -lt "$CANDY_LISTENER_WAIT_SECONDS" ] || return 1
 		waited=$((waited + 1))
 		sleep 1

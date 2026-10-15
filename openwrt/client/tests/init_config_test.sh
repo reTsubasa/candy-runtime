@@ -291,6 +291,7 @@ sed -n '/^reload_runtime_locked()/,/^}/p' "$repo_root/candy-client/candy.init" |
 grep -F 'chown root:root /var/lib/candy' "$repo_root/candy-client/candy.init" >/dev/null || fail "netd journal parent is not retained by root"
 grep -F 'chown -R candy-sdwan:candy-sdwan "$CANDY_EPOCH_DIRECTORY"' "$repo_root/candy-client/candy.init" >/dev/null || fail "SD-WAN epoch directory is not delegated narrowly"
 grep -F -- '--probe-socket "$CANDY_NETD_SOCKET"' "$repo_root/candy-client/candy.init" >/dev/null || fail "netd readiness does not perform a live socket probe"
+grep -F -- '--probe-protocol v1' "$repo_root/candy-client/candy.init" >/dev/null || fail "legacy netd readiness does not select its protocol"
 grep -F 'verify_promoted_runtime_candidate "$candidate_sha"' "$repo_root/candy-client/candy.init" >/dev/null || fail "successful reload does not verify daemon promotion"
 grep -F 'config_load candy 2>/dev/null || true' "$repo_root/candy-client/candy.init" >/dev/null
 grep -F 'procd_set_param env CANDY_TRAFFIC_LOG="$TRAFFIC_LOG_FILE" CANDY_READY_FILE="$CANDY_READY_FILE" CANDY_PASSIVE_STATUS_FILE="$CANDY_PASSIVE_STATUS_FILE"' "$repo_root/candy-client/candy.init" >/dev/null
