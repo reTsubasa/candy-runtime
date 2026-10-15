@@ -243,6 +243,24 @@ impl PacketOutput {
                                 tracing::warn!(
                                     code = "tun_write_deadline",
                                     module = "sdwan_packet_output",
+                                    port = std::any::type_name::<P>(),
+                                    timeout_stage = if write_started >= packet.deadline {
+                                        "expired_before_write"
+                                    } else {
+                                        "pending_send"
+                                    },
+                                    queue_wait_us = write_started
+                                        .saturating_duration_since(
+                                            packet.deadline - OUTPUT_WRITE_TIMEOUT
+                                        )
+                                        .as_micros()
+                                        as u64,
+                                    send_elapsed_us = write_started.elapsed().as_micros() as u64,
+                                    deadline_overrun_us = tokio::time::Instant::now()
+                                        .saturating_duration_since(packet.deadline)
+                                        .as_micros()
+                                        as u64,
+                                    packet_bytes = packet.packet.len(),
                                     timeout_ms = OUTPUT_WRITE_TIMEOUT.as_millis() as u64,
                                     action = "drop_packet_keep_port",
                                     dropped_packets = count

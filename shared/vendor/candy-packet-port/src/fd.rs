@@ -62,6 +62,8 @@ impl InheritedPacketFd {
     }
 
     pub async fn recv_packet(&self) -> io::Result<Vec<u8>> {
+        // AsyncFd readiness with a raw read otherwise stays immediately ready.
+        tokio::task::consume_budget().await;
         loop {
             let mut ready = self.io.readable().await?;
             match ready.try_io(|inner| {
@@ -155,6 +157,27 @@ impl InheritedPacketFd {
 mod tests {
     use super::*;
     use tokio::net::UnixDatagram;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuously_readable_fd_schedules_sibling_output_task() {
+        let (fd, peer) = UnixDatagram::pair().unwrap();
+        let port = InheritedPacketFd::new(OwnedFd::from(fd.into_std().unwrap())).unwrap();
+        peer.send(&[0x45; 64]).await.unwrap();
+        assert_eq!(port.recv_packet().await.unwrap(), vec![0x45; 64]);
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = std::sync::Arc::clone(&ran);
+        let sibling =
+            tokio::spawn(async move { observed.store(true, std::sync::atomic::Ordering::Release) });
+        for _ in 0..4096 {
+            peer.try_send(&[0x45; 64]).unwrap();
+            assert_eq!(port.recv_packet().await.unwrap(), vec![0x45; 64]);
+        }
+        assert!(
+            ran.load(std::sync::atomic::Ordering::Acquire),
+            "ready fd read loop starved sibling output task"
+        );
+        sibling.await.unwrap();
+    }
 
     #[tokio::test]
     async fn inherited_receive_preserves_boundaries_and_allocates_only_received_bytes() {

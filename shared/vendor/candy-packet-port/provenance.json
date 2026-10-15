@@ -1,26 +1,26 @@
 {
   "files": {
     "Cargo.toml": "f1f9ded3ada35cf1ac6abb3bfd066e21a4d9871826e708de4e261a927bbcfa82",
-    "src/fd.rs": "4e08796effc340169a7de21974dfba13b0bc2d65813aec6b6e308db5c9dbc8ba",
+    "src/fd.rs": "88004a466a58adb1be9b1620dc57b5421f2fa35787fc9c5cf5929925abc3daee",
     "src/lib.rs": "1ffb422cb562f15d265a0c27e6f6b8d025b61f81dd3236b97039c23c6dbd7d13",
-    "src/packet_port.rs": "68ff67a3d857445bdcb0ee7351842f7ec67f9c1478b13b7491a1fae9d93b00cc",
-    "src/packet_port_ipc.rs": "820393a99c27c33b09105d69039e57b8f604b260690d9fae61d86614153a9463",
+    "src/packet_port.rs": "19c375a5f6a2e6f71d9e712c110a9565431a4c6804f88acafea2dd974b29a978",
+    "src/packet_port_ipc.rs": "4a6401c1781417e23479f4ee30e6a73d299c098b6f1b089249a037813ff77e9b",
     "src/packet_port_manager.rs": "86ce8ffb4c66777e9e859bf38f84249ffaa2b5384f39c57166caa93869b1772f"
   },
   "note": "Fixed public source package from a development worktree; base commit alone is not its content identity.",
   "origin": "https://github.com/reTsubasa/candy-core",
-  "origin_base_commit": "df6399414478bdc0a71febfbf6792acf0daaf86b",
+  "origin_base_commit": "327146e7439d8e74b847d3d6b95c25bd6095f8b6",
   "origin_path": "crates/candy-packet-port",
-  "origin_worktree_content_sha256": "9a7c115ba5e83684edf35d1894f866f733100020ff089767dba1c55979a88d51",
+  "origin_worktree_content_sha256": "d47c60bb5bb99f347208b1b82959f3a6ddc3fdd852509c69c5ec51f341afa5cd",
   "package": "candy-packet-port",
-  "package_content_sha256": "5f48a8d0f23c8752e80c131aa34625befb80e2a759f3b00e98b638a857f39d5d",
+  "package_content_sha256": "a72e66c171e50b0c49fa53492a571ece393b98069e9596f1c573265e0bf492fa",
   "schema_version": 1,
   "source_files": {
     "Cargo.toml": "7be1c63650c39ceb702a14b9d869013a86728dc2196f4883880836ac7f539be8",
-    "src/fd.rs": "4e08796effc340169a7de21974dfba13b0bc2d65813aec6b6e308db5c9dbc8ba",
+    "src/fd.rs": "88004a466a58adb1be9b1620dc57b5421f2fa35787fc9c5cf5929925abc3daee",
     "src/lib.rs": "1ffb422cb562f15d265a0c27e6f6b8d025b61f81dd3236b97039c23c6dbd7d13",
-    "src/packet_port.rs": "68ff67a3d857445bdcb0ee7351842f7ec67f9c1478b13b7491a1fae9d93b00cc",
-    "src/packet_port_ipc.rs": "820393a99c27c33b09105d69039e57b8f604b260690d9fae61d86614153a9463",
+    "src/packet_port.rs": "19c375a5f6a2e6f71d9e712c110a9565431a4c6804f88acafea2dd974b29a978",
+    "src/packet_port_ipc.rs": "4a6401c1781417e23479f4ee30e6a73d299c098b6f1b089249a037813ff77e9b",
     "src/packet_port_manager.rs": "86ce8ffb4c66777e9e859bf38f84249ffaa2b5384f39c57166caa93869b1772f"
   }
 }

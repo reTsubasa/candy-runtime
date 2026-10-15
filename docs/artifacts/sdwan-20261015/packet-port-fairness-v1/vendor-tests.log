@@ -1,0 +1,93 @@
+    Updating crates.io index
+     Locking 35 packages to latest compatible versions
+      Adding nix v0.29.0 (available: v0.31.3)
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling libc v0.2.190
+   Compiling unicode-ident v1.0.27
+   Compiling autocfg v1.5.1
+   Compiling cfg_aliases v0.2.2
+   Compiling cfg-if v1.0.5
+   Compiling serde_core v1.0.229
+   Compiling bitflags v2.13.2
+   Compiling once_cell v1.21.4
+   Compiling nix v0.29.0
+   Compiling rustix v1.1.5
+   Compiling getrandom v0.4.3
+   Compiling memoffset v0.9.1
+   Compiling serde v1.0.229
+   Compiling pin-project-lite v0.2.17
+   Compiling tracing-core v0.1.36
+   Compiling syn v3.0.9
+   Compiling syn v2.0.119
+   Compiling bytes v1.12.1
+   Compiling errno v0.3.14
+   Compiling mio v1.2.4
+   Compiling socket2 v0.6.5
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling serde_derive v1.0.229
+   Compiling tokio-macros v2.7.2
+   Compiling tokio v1.53.3
+   Compiling tracing-attributes v0.1.31
+   Compiling tracing v0.1.44
+   Compiling candy-packet-port v0.3.63 (/Users/hyc/Documents/candy/candy-runtime/shared/vendor/candy-packet-port)
+warning: use of deprecated associated function `tokio::io::unix::AsyncFd::<T>::new`: unsound due to lack of I/O safety; use `AsyncFd::register` instead (see https://github.com/tokio-rs/tokio/pull/8587)
+  --> src/fd.rs:60:26
+   |
+60 |             io: AsyncFd::new(fd)?,
+   |                          ^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: `candy-packet-port` (lib) generated 1 warning
+warning: `candy-packet-port` (lib test) generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.92s
+     Running unittests src/lib.rs (shared/vendor/candy-packet-port/target/debug/deps/candy_packet_port-740e5aa0e688156b)
+
+running 36 tests
+test fd::tests::inherited_receive_preserves_boundaries_and_allocates_only_received_bytes ... ok
+test packet_port::tests::expired_queued_packets_never_poll_a_ready_port_and_release_all_credit ... ok
+test packet_port::tests::fatal_fd_error_is_reported_and_stop_cancels_blocked_writer ... ok
+test packet_port::tests::blocked_output_is_byte_bounded_and_policy_fences_inflight_and_queued_packets ... ok
+test packet_port::tests::enobufs_drops_only_current_packet_then_writes_next ... ok
+test packet_port::tests::cancelled_byte_wait_releases_slot_and_preserves_opposite_output ... ok
+test packet_port::tests::fencing_a_ready_queued_drain_discards_old_epoch_before_any_fd_write ... ok
+test packet_port::tests::oversized_packet_is_rejected_without_invoking_or_failing_port ... ok
+test packet_port::tests::nonblocking_fast_path_preserves_packet_errors_and_never_retries_fatal_writes ... ok
+test packet_port::tests::packet_limit_includes_inflight_and_all_credits_return_after_cancellation ... ok
+test packet_port::tests::queued_nonblocking_drain_preserves_order_across_batches_and_returns_credit ... ok
+test fd::tests::continuously_readable_fd_schedules_sibling_output_task ... ok
+test packet_port_ipc::tests::malformed_and_stale_frames_do_not_break_later_packets ... ok
+test packet_port::tests::short_packets_with_large_allocations_cannot_bypass_byte_credit ... ok
+test packet_port_ipc::tests::bridge_keeps_worker_off_the_packet_descriptor ... ok
+test packet_port::tests::queued_output_distinguishes_residence_from_send_elapsed ... ok
+test packet_port::tests::write_deadline_drops_stalled_packet_and_keeps_writer ... ok
+test packet_port_ipc::tests::nonblocking_send_does_not_require_reactor_readiness_to_be_cached ... ok
+test packet_port_ipc::tests::packet_frames_preserve_payload_in_both_directions ... ok
+test packet_port_ipc::tests::vectored_receive_rejects_oversized_and_short_frames_before_valid_maximum_packet ... ok
+test packet_port_ipc::tests::cancelling_empty_receive_before_readiness_allocates_no_payload_buffer ... ok
+test packet_port_manager::tests::authorization_is_checked_before_each_output_poll_and_failure_is_scoped ... ok
+test packet_port_manager::tests::byte_backpressure_does_not_block_reverse_data_or_control_cancellation ... ok
+test packet_port_manager::tests::abandoned_attach_does_not_consume_owner_epoch ... ok
+test packet_port_manager::tests::continuous_tun_input_cannot_starve_ready_worker_output ... ok
+test packet_port_ipc::tests::continuously_readable_port_schedules_sibling_output_task ... ok
+test packet_port_manager::tests::output_status_keeps_lifetime_counters_without_counting_admission_twice ... ok
+test packet_port_manager::tests::owner_replacement_retains_output_not_yet_sampled ... ok
+test packet_port_manager::tests::queued_control_and_shutdown_keep_priority_over_tun_flood ... ok
+test packet_port::tests::ingress_admission_waits_for_credit_and_resumes_without_rejection ... ok
+test packet_port_manager::tests::actual_receipt_recovers_lost_ack_and_tracks_revoke_and_expiry ... ok
+test packet_port_ipc::tests::worker_disappearance_does_not_stop_infrastructure_reader ... ok
+test packet_port_manager::tests::authorized_owner_expiry_keeps_tun_and_allows_replacement ... ok
+test packet_port_manager::tests::expired_owner_can_be_replaced_without_reopening_tun_and_old_epoch_is_rejected ... ok
+test packet_port_manager::tests::control_loss_uses_existing_authorization_deadline_and_matching_renewal_only ... ok
+test packet_port_manager::tests::observed_bridge_reports_actual_output_and_final_counters_once ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s
+
+   Doc-tests candy_packet_port
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

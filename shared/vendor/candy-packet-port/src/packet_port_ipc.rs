@@ -176,6 +176,9 @@ impl PacketPort for UnixPacketPort {
         }
     }
     async fn recv_packet(&self) -> io::Result<Vec<u8>> {
+        // readiness + raw recvmsg do not consume Tokio's cooperative budget.
+        // A continuously readable port must still schedule output and timers.
+        tokio::task::consume_budget().await;
         // Fair direction polling may cancel an empty receive on every packet.
         self.socket.readable().await?;
         // The extra byte detects oversized/truncated frames at the boundary.
@@ -381,6 +384,28 @@ mod tests {
         let worker = UnixPacketPort::new(worker, binding(), PacketPortRole::Worker).unwrap();
         assert!(infrastructure.try_send_packet(&[0x45; 64]).unwrap());
         assert_eq!(worker.recv_packet().await.unwrap(), vec![0x45; 64]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuously_readable_port_schedules_sibling_output_task() {
+        let (infrastructure, worker) = UnixDatagram::pair().unwrap();
+        let infrastructure =
+            UnixPacketPort::new(infrastructure, binding(), PacketPortRole::Infrastructure).unwrap();
+        let worker = UnixPacketPort::new(worker, binding(), PacketPortRole::Worker).unwrap();
+        assert!(infrastructure.try_send_packet(&[0x45; 64]).unwrap());
+        assert_eq!(worker.recv_packet().await.unwrap(), vec![0x45; 64]);
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::clone(&ran);
+        let sibling = tokio::spawn(async move { observed.store(true, Ordering::Release) });
+        for _ in 0..4096 {
+            assert!(infrastructure.try_send_packet(&[0x45; 64]).unwrap());
+            assert_eq!(worker.recv_packet().await.unwrap(), vec![0x45; 64]);
+        }
+        assert!(
+            ran.load(Ordering::Acquire),
+            "ready recv loop starved sibling output task"
+        );
+        sibling.await.unwrap();
     }
 
     // Linux reports a full connected datagram queue as EAGAIN; Darwin uses
