@@ -1,5 +1,25 @@
 # SD-WAN 实施与门禁状态（2026-10-14）
 
+## 最新集成结论（2026-10-15，owner v11）
+
+Core `9c4f64f`、Runtime `f9d1bfc` 冻结六产物 BUILD_PASS，643 个源文件与
+六产物 hashes 独立复核 PASS。默认四轮上传 750.00/749.99、下载
+750.01/750.00 Mbps，吞吐与稳态输出完整性 PASS。详细执行诊断的干净复测
+上传 649.64/680.37、下载 749.97/746.09 Mbps，吞吐 FAIL，完整性 PASS。
+两种模式 Core 两端与客户端 TUNIO 两方向全部 drop/error/admission subtype
+为零；256 packets/512 KiB/100 ms 未放宽。详细诊断保持默认关闭。
+
+首次详细诊断的并发 Cargo 扰动与原始失败证据保留，干净复测仍出现上传退化，
+不能把该开销全归因于并发构建。导出尾部未验证，不能由 lost=0 宣称完整捕获。
+详见 `sdwan-owner-performance-v11-20261015.md`。
+
+mixed-listener v10 工作区 debug 集成已通过两个签名域、Proxy、worker 恢复
+与两次 master 重启，TUNIO 保持；它不是冻结 release 或同域扩容验收。
+服务端 session quiesce 已提交 Core `788d3f6`，客户端明确排空通知、完整
+staged caller、durable orchestration、同域 worker set 与最终平台门禁仍未关闭。
+正在按 Nginx 的 validate/prepare/publish/drain/reap 顺序补齐。完整 G0-G6
+仍未通过；本轮未签名发布或更新生产。
+
 ## 最新集成结论（2026-10-15，owner v10）
 
 Core `72b08f2`、Runtime `2b006c3` 六产物冻结构建及 hashes 复核 PASS。

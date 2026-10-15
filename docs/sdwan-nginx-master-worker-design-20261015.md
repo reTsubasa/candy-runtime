@@ -207,3 +207,38 @@ permit；回归须证明请求正常结束、取消或失败都不终止 listene
 4. 在无并发构建或测试负载的窗口测量默认和诊断模式；吞吐、输出完整性与
    恢复时间分别报告，稳态 PASS 不能代替交接 PASS。
 5. 完成同域 1/2/4、mixed、两小时续期及目标平台门禁后，才签名发布或更新生产。
+
+### 9.3 对照 Nginx 官方流程的实施顺序
+
+2026-10-15 已核对官方 control 文档。HUP 先检查配置和新资源，失败继续
+旧配置；成功启动新 worker 后，旧 worker 关闭新工作入口并服务已有客户端。
+本项目依此顺序实施：
+
+1. 固定完整配置代际、签名证据和原授权期限，先完成校验与所有参与者 Prepare。
+2. 用独立候选 namespace 和精确 selector 接入新代，取得真实 packet proof；
+   同域 active owner 不得被候选握手抢占，候选失败只清理候选。
+3. 持久化 commit intent，核对实际 Installed receipt，再发布新请求路由。
+   丢失确认按 UNKNOWN 查询，沿用同一事务和原期限恢复。
+4. 明确通知客户端旧连接排空，停止分配新 session，准备并验证替代连接；
+   已有 session 保留原 transport，普通 quota 错误不触发连接级重置。
+5. 分别取得 transport drained 与 OS exit/reap 证据。kill 请求、registry
+   删除、FIN 排队均不能代替完成证明；失败保留精确 Child 所有权并有界退避。
+6. 最后验证同域 sticky 1/2/4/2/1 扩缩容与全部性能、故障和平台门禁。
+
+Nginx 官方同页也明确指出：QUIC reload/upgrade 保留连接需要 `quic_bpf`。
+这不是 Candy 已具备连接迁移的证据。当前 Quinn 状态仍属于 Transport
+master；worker reload 与 master 可执行文件升级必须分别验收。
+
+### 9.4 本轮状态补充
+
+- mixed-listener v10 已通过两个签名域、Proxy、单 worker 故障恢复与两次
+  master 重启；TUNIO 保持。它是工作区 debug 集成证据，不是同域扩容验收。
+- Core `788d3f6` 已完成服务端 session quiesce 并推送；通用 code 5 尚不足以
+  通知客户端交接，端到端 graceful replacement 仍未完成。
+- 候选 selector、paired-clock 原期限与精确 Child 回收正在补齐并验证；
+  应用层 staged caller 与 Runtime durable orchestration 尚未完成。
+- 冻结 v11 默认四轮约 750 Mbps，输出完整性 PASS；详细诊断模式干净复测
+  上传 649.64/680.37 Mbps，吞吐 FAIL、输出完整性 PASS。详见
+  `sdwan-owner-performance-v11-20261015.md`。详细诊断保持默认关闭。
+
+以上补充不关闭完整 G0-G6，也不授权依据局部 PASS 进行生产切换。
