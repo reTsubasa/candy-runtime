@@ -156,3 +156,36 @@ The protocol unit tests synchronize endpoint lifetime explicitly; this is
 separate from the Linux/OpenWrt daemon target and is not evidence of Linux
 CLI behavior. A fresh Linux/OpenWrt probe gate is required after the performance
 window before claiming that target's new binary has passed.
+
+### Fresh Target Verification
+
+After the exclusive performance window, the new probe code was rebuilt for
+`x86_64-unknown-linux-musl` with `cargo build --locked --offline -j 1`.
+The builder now always requires the lock on its initial build. Build evidence
+records `test_lock_changed=false`, root lock SHA256
+`78f4fda42127ce097042086c6ccb5fb826ecded4719151dd915b76de35b49a34`,
+and netd SHA256
+`55d37fa4ea6ebff5bf9c0cb9a3873c33702d0fd9792991eaf75b961db79f82c0`.
+The source snapshot HEAD is `46d8e3a3d50fd6ae4ea7cb91e5c2ed23db766266`,
+which includes probe correction `ebc9d06`; the full copied source file map is
+in the build report. Unrelated working Agent changes were not compiled by
+this netd-only package build.
+
+The authenticated OpenWrt 25.12.5 VM rerun completed
+`PASS_NARROW_PROCD`, including `protocol_v2_health_probe=PASS` and an explicit
+assertion that health checks produced no `code=netd_v2_request_failed` warnings.
+Repeated startup, worker/netd SIGKILL recovery, fault containment, bounded
+persistent retries (three attempts), and manual recovery all passed again.
+QEMU exited and was reaped. This run intentionally did not repeat the kernel
+TUN case, whose separate v7 evidence remains above.
+
+Evidence:
+
+- `docs/artifacts/sdwan-20261015/openwrt-musl-probe-v2/build-report.json`
+- `docs/artifacts/sdwan-20261015/openwrt-musl-probe-v2/build.log`
+- `docs/artifacts/sdwan-20261015/openwrt-vm-probe-v8/report.json`
+- `docs/artifacts/sdwan-20261015/openwrt-vm-probe-v8/guest-evidence.tar.gz`
+
+The netd probe target gate is now verified on real OpenWrt; the full production
+Agent/Core platform, IPQ40xx, Android, and update/rollback statuses remain as
+listed above.

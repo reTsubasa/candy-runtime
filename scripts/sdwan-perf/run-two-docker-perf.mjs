@@ -10,6 +10,7 @@ const topology = process.env.CANDY_PERF_TOPOLOGY || 'ipc';
 if (!['ipc', 'in-process'].includes(topology)) throw new Error(`unsupported topology: ${topology}`);
 const cpuTargetMbps = Number(process.env.CANDY_PERF_CPU_TARGET_MBPS || 750);
 const transactions = process.env.CANDY_PERF_TRANSACTIONS === '1';
+const executorDiagnostics = process.env.CANDY_PERF_EXECUTOR_DIAGNOSTICS === '1';
 const grantTtlSecs = Number(process.env.CANDY_PERF_GRANT_TTL_SECS || 3600);
 const selectedSample=process.env.CANDY_PERF_SAMPLE?process.env.CANDY_PERF_SAMPLE.split('/'):undefined;
 if(selectedSample&&!/^([1-5])\/(1|4|16)\/(upload|download)$/.test(process.env.CANDY_PERF_SAMPLE))throw new Error('sample selection must be round/parallel/direction');
@@ -31,7 +32,9 @@ const write = (name, data) => fs.writeFileSync(path.join(root, name), typeof dat
 const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const launch = (name, label, args, env = []) => {
   const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
-  run(['exec', '-d', ...env.flatMap(value => ['-e', value]), name, 'sh', '-c', `exec ${args.map(quote).join(' ')} > /bench/${label}.log 2>&1`]);
+  const diagnostics = executorDiagnostics && ['client-agent', 'client-b0', 'server-core'].includes(label)
+    ? [`CANDY_PACKET_EXECUTOR_DIAGNOSTICS=/bench/executor-diagnostics/${name === client ? 'client' : 'server'}`] : [];
+  run(['exec', '-d', ...[...env, ...diagnostics].flatMap(value => ['-e', value]), name, 'sh', '-c', `exec ${args.map(quote).join(' ')} > /bench/${label}.log 2>&1`]);
 };
 const wait = (name, file) => {
   for (let i = 0; i < 300; i++) {
@@ -70,6 +73,9 @@ if (phase === 'setup') {
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   if (fs.existsSync(path.join(root, 'fixture'))) throw new Error('setup needs a new run directory without a fixture; preserve prior evidence and choose a new directory');
   if (fs.existsSync(path.join(root, 'run-identity.json'))) throw new Error('setup refuses to overwrite a prior run; choose a new run directory');
+  if (executorDiagnostics) {
+    for (const side of ['client', 'server']) fs.mkdirSync(path.join(root, 'executor-diagnostics', side), {recursive: true, mode: 0o700});
+  }
   const binaries = ['candy-core', 'candy-netd', 'candy-tunio', 'candy-agent', 'sdwan_signed_cli_fixture', 'signed_cli_helper'];
   const hashes = Object.fromEntries(binaries.map(name => [name, crypto.createHash('sha256').update(fs.readFileSync(path.join(root, 'binaries', name))).digest('hex')]));
   if (fs.existsSync(path.join(root, 'binary-hashes.json'))) {
@@ -90,6 +96,7 @@ if (phase === 'setup') {
   const runIdentity=JSON.parse(fs.readFileSync(path.join(root,'run-identity.json')));
   runIdentity.scheduler_sha256 = crypto.createHash('sha256').update(fs.readFileSync(scheduler)).digest('hex');
   runIdentity.scheduler_interval_seconds = 1;
+  runIdentity.executor_diagnostics = executorDiagnostics;
   runIdentity.image_id=JSON.parse(run(['inspect',client]))[0].Image;
   write('run-identity.json',runIdentity);
   const clientPid = run(['inspect', '-f', '{{.State.Pid}}', client]).trim();
@@ -153,6 +160,7 @@ const expectedHashes = JSON.parse(fs.readFileSync(path.join(root,'binary-hashes.
 const identity = JSON.parse(fs.readFileSync(path.join(root,'run-identity.json')));
 if (identity.topology !== topology || identity.cpu_target_mbps !== cpuTargetMbps) throw new Error('topology or matched CPU target changed after setup');
 if (identity.parameters.transactions !== transactions || identity.parameters.grant_ttl_secs !== grantTtlSecs) throw new Error('transaction mode or Grant TTL changed after setup');
+if (Boolean(identity.executor_diagnostics) !== executorDiagnostics) throw new Error('executor diagnostics mode changed after setup');
 if (crypto.createHash('sha256').update(fs.readFileSync(path.join(root,'candy-perf-probe.py'))).digest('hex') !== identity.probe_sha256) throw new Error('probe changed after setup');
 if (crypto.createHash('sha256').update(fs.readFileSync(path.join(root,'candy-perf-scheduler.py'))).digest('hex') !== identity.scheduler_sha256) throw new Error('scheduler observer changed after setup');
 for (const [name,expected] of Object.entries(expectedHashes)) {

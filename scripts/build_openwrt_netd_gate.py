@@ -65,7 +65,7 @@ def main():
         env = dict(os.environ, CARGO_TARGET_DIR=str(target),
                    CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=str(linker))
         started = time.monotonic()
-        exit_code = build_command(["cargo", "build", "--offline", "-j", "1", "--package", "candy-netd",
+        exit_code = build_command(["cargo", "build", "--locked", "--offline", "-j", "1", "--package", "candy-netd",
                                    "--target", report["target"]], frozen, env, args.out / "build.log", args.timeout)
         report["elapsed_s"] = time.monotonic() - started
         report["exit_code"] = exit_code

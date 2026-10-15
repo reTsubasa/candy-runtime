@@ -1,0 +1,49 @@
+{
+  "status": "PASS_NARROW_PROCD",
+  "scope": "OpenWrt real procd with lifecycle probe; optional real netd; no complete SD-WAN acceptance",
+  "whole_platform": "NOT_RUN",
+  "runner_sha256": "eb38b7bc7d9e6aab5ced51942447f0dc7d4df00eae66d004a9a420cc4c8f3d76",
+  "guest_script_sha256": "e7d44fd5afc081ab20838593f9a4f7512be14146c377270e3daab65721023281",
+  "remaining": [
+    "packaged production init integration",
+    "signed Agent/Core/TUN packet path",
+    "update and rollback",
+    "IPQ40xx physical platform",
+    "Android Rust integration"
+  ],
+  "official_image": {
+    "release": "25.12.5",
+    "url": "https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-25.12.5-x86-64-generic-ext4-combined.img.gz",
+    "sha256": "23e2538e8ab0eb52dfed1c65d608ecdb71ffd432dd54885da138ae67cd9e4461",
+    "manifest_sha256": "0787db220cdc4a2e2d0ba8c19e8e28f2ee88e67d464a159e78974e323824d5b5",
+    "usign_fingerprint": "b5043e70f9a75cde",
+    "signature_verified": true
+  },
+  "qemu": {
+    "vcpus": 1,
+    "memory_mib": 512,
+    "snapshot": true,
+    "guest_egress": "restricted",
+    "ssh_bind": "127.0.0.1",
+    "timeout_s": 360
+  },
+  "netd_sha256": "55d37fa4ea6ebff5bf9c0cb9a3873c33702d0fd9792991eaf75b961db79f82c0",
+  "guest": {
+    "pid1": "procd",
+    "openwrt": "25.12.5",
+    "real_netd": true,
+    "worker_payload": "lifecycle_probe",
+    "duplicate_start_idempotent": true,
+    "worker_sigkill_recovered": true,
+    "worker_failure_preserves_infrastructure": true,
+    "infrastructure_sigkill_recovered": true,
+    "infrastructure_restart_preserves_worker": true,
+    "persistent_fault_bounded": true,
+    "fault_attempts": 3,
+    "manual_recovery_after_fault": true,
+    "protocol_v2_health_probe": "PASS",
+    "kernel_tun_guard_and_journal_recovery": "NOT_RUN",
+    "whole_platform": "NOT_RUN"
+  },
+  "qemu_process_reaped": true
+}

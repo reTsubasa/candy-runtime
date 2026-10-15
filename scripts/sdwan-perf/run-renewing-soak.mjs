@@ -92,7 +92,7 @@ const snapshot = async name => {
 try {
   fs.cpSync(path.join(build, 'binaries'), path.join(root, 'binaries'), {recursive: true});
   for (const name of ['binary-hashes.json', 'source-freeze.json', 'build-provenance.json']) fs.copyFileSync(path.join(build, name), path.join(root, name));
-  write('renewal-run.json', {mode, require_output_diagnostics: requireOutputs, ttl_seconds: ttl, policy_ttl_seconds: policyTtl, renewal_interval_seconds: renewalInterval, rounds, seconds, runner_sha256: crypto.createHash('sha256').update(fs.readFileSync(new URL(import.meta.url))).digest('hex'), scope: 'isolated aarch64 Docker renewal stability; not physical-link acceptance'});
+  write('renewal-run.json', {mode, require_output_diagnostics: requireOutputs, executor_diagnostics: process.env.CANDY_PERF_EXECUTOR_DIAGNOSTICS === '1', ttl_seconds: ttl, policy_ttl_seconds: policyTtl, renewal_interval_seconds: renewalInterval, rounds, seconds, runner_sha256: crypto.createHash('sha256').update(fs.readFileSync(new URL(import.meta.url))).digest('hex'), scope: 'isolated aarch64 Docker renewal stability; not physical-link acceptance'});
   phase('setup');
   identity = read('run-identity.json');
   stopHostObserver = observeHost(path.join(root, 'scheduler-host.jsonl'));

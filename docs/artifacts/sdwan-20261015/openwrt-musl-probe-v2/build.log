@@ -1,0 +1,3 @@
+   Compiling candy-netd-client v0.4.0 (/private/var/folders/ht/sp1p14p103d2hh5x2k_mrbnr0000gn/T/candy-netd-musl-source-xzkmzyph/linux/common/crates/candy-netd-client)
+   Compiling candy-netd v0.4.0 (/private/var/folders/ht/sp1p14p103d2hh5x2k_mrbnr0000gn/T/candy-netd-musl-source-xzkmzyph/linux/common/apps/candy-netd)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.98s
