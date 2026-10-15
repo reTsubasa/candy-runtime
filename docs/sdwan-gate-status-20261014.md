@@ -1,5 +1,31 @@
 # SD-WAN 实施与门禁状态（2026-10-14）
 
+## 最新集成结论（2026-10-15，release v7）
+
+本节优先于下文历史记录。完整 G0–G6 **仍未通过**，不签名发布或更新生产。
+
+| 专项 | 实际结果 | 证据及范围 |
+| --- | --- | --- |
+| 冻结六产物构建 | BUILD_PASS | Core `8454593`、Runtime `b4459ce`；manifest `a75dee1f0b9a8dd73a2fe3035d2c5b788a0766010f1c01833aceeefdf524b4d9`；排除工作区未提交修改，不包含仍在实现的 mixed listener 接线 |
+| shared host lifecycle | PASS，恰好 1 项实际执行 | 真实失败域返回 `exit_code=1` / `domain_failed`；host 存活，forget 回收 completed/live；冻结 release helper |
+| shared host 四域扩缩与隔离 | PASS，恰好 1 项实际执行 | 四签名域、扩缩、域/host 故障与基础设施保持；冻结 release fixture，不等价于平台验收或混合公共 listener |
+| v7 独占 4 × 60 秒吞吐 | 诊断阈值 PASS | 上传 750.00 / 749.99 Mbps，下载 747.93 / 750.01 Mbps；750 Mbps offered load，不能作为 800 Mbps 验收 |
+| v7 稳态完整性 | FAIL | TUNIO→Core deadline 1462，Core→TUNIO deadline 593；全部 admission subtype 拒绝为零，TUNIO→TUN 和 server 无输出丢包；100 ms 期限与 256 packets / 512 KiB 参数保持 |
+| 平台静态复查 | 部分 PASS，Android 签名 FAIL | 5 项 parser 回归、4 个旧 x86 ELF、catalog 验签通过；本地 0.3.5 正式证书与 0.3.6 Debug 证书不同，覆盖安装与 required signer 静态门禁失败；旧包不证明当前源码平台通过 |
+
+v7 第一上传轮客户端无 cgroup throttling，仍有 726 次 TUNIO deadline；下载轮同时
+出现 runnable wait 和部分 quota throttling。新增每秒每线程 `schedstat`、CPU PSI、
+VM CPU 采样支持继续区分系统调度与执行器阻塞，不能据此断言代码已无缺陷。
+Core 排队峰值 432.291 ms，TUNIO 排队峰值 313.987 ms；v6 的 477/324 次历史失败
+保留，当前没有完整性改善或故障关闭的结论。
+
+证据位于工作区 `docs/artifacts/sdwan-20261015/`：
+`fairness-release-v7-source-fixed/`、`shared-host-v7-lifecycle/`、
+`shared-host-v7-four-domains/`、`perf-fairness-comparison-v7/summary.json`。
+平台审计见 `sdwan-platform-offline-audit-20261015.md`。Docker aarch64 不替代
+物理链路、OpenWrt/procd、IPQ40xx 或 Android 真机证据。两小时稳定性、正式
+800 Mbps / UDP / p99 / 多 worker mixed、当前平台安装与签名升级仍未关闭。
+
 ## 最新集成结论（2026-10-15，v18 / release v6）
 
 本节优先于下文历史记录。完整 G0–G6 **仍未通过**，不得据此签名发布或更新生产。
