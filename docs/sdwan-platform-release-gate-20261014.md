@@ -1,5 +1,9 @@
 # SD-WAN 平台与发布门禁（2026-10-14）
 
+## 2026-10-15 离线复验补充
+
+最新证据见 [离线平台审计](sdwan-platform-offline-audit-20261015.md)。旧 x86 Runtime 四个 ELF 与现有 catalog 验签通过；本地 0.3.5 universal 使用正式证书、0.3.6 universal 使用 Debug 证书，二者覆盖兼容及 required signer 检查均 FAIL。ADB 设备列表为空、AVD 为空、Android system-images 缺失；未发现可启动 OpenWrt 隔离镜像、默认 SDK 缓存或 SDK Docker image。G0/G5 保持未完成。该复验没有构建、签名、安装、VM 启动、负载测试或生产变更。
+
 ## 范围与判定
 
 `scripts/platform_release_gate.py` 提供不构建、不安装、不签名和不发布的离线门禁。每次必须使用新的证据目录；目录已存在时拒绝运行，保留失败证据。退出码 1 表示至少一个实测失败，退出码 2 表示所执行检查通过但完整平台门禁尚未完成。该脚本不会返回完整发布 PASS。
