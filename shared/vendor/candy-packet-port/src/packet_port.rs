@@ -442,9 +442,15 @@ impl PacketOutput {
         }
     }
 
-    pub async fn stop(&mut self) {
+    pub fn cancel(&self) {
         if !self.joined {
             self.task.abort();
+        }
+    }
+
+    pub async fn stop(&mut self) {
+        if !self.joined {
+            self.cancel();
             let _ = (&mut self.task).await;
             self.joined = true;
         }

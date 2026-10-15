@@ -6,7 +6,7 @@ use crate::packet_port_ipc::{
 };
 use std::future::Future;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -104,6 +104,22 @@ fn is_authorization_failure(error: &io::Error) -> bool {
 }
 
 pub enum PacketPortOwnerChange {
+    /// Stage exactly one candidate without opening data pumps or replacing the reader.
+    PrepareOwner {
+        transaction: OwnerTransaction,
+        port: UnixPacketPort,
+        authorization: AuthorizationCheck,
+    },
+    CommitOwner {
+        transaction: OwnerTransaction,
+    },
+    AbortOwner {
+        transaction: OwnerTransaction,
+    },
+    ProbeTransaction {
+        transaction_id: [u8; 16],
+        revision: u64,
+    },
     Attach {
         port: UnixPacketPort,
         auth_deadline: Instant,
@@ -124,12 +140,43 @@ pub enum PacketPortOwnerChange {
     Probe,
 }
 
+/// Immutable transaction identity, scoped to this infrastructure/domain bridge.
+/// Revisions are monotonic for the lifetime of the bridge. A restarted caller
+/// probes the watermark before choosing its next revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnerTransaction {
+    pub transaction_id: [u8; 16],
+    pub revision: u64,
+    pub expected_active_epoch: Option<u64>,
+    pub binding: PacketPortBinding,
+    pub auth_deadline: Instant,
+    pub prepare_deadline: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OwnerTransactionPhase {
+    Prepared,
+    Committed,
+    Aborted,
+    Expired,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnerTransactionReceipt {
+    pub transaction: OwnerTransaction,
+    pub phase: OwnerTransactionPhase,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PacketPortReceipt {
     pub binding: Option<PacketPortBinding>,
     pub auth_deadline: Option<Instant>,
     pub owner_epoch: u64,
     pub policy_generation: u64,
+    /// At most one pending and one most recent terminal result are retained.
+    pub pending: Option<OwnerTransactionReceipt>,
+    pub last_transaction: Option<OwnerTransactionReceipt>,
+    pub highest_transaction_revision: u64,
 }
 
 /// Only the authenticated local Agent may supply these changes. It must verify
@@ -146,8 +193,108 @@ pub struct PacketPortOwnerUpdate {
 struct Owner {
     port: Arc<UnixPacketPort>,
     auth_deadline: Instant,
+    /// Two-phase owners cannot extend the immutable Prepare authorization cap.
+    transaction_cap: Option<Instant>,
+    deadline: watch::Sender<Instant>,
+    fence: Arc<OwnerFence>,
     to_worker: PacketOutput,
     to_tun: PacketOutput,
+}
+
+impl Owner {
+    fn new<P: PacketPort>(
+        port: UnixPacketPort,
+        tun: Arc<P>,
+        auth_deadline: Instant,
+        transaction_cap: Option<Instant>,
+        authorization: Option<AuthorizationCheck>,
+    ) -> Self {
+        let port = Arc::new(port);
+        let (deadline, deadline_rx) = watch::channel(auth_deadline);
+        let fence = Arc::new(OwnerFence::new());
+        Self {
+            to_worker: PacketOutput::new(Arc::new(DeadlinePort {
+                port: port.clone(),
+                deadline: deadline_rx.clone(),
+                authorization: authorization.clone(),
+                fence: fence.clone(),
+            })),
+            to_tun: PacketOutput::new(Arc::new(DeadlinePort {
+                port: tun,
+                deadline: deadline_rx,
+                authorization,
+                fence: fence.clone(),
+            })),
+            port,
+            auth_deadline,
+            transaction_cap,
+            deadline,
+            fence,
+        }
+    }
+
+    fn retire(&self) {
+        self.fence.retire();
+        self.to_worker.cancel();
+        self.to_tun.cancel();
+    }
+}
+
+/// The mutex covers only one nonblocking send poll. Retiring under the same
+/// lock is a send fence even when an output task runs on another executor thread.
+struct OwnerFence {
+    active: Mutex<bool>,
+    retired: watch::Sender<bool>,
+}
+
+impl OwnerFence {
+    fn new() -> Self {
+        Self {
+            active: Mutex::new(true),
+            retired: watch::channel(false).0,
+        }
+    }
+
+    fn while_active<T>(&self, operation: impl FnOnce() -> T) -> io::Result<T> {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !*active {
+            return Err(authorization_failure(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "packet-port owner retired",
+            )));
+        }
+        Ok(operation())
+    }
+
+    fn retire(&self) {
+        *self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+        self.retired.send_replace(true);
+    }
+}
+
+struct PendingOwner {
+    transaction: OwnerTransaction,
+    port: UnixPacketPort,
+    authorization: AuthorizationCheck,
+}
+
+fn matches_infrastructure(port: &UnixPacketPort, infrastructure: PacketPortBinding) -> bool {
+    let binding = port.binding();
+    port.role() == PacketPortRole::Infrastructure
+        && binding.infrastructure_id == infrastructure.infrastructure_id
+        && binding.infrastructure_generation == infrastructure.infrastructure_generation
+        && binding.io_epoch == infrastructure.io_epoch
+        && binding.routing_domain_id == infrastructure.routing_domain_id
+}
+
+fn active_epoch(owner: Option<&Owner>) -> Option<u64> {
+    owner.map(|owner| owner.port.binding().owner_epoch)
 }
 
 async fn owner_packet<P: PacketPort>(port: Option<&P>) -> io::Result<Vec<u8>> {
@@ -236,12 +383,21 @@ fn receipt(
     owner: Option<&Owner>,
     highest_owner_epoch: u64,
     highest_policy_generation: u64,
+    pending: Option<&PendingOwner>,
+    last_transaction: Option<&OwnerTransactionReceipt>,
+    highest_transaction_revision: u64,
 ) -> PacketPortReceipt {
     PacketPortReceipt {
         binding: owner.map(|owner| owner.port.binding()),
         auth_deadline: owner.map(|owner| owner.auth_deadline),
         owner_epoch: highest_owner_epoch,
         policy_generation: highest_policy_generation,
+        pending: pending.map(|pending| OwnerTransactionReceipt {
+            transaction: pending.transaction.clone(),
+            phase: OwnerTransactionPhase::Prepared,
+        }),
+        last_transaction: last_transaction.cloned(),
+        highest_transaction_revision,
     }
 }
 
@@ -251,17 +407,27 @@ async fn revoke(
     outputs: &mut PacketBridgeOutputStatus,
 ) {
     if let Some(mut previous) = owner.take() {
-        previous.to_worker.stop().await;
-        previous.to_tun.stop().await;
+        previous.retire();
+        tokio::join!(previous.to_worker.stop(), previous.to_tun.stop());
         collect(&previous, counters, outputs);
     }
     outputs.binding = None;
+}
+
+fn retire(owner: Owner, retired: &mut tokio::task::JoinSet<Owner>) {
+    owner.retire();
+    retired.spawn(async move {
+        let mut owner = owner;
+        tokio::join!(owner.to_worker.stop(), owner.to_tun.stop());
+        owner
+    });
 }
 
 struct DeadlinePort<P> {
     port: Arc<P>,
     deadline: watch::Receiver<Instant>,
     authorization: Option<AuthorizationCheck>,
+    fence: Arc<OwnerFence>,
 }
 
 impl<P: PacketPort> PacketPort for DeadlinePort<P> {
@@ -269,19 +435,22 @@ impl<P: PacketPort> PacketPort for DeadlinePort<P> {
         self.port.max_packet_size()
     }
     fn try_send_packet(&self, packet: &[u8]) -> io::Result<bool> {
-        if let Some(authorization) = &self.authorization {
-            authorization().map_err(authorization_failure)?;
-        }
-        if Instant::now() >= *self.deadline.borrow() {
-            return Ok(false);
-        }
-        self.port.try_send_packet(packet)
+        self.fence.while_active(|| {
+            if let Some(authorization) = &self.authorization {
+                authorization().map_err(authorization_failure)?;
+            }
+            if Instant::now() >= *self.deadline.borrow() {
+                return Ok(false);
+            }
+            self.port.try_send_packet(packet)
+        })?
     }
     async fn recv_packet(&self) -> io::Result<Vec<u8>> {
         self.port.recv_packet().await
     }
     async fn send_packet(&self, packet: &[u8]) -> io::Result<()> {
         let mut deadline_rx = self.deadline.clone();
+        let mut retired_rx = self.fence.retired.subscribe();
         let send = self.port.send_packet(packet);
         tokio::pin!(send);
         loop {
@@ -294,6 +463,7 @@ impl<P: PacketPort> PacketPort for DeadlinePort<P> {
             }
             tokio::select! {
                 biased;
+                _ = retired_rx.changed() => return Err(authorization_failure(io::Error::new(io::ErrorKind::PermissionDenied, "packet-port owner retired during output"))),
                 _ = tokio::time::sleep_until(deadline) => {
                     return Err(authorization_failure(io::Error::new(io::ErrorKind::PermissionDenied, "routing-domain authorization expired during output")));
                 }
@@ -301,12 +471,14 @@ impl<P: PacketPort> PacketPort for DeadlinePort<P> {
                     if changed.is_err() { return Err(io::Error::new(io::ErrorKind::PermissionDenied, "authorization publisher closed")); }
                 }
                 result = std::future::poll_fn(|cx| {
-                    if let Some(authorization) = &self.authorization {
-                        if let Err(error) = authorization() {
-                            return std::task::Poll::Ready(Err(authorization_failure(error)));
+                    self.fence.while_active(|| {
+                        if let Some(authorization) = &self.authorization {
+                            if let Err(error) = authorization() {
+                                return std::task::Poll::Ready(Err(authorization_failure(error)));
+                            }
                         }
-                    }
-                    send.as_mut().poll(cx)
+                        send.as_mut().poll(cx)
+                    }).unwrap_or_else(|error| std::task::Poll::Ready(Err(error)))
                 }) => return result,
             }
         }
@@ -353,9 +525,12 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
 ) -> io::Result<PacketBridgeCounters> {
     let tun = Arc::new(tun);
     let mut owner: Option<Owner> = None;
+    let mut pending: Option<PendingOwner> = None;
+    let mut last_transaction: Option<OwnerTransactionReceipt> = None;
+    let mut highest_transaction_revision = 0;
     let mut highest_owner_epoch = 0;
     let mut highest_policy_generation = 0;
-    let (deadline_tx, deadline_rx) = watch::channel(Instant::now());
+    let mut retired = tokio::task::JoinSet::new();
     let mut control_available = true;
     let mut prefer_worker = false;
     let mut counters = PacketBridgeCounters::default();
@@ -370,6 +545,12 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
         }
         let worker = owner.as_ref().map(|owner| owner.port.clone());
         let expiry = owner.as_ref().map(|owner| owner.auth_deadline);
+        let pending_expiry = pending.as_ref().map(|candidate| {
+            candidate
+                .transaction
+                .prepare_deadline
+                .min(candidate.transaction.auth_deadline)
+        });
         let to_worker = owner.as_ref().map(|owner| owner.to_worker.admission());
         let to_tun = owner.as_ref().map(|owner| owner.to_tun.admission());
         tokio::select! {
@@ -377,10 +558,21 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() { break Ok(()); }
             }
+            Some(joined) = retired.join_next(), if !retired.is_empty() => {
+                let previous = joined.map_err(io::Error::other)?;
+                collect(&previous, &mut counters, &mut outputs);
+                if let Some(owner) = &owner { collect(owner, &mut counters, &mut outputs); }
+            }
             _ = owner_expiry(expiry) => {
                 tracing::warn!(code = "packet_port_owner_expired", module = "sdwan_tun_io",
                     owner_epoch = highest_owner_epoch, action = "revoke_domain_keep_infrastructure");
                 revoke(&mut owner, &mut counters, &mut outputs).await;
+            }
+            _ = owner_expiry(pending_expiry) => {
+                let expired = pending.take().expect("pending expiry requires candidate");
+                last_transaction = Some(OwnerTransactionReceipt {
+                    transaction: expired.transaction, phase: OwnerTransactionPhase::Expired,
+                });
             }
             update = updates.recv(), if control_available => {
                 let Some(update) = update else {
@@ -399,6 +591,91 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
                     change => (change, None),
                 };
                 let result = match change {
+                    PacketPortOwnerChange::PrepareOwner { transaction, port, authorization } => {
+                        let now = Instant::now();
+                        let duplicate = pending.as_ref().is_some_and(|candidate| candidate.transaction == transaction)
+                            || last_transaction.as_ref().is_some_and(|last| last.transaction == transaction && last.phase == OwnerTransactionPhase::Committed);
+                        let identity_conflict = pending.as_ref().is_some_and(|candidate| candidate.transaction.transaction_id == transaction.transaction_id && candidate.transaction != transaction)
+                            || last_transaction.as_ref().is_some_and(|last| last.transaction.transaction_id == transaction.transaction_id && last.transaction != transaction);
+                        if !matches_infrastructure(&port, infrastructure) || port.binding() != transaction.binding || identity_conflict {
+                            Err("code=owner_prepare_identity_mismatch module=packet_port_manager reason=FD_binding_or_transaction_payload_differs".into())
+                        } else if duplicate {
+                            // Retain the original FD, deadlines and authorization callback.
+                            Ok(())
+                        } else if transaction.transaction_id == [0; 16] || transaction.revision == 0 {
+                            Err("code=owner_prepare_invalid_identity module=packet_port_manager reason=transaction_ID_and_revision_must_be_nonzero".into())
+                        } else if transaction.revision <= highest_transaction_revision {
+                            Err(format!("code=owner_prepare_stale_revision module=packet_port_manager revision={} highest_revision={highest_transaction_revision}", transaction.revision))
+                        } else if retired.len() >= 8 {
+                            Err("code=owner_prepare_cleanup_busy module=packet_port_manager reason=retired_writer_cleanup_pending limit=8 action=retry_prepare".into())
+                        } else if pending.is_some() {
+                            Err("code=owner_prepare_capacity module=packet_port_manager reason=pending_candidate_exists limit=1 action=commit_or_abort_existing_candidate".into())
+                        } else if active_epoch(owner.as_ref()) != transaction.expected_active_epoch {
+                            Err(format!("code=owner_prepare_active_changed module=packet_port_manager expected={:?} actual={:?}", transaction.expected_active_epoch, active_epoch(owner.as_ref())))
+                        } else if transaction.binding.owner_epoch <= highest_owner_epoch
+                            || transaction.binding.policy_generation < highest_policy_generation {
+                            Err(format!("code=owner_prepare_stale_epoch module=packet_port_manager owner_epoch={} highest_owner_epoch={highest_owner_epoch} policy_generation={} highest_policy_generation={highest_policy_generation}", transaction.binding.owner_epoch, transaction.binding.policy_generation))
+                        } else if transaction.prepare_deadline <= now || transaction.auth_deadline <= now
+                            || transaction.prepare_deadline > transaction.auth_deadline
+                            || transaction.prepare_deadline.duration_since(now) > std::time::Duration::from_secs(30) {
+                            Err("code=owner_prepare_invalid_deadline module=packet_port_manager reason=prepare_must_be_live_within_authorization_and_30s_cap".into())
+                        } else if let Err(error) = authorization() {
+                            Err(format!("code=owner_prepare_unauthorized module=packet_port_manager detail={error}"))
+                        } else {
+                            highest_transaction_revision = transaction.revision;
+                            pending = Some(PendingOwner { transaction, port, authorization });
+                            Ok(())
+                        }
+                    }
+                    PacketPortOwnerChange::CommitOwner { transaction } => {
+                        if last_transaction.as_ref().is_some_and(|last| last.transaction == transaction && last.phase == OwnerTransactionPhase::Committed) {
+                            Ok(())
+                        } else if !pending.as_ref().is_some_and(|candidate| candidate.transaction == transaction) {
+                            Err("code=owner_commit_not_prepared module=packet_port_manager reason=exact_prepared_transaction_required".into())
+                        } else if retired.len() >= 8 {
+                            Err("code=owner_commit_cleanup_busy module=packet_port_manager reason=retired_writer_cleanup_pending limit=8 action=retry_commit".into())
+                        } else if active_epoch(owner.as_ref()) != transaction.expected_active_epoch
+                            || transaction.binding.owner_epoch <= highest_owner_epoch
+                            || transaction.binding.policy_generation < highest_policy_generation {
+                            Err(format!("code=owner_commit_active_changed module=packet_port_manager expected={:?} actual={:?} owner_epoch={} highest_owner_epoch={highest_owner_epoch} policy_generation={} highest_policy_generation={highest_policy_generation} action=preserve_active_owner", transaction.expected_active_epoch, active_epoch(owner.as_ref()), transaction.binding.owner_epoch, transaction.binding.policy_generation))
+                        } else if transaction.auth_deadline <= Instant::now()
+                            || transaction.prepare_deadline <= Instant::now() {
+                            Err("code=owner_commit_expired module=packet_port_manager reason=prepare_or_authorization_deadline_elapsed action=preserve_active_owner".into())
+                        } else if let Err(error) = (pending.as_ref().expect("validated pending transaction").authorization)() {
+                            Err(format!("code=owner_commit_unauthorized module=packet_port_manager detail={error} action=preserve_active_owner"))
+                        } else {
+                            let candidate = pending.take().expect("validated pending transaction");
+                            let replacement = Owner::new(candidate.port, tun.clone(), transaction.auth_deadline, Some(transaction.auth_deadline), Some(candidate.authorization));
+                            // The fence is the linearization point. No await
+                            // separates it from installing the prepared owner.
+                            if let Some(previous) = owner.take() { retire(previous, &mut retired); }
+                            highest_owner_epoch = transaction.binding.owner_epoch;
+                            highest_policy_generation = transaction.binding.policy_generation;
+                            owner = Some(replacement);
+                            outputs.binding = Some(transaction.binding);
+                            last_transaction = Some(OwnerTransactionReceipt { transaction, phase: OwnerTransactionPhase::Committed });
+                            Ok(())
+                        }
+                    }
+                    PacketPortOwnerChange::AbortOwner { transaction } => {
+                        if pending.as_ref().is_some_and(|candidate| candidate.transaction == transaction) {
+                            pending = None;
+                            last_transaction = Some(OwnerTransactionReceipt { transaction, phase: OwnerTransactionPhase::Aborted });
+                            Ok(())
+                        } else if last_transaction.as_ref().is_some_and(|last| last.transaction == transaction && matches!(last.phase, OwnerTransactionPhase::Aborted | OwnerTransactionPhase::Expired)) {
+                            Ok(())
+                        } else if last_transaction.as_ref().is_some_and(|last| last.transaction == transaction && last.phase == OwnerTransactionPhase::Committed) {
+                            Err("code=owner_transaction_committed module=packet_port_manager reason=committed_transaction_cannot_be_aborted action=inspect_receipt".into())
+                        } else {
+                            Err("code=owner_abort_not_prepared module=packet_port_manager reason=exact_pending_or_terminal_transaction_required action=preserve_active_owner".into())
+                        }
+                    }
+                    PacketPortOwnerChange::ProbeTransaction { transaction_id, revision } => {
+                        if pending.as_ref().is_some_and(|candidate| candidate.transaction.transaction_id == transaction_id && candidate.transaction.revision == revision)
+                            || last_transaction.as_ref().is_some_and(|last| last.transaction.transaction_id == transaction_id && last.transaction.revision == revision) {
+                            Ok(())
+                        } else { Err("code=owner_transaction_unknown module=packet_port_manager reason=unknown_or_superseded action=inspect_actual_state_and_revision_watermark".into()) }
+                    }
                     PacketPortOwnerChange::Attach { port, auth_deadline } => {
                         let binding = port.binding();
                         if port.role() != PacketPortRole::Infrastructure
@@ -407,37 +684,32 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
                             || binding.io_epoch != infrastructure.io_epoch
                             || binding.routing_domain_id != infrastructure.routing_domain_id {
                             Err("packet port infrastructure or domain identity mismatch".into())
+                        } else if retired.len() >= 8 {
+                            Err("code=owner_attach_cleanup_busy module=packet_port_manager reason=retired_writer_cleanup_pending limit=8 action=retry_attach".into())
                         } else if authorization.as_ref().is_some_and(|check| check().is_err())
                             || auth_deadline <= Instant::now() || binding.owner_epoch <= highest_owner_epoch
                             || binding.policy_generation < highest_policy_generation {
                             Err("expired authorization or stale owner/policy epoch".into())
                         } else {
-                            revoke(&mut owner, &mut counters, &mut outputs).await;
-                            if auth_deadline <= Instant::now()
-                                || authorization.as_ref().is_some_and(|check| check().is_err()) {
-                                Err("authorization expired while stopping prior owner".into())
-                            } else {
-                                highest_owner_epoch = binding.owner_epoch;
-                                highest_policy_generation = binding.policy_generation;
-                                deadline_tx.send_replace(auth_deadline);
-                                let port = Arc::new(port);
-                                owner = Some(Owner {
-                                    to_worker: PacketOutput::new(Arc::new(DeadlinePort { port: port.clone(), deadline: deadline_rx.clone(), authorization: authorization.clone() })),
-                                    to_tun: PacketOutput::new(Arc::new(DeadlinePort { port: tun.clone(), deadline: deadline_rx.clone(), authorization })),
-                                    port, auth_deadline,
-                                });
-                                outputs.binding = Some(binding);
-                                Ok(())
-                            }
+                            // Check and construct the replacement before fencing the
+                            // old owner. There is no await or failure branch afterwards.
+                            let replacement = Owner::new(port, tun.clone(), auth_deadline, None, authorization);
+                            if let Some(previous) = owner.take() { retire(previous, &mut retired); }
+                            highest_owner_epoch = binding.owner_epoch;
+                            highest_policy_generation = binding.policy_generation;
+                            owner = Some(replacement);
+                            outputs.binding = Some(binding);
+                            Ok(())
                         }
                     }
                     PacketPortOwnerChange::Renew { owner_epoch, policy_generation, auth_deadline } => {
                         match owner.as_mut() {
                             Some(owner) if owner_epoch == highest_owner_epoch
                                 && policy_generation == highest_policy_generation
-                                && auth_deadline > owner.auth_deadline => {
+                                && auth_deadline > owner.auth_deadline
+                                && owner.transaction_cap.is_none_or(|cap| auth_deadline <= cap) => {
                                 owner.auth_deadline = auth_deadline;
-                                deadline_tx.send_replace(auth_deadline);
+                                owner.deadline.send_replace(auth_deadline);
                                 Ok(())
                             }
                             _ => Err("renewal requires matching live owner and advancing deadline".into()),
@@ -459,6 +731,7 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
                         owner.as_ref(),
                         highest_owner_epoch,
                         highest_policy_generation,
+                        pending.as_ref(), last_transaction.as_ref(), highest_transaction_revision,
                     ));
                 }
                 let _ = update.acknowledgement.send(result);
@@ -508,11 +781,19 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
         }
     };
     revoke(&mut owner, &mut counters, &mut outputs).await;
+    while let Some(joined) = retired.join_next().await {
+        let previous = joined.map_err(io::Error::other)?;
+        collect(&previous, &mut counters, &mut outputs);
+    }
     if let Some(sender) = diagnostics {
         sender.send_replace(outputs);
     }
     result.map(|_| counters)
 }
+
+#[cfg(test)]
+#[path = "packet_port_transaction_tests.rs"]
+mod transaction_tests;
 
 #[cfg(test)]
 mod tests {
@@ -870,6 +1151,7 @@ mod tests {
             port: raw.clone(),
             deadline,
             authorization: Some(authorization),
+            fence: Arc::new(OwnerFence::new()),
         };
         let send = port.send_packet(&[1]);
         tokio::pin!(send);
