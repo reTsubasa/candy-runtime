@@ -68,6 +68,11 @@ const reasonTotals = Object.fromEntries(['client', 'server'].map(side => {
   for (const sample of samples) for (const [key, value] of Object.entries(sample[side].drop_reason_delta || {})) totals[key] = (totals[key] || 0) + value;
   return [side, totals];
 }));
+const tunioFailureTotals = Object.fromEntries(['to_worker', 'to_tun'].map(direction => [direction,
+  Object.fromEntries(outputFailureCounters.map(key => [key,
+    samples.reduce((total, sample) => total + (sample.client.tunio_outputs?.delta[direction][key] ?? 0), 0),
+  ])),
+]));
 const throughput = samples.length === run.rounds && samples.every(row => row.receiver_mbps >= 712.5);
 const integrity = samples.length === run.rounds && samples.every(row => ['client', 'server'].every(side => {
   const state = row[side];
@@ -75,6 +80,6 @@ const integrity = samples.length === run.rounds && samples.every(row => ['client
   const timingEvidence = !run.require_output_diagnostics || (state.output_timing_delta && state.output_timing_max_micros.queue_wait !== null && state.output_timing_max_micros.send_elapsed !== null);
   return outputIntegrity && timingEvidence && !state.process_generation_changed && state.lifecycle === 'active' && state.phase === 'data_plane_active' && state.failed_prefixes?.length === 0 && state.counter_delta?.drops === 0 && state.counter_delta?.stream_read_errors === 0 && state.counter_delta?.stream_write_errors === 0 && state.memory_peak_bytes <= 2147483648;
 }));
-const result = {schema_version: 1, scope: 'aarch64 Docker diagnostic; no physical-link or full stability acceptance', mode: run.mode, complete: Boolean(completion) && samples.length === run.rounds, throughput_gate: throughput ? 'PASS' : 'FAIL', steady_sample_integrity: integrity ? 'PASS' : 'FAIL', full_gate: 'NOT_EVALUATED', note: 'Changed process generations require transaction and retired-worker counter review; no reset is treated as zero. Queue subtype counters may overlap aggregate reasons in historical builds.', reason_totals: reasonTotals, samples};
+const result = {schema_version: 1, scope: 'aarch64 Docker diagnostic; no physical-link or full stability acceptance', mode: run.mode, complete: Boolean(completion) && samples.length === run.rounds, throughput_gate: throughput ? 'PASS' : 'FAIL', steady_sample_integrity: integrity ? 'PASS' : 'FAIL', full_gate: 'NOT_EVALUATED', note: 'Changed process generations require transaction and retired-worker counter review; no reset is treated as zero. Queue subtype counters may overlap aggregate reasons in historical builds.', reason_totals: reasonTotals, tunio_failure_totals: tunioFailureTotals, samples};
 fs.writeFileSync(output, JSON.stringify(result, null, 2), {mode: 0o600});
-console.log(JSON.stringify({samples: samples.length, throughput: result.throughput_gate, integrity: result.steady_sample_integrity, reasons: reasonTotals}));
+console.log(JSON.stringify({samples: samples.length, throughput: result.throughput_gate, integrity: result.steady_sample_integrity, reasons: reasonTotals, tunio_failures: tunioFailureTotals}));

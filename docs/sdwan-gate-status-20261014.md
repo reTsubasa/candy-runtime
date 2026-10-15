@@ -1,6 +1,21 @@
 # SD-WAN 实施与门禁状态（2026-10-14）
 
-## 最新集成结论（v16）
+## 最新集成结论（2026-10-15，v18 / release v6）
+
+本节优先于下文历史记录。完整 G0–G6 **仍未通过**，不得据此签名发布或更新生产。
+
+- 最新提交冻结 release v6 已完成六个二进制构建；manifest SHA256 为 `b1e8400b4005abccaf957fc00e0565de8794ecefe2bf307283b976447136395a`。冻结 Core `df63994`、Runtime `42a9abd`，不包含后续接收拥塞隔离和完整 Proxy OS worker 的增量。
+- signed handoff v18 实际执行 3/3 PASS：连续负载 worker slot rotation、真实 mTLS Cloud 过期/恢复/续期、两个签名候选的路径故障恢复。每个专项均恰好执行一个真实测试；这是 exclusive slot 功能证据，不是共享多域池、无损交接或完整稳定性验收。v17 在测试前因冻结目录缺少 Git 元数据失败，失败证据保留；执行器已支持校验签名源快照。
+- release v6 独占窗口完成 4 × 60 秒：上传 750.00 / 749.98 Mbps，下载 738.70 / 750.00 Mbps。诊断吞吐阈值 PASS，但完整性 **FAIL**：TUNIO to_worker deadline 丢 477 包、Core tun_write_deadline 丢 324 包。slot/byte/channel admission 拒绝均为零，说明 direction-local backpressure 消除了该轮队列槽拒绝，尚未消除输出超时。第一上传轮客户端/服务端均无 cgroup throttling，不能将全部超时归因 CPU quota。队列等待峰值 217.780 ms（TUNIO）/271.311 ms（Core）。750 Mbps 是诊断限速，不构成 800 Mbps 指标通过。
+- 最新源代码 `cargo fmt --all -- --check` 与 `cargo check --workspace` PASS。跨 worker 中心认证 Core `6167ec9`：server 74/74、authority 3/3 和严格 Clippy PASS；完整 Proxy OS worker、共享多域 fixture 的结果须按各专项最新证据单独列示。
+- Core `382c608` 的真实 Proxy worker 门禁 2/2 PASS：使用 bounded first control stream classifier 和 exact primed bytes replay，覆盖 TCP/UDP、坏认证、1→2→4→2→1、SIGKILL 替换、健康 worker 保持及 credit 归零。Core transport 179/179、server 74/74、packet-port 36/36 均通过。
+- Core `fb9d75e` 的 listener classifier 只做有界 traffic-kind 预分类并保留原始首帧；它不执行认证，也不代表 SD-WAN 已完成跨进程数据面接线。Proxy master CLI 的实际启动/停止测试 1/1 PASS；master 仍是 Proxy-only opt-in 入口。
+- 共享多域 host fixture v2 已完成四签名域、1→2→4→2→1、TUN/IO 身份保持、单域故障隔离和 host SIGKILL 后受影响域迁移；完整现场见 `docs/artifacts/sdwan-20261015/shared-pool-v2/shared-pool.json`。该证据为隔离 fixture，仍不能替代 OpenWrt/procd 或物理链路门禁。
+- Core `327146e` / Runtime `51efa1b` 修复持续可读 raw PacketPort 接收饿死 sibling task 的确定性缺陷，并增加 packet port、stage、queue residence、send elapsed 和 deadline overrun 日志。参数仍为 256 packets、512 KiB、100 ms；新的公平性回归 PASS，但 v6 有载性能结果仍保留为完整性 FAIL，需 v7 复测确认。
+
+证据：工作区 `docs/artifacts/sdwan-20261014/signed-handoff-gate-v18/`、`perf-renewal-freeze-v6-committed/`、`perf-renewal-build-v6/`，以及 `docs/artifacts/sdwan-20261015/perf-queue-comparison-v6/summary.json`。输出丢包、共享多域/混合 listener、正式性能矩阵与两小时稳定性仍待关闭；平台真机门禁仍 NOT RUN。
+
+## 历史集成结论（v16）
 
 本节优先于下文历史失败记录。完整 G0–G6 **仍未通过**，不得据此签名发布或更新生产。
 

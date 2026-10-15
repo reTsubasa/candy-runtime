@@ -15,7 +15,7 @@ const snapshot = () => {
   return {client: {...resource, active: {core, io: {pid: 12}, outputs: {pid: 12, process_start_ticks: 42, bridge_outputs: {to_worker: outputCounters(), to_tun: outputCounters()}}}}, server: {...resource, core: structuredClone(core)}};
 };
 let sequence = 0;
-const execute = (before, after, expected, requireOutputs = true) => {
+const execute = (before, after, expected, requireOutputs = true, expectedFailures) => {
   write('renewal-run.json', {rounds: 1, mode: 'test', require_output_diagnostics: requireOutputs});
   write('completion.json', {});
   write('sample-p4-upload-r1.json', {end: {sum_received: {seconds: 60, bits_per_second: 750e6}}});
@@ -26,7 +26,9 @@ const execute = (before, after, expected, requireOutputs = true) => {
   if (expected === 'REJECT') assert.notEqual(result.status, 0);
   else {
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(JSON.parse(fs.readFileSync(output)).steady_sample_integrity, expected);
+    const summary = JSON.parse(fs.readFileSync(output));
+    assert.equal(summary.steady_sample_integrity, expected);
+    if (expectedFailures) assert.equal(summary.tunio_failure_totals[expectedFailures.direction][expectedFailures.key], expectedFailures.value);
   }
 };
 try {
@@ -34,7 +36,7 @@ try {
   for (const direction of ['to_worker', 'to_tun']) for (const key of ['queue_slot_exhausted', 'queue_byte_exhausted', 'queue_channel_full', 'backpressure_drops', 'deadline_drops', 'stale_drops']) {
     const after = snapshot();
     after.client.active.outputs.bridge_outputs[direction][key]++;
-    execute(snapshot(), after, 'FAIL');
+    execute(snapshot(), after, 'FAIL', true, {direction, key, value: 1});
   }
   const missing = snapshot();
   delete missing.client.active.outputs;
