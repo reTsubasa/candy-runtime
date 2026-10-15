@@ -40,8 +40,9 @@ def run(args: list[str], *, cwd: Path | None = None, capture: bool = True) -> st
 
 
 def run_build(args: list[str], log: Path) -> None:
-    result = subprocess.run(args, text=True, capture_output=True)
-    log.write_text(result.stdout + "\n" + result.stderr)
+    with log.open("w") as output:
+        result = subprocess.run(args, text=True, stdout=output, stderr=subprocess.STDOUT,
+                                timeout=1800)
     if result.returncode:
         raise subprocess.CalledProcessError(result.returncode, args)
 
@@ -248,7 +249,8 @@ def main() -> int:
             "manifest_sha256": manifest_digest}, indent=2) + "\n")
         return 0
     mounts = ["-v", f"{frozen}:/workspace:ro", "-v", f"{evidence}:/evidence:rw",
-              "-v", f"{CACHE}:/build:rw"]
+              "-v", f"{CACHE}:/build:rw",
+              "-v", f"{Path.home()}/.cargo/registry:/usr/local/cargo/registry:ro"]
     name = "candy-freeze-build-" + hashlib.sha256(str(evidence).encode()).hexdigest()[:12]
     try:
         run_build(["docker", "run", "--name", name, "--rm", "--network", "none", "--cpus", "2",
@@ -266,9 +268,16 @@ def main() -> int:
              "/workspace/candy-runtime/linux/common/apps/candy-tunio/Cargo.toml", "--target-dir", "/build", "--release",
              "--locked", "--offline"], evidence / "build-tunio.log")
         run_build(["docker", "run", "--name", name + "-helper", "--rm", "--network", "none", "--cpus", "2",
-             "--memory", "4g", *mounts, IMAGE, "sh", "-ec",
-             "cargo test --manifest-path /workspace/candy-runtime/linux/common/apps/candy-tunio/Cargo.toml --target-dir /build --release --locked --offline --test signed_cli --no-run --message-format=json > /evidence/signed-cli-cargo.jsonl; python3 -c 'import json,pathlib,shutil; p=pathlib.Path(\"/evidence/signed-cli-cargo.jsonl\"); rows=[]; [rows.append(json.loads(x)) for x in p.read_text().splitlines() if x.lstrip().startswith(\"{\")]; hits=[r[\"executable\"] for r in rows if r.get(\"reason\")==\"compiler-artifact\" and r.get(\"target\",{}).get(\"name\")==\"signed_cli\" and r.get(\"target\",{}).get(\"kind\")==[\"test\"] and isinstance(r.get(\"executable\"),str)]; assert len(hits)==1, hits; src=pathlib.Path(hits[0]); assert src.is_file(); shutil.copy2(src,\"/build/release/signed_cli_helper\")'"], evidence / "build-signed-cli-helper.log")
-        for label, path in ARTIFACTS.items():
+             "--memory", "4g", *mounts, IMAGE, "cargo", "test", "--manifest-path",
+             "/workspace/candy-runtime/linux/common/apps/candy-tunio/Cargo.toml", "--target-dir", "/build",
+             "--release", "--locked", "--offline", "--test", "signed_cli", "--no-run",
+             "--message-format=json"], evidence / "build-signed-cli-helper.log")
+        paths = dict(ARTIFACTS)
+        paths["signed_cli_helper"] = select_signed_cli_executable(
+            (evidence / "build-signed-cli-helper.log").read_text())
+        if not paths["signed_cli_helper"].startswith("/build/release/deps/") or ".." in Path(paths["signed_cli_helper"]).parts:
+            raise ValueError("signed_cli artifact is outside the release build directory")
+        for label, path in paths.items():
             source = CACHE / Path(path.removeprefix("/build/"))
             if not source.is_file():
                 raise SystemExit(f"required release artifact missing: {label}: {source}")
@@ -288,6 +297,16 @@ def main() -> int:
         provenance["image_id"] = image.stdout.strip()
         (evidence / "binary-hashes.json").write_text(
             json.dumps(provenance["binary_hashes"], indent=2, sort_keys=True) + "\n")
+    except Exception as error:
+        (evidence / "result.json").write_text(json.dumps({
+            "gate": "BUILD_FAIL", "performance": "NOT_RUN", "detail": str(error),
+            "manifest_sha256": manifest_digest}, indent=2) + "\n")
+        for container in (name, name + "-runtime", name + "-tunio", name + "-helper"):
+            try:
+                subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        raise
     finally:
         (evidence / "build-provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
     (evidence / "result.json").write_text(json.dumps({"gate": "BUILD_PASS", "performance": "NOT_RUN",

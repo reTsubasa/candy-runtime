@@ -81,11 +81,15 @@ if (phase === 'setup') {
   write('docker-info.json', JSON.parse(run(['info', '--format', '{{json .}}'])));
   const probe = path.resolve(new URL('./candy-perf-probe.py', import.meta.url).pathname);
   fs.copyFileSync(probe,path.join(root,'candy-perf-probe.py'));
+  const scheduler = path.resolve(new URL('./candy-perf-scheduler.py', import.meta.url).pathname);
+  fs.copyFileSync(scheduler, path.join(root, 'candy-perf-scheduler.py'));
   write('run-identity.json', {run_id:runId,root,client,server,image,topology,cpu_target_mbps:cpuTargetMbps,runner_sha256:crypto.createHash('sha256').update(fs.readFileSync(new URL(import.meta.url))).digest('hex'),probe_sha256:crypto.createHash('sha256').update(fs.readFileSync(probe)).digest('hex'),parameters:{cpu_quota:3,memory_bytes:2147483648,link_bps:1000000000,grant_bps:2000000000,grant_ttl_secs:grantTtlSecs,transactions,window_mib:64,mtu:1180,formal_warm_seconds:10,formal_measure_seconds:60,formal_rounds:5},started_at:new Date().toISOString()});
   for (const name of [client, server]) {
     run(['run', '-d', '--name', name, '--label', `candy.perf.run=${root}`, '--label', `candy.perf.run_id=${runId}`, '--network', 'none', ...(name === server ? ['--pid', 'host'] : []), '--privileged', '--cpus', '3', '--memory', '2g', '--memory-swap', '2g', '--pids-limit', '256', '-v', `${root}:/bench`, image, 'sleep', 'infinity']);
   }
   const runIdentity=JSON.parse(fs.readFileSync(path.join(root,'run-identity.json')));
+  runIdentity.scheduler_sha256 = crypto.createHash('sha256').update(fs.readFileSync(scheduler)).digest('hex');
+  runIdentity.scheduler_interval_seconds = 1;
   runIdentity.image_id=JSON.parse(run(['inspect',client]))[0].Image;
   write('run-identity.json',runIdentity);
   const clientPid = run(['inspect', '-f', '{{.State.Pid}}', client]).trim();
@@ -102,6 +106,9 @@ if (phase === 'setup') {
     exec(name, ['ip', 'link', 'add', 'candy-test-lan', 'type', 'dummy']);
     exec(name, ['ip', 'addr', 'add', lan, 'dev', 'candy-test-lan']);
     exec(name, ['ip', 'link', 'set', 'candy-test-lan', 'up']);
+  }
+  for (const [name, side] of [[client, 'client'], [server, 'server']]) {
+    launch(name, `${side}-scheduler`, ['python3', '/bench/candy-perf-scheduler.py', '--output', `/bench/scheduler-${side}.jsonl`]);
   }
   exec(server, ['env', 'CANDY_SIGNED_FIXTURE_ENDPOINT=10.200.0.2:18443', `CANDY_SIGNED_FIXTURE_GRANT_TTL_SECS=${grantTtlSecs}`, ...(process.env.CANDY_SIGNED_FIXTURE_POLICY_TTL_SECS ? [`CANDY_SIGNED_FIXTURE_POLICY_TTL_SECS=${process.env.CANDY_SIGNED_FIXTURE_POLICY_TTL_SECS}`] : []), 'CANDY_SIGNED_FIXTURE_RATE_BPS=2000000000', 'CANDY_SIGNED_FIXTURE_WINDOW_MIB=64', '/bench/binaries/sdwan_signed_cli_fixture', '/bench/fixture']);
   const compiled = JSON.parse(exec(client, ['/bench/binaries/candy-core', 'client', 'sdwan', 'compile-control', '--config', '/bench/fixture/client.toml']));
@@ -147,6 +154,7 @@ const identity = JSON.parse(fs.readFileSync(path.join(root,'run-identity.json'))
 if (identity.topology !== topology || identity.cpu_target_mbps !== cpuTargetMbps) throw new Error('topology or matched CPU target changed after setup');
 if (identity.parameters.transactions !== transactions || identity.parameters.grant_ttl_secs !== grantTtlSecs) throw new Error('transaction mode or Grant TTL changed after setup');
 if (crypto.createHash('sha256').update(fs.readFileSync(path.join(root,'candy-perf-probe.py'))).digest('hex') !== identity.probe_sha256) throw new Error('probe changed after setup');
+if (crypto.createHash('sha256').update(fs.readFileSync(path.join(root,'candy-perf-scheduler.py'))).digest('hex') !== identity.scheduler_sha256) throw new Error('scheduler observer changed after setup');
 for (const [name,expected] of Object.entries(expectedHashes)) {
   const actual = crypto.createHash('sha256').update(fs.readFileSync(path.join(root,'binaries',name))).digest('hex');
   if (actual !== expected) throw new Error(`fixed binary changed: ${name}`);
