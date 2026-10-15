@@ -5,7 +5,8 @@ use anyhow::{bail, Context, Result};
 use candy_packet_port::{
     packet_port_ipc::{PacketPortRole, UnixPacketPort},
     packet_port_manager::{
-        AuthorizationCheck, PacketPortOwnerChange, PacketPortOwnerUpdate, PacketPortReceipt,
+        AuthorizationCheck, OwnerTransaction, OwnerTransactionPhase, PacketPortOwnerChange,
+        PacketPortOwnerUpdate, PacketPortReceipt,
     },
 };
 use candy_process_control::{peer_identity, process_is_current, ProcessIdentity};
@@ -56,6 +57,54 @@ pub(crate) struct AuthorityState {
     pub(crate) pending: Option<AuthorityEnvelope>,
     pub(crate) active: Option<AuthorityEnvelope>,
     pub(crate) actual_deadline_mono_ms: Option<u64>,
+    pub(crate) actual_owner_binding: Option<PacketPortBinding>,
+    pub(crate) owner_highest_revision: u64,
+    owner_pending: Option<AuthorityOwnerReceipt>,
+    owner_last_transaction: Option<AuthorityOwnerReceipt>,
+    #[serde(skip)]
+    owner_candidate: Option<OwnerAuthority>,
+    #[serde(skip)]
+    owner_terminal: Option<(OwnerAuthority, OwnerTransactionPhase)>,
+}
+
+#[derive(Debug, Clone)]
+struct OwnerAuthority {
+    envelope: AuthorityEnvelope,
+    transaction: OwnerTransaction,
+    requested_prepare_deadline_mono_ms: u64,
+    prepared: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorityOwnerReceipt {
+    pub transaction_id: String,
+    pub authority_revision: u64,
+    pub phase: String,
+    pub binding: PacketPortBinding,
+    pub expected_active_epoch: Option<u64>,
+    pub authorization_cap_mono_ms: u64,
+    pub requested_prepare_deadline_mono_ms: u64,
+}
+
+impl OwnerAuthority {
+    fn receipt(&self, phase: OwnerTransactionPhase) -> AuthorityOwnerReceipt {
+        AuthorityOwnerReceipt {
+            transaction_id: self.envelope.transaction_id.clone(),
+            authority_revision: self.transaction.revision,
+            phase: match phase {
+                OwnerTransactionPhase::Prepared => "prepared",
+                OwnerTransactionPhase::Committed => "committed",
+                OwnerTransactionPhase::Aborted => "aborted",
+                OwnerTransactionPhase::Expired => "expired",
+            }
+            .into(),
+            binding: self.transaction.binding,
+            expected_active_epoch: self.transaction.expected_active_epoch,
+            authorization_cap_mono_ms: self.envelope.effective_deadline_mono_ms,
+            requested_prepare_deadline_mono_ms: self.requested_prepare_deadline_mono_ms,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -66,6 +115,12 @@ pub enum AuthorityOperation {
     AttachAuthorized,
     RevokeExact,
     DiscardAuthority,
+    PrepareOwner {
+        expected_active_epoch: Option<u64>,
+        prepare_deadline_mono_ms: u64,
+    },
+    CommitOwner,
+    AbortOwner,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -104,6 +159,12 @@ pub struct AuthorityControlResponse {
     pub auth_deadline_unix: u64,
     pub owner_active: bool,
     pub actual_deadline_mono_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_transaction: Option<AuthorityOwnerReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_owner_binding: Option<PacketPortBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_highest_revision: Option<u64>,
 }
 
 pub fn authority_control_path(supervision: &Path) -> PathBuf {
@@ -386,6 +447,16 @@ fn manager_change(
     change: PacketPortOwnerChange,
     deadline: Instant,
 ) -> Result<PacketPortReceipt> {
+    let (result, actual) = manager_outcome(updates, change, deadline)?;
+    result.map_err(|error| anyhow::anyhow!("actual PacketPort change rejected: {error}"))?;
+    Ok(actual)
+}
+
+fn manager_outcome(
+    updates: &mpsc::Sender<PacketPortOwnerUpdate>,
+    change: PacketPortOwnerChange,
+    deadline: Instant,
+) -> Result<(std::result::Result<(), String>, PacketPortReceipt)> {
     let (acknowledgement, ack) = oneshot::channel();
     let (receipt, actual) = oneshot::channel();
     updates
@@ -398,11 +469,106 @@ fn manager_change(
     // Keep the ACK receiver alive while waiting for actual applied state.
     let result = wait_receiver(ack, deadline)?;
     let actual = wait_receiver(actual, deadline)?;
-    result.map_err(|error| anyhow::anyhow!("actual PacketPort change rejected: {error}"))?;
-    Ok(actual)
+    Ok((result, actual))
+}
+
+fn reconcile_owner(state: &mut AuthorityState, actual: &PacketPortReceipt) {
+    state.actual_owner_binding = actual.binding;
+    state.owner_highest_revision = actual.highest_transaction_revision;
+    if let Some(mut record) = state.owner_candidate.take() {
+        if actual
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.transaction == record.transaction)
+        {
+            record.prepared = true;
+            state.owner_candidate = Some(record);
+        } else if let Some(last) = actual
+            .last_transaction
+            .as_ref()
+            .filter(|last| last.transaction == record.transaction)
+        {
+            if state.pending.as_ref() == Some(&record.envelope) {
+                state.pending = None;
+            }
+            if last.phase == OwnerTransactionPhase::Committed {
+                state.active = (actual.binding == Some(record.envelope.binding))
+                    .then(|| record.envelope.clone());
+            }
+            state.owner_terminal = Some((record, last.phase));
+        }
+        // A manager rejection before preparation leaves only the file authority
+        // staged. It must not acquire Prepared status by inference.
+    }
+    if let Some((record, _)) = &state.owner_terminal {
+        if actual.binding != Some(record.envelope.binding)
+            && state.active.as_ref() == Some(&record.envelope)
+        {
+            state.active = None;
+        }
+    }
+    if state.owner_terminal.as_ref().is_some_and(|(record, _)| {
+        actual
+            .last_transaction
+            .as_ref()
+            .is_none_or(|last| last.transaction != record.transaction)
+    }) {
+        state.owner_terminal = None;
+    }
+    state.owner_pending = state
+        .owner_candidate
+        .as_ref()
+        .filter(|record| record.prepared)
+        .map(|record| record.receipt(OwnerTransactionPhase::Prepared));
+    state.owner_last_transaction = state
+        .owner_terminal
+        .as_ref()
+        .map(|(record, phase)| record.receipt(*phase));
+}
+
+fn owner_receipt(state: &AuthorityState, transaction_id: &str) -> Option<AuthorityOwnerReceipt> {
+    if let Some(record) = state
+        .owner_candidate
+        .as_ref()
+        .filter(|record| record.prepared && record.envelope.transaction_id == transaction_id)
+    {
+        return Some(record.receipt(OwnerTransactionPhase::Prepared));
+    }
+    state
+        .owner_terminal
+        .as_ref()
+        .filter(|(record, _)| record.envelope.transaction_id == transaction_id)
+        .map(|(record, phase)| record.receipt(*phase))
+}
+
+fn owner_record<'a>(state: &'a AuthorityState, transaction_id: &str) -> Option<&'a OwnerAuthority> {
+    state
+        .owner_candidate
+        .as_ref()
+        .filter(|record| record.envelope.transaction_id == transaction_id)
+        .or_else(|| {
+            state
+                .owner_terminal
+                .as_ref()
+                .map(|(record, _)| record)
+                .filter(|record| record.envelope.transaction_id == transaction_id)
+        })
+}
+
+fn apply_owner_change(
+    state: &mut Controller,
+    updates: &mpsc::Sender<PacketPortOwnerUpdate>,
+    change: PacketPortOwnerChange,
+    deadline: Instant,
+) -> Result<()> {
+    let (result, actual) = manager_outcome(updates, change, deadline)?;
+    reconcile(state, actual)?;
+    state.publish()?;
+    result.map_err(|error| anyhow::anyhow!("actual PacketPort change rejected: {error}"))
 }
 
 fn reconcile(state: &mut Controller, actual: PacketPortReceipt) -> Result<()> {
+    reconcile_owner(&mut state.authority, &actual);
     if let Some(pending) = &state.authority.pending {
         if pending.binding.owner_epoch == actual.owner_epoch
             && pending.binding.policy_generation == actual.policy_generation
@@ -486,6 +652,53 @@ fn packet_port(
     )?)
 }
 
+fn needs_descriptor(operation: AuthorityOperation) -> bool {
+    matches!(
+        operation,
+        AuthorityOperation::AttachAuthorized | AuthorityOperation::PrepareOwner { .. }
+    )
+}
+
+fn transaction_bytes(value: &str) -> Result<[u8; 16]> {
+    if !hex(value, 32) {
+        bail!("owner transaction ID must be 32 lowercase hex digits");
+    }
+    let mut bytes = [0; 16];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)?;
+    }
+    Ok(bytes)
+}
+
+fn prepare_record(
+    envelope: &AuthorityEnvelope,
+    expected_active_epoch: Option<u64>,
+    prepare_deadline_mono_ms: u64,
+) -> Result<OwnerAuthority> {
+    let anchor = tokio::time::Instant::now();
+    let now = monotonic_ms()?;
+    let remaining = prepare_deadline_mono_ms.checked_sub(now)
+        .filter(|remaining| *remaining > 0 && *remaining <= 30_000)
+        .context("code=owner_prepare_deadline_rejected module=tunio_authority reason=prepare_must_be_live_within_30s")?;
+    if prepare_deadline_mono_ms > envelope.effective_deadline_mono_ms {
+        bail!("code=owner_prepare_deadline_rejected module=tunio_authority reason=prepare_exceeds_immutable_authorization_cap");
+    }
+    let auth_deadline = owner_deadline(envelope)?;
+    Ok(OwnerAuthority {
+        envelope: envelope.clone(),
+        transaction: OwnerTransaction {
+            transaction_id: transaction_bytes(&envelope.transaction_id)?,
+            revision: envelope.authority_revision,
+            expected_active_epoch,
+            binding: envelope.binding,
+            auth_deadline,
+            prepare_deadline: (anchor + Duration::from_millis(remaining)).min(auth_deadline),
+        },
+        requested_prepare_deadline_mono_ms: prepare_deadline_mono_ms,
+        prepared: false,
+    })
+}
+
 fn apply_request(
     state: &mut Controller,
     peer: ProcessIdentity,
@@ -495,7 +708,7 @@ fn apply_request(
     runtime: &tokio::runtime::Handle,
     deadline: Instant,
 ) -> Result<()> {
-    if request.schema_version != 2
+    if !matches!(request.schema_version, 2 | 3)
         || request.process != state.process
         || request.controller != peer
         || peer != state.controller
@@ -508,13 +721,20 @@ fn apply_request(
     {
         bail!("code=authority_controller_rejected module=tunio_authority detail=controller/epoch/capability/registration mismatch");
     }
-    if descriptors.len()
-        != usize::from(matches!(
+    if request.schema_version != 3
+        && matches!(
             request.operation,
-            AuthorityOperation::AttachAuthorized
-        ))
+            AuthorityOperation::PrepareOwner { .. }
+                | AuthorityOperation::CommitOwner
+                | AuthorityOperation::AbortOwner
+        )
     {
-        bail!("authorized Attach requires one descriptor; other operations require none");
+        bail!("code=owner_protocol_required module=tunio_authority reason=owner_transactions_require_schema_3 action=preserve_existing_owner");
+    }
+    if descriptors.len() != usize::from(needs_descriptor(request.operation)) {
+        bail!(
+            "authorized Attach and Prepare require one descriptor; other operations require none"
+        );
     }
     reconcile(
         state,
@@ -525,6 +745,142 @@ fn apply_request(
             if request.envelope.is_some() {
                 bail!("Probe cannot supply an authorization envelope");
             }
+            if request.schema_version == 2 {
+                state.publish()?;
+                return Ok(());
+            }
+            let actual = manager_change(updates, PacketPortOwnerChange::Probe, deadline)?;
+            reconcile(state, actual.clone())?;
+            let id = transaction_bytes(&request.transaction_id)?;
+            let history = actual
+                .pending
+                .as_ref()
+                .filter(|record| record.transaction.transaction_id == id)
+                .or_else(|| {
+                    actual
+                        .last_transaction
+                        .as_ref()
+                        .filter(|record| record.transaction.transaction_id == id)
+                })
+                .cloned();
+            if let Some(history) = history {
+                let (result, actual) = manager_outcome(
+                    updates,
+                    PacketPortOwnerChange::ProbeTransaction {
+                        transaction_id: history.transaction.transaction_id,
+                        revision: history.transaction.revision,
+                    },
+                    deadline,
+                )?;
+                reconcile(state, actual)?;
+                state.publish()?;
+                result.map_err(|error| {
+                    anyhow::anyhow!("actual PacketPort transaction probe rejected: {error}")
+                })?;
+            } else {
+                bail!("code=owner_transaction_unknown module=tunio_authority reason=manager_has_no_matching_pending_or_terminal_receipt");
+            }
+        }
+        AuthorityOperation::PrepareOwner {
+            expected_active_epoch,
+            prepare_deadline_mono_ms,
+        } => {
+            let envelope = request
+                .envelope
+                .as_ref()
+                .context("Prepare requires exact verified staged authority")?;
+            if envelope.transaction_id != request.transaction_id {
+                bail!("code=owner_prepare_identity_mismatch module=tunio_authority reason=request_and_envelope_transaction_differ");
+            }
+            validate_envelope(state, envelope)?;
+            let cached = owner_record(&state.authority, &request.transaction_id).cloned();
+            let active_epoch = state
+                .authority
+                .actual_owner_binding
+                .map(|binding| binding.owner_epoch);
+            if cached.is_none() && expected_active_epoch != active_epoch {
+                bail!("code=owner_prepare_active_mismatch module=tunio_authority expected_active_epoch={expected_active_epoch:?} actual_active_epoch={active_epoch:?} action=preserve_active_owner");
+            }
+            let record = if let Some(record) = cached {
+                if record.envelope != *envelope
+                    || record.transaction.expected_active_epoch != expected_active_epoch
+                    || record.requested_prepare_deadline_mono_ms != prepare_deadline_mono_ms
+                {
+                    bail!("code=owner_prepare_identity_mismatch module=tunio_authority reason=immutable_transaction_payload_changed");
+                }
+                record
+            } else {
+                if state.authority.pending.as_ref() != Some(envelope) {
+                    bail!("code=authority_stage_mismatch module=tunio_authority reason=Prepare_requires_exact_staged_authority");
+                }
+                prepare_record(envelope, expected_active_epoch, prepare_deadline_mono_ms)?
+            };
+            let port = packet_port(
+                descriptors.pop().expect("checked one fd"),
+                peer,
+                envelope.binding,
+                runtime,
+            )?;
+            if owner_record(&state.authority, &request.transaction_id).is_none() {
+                // Retain the exact Instant cap before enqueue. If the ACK is lost,
+                // the next actual manager Probe confirms or discards this record.
+                state.authority.owner_candidate = Some(record.clone());
+            }
+            apply_owner_change(
+                state,
+                updates,
+                PacketPortOwnerChange::PrepareOwner {
+                    transaction: record.transaction,
+                    port,
+                    authorization: authorization_check(envelope),
+                },
+                deadline,
+            )?;
+        }
+        AuthorityOperation::CommitOwner => {
+            let record = owner_record(&state.authority, &request.transaction_id)
+                .cloned().context("code=owner_transaction_unknown module=tunio_authority reason=no_exact_prepared_or_terminal_transaction")?;
+            if request.envelope.as_ref() != Some(&record.envelope) {
+                bail!("code=owner_commit_identity_mismatch module=tunio_authority reason=exact_prepared_envelope_required");
+            }
+            if !state
+                .authority
+                .owner_terminal
+                .as_ref()
+                .is_some_and(|(last, phase)| {
+                    last.transaction == record.transaction
+                        && *phase == OwnerTransactionPhase::Committed
+                })
+            {
+                validate_envelope(state, &record.envelope)?;
+            }
+            apply_owner_change(
+                state,
+                updates,
+                PacketPortOwnerChange::CommitOwner {
+                    transaction: record.transaction,
+                },
+                deadline,
+            )?;
+        }
+        AuthorityOperation::AbortOwner => {
+            let record = owner_record(&state.authority, &request.transaction_id)
+                .cloned().context("code=owner_transaction_unknown module=tunio_authority reason=no_exact_prepared_or_terminal_transaction")?;
+            if request
+                .envelope
+                .as_ref()
+                .is_some_and(|envelope| envelope != &record.envelope)
+            {
+                bail!("code=owner_abort_identity_mismatch module=tunio_authority reason=exact_prepared_envelope_required");
+            }
+            apply_owner_change(
+                state,
+                updates,
+                PacketPortOwnerChange::AbortOwner {
+                    transaction: record.transaction,
+                },
+                deadline,
+            )?;
         }
         AuthorityOperation::StageAuthority => {
             let envelope = request
@@ -567,6 +923,9 @@ fn apply_request(
             state.authority.pending = Some(envelope.clone());
         }
         AuthorityOperation::AttachAuthorized => {
+            if state.authority.owner_candidate.is_some() {
+                bail!("code=owner_legacy_attach_rejected module=tunio_authority reason=owner_transaction_pending action=commit_or_abort_exact_owner_transaction");
+            }
             let envelope = request
                 .envelope
                 .as_ref()
@@ -630,6 +989,14 @@ fn apply_request(
             }
             if state
                 .authority
+                .owner_candidate
+                .as_ref()
+                .is_some_and(|record| record.envelope.transaction_id == request.transaction_id)
+            {
+                bail!("code=owner_discard_rejected module=tunio_authority reason=owner_candidate_requires_exact_abort action=abort_owner");
+            }
+            if state
+                .authority
                 .pending
                 .as_ref()
                 .is_none_or(|v| v.transaction_id != request.transaction_id)
@@ -650,12 +1017,32 @@ pub fn exchange_authority(
     fd: Option<&OwnedFd>,
     deadline: Instant,
 ) -> Result<AuthorityControlResponse> {
+    let reply = exchange_authority_outcome(path, expected_io, request, fd, deadline)?;
+    if !reply.accepted {
+        bail!(
+            "code={} module=tunio_authority detail={}",
+            reply.code,
+            reply.detail
+        );
+    }
+    Ok(reply)
+}
+
+/// Preserve exact actual-state receipts even when an operation was rejected.
+/// Transaction controllers must inspect these results before choosing a retry.
+pub fn exchange_authority_outcome(
+    path: &Path,
+    expected_io: ProcessIdentity,
+    request: &AuthorityControlRequest,
+    fd: Option<&OwnedFd>,
+    deadline: Instant,
+) -> Result<AuthorityControlResponse> {
     crate::attach_control::validate_endpoint(path)?;
     crate::attach_control::remaining(deadline)?;
     if request.process != expected_io || !process_is_current(expected_io) {
         bail!("authority IO identity differs");
     }
-    if fd.is_some() != matches!(request.operation, AuthorityOperation::AttachAuthorized) {
+    if fd.is_some() != needs_descriptor(request.operation) {
         bail!("authority descriptor shape differs");
     }
     let stream = crate::attach_control::connect_until(path, deadline)?;
@@ -678,7 +1065,7 @@ pub fn exchange_authority(
         bail!("authority response shape differs");
     }
     let reply: AuthorityControlResponse = serde_json::from_slice(&bytes)?;
-    if reply.schema_version != 2
+    if reply.schema_version != request.schema_version
         || reply.process != expected_io
         || reply.controller != request.controller
         || reply.controller_epoch != request.controller_epoch
@@ -686,13 +1073,6 @@ pub fn exchange_authority(
         || peer_identity(&stream)? != expected_io
     {
         bail!("authority response fencing differs");
-    }
-    if !reply.accepted {
-        bail!(
-            "code={} module=tunio_authority detail={}",
-            reply.code,
-            reply.detail
-        );
     }
     Ok(reply)
 }
@@ -749,7 +1129,7 @@ pub(crate) fn start(
                             deadline,
                         );
                         let reply = AuthorityControlResponse {
-                            schema_version: 2,
+                            schema_version: request.schema_version,
                             process: state.process,
                             controller: state.controller,
                             controller_epoch: state.epoch,
@@ -785,6 +1165,18 @@ pub(crate) fn start(
                             auth_deadline_unix: state.auth_deadline_unix,
                             owner_active: state.owner_active,
                             actual_deadline_mono_ms: state.authority.actual_deadline_mono_ms,
+                            owner_transaction: if request.schema_version == 3 {
+                                owner_receipt(&state.authority, &request.transaction_id)
+                            } else {
+                                None
+                            },
+                            actual_owner_binding: if request.schema_version == 3 {
+                                state.authority.actual_owner_binding
+                            } else {
+                                None
+                            },
+                            owner_highest_revision: (request.schema_version == 3)
+                                .then_some(state.authority.owner_highest_revision),
                         };
                         drop(state);
                         let bytes = serde_json::to_vec(&reply)?;
@@ -963,7 +1355,7 @@ mod tests {
     struct Harness {
         _dir: tempfile::TempDir,
         candidate: Candidate,
-        _old_worker: UnixPacketPort,
+        old_worker: UnixPacketPort,
         socket: PathBuf,
         state: Arc<Mutex<Controller>>,
         kernel: UnixDatagram,
@@ -1034,7 +1426,7 @@ mod tests {
             Self {
                 _dir: dir,
                 candidate,
-                _old_worker: old_worker,
+                old_worker,
                 socket: authority_control_path(&supervision),
                 state,
                 kernel,
@@ -1087,6 +1479,56 @@ mod tests {
             }
         }
 
+        fn owner_request(
+            &self,
+            operation: AuthorityOperation,
+            envelope: Option<AuthorityEnvelope>,
+            transaction: &str,
+        ) -> AuthorityControlRequest {
+            let mut request = self.request(operation, envelope, transaction);
+            request.schema_version = 3;
+            request
+        }
+
+        async fn outcome(
+            &self,
+            request: AuthorityControlRequest,
+            fd: Option<OwnedFd>,
+        ) -> AuthorityControlResponse {
+            let path = self.socket.clone();
+            let process = self.state.lock().unwrap().process;
+            tokio::task::spawn_blocking(move || {
+                exchange_authority_outcome(
+                    &path,
+                    process,
+                    &request,
+                    fd.as_ref(),
+                    Instant::now() + REQUEST_TIMEOUT,
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap()
+        }
+
+        async fn old_still_works(&self) {
+            self.kernel.send(&[0x45; 64]).await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), self.old_worker.recv_packet())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                vec![0x45; 64]
+            );
+            self.old_worker.send_packet(&[0x46; 64]).await.unwrap();
+            let mut packet = [0; 100];
+            let len = tokio::time::timeout(Duration::from_secs(1), self.kernel.recv(&mut packet))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(&packet[..len], &[0x46; 64]);
+        }
+
         async fn exchange(
             &self,
             request: AuthorityControlRequest,
@@ -1111,6 +1553,457 @@ mod tests {
             self.stop.send(true).unwrap();
             self.task.await.unwrap().unwrap();
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owner_prepare_commit_and_lost_response_probe_report_exact_actual_state() {
+        let harness = Harness::start(Duration::from_secs(30)).await;
+        let envelope = harness.envelope(2, 2, 1);
+        let transaction = envelope.transaction_id.clone();
+        let staged = harness
+            .exchange(
+                harness.request(
+                    AuthorityOperation::StageAuthority,
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        let legacy_wire = serde_json::to_value(&staged).unwrap();
+        assert!(legacy_wire.get("owner_transaction").is_none());
+        assert!(legacy_wire.get("owner_highest_revision").is_none());
+        assert!(legacy_wire.get("actual_owner_binding").is_none());
+        assert!(staged.owner_transaction.is_none());
+        let premature = harness
+            .outcome(
+                harness.owner_request(
+                    AuthorityOperation::CommitOwner,
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                None,
+            )
+            .await;
+        assert!(!premature.accepted);
+        assert!(premature.owner_transaction.is_none());
+        harness.old_still_works().await;
+        let prepare_deadline = monotonic_ms().unwrap() + 5_000;
+        let operation = AuthorityOperation::PrepareOwner {
+            expected_active_epoch: Some(1),
+            prepare_deadline_mono_ms: prepare_deadline,
+        };
+        let (fd, worker) = ports(2, 2);
+        let prepared = harness
+            .exchange(
+                harness.owner_request(operation, Some(envelope.clone()), &transaction),
+                Some(fd),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            prepared.owner_transaction.as_ref().unwrap().phase,
+            "prepared"
+        );
+        assert_eq!(prepared.active, None);
+        assert_eq!(prepared.pending, Some(envelope.clone()));
+        assert_eq!(prepared.actual_owner_binding, Some(binding(1, 1)));
+        assert_eq!(prepared.owner_highest_revision, Some(1));
+        let immutable = harness
+            .state
+            .lock()
+            .unwrap()
+            .authority
+            .owner_candidate
+            .as_ref()
+            .unwrap()
+            .transaction
+            .clone();
+        harness.old_still_works().await;
+        let (fd, _unused) = ports(2, 2);
+        let duplicate = harness
+            .exchange(
+                harness.owner_request(operation, Some(envelope.clone()), &transaction),
+                Some(fd),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate.owner_transaction, prepared.owner_transaction);
+        assert_eq!(
+            harness
+                .state
+                .lock()
+                .unwrap()
+                .authority
+                .owner_candidate
+                .as_ref()
+                .unwrap()
+                .transaction,
+            immutable
+        );
+        let (fd, _unused) = ports(2, 2);
+        assert!(harness
+            .exchange(
+                harness.request(
+                    AuthorityOperation::AttachAuthorized,
+                    Some(envelope.clone()),
+                    &transaction
+                ),
+                Some(fd)
+            )
+            .await
+            .is_err());
+        assert!(harness
+            .exchange(
+                harness.request(AuthorityOperation::DiscardAuthority, None, &transaction),
+                None
+            )
+            .await
+            .is_err());
+
+        // Send the complete request then lose the control response. The local
+        // manager still owns the operation; Probe must recover its exact result.
+        let request = harness.owner_request(
+            AuthorityOperation::CommitOwner,
+            Some(envelope.clone()),
+            &transaction,
+        );
+        let socket = harness.socket.clone();
+        tokio::task::spawn_blocking(move || {
+            let deadline = Instant::now() + REQUEST_TIMEOUT;
+            let stream = crate::attach_control::connect_until(&socket, deadline).unwrap();
+            candy_netd_client::send_descriptor_frame_until(
+                &stream,
+                &serde_json::to_vec(&request).unwrap(),
+                None,
+                deadline,
+            )
+            .unwrap();
+        })
+        .await
+        .unwrap();
+        let committed = harness
+            .exchange(
+                harness.owner_request(AuthorityOperation::ProbeTransaction, None, &transaction),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            committed.owner_transaction.as_ref().unwrap().phase,
+            "committed"
+        );
+        assert_eq!(committed.active, Some(envelope.clone()));
+        assert!(committed.pending.is_none());
+        assert_eq!(committed.actual_owner_binding, Some(binding(2, 2)));
+        assert!(committed.owner_active);
+        assert!(committed.actual_deadline_mono_ms.unwrap() <= envelope.effective_deadline_mono_ms);
+        assert_eq!(
+            committed
+                .owner_transaction
+                .as_ref()
+                .unwrap()
+                .authorization_cap_mono_ms,
+            envelope.effective_deadline_mono_ms
+        );
+        assert!(serde_json::to_vec(&committed).unwrap().len() <= CONTROL_BYTES);
+        harness.kernel.send(&[0x47; 64]).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), worker.recv_packet())
+                .await
+                .unwrap()
+                .unwrap(),
+            vec![0x47; 64]
+        );
+        worker.send_packet(&[0x48; 64]).await.unwrap();
+        let mut packet = [0; 100];
+        let len = tokio::time::timeout(Duration::from_secs(1), harness.kernel.recv(&mut packet))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&packet[..len], &[0x48; 64]);
+        let cannot_abort = harness
+            .outcome(
+                harness.owner_request(AuthorityOperation::AbortOwner, None, &transaction),
+                None,
+            )
+            .await;
+        assert!(!cannot_abort.accepted);
+        assert!(cannot_abort.detail.contains("owner_transaction_committed"));
+        assert_eq!(cannot_abort.owner_transaction, committed.owner_transaction);
+        harness
+            .exchange(
+                harness.request(AuthorityOperation::RevokeExact, None, &transaction),
+                None,
+            )
+            .await
+            .unwrap();
+        let repeated = harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::CommitOwner,
+                    Some(envelope),
+                    &transaction,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            repeated.owner_transaction.as_ref().unwrap().phase,
+            "committed"
+        );
+        assert!(!repeated.owner_active);
+        assert!(repeated.actual_owner_binding.is_none());
+        assert!(repeated.active.is_none());
+        harness.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owner_wrong_fd_changed_payload_and_old_controller_preserve_active_owner() {
+        let harness = Harness::start(Duration::from_secs(30)).await;
+        let envelope = harness.envelope(2, 2, 1);
+        let transaction = envelope.transaction_id.clone();
+        harness
+            .exchange(
+                harness.request(
+                    AuthorityOperation::StageAuthority,
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        let deadline = monotonic_ms().unwrap() + 5_000;
+        let operation = AuthorityOperation::PrepareOwner {
+            expected_active_epoch: Some(1),
+            prepare_deadline_mono_ms: deadline,
+        };
+        let (fd, _unused) = ports(2, 2);
+        let stale = harness
+            .outcome(
+                harness.owner_request(
+                    AuthorityOperation::PrepareOwner {
+                        expected_active_epoch: None,
+                        prepare_deadline_mono_ms: deadline,
+                    },
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                Some(fd),
+            )
+            .await;
+        assert!(!stale.accepted);
+        assert!(stale.owner_transaction.is_none());
+        assert_eq!(stale.actual_owner_binding, Some(binding(1, 1)));
+        let (wrong, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert!(harness
+            .exchange(
+                harness.owner_request(operation, Some(envelope.clone()), &transaction),
+                Some(wrong.into())
+            )
+            .await
+            .is_err());
+        assert!(harness
+            .state
+            .lock()
+            .unwrap()
+            .authority
+            .owner_candidate
+            .is_none());
+        let (fd, _worker) = ports(2, 2);
+        let prepared = harness
+            .exchange(
+                harness.owner_request(operation, Some(envelope.clone()), &transaction),
+                Some(fd),
+            )
+            .await
+            .unwrap();
+        let (fd, _unused) = ports(2, 2);
+        let changed = AuthorityOperation::PrepareOwner {
+            expected_active_epoch: Some(1),
+            prepare_deadline_mono_ms: deadline + 1,
+        };
+        let rejected = harness
+            .outcome(
+                harness.owner_request(changed, Some(envelope.clone()), &transaction),
+                Some(fd),
+            )
+            .await;
+        assert!(!rejected.accepted);
+        assert_eq!(rejected.owner_transaction, prepared.owner_transaction);
+        let mut old = harness.owner_request(
+            AuthorityOperation::CommitOwner,
+            Some(envelope.clone()),
+            &transaction,
+        );
+        old.controller_epoch = 0;
+        assert!(harness.exchange(old, None).await.is_err());
+        let mut schema2 = harness.owner_request(
+            AuthorityOperation::CommitOwner,
+            Some(envelope.clone()),
+            &transaction,
+        );
+        schema2.schema_version = 2;
+        assert!(harness.exchange(schema2, None).await.is_err());
+        harness.old_still_works().await;
+        // Current authenticated controller can abort an inherited pending
+        // transaction after takeover; the old controller cannot mutate it.
+        harness.state.lock().unwrap().epoch += 1;
+        let aborted = harness
+            .exchange(
+                harness.owner_request(AuthorityOperation::AbortOwner, None, &transaction),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(aborted.owner_transaction.as_ref().unwrap().phase, "aborted");
+        assert!(aborted.pending.is_none());
+        let repeated = harness
+            .exchange(
+                harness.owner_request(AuthorityOperation::AbortOwner, None, &transaction),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(repeated.owner_transaction, aborted.owner_transaction);
+        let rejected = harness
+            .outcome(
+                harness.owner_request(
+                    AuthorityOperation::CommitOwner,
+                    Some(envelope),
+                    &transaction,
+                ),
+                None,
+            )
+            .await;
+        assert!(!rejected.accepted);
+        assert_eq!(rejected.owner_transaction, aborted.owner_transaction);
+        harness.old_still_works().await;
+        harness.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owner_prepare_expiry_preserves_old_owner_and_rejects_late_commit() {
+        let harness = Harness::start(Duration::from_secs(30)).await;
+        let envelope = harness.envelope(2, 2, 1);
+        let transaction = envelope.transaction_id.clone();
+        harness
+            .exchange(
+                harness.request(
+                    AuthorityOperation::StageAuthority,
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        let (fd, _worker) = ports(2, 2);
+        harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::PrepareOwner {
+                        expected_active_epoch: Some(1),
+                        prepare_deadline_mono_ms: monotonic_ms().unwrap() + 100,
+                    },
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                Some(fd),
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let expired = harness
+            .exchange(
+                harness.owner_request(AuthorityOperation::ProbeTransaction, None, &transaction),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(expired.owner_transaction.as_ref().unwrap().phase, "expired");
+        assert!(expired.pending.is_none());
+        let rejected = harness
+            .outcome(
+                harness.owner_request(
+                    AuthorityOperation::CommitOwner,
+                    Some(envelope),
+                    &transaction,
+                ),
+                None,
+            )
+            .await;
+        assert!(!rejected.accepted);
+        assert_eq!(rejected.owner_transaction, expired.owner_transaction);
+        harness.old_still_works().await;
+        harness.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owner_schema3_active_and_pending_authorities_fit_bounded_response() {
+        let harness = Harness::start(Duration::from_secs(30)).await;
+        let active = harness.envelope(2, 2, 1);
+        harness
+            .exchange(
+                harness.request(
+                    AuthorityOperation::StageAuthority,
+                    Some(active.clone()),
+                    &active.transaction_id,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        let (fd, _active_worker) = ports(2, 2);
+        harness
+            .exchange(
+                harness.request(
+                    AuthorityOperation::AttachAuthorized,
+                    Some(active.clone()),
+                    &active.transaction_id,
+                ),
+                Some(fd),
+            )
+            .await
+            .unwrap();
+        let candidate = harness.envelope(3, 3, 2);
+        harness
+            .exchange(
+                harness.request(
+                    AuthorityOperation::StageAuthority,
+                    Some(candidate.clone()),
+                    &candidate.transaction_id,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        let (fd, _candidate_worker) = ports(3, 3);
+        let prepared = harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::PrepareOwner {
+                        expected_active_epoch: Some(2),
+                        prepare_deadline_mono_ms: monotonic_ms().unwrap() + 5_000,
+                    },
+                    Some(candidate.clone()),
+                    &candidate.transaction_id,
+                ),
+                Some(fd),
+            )
+            .await
+            .unwrap();
+        assert_eq!(prepared.active, Some(active));
+        assert_eq!(prepared.pending, Some(candidate));
+        assert_eq!(
+            prepared.owner_transaction.as_ref().unwrap().phase,
+            "prepared"
+        );
+        assert!(serde_json::to_vec(&prepared).unwrap().len() <= CONTROL_BYTES);
+        harness.finish().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
