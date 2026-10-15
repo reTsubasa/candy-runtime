@@ -1,0 +1,4 @@
+FROM candy-sdwan-perf-runner:20261013
+RUN apt-get -o Acquire::Retries=3 update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ethtool \
+    && rm -rf /var/lib/apt/lists/*

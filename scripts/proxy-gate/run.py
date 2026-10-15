@@ -1,0 +1,473 @@
+#!/usr/bin/env python3
+"""Black-box Runtime Rust client gate in two isolated Linux containers."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import time
+
+HERE = Path(__file__).resolve().parent
+RUNTIME = HERE.parents[1]
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--binary', required=True, type=Path)
+    parser.add_argument('--evidence', required=True, type=Path)
+    parser.add_argument('--performance', action='store_true')
+    parser.add_argument('--seconds', type=int, default=60)
+    parser.add_argument('--rounds', type=int, default=5)
+    parser.add_argument('--warmup', type=int, default=10)
+    parser.add_argument('--workers', type=int, nargs='+', choices=(1, 2, 4), default=[1, 2, 4])
+    parser.add_argument('--directions', nargs='+', choices=('upload', 'download'), default=['upload', 'download'])
+    parser.add_argument('--flows', type=int, nargs='+', choices=(1, 4, 16), default=[1, 4])
+    parser.add_argument('--scaling-attempts', type=int, choices=range(1, 13), default=12)
+    parser.add_argument('--image', default='candy-proxy-netem-runner:20261015')
+    parser.add_argument('--pin-cpus', action='store_true',
+                        help='require 8 VM CPUs; reserve 3 per service and 1 per namespace generator')
+    args = parser.parse_args()
+    if not 1 <= args.seconds <= 120 or not 1 <= args.rounds <= 10 or not 1 <= args.warmup <= 30:
+        parser.error('seconds must be 1..120 and rounds 1..10')
+    root = args.evidence.resolve()
+    root.mkdir(parents=True, mode=0o700, exist_ok=False)
+    binary = args.binary.resolve()
+    if binary.read_bytes()[:4] != b'\x7fELF':
+        parser.error('the gate requires the actual Linux Rust Core ELF')
+    shutil.copy2(binary, root / 'candy-core')
+    shutil.copy2(HERE / 'guest.py', root / 'guest.py')
+    shutil.copy2(HERE / 'load.py', root / 'load.py')
+    shutil.copy2(HERE / 'udp.py', root / 'udp.py')
+    shutil.copy2(HERE / 'admission.py', root / 'admission.py')
+    shutil.copy2(HERE / 'timing.py', root / 'timing.py')
+    shutil.copy2(HERE / 'log_fault.py', root / 'log_fault.py')
+    shutil.copy2(HERE / 'scaling.py', root / 'scaling.py')
+    shutil.copy2(Path(__file__), root / 'run.py')
+    wrapper = RUNTIME / 'openwrt/client/packages/candy-client/candy-client'
+    shutil.copy2(wrapper, root / 'candy-client')
+    suffix = hashlib.sha256(str(root).encode()).hexdigest()[:12]
+    client, server = f'candy-pgate-c-{suffix}', f'candy-pgate-s-{suffix}'
+    owned = []
+    observers = []
+    baseline_owned = False
+    performance_started = False
+    rows, perf = [], []
+    result = {'schema_version': 1, 'gate': 'FAIL', 'client': 'Runtime candy-client -> Rust candy-core client',
+              'scope': 'isolated aarch64 Linux containers with 1 Gbps veth; no physical-platform acceptance',
+              'deprecated_profiles': ['legacy_datagram_only_without_fragmentation_or_stream_fallback'],
+              'requested_matrix': {'workers': args.workers, 'directions': args.directions,
+                                   'flows': args.flows, 'rounds': args.rounds,
+                                   'seconds': args.seconds, 'warmup_seconds': args.warmup},
+              'release_acceptance': 'INCOMPLETE',
+              'performance_gate': 'INCOMPLETE' if args.performance else 'NOT_RUN',
+              'cpu_isolation': ({'client_service': '0-2', 'server_service': '3-5',
+                                 'client_generator': '6', 'server_generator': '7',
+                                 'cfs_quota': 'none; disjoint cpusets bound execution'}
+                                if args.pin_cpus else {'cfs_quota_cpus_per_namespace': 3}),
+              'remaining_gates': ['released-artifact B0 comparison', 'simultaneous bidirectional traffic',
+                                  'independent connection aggregate throughput', 'mixed SD-WAN traffic',
+                                  'two-hour stability and renewal', 'physical platform installation and rollback'],
+              'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
+              'wrapper_sha256': hashlib.sha256(wrapper.read_bytes()).hexdigest(),
+              'guest_sha256': hashlib.sha256((HERE / 'guest.py').read_bytes()).hexdigest(),
+              'load_sha256': hashlib.sha256((HERE / 'load.py').read_bytes()).hexdigest(),
+              'udp_sha256': hashlib.sha256((HERE / 'udp.py').read_bytes()).hexdigest(),
+              'admission_sha256': hashlib.sha256((HERE / 'admission.py').read_bytes()).hexdigest(),
+              'timing_sha256': hashlib.sha256((HERE / 'timing.py').read_bytes()).hexdigest(),
+              'log_fault_sha256': hashlib.sha256((HERE / 'log_fault.py').read_bytes()).hexdigest(),
+              'scaling_sha256': hashlib.sha256((HERE / 'scaling.py').read_bytes()).hexdigest(),
+              'runner_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+              'compatibility': rows, 'performance': perf}
+
+    def write(name, value):
+        (root / name).write_text(json.dumps(value, indent=2) + '\n')
+
+    def run(argv, *, timeout=30, check=True):
+        done = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, timeout=timeout)
+        with (root / 'commands.jsonl').open('a') as out:
+            out.write(json.dumps({'argv': argv, 'exit_code': done.returncode,
+                                  'stderr': done.stderr[-4096:]}) + '\n')
+        if check and done.returncode:
+            raise RuntimeError(f'command failed {argv}: {done.stderr[-4096:]} {done.stdout[-4096:]}')
+        return done
+
+    def dex(name, *argv, **kwargs):
+        if args.pin_cpus:
+            argv = ('taskset', '-c', '6' if name == client else '7', *argv)
+        return run(['docker', 'exec', name, *argv], **kwargs)
+
+    def guest(name, action, **kwargs):
+        argv = ['python3', '/gate/guest.py', action]
+        for key, value in kwargs.items():
+            argv.extend(['--' + key, str(value)])
+        return dex(name, *argv)
+
+    def ready(label, timeout=30, port=15000, process_labels=('master', 'client')):
+        started = time.monotonic()
+        while time.monotonic() - started < timeout:
+            for process_label in process_labels:
+                log = root / (process_label + '.log')
+                if log.exists() and '\nError:' in log.read_text():
+                    raise RuntimeError(f'{label}: {process_label} exited: {log.read_text()[-2048:]}')
+            probe = dex(client, 'python3', '/gate/guest.py', 'probe', '--port', str(port), check=False, timeout=8)
+            if probe.returncode == 0:
+                return time.monotonic() - started
+            time.sleep(.1)
+        raise RuntimeError(f'{label}: actual TCP data-plane readiness deadline')
+
+    def start(profile, workers, blocked_stderr=False):
+        guest(server, 'configure', profile=profile, workers=workers)
+        guest(server, 'server-log-blocked' if blocked_stderr else 'server', profile=profile, workers=workers)
+        guest(client, 'client', profile=profile)
+        return ready(f'{profile} workers={workers}')
+
+    def stop():
+        nonlocal baseline_owned
+        if baseline_owned:
+            guest(client, 'stop', label='baseline')
+            guest(server, 'stop', label='baseline-master')
+            baseline_owned = False
+        for label in ('bad_auth', 'bad_pin'):
+            if (root / (label + '.process.json')).exists():
+                guest(client, 'stop', label=label)
+        guest(client, 'stop')
+        guest(server, 'stop', label='master')
+
+    def scaling(workers, case):
+        for attempt in range(args.scaling_attempts):
+            evidence = root / f'worker-scaling-{case}-w{workers}-a{attempt}'
+            done = run([sys.executable, str(root / 'scaling.py'),
+                        '--client-container', client, '--server-container', server,
+                        '--gate-root', str(root), '--workers', str(workers),
+                        '--connections', str(6 if workers > 1 else 1), '--seconds', '3',
+                        '--evidence', str(evidence)], timeout=100, check=False)
+            outcome = json.loads((evidence / 'result.json').read_text())
+            rows.append({'case': 'independent_client_worker_distribution',
+                         'workers': workers, 'stage': case, 'attempt': attempt,
+                         'gate': 'PASS' if outcome['gate'] == 'PASS' else 'INCOMPLETE',
+                         'attempt_result': outcome['gate'],
+                         'evidence': str(evidence)})
+            if not done.returncode and outcome['gate'] == 'PASS':
+                return
+            if (outcome.get('error') != 'RuntimeError: not every configured worker carries an actual egress flow'
+                    or any(row['gate'] != 'PASS' for row in outcome['cleanup'])):
+                raise RuntimeError(str(outcome))
+        raise RuntimeError('distribution coverage incomplete after bounded connection batches')
+
+    def status(profile, label='client'):
+        path = root / profile / f'{label}-status.json'
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                value = json.loads(path.read_text())
+                node = value['nodes']['gate']
+                if node['state'] in ('ready', 'connected') and node['passive']['applied_transport']['congestion']:
+                    applied = node['passive']['applied_transport']
+                    if applied['congestion'] != 'candy-bbr' or applied['candy_bbr_preset'] != 'bbr-v1':
+                        raise RuntimeError(f'applied congestion mismatch: {applied}')
+                    features = node['passive']['features']
+                    if features['early_data']['authorized'] != (profile == 'recommended'):
+                        raise RuntimeError(f'early data negotiation mismatch: {features}')
+                    if not features['stream_udp_fallback']['authorized']:
+                        raise RuntimeError(f'fallback negotiation mismatch: {features}')
+                    if features['fragmented_datagram']['authorized'] != (profile == 'recommended'):
+                        raise RuntimeError(f'fragmentation negotiation mismatch: {features}')
+                    return value
+            except (FileNotFoundError, json.JSONDecodeError, KeyError):
+                pass
+            time.sleep(.1)
+        raise RuntimeError('passive status did not confirm applied settings and negotiated features')
+
+    try:
+        image = json.loads(run(['docker', 'image', 'inspect', args.image]).stdout)[0]
+        result['image_id'] = image['Id']
+        result['image_architecture'] = image['Architecture']
+        if args.pin_cpus and int(run(['docker', 'info', '--format', '{{.NCPU}}']).stdout) < 8:
+            raise RuntimeError('--pin-cpus requires at least eight Docker VM CPUs')
+        for name in (client, server):
+            resources = (['--cpuset-cpus', '0-2,6' if name == client else '3-5,7',
+                          '-e', 'CANDY_GATE_SERVICE_CPUS=' + ('0-2' if name == client else '3-5')]
+                         if args.pin_cpus else ['--cpus', '3'])
+            run(['docker', 'run', '-d', '--name', name, '--label', f'candy.proxy.gate={root}',
+                 '--network', 'none', '--privileged', *resources, '--memory', '3g',
+                 '--add-host', 'www.gstatic.com:10.202.0.2',
+                 '--pids-limit', '256', *(['--pid', 'host'] if name == server else []),
+                 '-v', f'{root}:/gate', args.image, 'sleep', 'infinity'])
+            owned.append(name)
+        client_pid = run(['docker', 'inspect', '-f', '{{.State.Pid}}', client]).stdout.strip()
+        dex(server, 'ip', 'link', 'add', 'cpg-s', 'type', 'veth', 'peer', 'name', 'cpg-c')
+        dex(server, 'ip', 'link', 'set', 'cpg-c', 'netns', client_pid)
+        for name, iface, addr in ((client, 'cpg-c', '10.202.0.1/24'),
+                                  (server, 'cpg-s', '10.202.0.2/24')):
+            dex(name, 'ip', 'link', 'set', 'lo', 'up')
+            dex(name, 'ip', 'addr', 'add', addr, 'dev', iface)
+            dex(name, 'ip', 'link', 'set', iface, 'up')
+            # Shape actual MTU-sized packets, not deferred 64 KiB GSO skbs.
+            before_offload = dex(name, 'ethtool', '-k', iface).stdout
+            dex(name, 'ethtool', '-K', iface, 'tso', 'off', 'gso', 'off', 'gro', 'off',
+                'tx-udp-segmentation', 'off')
+            write(f'{iface}-offload.json', {'before': before_offload,
+                                          'after': dex(name, 'ethtool', '-k', iface).stdout})
+            dex(name, 'tc', 'qdisc', 'add', 'dev', iface, 'root', 'netem',
+                'delay', '5ms', 'rate', '1gbit', 'limit', '4096')
+        for name, side in ((client, 'client'), (server, 'server')):
+            guest(name, 'timing', label=side)
+            observers.append((name, 'timing-' + side))
+        dex(server, 'python3', '-c',
+            "import subprocess; f=open('/gate/targets.log','ab'); "
+            "subprocess.Popen(['python3','/gate/guest.py','targets'],stdout=f,stderr=f,start_new_session=True)")
+        dex(server, 'iperf3', '-s', '-D', '-p', '5201', '--logfile', '/gate/iperf-server.log')
+        for profile in ('recommended', 'stream_udp_fallback'):
+            try:
+                recovery = start(profile, 2)
+                write(profile + '-verified-status.json', status(profile))
+                for label in ('bad_auth', 'bad_pin'):
+                    guest(client, 'client', profile=profile, label=label)
+                    reason = 'authentication rejected' if label == 'bad_auth' else 'pin mismatch'
+                    deadline = time.monotonic() + 20
+                    while time.monotonic() < deadline:
+                        if reason in (root / (label + '.log')).read_text().lower():
+                            break
+                        time.sleep(.1)
+                    else:
+                        raise RuntimeError(f'{profile}: {label} never reached expected rejection: {reason}')
+                    # Negative probes must fail while the positive connection works.
+                    rejected = dex(client, 'python3', '/gate/guest.py', 'probe', '--label', label,
+                                   check=False, timeout=8)
+                    guest(client, 'stop', label=label)
+                    if rejected.returncode == 0:
+                        raise RuntimeError(f'{profile}: {label} accepted')
+                    ready(f'{profile}: preserve good connection after {label}')
+                    rows.append({'profile': profile, 'case': label,
+                                 'rejection': 'PASS', 'expected_reason': reason,
+                                 'healthy_connection_preserved': 'PASS'})
+                if profile == 'recommended':
+                    before_fault = json.loads(guest(server, 'snapshot', label='master').stdout)
+                    fault = json.loads(guest(server, 'kill-workers').stdout)
+                    recovery = ready('worker crash recovery', timeout=30)
+                    data = {'gate': 'PASS', 'profile': profile, 'tcp_recovery': 'PASS'}
+                    after_fault = json.loads(guest(server, 'snapshot', label='master').stdout)
+                    leader_before = next(p for p in before_fault['processes'] if p['pid'] == fault['master_pid'])
+                    leader_after = next(p for p in after_fault['processes'] if p['pid'] == fault['master_pid'])
+                    if any(leader_before[key] != leader_after[key] for key in ('pid', 'start_ticks')):
+                        raise RuntimeError('master incarnation changed after worker fault')
+                    replacements = [p for p in after_fault['processes'] if p['command'][:3] ==
+                                    ['/gate/candy-core', 'server', 'proxy-worker']]
+                    if len(replacements) != 2 or any(p['pid'] in fault['killed_owned_worker_pids'] for p in replacements):
+                        raise RuntimeError('worker pool did not restore two fresh children')
+                    data.update(case='worker_crash_recovery', recovery_seconds=recovery, fault=fault)
+                    data['master_preserved'] = 'PASS'
+                    rows.append(data)
+                data = json.loads(guest(client, 'probes', profile=profile).stdout)
+                data.update(profile=profile)
+                rows.append(data)
+                if profile == 'recommended':
+                    udp_before = {side: json.loads(guest(name, 'snapshot', label=label).stdout)
+                                  for side, name, label in [('client', client, 'client'), ('server', server, 'master')]}
+                    udp = dex(client, 'python3', '/gate/udp.py', timeout=40, check=False)
+                    udp_result = json.loads(udp.stdout)
+                    udp_result['service_before'] = udp_before
+                    udp_result['service_after'] = {
+                        side: json.loads(guest(name, 'snapshot', label=label).stdout)
+                        for side, name, label in [('client', client, 'client'), ('server', server, 'master')]}
+                    udp_result['target_socket'] = json.loads((root / 'udp-target-socket.json').read_text())
+                    write('udp-rate-overload-recovery.json', udp_result)
+                    rows.append({'case': 'udp_rate_overload_recovery', 'gate': udp_result['gate']})
+                    scaling(2, 'compatibility')
+                    # Wait for the previous owners' bounded QUIC close before
+                    # deliberately consuming the effective transport budget.
+                    time.sleep(5)
+                    admission_before = json.loads(guest(server, 'snapshot', label='master').stdout)
+                    admission = dex(client, 'python3', '/gate/admission.py', timeout=100, check=False)
+                    admission_result = json.loads(admission.stdout)
+                    admission_after = json.loads(guest(server, 'snapshot', label='master').stdout)
+                    admission_result['service_before'] = admission_before
+                    admission_result['service_after'] = admission_after
+                    if ({(p['pid'], p['start_ticks']) for p in admission_before['processes']} !=
+                            {(p['pid'], p['start_ticks']) for p in admission_after['processes']}):
+                        admission_result.update(gate='FAIL', error='service incarnation changed during admission exhaustion')
+                    write('admission-exhaustion-recovery.json', admission_result)
+                    rows.append({'case': 'admission_exhaustion_recovery', 'gate': admission_result['gate']})
+            except Exception as error:
+                rows.append({'profile': profile, 'gate': 'FAIL', 'error': str(error)})
+            finally:
+                stop()
+        try:
+            start('recommended', 2, blocked_stderr=True)
+            blocked = {'case': 'platform_log_backpressure', 'gate': 'FAIL'}
+            for action, name in [('state', server), ('traffic', client), ('state', server), ('drain', server)]:
+                observation = json.loads(dex(name, 'python3', '/gate/log_fault.py', action,
+                                             timeout=35, check=False).stdout)
+                blocked.setdefault(action, []).append(observation)
+                write('platform-log-backpressure.json', blocked)
+                if observation['gate'] != 'PASS':
+                    raise RuntimeError(f'platform log fault {action}: {observation}')
+            if blocked['state'][0]['processes'] != blocked['state'][1]['processes']:
+                raise RuntimeError('master/worker incarnation changed during blocked logging')
+            ready('healthy traffic after platform log recovery')
+            blocked['gate'] = 'PASS'
+            write('platform-log-backpressure.json', blocked)
+            rows.append({'case': 'platform_log_backpressure', 'gate': 'PASS'})
+        except Exception as error:
+            rows.append({'case': 'platform_log_backpressure', 'gate': 'FAIL', 'error': str(error)})
+        finally:
+            stop()
+        result['compatibility_gate'] = 'FAIL' if any(x.get('gate') == 'FAIL' for x in rows) else 'PASS'
+        if args.performance:
+            performance_started = True
+            for workers in args.workers:
+                # Never reuse a private worker generation across master runs.
+                dex(server, 'python3', '-c',
+                    "from pathlib import Path; import shutil; "
+                    "p=Path('/gate/recommended/master'); shutil.rmtree(p) if p.exists() else None")
+                start('recommended', workers)
+                pool = json.loads(guest(server, 'snapshot', label='master').stdout)
+                active_workers = [p for p in pool['processes'] if p['command'][:3] ==
+                                  ['/gate/candy-core', 'server', 'proxy-worker']]
+                if len(active_workers) != workers:
+                    raise RuntimeError(f'configured {workers} workers, found {len(active_workers)}')
+                scaling(workers, 'performance')
+                guest(server, 'baseline-server', profile='recommended')
+                baseline_owned = True
+                guest(client, 'client', profile='recommended', label='baseline')
+                ready('in-process baseline', port=19000, process_labels=('baseline-master', 'baseline'))
+                write(f'baseline-w{workers}-verified-status.json', status('recommended', 'baseline'))
+                baseline_tree = json.loads(guest(server, 'snapshot', label='baseline-master').stdout)
+                if len(baseline_tree['processes']) != 1:
+                    raise RuntimeError('in-process baseline spawned unexpected child processes')
+                for direction in args.directions:
+                    for flows in args.flows:
+                        for round_id in range(args.rounds):
+                            for kind in (('direct', 'baseline', 'proxy') if round_id % 2 == 0 else ('proxy', 'baseline', 'direct')):
+                                label = f'{kind}-w{workers}-{direction}-p{flows}-r{round_id}'
+                                process_labels = [('client', client, 'baseline' if kind == 'baseline' else 'client'),
+                                                  ('server', server, 'baseline-master' if kind == 'baseline' else 'master')]
+                                before = {side: json.loads(guest(name, 'snapshot', label=process_label).stdout)
+                                          for side, name, process_label in process_labels}
+                                status_path = root / 'recommended' / ('baseline-status.json' if kind == 'baseline' else 'client-status.json')
+                                status_before = json.loads(status_path.read_text())
+                                measured = dex(client, 'python3', '/gate/load.py', 'round',
+                                               '--kind', kind, '--direction', direction,
+                                               '--flows', str(flows), '--seconds', str(args.seconds),
+                                               '--case', label, '--warmup', str(args.warmup), timeout=args.seconds + args.warmup + 40,
+                                               check=False)
+                                raw = json.loads(measured.stdout)
+                                raw['client_status_before'] = status_before
+                                raw['service_before'] = before
+                                raw['service_after'] = {
+                                    side: json.loads(guest(name, 'snapshot', label=process_label).stdout)
+                                    for side, name, process_label in process_labels}
+                                if args.pin_cpus:
+                                    for side, cpus in [('client', '0-2'), ('server', '3-5')]:
+                                        if any(process['allowed_cpus'] != cpus for phase in ('service_before', 'service_after')
+                                               for process in raw[phase][side]['processes']):
+                                            raw.update(gate='FAIL', error=f'{side} service affinity mismatch')
+                                    if raw.get('generator_cpu_affinity') != [6]:
+                                        raw.update(gate='FAIL', error='client load generator affinity mismatch')
+                                if status_path.exists():
+                                    raw['client_status_after'] = json.loads(status_path.read_text())
+                                write(label + '.json', raw)
+                                if measured.returncode or raw['gate'] != 'PASS':
+                                    raise RuntimeError(f'{label}: {raw.get("error", raw)}')
+                                latency = raw['loaded_latency']
+                                if latency['errors'] or latency['samples'] != args.seconds * 20:
+                                    raise RuntimeError(f'{label}: loaded latency integrity failure {latency}')
+                                mbps = raw['receiver_mbps']
+                                resource = {}
+                                for side, name, process_label in process_labels:
+                                    if kind == 'direct':
+                                        continue
+                                    after = raw['service_after'][side]
+                                    initial = {p['pid']: p for p in before[side]['processes']}
+                                    final = {p['pid']: p for p in after['processes']}
+                                    if initial.keys() != final.keys() or any(
+                                            initial[pid]['start_ticks'] != final[pid]['start_ticks']
+                                            for pid in initial):
+                                        raise RuntimeError(f'{label}: service process changed during measurement')
+                                    ticks = sum(final[pid]['cpu_ticks'] - initial[pid]['cpu_ticks']
+                                                for pid in initial)
+                                    delivered_gib = raw['measured_payload_bytes'] / (1024 ** 3)
+                                    resource[side] = {'before': before[side], 'after': after,
+                                                      'cpu_seconds_per_measured_gib_including_warmup_and_probes':
+                                                          ticks / after['clock_ticks'] / delivered_gib}
+                                perf.append({'kind': kind, 'workers': workers, 'direction': direction,
+                                             'flows': flows, 'round': round_id, 'receiver_mbps': mbps,
+                                             'loaded_latency': latency, 'payload_integrity': 'PASS',
+                                             'measurement_window': [raw['start'], raw['end']],
+                                             'service_resources': resource})
+                                write('performance-progress.json', perf)
+                stop()
+            from statistics import median
+            groups = []
+            for workers in args.workers:
+                for direction in args.directions:
+                    for flows in args.flows:
+                        sample = [x for x in perf if x['workers'] == workers and
+                                  x['direction'] == direction and x['flows'] == flows]
+                        direct = median(x['receiver_mbps'] for x in sample if x['kind'] == 'direct')
+                        proxy = median(x['receiver_mbps'] for x in sample if x['kind'] == 'proxy')
+                        baseline = median(x['receiver_mbps'] for x in sample if x['kind'] == 'baseline')
+                        direct_p99 = median(x['loaded_latency']['p99_ms'] for x in sample if x['kind'] == 'direct')
+                        proxy_p99 = median(x['loaded_latency']['p99_ms'] for x in sample if x['kind'] == 'proxy')
+                        baseline_p99 = median(x['loaded_latency']['p99_ms'] for x in sample if x['kind'] == 'baseline')
+                        cpu = lambda row: sum(side['cpu_seconds_per_measured_gib_including_warmup_and_probes']
+                                              for side in row['service_resources'].values())
+                        baseline_cpu = median(cpu(x) for x in sample if x['kind'] == 'baseline')
+                        proxy_cpu = median(cpu(x) for x in sample if x['kind'] == 'proxy')
+                        latency_pass = all(x['loaded_latency']['p99_ms'] <= max(1.2 * baseline_p99, baseline_p99 + 2)
+                                           for x in sample if x['kind'] == 'proxy')
+                        groups.append({'workers': workers, 'direction': direction, 'flows': flows,
+                                       'direct_median_mbps': direct, 'proxy_median_mbps': proxy,
+                                       'baseline_median_mbps': baseline,
+                                       'direct_p99_ms': direct_p99, 'proxy_p99_ms': proxy_p99,
+                                       'baseline_p99_ms': baseline_p99,
+                                       'baseline_cpu_seconds_per_measured_gib': baseline_cpu,
+                                       'proxy_cpu_seconds_per_measured_gib': proxy_cpu,
+                                       'architecture_goodput_gate': 'PASS' if proxy >= baseline * .95 else 'FAIL',
+                                       'cpu_gate': 'PASS' if proxy_cpu <= baseline_cpu * 1.2 else 'FAIL',
+                                       'latency_gate': 'PASS' if latency_pass else 'FAIL',
+                                       'goodput_gate': 'PASS' if direct >= 900 and proxy >= 800 else 'FAIL'})
+            result['goodput'] = groups
+            result['performance_observed_gate'] = 'PASS' if all(
+                all(x[key] == 'PASS' for key in ('goodput_gate', 'latency_gate', 'architecture_goodput_gate', 'cpu_gate'))
+                for x in groups) else 'FAIL'
+            result['performance_gate'] = result['performance_observed_gate']
+            result['measurement_duration_standard_met'] = args.seconds >= 60 and args.rounds >= 5 and args.warmup >= 10
+            if not result['measurement_duration_standard_met'] and result['performance_gate'] == 'PASS':
+                result['performance_gate'] = 'INCOMPLETE'
+        else:
+            result['performance_gate'] = 'NOT_RUN'
+        result['gate'] = 'PASS' if (result['compatibility_gate'] == 'PASS' and result['performance_gate'] in ('PASS', 'NOT_RUN')) else 'FAIL'
+    except Exception as error:
+        result['error'] = str(error)
+        if performance_started:
+            result['performance_gate'] = 'FAIL'
+    finally:
+        result['cleanup'] = []
+        result['timing_observers'] = {}
+        for name, label in reversed(observers):
+            try:
+                guest(name, 'stop', label=label)
+                result['timing_observers'][label] = json.loads((root / (label + '.log')).read_text())
+            except Exception as error:
+                result['gate'] = 'FAIL'
+                result['cleanup'].append({'observer': label, 'error': str(error)})
+        for name in reversed(owned):
+            try:
+                done = run(['docker', 'rm', '-f', name], check=False, timeout=15)
+                result['cleanup'].append({'container': name, 'exit_code': done.returncode})
+                if done.returncode:
+                    result['gate'] = 'FAIL'
+            except Exception as error:
+                result['cleanup'].append({'container': name, 'error': str(error)})
+                result['gate'] = 'FAIL'
+        write('result.json', result)
+        print(json.dumps(result, indent=2))
+    return 0 if result['gate'] == 'PASS' else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
