@@ -1,0 +1,5 @@
+PING 10.251.2.10 (10.251.2.10) from 10.251.1.10 : 56(84) bytes of data.
+
+--- 10.251.2.10 ping statistics ---
+400 packets transmitted, 400 received, 0% packet loss, time 20739ms
+rtt min/avg/max/mdev = 1.026/3.556/62.344/4.761 ms, pipe 2

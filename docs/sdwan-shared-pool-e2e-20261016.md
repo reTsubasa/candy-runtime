@@ -104,6 +104,23 @@ signed release, production deployment, OpenWrt or throughput acceptance.
 
 ## Negotiated Continuity Gate
 
+`shared-pool-negotiated-final-v1` used the committed Core `090f93d` and
+Runtime `89e8249` source freeze with the same six immutable binaries as the
+passing bilateral final gate. It failed on the first `1 -> 2` transition:
+the completed renewal journals had no `mbb_reservation`, and Runtime logged
+`mbb_slot_overlap_unavailable`, `dedicated_worker_slot_is_exclusive`, and
+`bounded_stop_spawn_fallback`. Only the initial one-host placement was accepted;
+no complete negotiated scaling or zero-loss result follows from this run.
+
+The cause is an implementation boundary: Runtime selected negotiated handoff
+only when `plan.shared_listener` existed. That field describes inbound listener
+registration, so outgoing shared-pool client plans have no such field even when
+their authenticated peer uses the shared listener and supports candidate
+negotiation. Consequently an outgoing cross-process placement change took the
+old stop/spawn path. Runtime must recognize authenticated outbound candidate
+support independently of inbound registration. The strict test assertion is
+retained, and the raw failed journal and Agent log identify this gap.
+
 `shared-pool-strict-continuity-v1` failed before its initial one-worker placement
 converged. It used Core `052cc392a811c190358109feb93efb8d3423c74b5050481172871636120a6b13`
 and the v19 Agent. No scale-step or zero-loss acceptance follows from this run.

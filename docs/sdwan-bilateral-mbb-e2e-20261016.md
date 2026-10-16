@@ -50,6 +50,7 @@ they deliberately cannot use the ordinary reload socket.
 | bilateral-mbb-v1 | FAIL | Incorrect fixture Grant business capability mask. |
 | bilateral-mbb-v2 | FAIL | Signed node connection quota exhausted by two existing domains. |
 | bilateral-mbb-v3 | PASS | Two domains, two successor rounds each; generations 1 -> 2 -> 3; 800/800 continuous ICMP replies; exact duplicate commits; stable Core, TUN and TUNIO identity; surviving Proxy requests. |
+| bilateral-mbb-final-v1 | PASS | Fixed committed source snapshot; all v3 assertions plus ordinary successor redial after the original transaction cap. |
 
 The v3 test ran for 22.56 seconds; the bounded harness completed in 31.765
 seconds. It mounted copied binary artifacts read-only and verified SHA256
@@ -72,8 +73,22 @@ rounds, kills one original client connection, and starts an ordinary Core client
 with the generation-three signed configuration and a fresh netd I/O epoch. It
 requires actual ICMP, the original client TUN and unchanged server TUNIO records.
 This specifically exercises a new authenticated handshake without a candidate
-selector after the old reservation cap has expired. Its result is pending the
-final integration binary run.
+selector after the old reservation cap has expired. `bilateral-mbb-final-v1`
+passed: 400/400 replies per domain during the two successor rounds, followed by
+the explicit 31-second wait and a fresh ordinary generation-three connection
+that forwarded real ICMP. Client TUN indices and server TUNIO identities stayed
+unchanged; Proxy remained usable. The intentional client kill/redial happens
+after the lossless migration interval and is not a zero-loss restart claim.
+
+The selected test took 54.92 seconds and the full bounded harness 63.559
+seconds. Core source was `090f93d6357d65f3c14d57f8879b14af925ca568`,
+Runtime source was `89e82491b54265d01210ddbf348b903bd3c060f2`, and the
+685-file committed source manifest SHA256 was
+`166813459d47fbc64e69a145275c3916d6848dea64f0275d89c09b0559531976`.
+Core binary SHA256 was
+`63453aee5e9cee4d93c59424165a0d8544f7912695b07c23bde57c4a64f888d4`.
+All six immutable binary identities and structured gate output are recorded in
+`artifacts/sdwan-20261016/bilateral-mbb-final-v1/`.
 
 P1 residual: the accepted successor context is retained by the live server
 actor. A server worker restart while its configured Cloud catalog still lags

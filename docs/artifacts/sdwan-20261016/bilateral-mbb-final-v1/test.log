@@ -1,0 +1,16 @@
+
+running 1 test
+PING 10.251.2.10 (10.251.2.10) from 10.251.1.10 : 56(84) bytes of data.
+
+--- 10.251.2.10 ping statistics ---
+1 packets transmitted, 0 received, 100% packet loss, time 0ms
+
+PING 10.251.2.10 (10.251.2.10) from 10.251.1.10 : 56(84) bytes of data.
+
+--- 10.251.2.10 ping statistics ---
+1 packets transmitted, 1 received, 0% packet loss, time 0ms
+rtt min/avg/max/mdev = 3.232/3.232/3.232/0.000 ms
+test signed_cli_bilateral_candidate_reload_preserves_traffic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 54.92s
+
