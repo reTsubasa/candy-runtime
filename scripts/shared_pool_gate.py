@@ -21,7 +21,8 @@ TESTS = ("signed_cli_shared_pool_scales_and_isolates_four_domains",
          "signed_cli_shared_host_lifecycle_scale_gate",
          "signed_cli_bilateral_candidate_reload_preserves_traffic",
          "signed_cli_successor_server_restart_preserves_authorization",
-         "signed_cli_runtime_shared_listener_routes_two_domains")
+         "signed_cli_runtime_shared_listener_routes_two_domains",
+         "signed_cli_mixed_role_quota_and_slow_consumer_isolation")
 
 
 def bounded_run(command: list[str], log: Path, seconds: float) -> int:
@@ -182,6 +183,21 @@ def main() -> int:
                 command.extend(["-e", f"{variable}=/binaries/{label}"])
             command.extend(["candy-sdwan-perf-runner:20261013", "timeout", "240",
                             "/binaries/signed_cli_helper", "--exact", args.test, "--ignored", "--nocapture"])
+        if args.test == "signed_cli_mixed_role_quota_and_slow_consumer_isolation":
+            wrapper_source = (args.build.resolve() / "frozen/candy-runtime" if args.build else RUNTIME)
+            wrapper_source /= "openwrt/client/packages/candy-client/candy-client"
+            tools = evidence / "runtime-tools"
+            tools.mkdir()
+            wrapper = tools / "candy-client"
+            shutil.copy2(wrapper_source, wrapper)
+            result["runtime_client_wrapper_sha256"] = hashlib.sha256(wrapper.read_bytes()).hexdigest()
+            image_position = command.index("candy-sdwan-perf-runner:20261013")
+            core_binary = ("/binaries/candy-core" if args.build or args.snapshot_helper
+                           else "/core/target-linux-shared/debug/candy-core")
+            command[image_position:image_position] = [
+                "-v", f"{tools}:/runtime-tools:ro",
+                "-e", "CANDY_PROXY_CLIENT_BINARY=/runtime-tools/candy-client",
+                "-e", f"CANDY_CORE_BIN={core_binary}"]
         exit_code = bounded_run(command, evidence / "test.log", 300)
         log = (evidence / "test.log").read_text()
         accepted = exit_code == 0 and exactly_one_pass(log, args.test)
