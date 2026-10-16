@@ -84,3 +84,38 @@ convergence and 1/2/4/2/1 scaling, unchanged zero-loss continuity assertions,
 exact bilateral drain and no premature owner stop. Follow-up crash/restart
 gates remain necessary. Debug/test ELF files are not release artifacts or
 throughput acceptance.
+
+## v10 parallel test endpoint lifetime
+
+Frozen v10 Linux Agent full tests first failed 137/138 in 10.20 seconds:
+`unrecorded_live_endpoint_blocks_replacement_without_granting_adoption` received
+`ManagedProofPending` immediately after dropping its own `UnixListener`.
+The same frozen test executable passed 138/138 serially in 17.21 seconds.
+Both original logs remain in `registered-mbb-source-v10/agent-tests*.log`.
+
+A separate Linux kernel reproducer with the existing runner image verified the
+invalid test assumption without a build or application traffic. A fork child
+held a listener with FD_CLOEXEC while waiting before exec. After the parent
+closed its descriptor, connecting still succeeded and SO_PEERCRED returned the
+original creating parent's live PID/UID. After child exec and reap the same
+path returned ECONNREFUSED. Output was:
+
+```text
+after_parent_close: reachable=true authenticated_owner_pid=1 expected_owner_pid=1 FD_CLOEXEC=true inherited_child=7
+after_child_exec_and_reap: reachable=false error=ECONNREFUSED
+```
+
+This proves a concurrent fork-to-exec window can invalidate immediate endpoint
+absence after local descriptor close. v10 did not capture the individual
+inheriting child, so its exact PID is not retrospectively established.
+
+The test now starts its own exact self-exec helper. That helper creates the
+listener after exec, so unrelated parent tests cannot inherit it. The parent
+calls the real `inspect_endpoint_process` and asserts the exact helper process
+identity, then proves the live endpoint blocks replacement. It sends explicit
+shutdown, waits for successful helper exit with a five-second bound and a
+kill/reap guard on failure, then tests both stale and removed socket paths.
+Production inspection and recovery code are unchanged. This is a source test
+change after the v10 freeze; v10 business binaries are not claimed to contain
+it. Native Agent tests passed 104/104; this Linux-only helper test still requires
+the coordinated next Linux test build.

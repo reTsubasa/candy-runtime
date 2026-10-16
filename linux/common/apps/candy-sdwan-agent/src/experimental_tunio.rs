@@ -3386,13 +3386,60 @@ mod tests {
 
     #[test]
     fn unrecorded_live_endpoint_blocks_replacement_without_granting_adoption() {
+        const HELPER: &str = "CANDY_TEST_UNRECORDED_ENDPOINT_OWNER";
+        if let Some(path) = std::env::var_os(HELPER) {
+            let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            std::io::stdin().read_exact(&mut [0_u8]).unwrap();
+            drop(listener);
+            return;
+        }
+        struct EndpointOwner(Child);
+        impl Drop for EndpointOwner {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("worker.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        // The child creates the listener after exec. Parallel tests in this
+        // process cannot inherit its FD in their fork-to-exec window.
+        let mut owner = EndpointOwner(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "experimental_tunio::tests::unrecorded_live_endpoint_blocks_replacement_without_granting_adoption"])
+                .env(HELPER, &path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.mode() & 0o777 == 0o600) {
+            assert!(
+                owner.0.try_wait().unwrap().is_none(),
+                "endpoint helper exited before binding"
+            );
+            assert!(Instant::now() < deadline, "endpoint helper did not bind");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let identity = candy_process_control::process_identity(owner.0.id()).unwrap();
+        assert_eq!(
+            candy_process_control::inspect_endpoint_process(&path).unwrap(),
+            identity
+        );
         let error = preserve_unrecorded_endpoint(&path).unwrap_err();
         assert!(error.is::<ManagedProofPending>());
-        drop(listener);
+        owner.0.stdin.take().unwrap().write_all(b"x").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = owner.0.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(Instant::now() < deadline, "endpoint helper did not exit");
+            thread::sleep(Duration::from_millis(10));
+        }
         preserve_unrecorded_endpoint(&path).unwrap();
         fs::remove_file(&path).unwrap();
         preserve_unrecorded_endpoint(&path).unwrap();
