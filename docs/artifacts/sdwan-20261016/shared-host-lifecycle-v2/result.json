@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "test": "signed_cli_shared_host_lifecycle_scale_gate",
+  "gate": "PASS",
+  "scope": "isolated source-worktree fixture; no release or platform acceptance",
+  "container": "candy-shared-gate-7f5b10cab6c1",
+  "host_deadline_seconds": 300,
+  "test_exit_code": 0,
+  "code": "selected_test_passed",
+  "test_executed": true,
+  "exact_one_test_passed": true,
+  "cleanup_exit_code": 0,
+  "elapsed_seconds": 8.834
+}

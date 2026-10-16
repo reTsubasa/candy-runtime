@@ -1,0 +1,122 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.73s
+     Running tests/signed_cli.rs (/workspace/target-linux-tunio/debug/deps/signed_cli-a57a50de93f7a120)
+
+running 1 test
+level=info component=candy-netd event=service_started protocol=2 independent_infrastructure=true multi_domain=false
+level=info component=candy-netd event=service_started protocol=2 domain_routing=namespace infrastructure=preserved
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=13
+level=info component=candy-netd event=service_started protocol=2 independent_infrastructure=true multi_domain=false
+level=info component=candy-netd event=service_started protocol=2 domain_routing=namespace infrastructure=preserved
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=12
+level=info component=candy-netd event=service_started protocol=2 independent_infrastructure=true multi_domain=false
+level=info component=candy-netd event=service_started protocol=2 domain_routing=namespace infrastructure=preserved
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=12
+level=info component=candy-netd event=service_started protocol=2 domain_routing=namespace infrastructure=preserved
+level=info component=candy-netd event=service_started protocol=2 independent_infrastructure=true multi_domain=false
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=12
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=12
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=13
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=12
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=12
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+test signed_cli_shared_pool_scales_and_isolates_four_domains ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 23.63s
+

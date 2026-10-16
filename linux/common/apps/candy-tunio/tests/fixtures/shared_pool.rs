@@ -107,6 +107,14 @@ fn verify_failed_domain_isolated(host: &Host) {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+    let retirement = request(&host.socket, "retire");
+    assert_eq!(retirement["accepted"], false, "{retirement}");
+    assert_eq!(
+        retirement["code"],
+        "worker_has_unacknowledged_domains",
+        "{retirement}"
+    );
+    assert_eq!(retirement["completed_domains"], 1, "{retirement}");
     assert_eq!(
         request_for_domain(&host.socket, "forget", "invalid-domain-fixture")["accepted"],
         true
@@ -207,6 +215,18 @@ struct Domain {
 }
 
 struct SharedEvidence(PathBuf);
+
+fn publish_scale_evidence(evidence: &[serde_json::Value]) {
+    if let Some(destination) = std::env::var_os("CANDY_SIGNED_EVIDENCE_DIR") {
+        let destination = PathBuf::from(destination);
+        fs::create_dir_all(&destination).unwrap();
+        private_json(
+            &destination.join("shared-pool.json"),
+            &serde_json::json!(evidence),
+        );
+    }
+}
+
 impl Drop for SharedEvidence {
     fn drop(&mut self) {
         let Some(destination) = std::env::var_os("CANDY_SIGNED_EVIDENCE_DIR") else {
@@ -617,11 +637,14 @@ pub(super) fn verify_domains() {
                         let thread_count = fs::read_dir(format!("/proc/{}/task", identity.pid))
                             .unwrap()
                             .count();
+                        // Each host owns the control loop and one bounded log
+                        // exporter, in addition to three threads per live domain.
                         assert!(
                             fd_count <= 256
                                 && thread_count
-                                    <= 1 + 3 * reply["live_domains"].as_u64().unwrap() as usize,
-                            "host descriptor/thread budget exceeded"
+                                    <= 2 + 3 * reply["live_domains"].as_u64().unwrap() as usize,
+                            "host descriptor/thread budget exceeded pid={} fds={fd_count} threads={thread_count} domains={reply}",
+                            identity.pid
                         );
                         metrics.push(serde_json::json!({"identity":identity,"domains":reply,"fds":fd_count,"threads":thread_count}));
                     }
@@ -665,6 +688,7 @@ pub(super) fn verify_domains() {
         }
         evidence
             .push(serde_json::json!({"workers":workers,"records":records,"hosts":host_metrics}));
+        publish_scale_evidence(&evidence);
     }
     // One unavailable peer must not kill its shared host or affect other domains.
     domains[0].server_process.0.kill().unwrap();
@@ -704,13 +728,10 @@ pub(super) fn verify_domains() {
         );
     }
     evidence.push(serde_json::json!({"fault":"host_crash","before":before,"after":after}));
+    publish_scale_evidence(&evidence);
     if let Some(destination) = std::env::var_os("CANDY_SIGNED_EVIDENCE_DIR") {
         let destination = PathBuf::from(destination);
         fs::create_dir_all(&destination).unwrap();
-        private_json(
-            &destination.join("shared-pool.json"),
-            &serde_json::json!(evidence),
-        );
         fs::copy(
             root.join("agent.log"),
             destination.join("shared-pool-agent.log"),

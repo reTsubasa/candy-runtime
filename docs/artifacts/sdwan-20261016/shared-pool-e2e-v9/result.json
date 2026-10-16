@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "test": "signed_cli_shared_pool_scales_and_isolates_four_domains",
+  "gate": "FAIL",
+  "scope": "isolated source-worktree fixture; no release or platform acceptance",
+  "container": "candy-shared-gate-f8ab1d11fd00",
+  "host_deadline_seconds": 300,
+  "test_exit_code": 101,
+  "code": "test_or_harness_failed",
+  "test_executed": true,
+  "exact_one_test_passed": false,
+  "cleanup_exit_code": 0,
+  "elapsed_seconds": 3.748
+}

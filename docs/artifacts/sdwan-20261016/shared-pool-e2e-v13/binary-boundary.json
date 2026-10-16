@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "scope": "intermediate isolated Linux functional gate; final integrated Core acceptance pending",
+  "candy_core_sha256": "1c75719891551ddb88378916cbfdad6c091a5e8012588c5e02399d4874cf12ee",
+  "candy_sdwan_agent_sha256": "6518d6024de049bc5b9685eef4f8ef45b2c45d2dc768c9f944d42c4054185695",
+  "candy_netd_sha256": "d4cc67d5ddb4941fb30ffbb433a567b0d4c8c58003b86de07724596b75ce4b18"
+}

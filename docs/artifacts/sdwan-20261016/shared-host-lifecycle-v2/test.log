@@ -1,0 +1,43 @@
+   Compiling candy-tunio v0.4.0 (/workspace/linux/common/apps/candy-tunio)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.79s
+     Running tests/signed_cli.rs (/workspace/target-linux-tunio/debug/deps/signed_cli-a57a50de93f7a120)
+
+running 1 test
+2026-10-16T02:08:29.389409Z  INFO candy_core_process::process_limits: Core file descriptor budget is ready event="process_resource_limit_ready" module="process_limits" resource="RLIMIT_NOFILE" requested_soft=1048576 requested_hard=1048576 previous_soft=1048576 previous_hard=1048576 effective_soft=1048576 effective_hard=1048576
+2026-10-16T02:08:29.428973Z ERROR candy_core_process::shared_sdwan_host: code="shared_domain_failed" module="sdwan_host" instance=invalid-domain-fixture detail=error: unexpected argument '--invalid-domain-fixture' found
+
+Usage: candy-core client sdwan run [OPTIONS] --config <CONFIG>
+
+For more information, try '--help'.
+ action="preserve_other_domains_report_exit"
+2026-10-16T02:08:29.483275Z  INFO candy_core_process::process_limits: Core file descriptor budget is ready event="process_resource_limit_ready" module="process_limits" resource="RLIMIT_NOFILE" requested_soft=1048576 requested_hard=1048576 previous_soft=1048576 previous_hard=1048576 effective_soft=1048576 effective_hard=1048576
+2026-10-16T02:08:29.521120Z ERROR candy_core_process::shared_sdwan_host: code="shared_domain_failed" module="sdwan_host" instance=invalid-domain-fixture detail=error: unexpected argument '--invalid-domain-fixture' found
+
+Usage: candy-core client sdwan run [OPTIONS] --config <CONFIG>
+
+For more information, try '--help'.
+ action="preserve_other_domains_report_exit"
+2026-10-16T02:08:29.642403Z  INFO candy_core_process::process_limits: Core file descriptor budget is ready event="process_resource_limit_ready" module="process_limits" resource="RLIMIT_NOFILE" requested_soft=1048576 requested_hard=1048576 previous_soft=1048576 previous_hard=1048576 effective_soft=1048576 effective_hard=1048576
+2026-10-16T02:08:29.757190Z  INFO candy_core_process::process_limits: Core file descriptor budget is ready event="process_resource_limit_ready" module="process_limits" resource="RLIMIT_NOFILE" requested_soft=1048576 requested_hard=1048576 previous_soft=1048576 previous_hard=1048576 effective_soft=1048576 effective_hard=1048576
+2026-10-16T02:08:29.809737Z ERROR candy_core_process::shared_sdwan_host: code="shared_domain_failed" module="sdwan_host" instance=invalid-domain-fixture detail=error: unexpected argument '--invalid-domain-fixture' found
+
+Usage: candy-core client sdwan run [OPTIONS] --config <CONFIG>
+
+For more information, try '--help'.
+ action="preserve_other_domains_report_exit"
+2026-10-16T02:08:29.880097Z ERROR candy_core_process::shared_sdwan_host: code="shared_domain_failed" module="sdwan_host" instance=invalid-domain-fixture detail=error: unexpected argument '--invalid-domain-fixture' found
+
+Usage: candy-core client sdwan run [OPTIONS] --config <CONFIG>
+
+For more information, try '--help'.
+ action="preserve_other_domains_report_exit"
+2026-10-16T02:08:29.927598Z ERROR candy_core_process::shared_sdwan_host: code="shared_domain_failed" module="sdwan_host" instance=invalid-domain-fixture detail=error: unexpected argument '--invalid-domain-fixture' found
+
+Usage: candy-core client sdwan run [OPTIONS] --config <CONFIG>
+
+For more information, try '--help'.
+ action="preserve_other_domains_report_exit"
+test signed_cli_shared_host_lifecycle_scale_gate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.60s
+
