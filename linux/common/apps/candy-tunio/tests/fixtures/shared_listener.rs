@@ -2,6 +2,8 @@
 use super::*;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+#[path = "retained_io_record.rs"]
+mod retained_io_record;
 
 struct Link(String);
 impl Drop for Link {
@@ -330,6 +332,7 @@ fn verify_live_reload(
     }
     std::thread::sleep(Duration::from_secs(31));
     probe_proxy();
+    let mut redial_server_before = server_before.clone();
     let mut recovered_server = None;
     if restart_successor_server {
         let process_path = server_plans[0].with_file_name("process.json");
@@ -352,6 +355,20 @@ fn verify_live_reload(
                         fresh["policy_generation"], 1,
                         "Cloud static catalog advanced unexpectedly"
                     );
+                    let fresh_io = status(&server_plans[0].with_file_name("io-process.json"));
+                    if !fresh_io.as_ref().is_some_and(|io| {
+                        retained_io_record::matches_worker_recovery(
+                            &server_before[0].1,
+                            io,
+                            fresh["worker_epoch"].as_u64().unwrap(),
+                        )
+                    }) {
+                        assert!(Instant::now() < deadline,
+                            "server recovery changed retained TUNIO beyond worker epoch: before={} after={fresh_io:?} worker={fresh}", server_before[0].1);
+                        std::thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                    redial_server_before[0] = (fresh.clone(), fresh_io.unwrap());
                     recovered_server = Some(fresh);
                     break;
                 }
@@ -420,7 +437,12 @@ fn verify_live_reload(
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(tun_identity(&clients[0]), tuns_before[0]);
-    for (plan, (_, io)) in server_plans.iter().zip(&server_before) {
+    for (plan, (worker, io)) in server_plans.iter().zip(&redial_server_before) {
+        assert_eq!(
+            status(&plan.with_file_name("process.json")).unwrap(),
+            *worker,
+            "ordinary successor redial replaced server Core"
+        );
         assert_eq!(
             status(&plan.with_file_name("io-process.json")).unwrap(),
             *io,
@@ -495,7 +517,12 @@ fn verify_live_reload(
             );
         }
         assert_eq!(tun_identity(&clients[0]), tuns_before[0]);
-        for (plan, (_, io)) in server_plans.iter().zip(&server_before) {
+        for (plan, (worker, io)) in server_plans.iter().zip(&redial_server_before) {
+            assert_eq!(
+                status(&plan.with_file_name("process.json")).unwrap(),
+                *worker,
+                "post-restart renewal replaced server Core"
+            );
             assert_eq!(
                 status(&plan.with_file_name("io-process.json")).unwrap(),
                 *io
@@ -516,6 +543,7 @@ fn verify_live_reload(
         "rounds":receipts,"client_processes":client_before,"client_tun_ifindices":tuns_before,
         "icmp_packets_per_domain":400,"icmp_loss":0,"proxy_survived":true,
         "successor_ordinary_redial_after_original_cap":true,"runtime_cross_process_candidate_handoff":"separate_gate",
+        "post_recovery_exact_server_records":redial_server_before,
         "recovered_static_generation_one_server":recovered_server,"post_restart_generation_four_renewal":post_restart_renewal}),
     );
 }
