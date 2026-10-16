@@ -1,0 +1,16 @@
+   Compiling candy-proto v0.3.63 (/core/crates/candy-proto)
+   Compiling quinn-proto v0.11.15 (/core/vendor/quinn-proto)
+   Compiling btls v0.5.6 (/core/vendor/btls)
+   Compiling candy-core v0.3.63 (/core/crates/candy-core)
+   Compiling candy-packet-port v0.3.63 (/core/crates/candy-packet-port)
+   Compiling candy-carrier-crypto v0.3.63 (/core/crates/candy-carrier-crypto)
+   Compiling quinn v0.11.11
+   Compiling candy-tun v0.3.63 (/core/crates/candy-tun)
+   Compiling quinn-btls v0.1.0 (/core/vendor/quinn-btls)
+   Compiling candy-carrier-transport v0.3.63 (/core/crates/candy-carrier-transport)
+   Compiling candy-carrier-runtime v0.3.63 (/core/crates/candy-carrier-runtime)
+   Compiling candy-carrier-client v0.3.63 (/core/crates/candy-carrier-client)
+   Compiling candy-carrier-server v0.3.63 (/core/crates/candy-carrier-server)
+   Compiling client-cli v0.3.63 (/core/apps/client-cli)
+   Compiling candy-core-process v0.3.63 (/core/apps/candy-core)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 11s

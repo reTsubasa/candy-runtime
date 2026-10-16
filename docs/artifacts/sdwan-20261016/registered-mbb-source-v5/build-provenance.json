@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "scope": "isolated Linux debug reliability gates; no release, platform or throughput acceptance",
+  "source_mode": "committed Git blobs, read-only build mounts; working changes excluded",
+  "core_revision": "92d5f4972ab4d583f4abba9ffe863944c8fe8486",
+  "runtime_revision": "44130eaccb5a1ca446c689ade7ff019e173aa578",
+  "manifest_sha256": "b468c9e15aa43274a0609d3afba18a12e650f68b3453bf136019fed71188acfb",
+  "image": "candy-sdwan-perf-runner:20261013",
+  "image_id": "sha256:83ec9ae6fa4c628d419f681bbae5b4994bf5dd56c46f550a1ee255cb52dbdfd7",
+  "rustup_toolchain": "1.88.0-aarch64-unknown-linux-gnu",
+  "rustc": "1.88.0 (6b00bc388 2025-06-23)",
+  "rustc_commit": "6b00bc3880198600130e1cf62b8f8a93494488cc",
+  "llvm": "20.1.5",
+  "target": "aarch64-unknown-linux-gnu",
+  "profile": "debug; Cargo dev/test defaults",
+  "cargo_flags": ["--locked", "--offline"],
+  "runtime_agent_features": ["experimental-tunio-rebind"],
+  "build_logs": ["core-build.log", "agent-build.log", "netd-build.log", "helper-build.log", "helper-build.jsonl"],
+  "gate_order": ["signed_cli_shared_pool_scales_and_isolates_four_domains", "signed_cli_successor_server_restart_preserves_authorization", "Rust Runtime proxy compatibility and reliability matrix"],
+  "traffic_concurrency": "serial; no other build or traffic load during the gates",
+  "binary_hashes_file": "binary-hashes.json",
+  "binary_profile": "aarch64-unknown-linux-gnu debug/dev and test artifacts; immutable copied snapshots"
+}

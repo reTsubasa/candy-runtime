@@ -1,0 +1,6 @@
+{
+  "gate": "SOURCE_FROZEN",
+  "build": "NOT_RUN",
+  "performance": "NOT_RUN",
+  "manifest_sha256": "b468c9e15aa43274a0609d3afba18a12e650f68b3453bf136019fed71188acfb"
+}

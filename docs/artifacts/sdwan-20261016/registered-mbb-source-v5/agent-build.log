@@ -1,0 +1,9 @@
+   Compiling candy-netd-proto v0.4.0 (/workspace/linux/common/crates/candy-netd-proto)
+   Compiling candy-process-control v0.4.0 (/workspace/linux/common/crates/candy-process-control)
+   Compiling candy-runtime-log v0.4.0 (/workspace/linux/common/crates/candy-runtime-log)
+   Compiling candy-packet-port v0.3.63 (/workspace/shared/vendor/candy-packet-port)
+   Compiling candy-cloud-sync v0.4.0 (/workspace/linux/common/apps/candy-cloud-sync)
+   Compiling candy-netd-client v0.4.0 (/workspace/linux/common/crates/candy-netd-client)
+   Compiling candy-tunio v0.4.0 (/workspace/linux/common/apps/candy-tunio)
+   Compiling candy-sdwan-agent v0.4.0 (/workspace/linux/common/apps/candy-sdwan-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 36s

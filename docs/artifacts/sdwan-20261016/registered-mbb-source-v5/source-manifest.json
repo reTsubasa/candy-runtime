@@ -1,0 +1,3437 @@
+[
+  {
+    "mode": 420,
+    "path": "candy-core/Cargo.lock",
+    "sha256": "b747e73374f4270750a79ef5303b74a43f56d389741ff4959c191f8bd6290809"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/Cargo.toml",
+    "sha256": "09b036a7fcfc1495828e0f181fe6e4caa6422ca041158f4b4e44387f839304cd"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/Cargo.toml",
+    "sha256": "a91ba627181c3ea962c6c779c0e74f5d89d40106f37bdf24f015141e7ef30fa2"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/examples/proxy_egress_worker.rs",
+    "sha256": "c4c1617360ddb704c65f3e36dea531f722666f5a09be6c73656856fb31c2abe2"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/examples/sdwan_signed_cli_fixture.rs",
+    "sha256": "d22db5f181dc575865126f9561855909f73bf6c665e43e9e0e9f6a4fb33b2cb6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/examples/transport_worker_ipc.rs",
+    "sha256": "5f1eca99c12a11fe0863af31eb6f1fe0cba38d705390853a57696d00195819fd"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/experimental_worker_control.rs",
+    "sha256": "e2c52042f1f41e51fe4519a8da17b1c3b12815577d1bfc945e7b9406e01c6b23"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/lib.rs",
+    "sha256": "e3f7c14a42eed152a2b8bbc164dabcbb9c29b9e3f2f2c83f4adf4ec0c19a1f32"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/main.rs",
+    "sha256": "8d20c237d5a0a3a75576e8ba43692419ba7185473de9da20da2bd6174ab94877"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/peer_commit_barrier.rs",
+    "sha256": "04bb6984c0ac4105f0086c3da22a6287ad29dc60cdafba86147304387ddd7089"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/peer_commit_barrier_tests.rs",
+    "sha256": "64d04f5c87041e4f562c0b263af2fe553b853e3bae01617b0778b98d5ca42bb5"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/peer_commit_journal.rs",
+    "sha256": "2b7e0c07bf957c32d9e18961a64e343f8e58f907ceff9194f2eba25234a588b2"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/process_limits.rs",
+    "sha256": "1eb90c0dda41c363002bb2c5a687ced772c60051ee2656f05ad3073fb50ffed7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/proxy_master_entry.rs",
+    "sha256": "8aecf7a7282ac348da730f9bd9403730245df86e50095b70a3adcb9ef8c91b12"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/proxy_master_entry/shutdown.rs",
+    "sha256": "cfc3443875c71009edf3aa3d36f908c5d6e6d87d48ed9e933d737b8d009d6c28"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/proxy_worker_entry.rs",
+    "sha256": "4da84e109b0771c999322fe0464f87f630bf1f6cf55fc9d0929c2b1e2a23d347"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/sdwan_candidate_initiator.rs",
+    "sha256": "dbd3f4e83d8c49a853cb5cc543d6c995113e7c5da1ac5c2e9650aed997c58b27"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/sdwan_candidate_reservation.rs",
+    "sha256": "dede82d054ebcaef99d7368dac5a69380294ab624f45da09cd446c94d77bf0fd"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/sdwan_worker_candidate.rs",
+    "sha256": "ffa42622429f78683b12f8592e1bf97185df37dbba96fe5b64d935950eee7b5a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/shared_listener_domain.rs",
+    "sha256": "c08bd2c296e38edcd1d0b7c4541b1bb1f7eb2ee3f9b875fca5b8507ad2d486e4"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/shared_listener_registry.rs",
+    "sha256": "9c0535de927a68051bc139af798f9118eefd52c00d3bdb9d282f8c9d236e03ed"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/shared_listener_reservation.rs",
+    "sha256": "b29a0c7e13cdc4f887d3bf9ffcf9b67f44f114db120e3048e1b7ec7396a4a9ce"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/shared_listener_staged.rs",
+    "sha256": "b3a0046bc51e2a45d2db5e1e0d86e2113c996b7f8a7ca070709271f614e7fc90"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/shared_sdwan_host.rs",
+    "sha256": "2604fe90ef674d72f5432275352dea566cf8d17d548b750297fe6dc1fd6b1526"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/structured_logging.rs",
+    "sha256": "d6ad243ee2f26a7c4296657548ba90b2b9160d523858c36b67794a1d62afb39d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/worker_placement.rs",
+    "sha256": "431e3be596dfb505358f5b6b657d2a68647f723f953c944f1355bc9633ebb679"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/src/worker_placement_tests.rs",
+    "sha256": "36f3649f6c517059e648d46ac399674549444f19040726f59131962757b289d5"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/tests/full_proxy_worker.rs",
+    "sha256": "3dd614ba5b8bb39f6d95f1de021ff9538b20568ac9dbbe6090902544e6cd9664"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/tests/managed_proxy_listener.rs",
+    "sha256": "04a46e2aaee04218f1453fe9aedc839534734cdcf2ba4f5c0a3cc692693475cd"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/tests/process_api.rs",
+    "sha256": "b7df9f8d1bff5d184192b770a32007e1c37341a3be46e372165a96220c3982b3"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/candy-core/tests/proxy_master_entry.rs",
+    "sha256": "afbf4687b939c4e64876ca97e042c304a14d1962c27b29dde821b334d45965a8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/client-cli/Cargo.toml",
+    "sha256": "fb2d432b5ef0e9d7438cdc8abb5d0e9055b5c58e70ba8299bbdf0fdf5276c7b7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/client-cli/src/bin/client-cli.rs",
+    "sha256": "c1c725c4d52b415bd1e2ffbbbfe1c46f0b5404cdce6caf9460a9a34c4f101fb5"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/apps/client-cli/src/main.rs",
+    "sha256": "9b7d291a1a1d8baffd4d50716ee88160f87875fd23181138983c9531d42137a5"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-client/Cargo.toml",
+    "sha256": "1aa4dcebc35525a1375d93b9d5d88a07000be6e607bb530970eb8223aa4c5d4d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-client/src/control_plane.rs",
+    "sha256": "dc39c55c0e4d0da14b628815c9c31dbee9e5357ebc6825d2d93ce11c8d9a205c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-client/src/lib.rs",
+    "sha256": "a2259621290ee193cec408db3fa6598b23f104e7b96e03bd84a7be4c499d0495"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-client/src/node_dialer.rs",
+    "sha256": "4a65d5ec9aa0df1bcf2f83b5e4887c5ab62af0e3cd8b0891a19fe9f320913111"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-client/src/proxy_drain.rs",
+    "sha256": "e251150af385e5c1158de1963028a8ba88147c1363663e256ced69c086306fe6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-client/src/proxy_worker_drain_tests.rs",
+    "sha256": "fbe9821a851ca09a00b4ba3c5e4cb25f59f4f6a4c7781c69bf999235b423f1ad"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-client/src/standalone.rs",
+    "sha256": "c9f267687880192011366e273a3c9fc17faf487060040d182e73a8262e8997b3"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-client/src/standalone_fault_gate_tests.rs",
+    "sha256": "bfb34d33633812974c4eadb158002f031e46a3b91b70da5360913202136bd747"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-client/src/terminal_pump.rs",
+    "sha256": "b02b28da392682ea794ed6b17a8f9923522b198fb497cfb3df2075eb181efa6b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/Cargo.toml",
+    "sha256": "209df1fba7d4590f0f55b1353ce407710881aa10bb6e539bf1e36778c949817c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/examples/cloud_auth_test_fixture.rs",
+    "sha256": "5bc17884fdd900b7b5fd4662625ff068149d3dbc6094211cda7493dcc4cef73a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/examples/diag_projection.rs",
+    "sha256": "ccf78119f08d4a119d9c6baa3755edfd56c7e637fd19a60837b4998634e58dae"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/examples/sdwan_private_cloud_test_fixture.rs",
+    "sha256": "bd205f048e0acba855a99d6f08c634618759bb11980dfbfd6ac37c0c405d919f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/src/auth.rs",
+    "sha256": "572f634a96ff445decf555df67ca824613e1234e5f528084d5ce22b31a06300b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/src/client_grant.rs",
+    "sha256": "79c177946f20f52e1175d089f297c26798b161f069d6ea9065578cf2f7126eec"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/src/client_projection.rs",
+    "sha256": "04955d68640bdd13ea919a4738ef7c29f2fc25a0f593eee669641cc46197c18e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/src/client_wire.rs",
+    "sha256": "7ea99cf4571b564bcbda21db119e02fcc5d0c34f17eaf75c7afe3bd807e3a6aa"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/src/cloud_grant.rs",
+    "sha256": "61ecc86b143c6e1af5542bbe0808c0bf4be56f4051d19c91a933d3c74e84c8c8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/src/fabric_contract.rs",
+    "sha256": "8a7f5f2de1b2d5262e4821d894d2737bb6ff5aa6fac7412fa6d7405597893656"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/src/lib.rs",
+    "sha256": "eb3a32e27c29d6ce1ffb57c16ff7dc48878e542c3825045f7ffb3f31bc36af35"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/src/route_contract.rs",
+    "sha256": "0333fa99faf48c12e1dd4d67ad87af4d0a8517e461cb155a3f5a99129ecdc56e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/tests/client_grant_contract.rs",
+    "sha256": "30678ca872c900f087999d67dec1497f090d97415bd8645d213cf3848a000969"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/tests/client_projection_contract.rs",
+    "sha256": "6f534c7d6a8c6a8fa99f7857cd01666810ae95e52ad25c0bf9f13cd16746f356"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/tests/cloud_grant_vectors.rs",
+    "sha256": "dc2e82a8b07b51a1a4042b74f82cd7249cdb35a3559e263d233f2057f2241800"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/tests/fixtures/policy_projection_v1.json",
+    "sha256": "060602126c607a92e421dd30a730fdf21635b17f94834a7b82fcf7d345ec35ce"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/tests/interop_vectors.rs",
+    "sha256": "1d5893687b6f80960ae9690d2b271ca0d56c5f83b370e4c3fd15d0639b6504c2"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/tests/ip_tunnel_vectors.rs",
+    "sha256": "9747774bde3698898bf6336d7a8a656af2b3574d08c3c16b6aa3da9901c8bda7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-crypto/tests/route_contract_vectors.rs",
+    "sha256": "00a53966d9ab28ecfe27d7dfd4b456c6a52bc79131300ac9cdc57a84b4c280f7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/Cargo.toml",
+    "sha256": "af78ff310e1f04cab22d1afb94b22efad173619aa1f24be5e4c105f1d4d14638"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/agent_status.rs",
+    "sha256": "5762c6fb61e6cb1b963dbe2ccd24a55aeade4b047e53431193911a3e2871463c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/bin/candy-proxy-worker.rs",
+    "sha256": "3f96fb3206a70d6a3757525479b4216a0c3ee93b7790d589e1d96cc95aacf03b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/candidate_journal.rs",
+    "sha256": "1f455c25123c2800c06b78e6987b1e2e520af9c79464ed30870551dcbeb9c0ef"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/candidate_journal_tests.rs",
+    "sha256": "189bf91904791de62d8531fe16d7b31bfe4101afd5c7be2222775004db7fce21"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/candidate_signed_context.rs",
+    "sha256": "4f0fb237e370788979c30e0ed3108908e5f5440b76ae6cdc3be718dfd341c44a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/client_grant_auth.rs",
+    "sha256": "fa9c61709394522bccd5e7b7207274464f29bbefae8c709395dedd29815d2d75"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/client_projection_store.rs",
+    "sha256": "660405bc66666df4d824df9589b8991f47d1bf9a50c2628269e3dae3b9cff25b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/cloud_auth.rs",
+    "sha256": "4859e3ee02c5aa0d962dc9be4950b6d2169287637287d667b16a72d170c2a89e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/connect_loop.rs",
+    "sha256": "ef1b6056ac0902795586d64686f5e91e1fd20b02d233465b3be55557f2fc9237"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/control_plane.rs",
+    "sha256": "6c2ce738adb1e62807d10f864673c81087c63588330f16361b612cdf0c372cf9"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/control_plane_wire.rs",
+    "sha256": "b6a8be694ff8183d133b8c7d154175e464be3110af1b035f071aeb65eeb6698d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/control_transport.rs",
+    "sha256": "68ad077a00826ed810bab419390a3c0144d78226602c0e9f3f2453ff084df8aa"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/control_transport_tests.rs",
+    "sha256": "18c4ac2a3fe8d291e372f7237ab632c877ef389b5eb3c33601770ca193061fe6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/dataplane.rs",
+    "sha256": "a98d5cc880360051f011d6312abe574f7a460a9a1487bba561016e29ceae151d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/early_stream.rs",
+    "sha256": "112f07b9b5b490a089022c8757cf20a875093c2b914875a67be0507e684f7281"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/early_stream_transport.rs",
+    "sha256": "eb30ed6764ff41475676f6668692d106fc44574b5a5c247af1abcb0ad38962ae"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/early_stream_transport_tests.rs",
+    "sha256": "c84615eb87682f08122c10b523642f81366c0a7e924639745c5e9cd9d727fb43"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/egress.rs",
+    "sha256": "10bcd61c863bf6e8d62ef5c8d29d85080a55bdf5ca36cb433d2c9c087985a367"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/fabric_auth.rs",
+    "sha256": "cd9faf50b4bba620ee76d329ac04f27bf3b2b863c1b1e00ebc5898503f519988"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/grant_http.rs",
+    "sha256": "9f71806b61806bf4f7ab5952ff60ac8f434486bd066e3bac7a326566c2e44c42"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/heterogeneous_sdwan.rs",
+    "sha256": "8cd2aa259c9ddd0cad0b824892f63b0653db6cdccc33de1726790cf8bf1592d8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/hub_identity.rs",
+    "sha256": "37c5f6c5f5cb73cb6889033af854396d37124fa1b85bd102d281d30058a16ee9"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/ip_tunnel.rs",
+    "sha256": "d9dbb914bdccbb9f7c7f312b77afbc29522c0a8611b0b8ff1f2ec2bfa59a0a7b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/lib.rs",
+    "sha256": "028bef238fa6fa7e82d6ea38a5f079d5e2909f3d8394284c53216377c9d51763"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/limits.rs",
+    "sha256": "fbee3ebc8eec16a48b1f37c2c24444ac79b825a81f0dda41c32e34cc4d868418"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/managed_proxy_pool.rs",
+    "sha256": "077fa1fba1fd224289ce5562a6da04a981658e99f0b8bc252c694b863fffe092"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/node_dial.rs",
+    "sha256": "1df7c41533b0ed63d2bf698ae4e888fa881a5cbad99f76c18e3d0b18f1a8da50"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/node_failover.rs",
+    "sha256": "1c0076f6f1f483848af5447a2c82649a3d97f0b3bfbc57fec288161ffd3515d2"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/projection_error.rs",
+    "sha256": "50c8f4159bcb569f9dce6e80394a8075fcba89bd77687fbb57abb846731a74a3"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/projection_http.rs",
+    "sha256": "0b2ff4ce9dbe75011fabc007a68029340c1dd036322aa072804538a9e1b2efaa"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/projection_lifecycle.rs",
+    "sha256": "1211c8087fe8fc3aac9e16f45a8ce2aafbf98b686a6f975f084f3389d89d7a27"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/proxy_drain_tests.rs",
+    "sha256": "01b0d0c59a8315440ab7edaf63090364e171a8ad9a6f98c9c387044e84882531"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/proxy_driver_tests.rs",
+    "sha256": "7a50fadd0fca23dc4eba2fa5351c13149ef2fae7743108f4f60310c457c783b1"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/proxy_native_udp_tests.rs",
+    "sha256": "c55f526766ace0dd8f43c404287ae5f43a46d199697cd6b98d9fce343f8c0de0"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/proxy_transport.rs",
+    "sha256": "b2054488e3fe99a7a1d85da079490e4a830a3dab3139adf000945056de7fff1e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/sdwan.rs",
+    "sha256": "6693c712a24ec76a7f01f00e405092dcf087da405156db3801e5097efc4c7b87"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/sdwan_queue.rs",
+    "sha256": "4438d26f83f6d6e4873612f9523829c78290628110b7485240feb8178f5fd9aa"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/sdwan_transport.rs",
+    "sha256": "eff3c78898ea38abed3df69a702c08946daa3d7245762eadca6ca4280c8d4eb4"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/session_state.rs",
+    "sha256": "e7a4536650f9db5f6f32aca8c29bca9e4e5e94d10558593baab30083962b2d28"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/session_transport.rs",
+    "sha256": "aec006ce2085b1bbb961da411b8fcced08368c3444851272ca9e2c77f6943c51"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/session_transport_tests.rs",
+    "sha256": "330c511d94afa6f75cb06c30beb3aaa880574c6d0762c1797d15ba7d6c693531"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/staged_barrier.rs",
+    "sha256": "8fa223b03222bce4a20a1da052c343bc5f3acfcf267b39a4e0f299c8487112aa"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/staged_barrier_clock.rs",
+    "sha256": "51a955e095cbe1d1fdd564814d0e5728f12017cafde2baaeaab27f1fb370c67d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/staged_barrier_tests.rs",
+    "sha256": "4b5befa73720bfbefd95502c5830f2ce41334bde42fda4915caea9e2c862247a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/status_document.rs",
+    "sha256": "c3313e31d44ac0a822299926963856e0e563735fbf1b633e1ee818007e0de67a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/terminal_driver.rs",
+    "sha256": "be39cb153bde6cf062887abdf6fee9273a078fdaaadfb41ab43a98f8cb79cd90"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/terminal_ip_tunnel.rs",
+    "sha256": "ba026d497635cea297fa65d1bb039446082b8300db8b4c2f62461e75c2ed99ab"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/terminal_session.rs",
+    "sha256": "790a1d42ad26968d7ac182b9eb5a4f8dc4d2849b1ab92ae7cfe4a2d177b07a9c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/tun.rs",
+    "sha256": "a8b38e5128e99fcff9055d2c0d976fec5cb428964525378324caefa8174cf8d7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/tun_control.rs",
+    "sha256": "a4a82fd418c5f44687844834601fe69c1e684b0a45671380630492ec83208bbb"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/tun_fabric.rs",
+    "sha256": "b591d755490d20749d25d1f1b2983176f8bd1432da7c7cc3e1bfe05ee0ed5fc6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/tun_shared.rs",
+    "sha256": "b7a65494aa9da144ed52a627c4466f827f50e8362870ca63a8167ecabb23c5e1"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/worker_generation.rs",
+    "sha256": "f87ec0ad32ccc3b9eb7507dd6046d6ef6e0e75a244c79cdbf07d2a88e597869c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/worker_grant_auth.rs",
+    "sha256": "c1f57a64a046acebe6b5c34b90a852e0781cd292d019c14a7f581a4a00660745"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/worker_process_manager.rs",
+    "sha256": "275568dbfa193e3cf8fd7039d4b490e4011e0f4a01aa53ad2c8393a0b422d922"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/src/worker_proxy_ipc.rs",
+    "sha256": "9da1e294178034416d654ae705a823597096e549cf7e1b4ff149cb246ada6e48"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/agent_status.rs",
+    "sha256": "18b2831792bbf3f5aa2bcb563cda77952935d426b6aafa160d067a9bbeb1c494"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/client_projection_store.rs",
+    "sha256": "40effa6ee40abfc5d7fd4900394d6fb3d08e995726477e516fe29cc4b70b40f7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/connect_loop.rs",
+    "sha256": "2d432a3c0ca61fff2b919493cf9dfe3733d20af47d26b53511a9a7536c0c420e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/early_stream.rs",
+    "sha256": "e5d5d723409facfb5bb24a154a8391e048cee3ae5f3a5ad71941bc353964185b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/fixtures/status_document_connected.json",
+    "sha256": "34587c5567de20dadf018d4ee44f6bb01f614f3df101fa71901a0f9d2e37e10a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/fixtures/status_document_lease_lapsed.json",
+    "sha256": "7c1ffa4b147d25bad8139652777f066ba06b9c2d29e239084fc613ec56de85e9"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/fixtures/status_document_revoked.json",
+    "sha256": "1ba6ef609912ae5f7e6938477d2a4d9f91aa606a7b2cfab83f5b9e8cdcc49adc"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/grant_http.rs",
+    "sha256": "6681bbf9682e7a9127b02b96eae4beb5d2b99215ac1a5203ea19477958edb45c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/managed_proxy_pool.rs",
+    "sha256": "313341fc1cab7491a075f8a0af174262af94ce165578b909a2fcc0c69feeb8bf"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/node_dial.rs",
+    "sha256": "713122c2bea3ef0864eacd81aeaafdd36b10adc55ce304dc12ba491951e5d53c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/node_failover.rs",
+    "sha256": "d18b1765c34681a2672c5606d4b0795fd80eca97b510cfabf954c5d39bb3db9b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/projection_error_mapping.rs",
+    "sha256": "9799aa0a22aa2da8ac06d3d1cb9f5b457c4e9716a62f8caa3be9706c82c0d85c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/projection_http.rs",
+    "sha256": "7b5665a5f9923ee76465fad69fec1f6bbbdbc30d4c8dd95ac9f383271b8f2559"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/projection_lifecycle.rs",
+    "sha256": "56c496a4380b935356cde577ebd5eb0384a74c96abf73593c8a5112050bfd749"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/sdwan_local_perf.rs",
+    "sha256": "b3c47696226ec4adc7cb6da29a73d65a03997f5f35593f73c3f5aff45048a83e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/server_name_parity.rs",
+    "sha256": "e35303e4b398e9c95c31d1fa46961d98e7cfdaaf98c0d9ee9184f360a0221522"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/status_document.rs",
+    "sha256": "29dbc2a73fd5a3b93a9f974732f1cd7a849847eec20a8d515641272ce0728354"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/terminal_driver.rs",
+    "sha256": "d8765e9cdab409faa4fe9f4ea0e24ff3d1957bdfd72f8c0131f5c13e86495273"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/terminal_ip_tunnel.rs",
+    "sha256": "676eccd621a761b2ddca763d0e3fdd80500c24806184bae07031f023492ac74a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/terminal_session.rs",
+    "sha256": "c439d25515062d986d2b7897a13b12a349a89b3b76fd67cf28fa86439479c99c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/terminal_tunnel_control.rs",
+    "sha256": "d170d2d0d00397ee18920fe1f54dbafd0a7967cccfa3617b09c0b0280cbfadd8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/tun_control.rs",
+    "sha256": "04cf4522218c5ba064f15e0a1d5e6f8b4f203959666806cf838f66d661af4a5f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/tun_fabric.rs",
+    "sha256": "35fcb38e932fae40f385a80d9221da164cfb863c6147b97427f41b5f57688535"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/tun_shared.rs",
+    "sha256": "86be008bb88eb3eea1dbf0bc75bd159f1bfd0eee769659a147b552a22e3455bd"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-runtime/tests/worker_process_manager.rs",
+    "sha256": "b7c625a66d45f2c92eb5f66022027e4240c596c99f484f17aaba7a321d0dbea8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-server/Cargo.toml",
+    "sha256": "57b43e9faa66e0e803b933209c815e03df9e65bcf206c879d69f9535bbdd410a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-server/examples/wan_proxy_server.rs",
+    "sha256": "7d398002570eeb9d646fbbdf98fe1250c1fffc8671d32ad8568bb02e5247a9ef"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-server/src/lib.rs",
+    "sha256": "2cd88b98c4f438ecf74fba40d023202aeb02d54aa0b702a8fe40df0004e6090a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-server/src/listener_classification.rs",
+    "sha256": "a5824c21d405b616f5fe7ee63761a5d0438266a28f711b6f6fe44c64b8abdfd2"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-server/src/managed_proxy_worker.rs",
+    "sha256": "27262eb828c738ee08c8010c1a60c325177ebb2ce115726404d5b63c7fb66feb"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-server/src/mixed_worker_tests.rs",
+    "sha256": "8ed9f3c2e7f06a6ee7651d1b6e8cddc174bfaebe8c4810ebbfb2ef6701856e76"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-server/src/port_auth_tests.rs",
+    "sha256": "98e3f4a7b2c6c60a13b22238ace8e93e2c94e306930780e31a5e3ea5b64d648c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-transport/Cargo.toml",
+    "sha256": "1c1ece6088565439bb175ff2bbafc63c1fc7298c9eca7c6a853f07350e370d81"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-transport/src/config.rs",
+    "sha256": "8933cdd05f1f5763772c91e4c861e39b259776e859a78c3946a0f85339f74437"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-transport/src/lib.rs",
+    "sha256": "77233ebba56dcb60091d99873ef401975aacd4eb41de00737034bb9a7716093c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-transport/src/priority.rs",
+    "sha256": "52b77868d96e4f44559c1e1388767833edc9d602f9711ec79e20938f1edeff6e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-transport/src/runtime_fallback.rs",
+    "sha256": "3e0b4e6b1a467b3e0c792a0a830cfe2605f1a17123d1950e0147094b473fc715"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-transport/src/telemetry.rs",
+    "sha256": "094d00dcf082426152895e74eedefeef55ea88187ce1f6909b3d7f75d8dc1b84"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-transport/src/transport_auth.rs",
+    "sha256": "893994b5434c549ef90533d10e9fd5172398b6c083d2e4c6cc8d734035006f82"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-transport/src/transport_control.rs",
+    "sha256": "478ae752a77d483266b56b88f18947e227df0c582104f7799ce3c1436e5295aa"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-transport/src/transport_ipc.rs",
+    "sha256": "f2bf956c01ca721616fa927efcecec4a8cee67f1235a1ad7b0d488ded6e0b004"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-transport/src/transport_ipc_tests.rs",
+    "sha256": "bdfbe4d3f4e0779f701b80dc02926c6ba4cd6358826f05de6061b5acc406795d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-transport/src/transport_port.rs",
+    "sha256": "0c6e62bd11bb596fb7af590b945f7f1b7bdd9cd0cd4722f54cdb7cff9ad9bba7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-transport/src/worker_admission.rs",
+    "sha256": "91c3ce69f39365b51a108181e73dd2a164b843ee6e822da000d09c280c74ef9b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-transport/src/worker_auth.rs",
+    "sha256": "e066f81eb5ac35e78ffbfe0d3420dd770962f5d9b1ee03d65edcc24f8605d9a6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-transport/src/worker_drain_tests.rs",
+    "sha256": "c8772d0b048826d1412efd7fe5ae4f06fa431734f1949b74abee34e9dd50bf71"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-transport/src/worker_pool.rs",
+    "sha256": "92c82b0d431f3b21ba5b6b6b9798f110ec8baed8736086c289bb7285e6919619"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-carrier-transport/src/worker_pool_shared_tests.rs",
+    "sha256": "b78b72609886bee1af7a8e5dd7183668876468b263d4492d8e908e3bf9c76f69"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-core-cloud-abi/Cargo.toml",
+    "sha256": "62034d813efc16ed5c1b0f843132ac6752af4d229d9e47a244d002096418e018"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-core-cloud-abi/include/candy_core_cloud_abi.h",
+    "sha256": "8d311543cd4d6eac4ae88fc170da02f67f527519d9df025c0684975b5205eb66"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-core-cloud-abi/src/construction.rs",
+    "sha256": "2116418434d4272dae6d49234322736e8e16ccd81995daca3b5897f76a52984b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-core-cloud-abi/src/lib.rs",
+    "sha256": "68764ff7aeebcfc2319096f8cb101b70112e68e71d11939e0782b79b49c2b078"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-core/Cargo.toml",
+    "sha256": "ad93d4a1fdab69864a34fd4028844acef4b9ae16d24c1d5079205f41707f9aaf"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-core/benches/rules.rs",
+    "sha256": "c2a6ccfc3ed9a324966c926a60d2eed54c5b6675f6064e8596e4a7ed4571f1d4"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-core/build.rs",
+    "sha256": "3c9b55c58b77480e3c3b0c6394cdd1e94e9904b8fa1cc66be79130436e83f556"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-core/src/lib.rs",
+    "sha256": "7388892ef149f7cf0aaa1c847dc298d5a07f2fe03cbd41b2f17f306624b78eee"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-core/src/manifest.rs",
+    "sha256": "4ee838469da5bbb719d2a460d6ebeecf38e6a8f5fd1cf73c5e91535eee939c44"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-core/tests/rule_allocations.rs",
+    "sha256": "a3c1e243af4e2ef77f9c5e22f023ff92718be654d514a3916652715163297aac"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-packet-port/Cargo.toml",
+    "sha256": "515d8fd53b652607579c4030669f71110390d69b057950ac929db7bbc0efd421"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-packet-port/src/executor_diagnostics.rs",
+    "sha256": "b568fbedcc9029cb9a53fb70906214ae6fdef921c07069c004aa9d329b6d0a54"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-packet-port/src/fd.rs",
+    "sha256": "88004a466a58adb1be9b1620dc57b5421f2fa35787fc9c5cf5929925abc3daee"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-packet-port/src/lib.rs",
+    "sha256": "b3f0f9bbcfaa45cca9209144f253cf29dc452e421eaf91b94c5d483bcd16c555"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-packet-port/src/packet_port.rs",
+    "sha256": "33a13881f306d6ee87c6876fb2704513590c129ea5dfdb1e2e426c22aa6c62da"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-packet-port/src/packet_port_ipc.rs",
+    "sha256": "f10ae83ef24cfd8fc00c7a3d22555d03a3bd3711cc83f5c0473359f9fb98ed85"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-packet-port/src/packet_port_manager.rs",
+    "sha256": "c648db9bd7d5b17bbe7e4ae3182c93bfc4deb1604606c0137719f23520448fa6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-packet-port/src/packet_port_transaction_tests.rs",
+    "sha256": "73e0e87023820d0be8482231c723d6c0caff077fea27107133fe51407b5a8112"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/Cargo.toml",
+    "sha256": "e0c8031e64ca237c4fb58855776f0409992c532f7970e9f7d0669494dab0f466"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/address.rs",
+    "sha256": "3cc4d3303d6507f1ec01c4b858f54ea65b16eeb63f221efebc21b4d8d56b539a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/cloud_grant.rs",
+    "sha256": "0aade4441801bfdde5fd904be94413f9a42404def98d681be432b11725ef0132"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/codec.rs",
+    "sha256": "90cbeec71a0be1559b122ed7f8d9ff7ca6ec2c5b937b799372638aa03089c5ea"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/commit_barrier.rs",
+    "sha256": "a4b540d1fa11c6af0135e594a9397084b14e0de4cfd445eea3c289aec388a31f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/control.rs",
+    "sha256": "fe2aaf3c4eeca51d5e8846e0b02b234bee70483e4d3401638830d54008f1bb48"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/dynamic_route_contract.rs",
+    "sha256": "e0a70cafce1a6ddc71a2f64c0d7ba96e11cae68239f6dc0cb22ade1e9e50c47c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/error.rs",
+    "sha256": "c4a619c1e983d80763aeb7f8817cfc1edd0d38910101b88acfabbc830ee92270"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/fabric_assignment_contract.rs",
+    "sha256": "fd3c93813f9dd4059f285c8a84ce4fc0ef7f1b167f783654cea04e0483d846b9"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/fabric_contract.rs",
+    "sha256": "bc0b7dedbdd25abdf12545db864e7641a0a5a09693fd8420e6845a39216db410"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/features.rs",
+    "sha256": "aa16718a97a3dbcc47b2bcb24600e3c676408362f2003db61260e1c8a9dbe49e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/frame.rs",
+    "sha256": "8a4cf339778657e81b40f76978658318e23d3274bea844dc593c383a9351d542"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/ids.rs",
+    "sha256": "d54ce283da888dc00262472cb9f25aed8ce367fe87cf3898d64b5abe23185422"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/ip_tunnel.rs",
+    "sha256": "ba1e83df4d8c7951cbaad35790548db1c6247c61587af7e72b67a4267e20a552"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/lib.rs",
+    "sha256": "ac711b8b9f90d15fed1ab5a084d6ab3ad7ecde925a7b422d1d722fb138d20825"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/mesh_contract.rs",
+    "sha256": "9ffa8ecfb40d367f36500fc1655b6c024d0e3ed5f206712264b61c487fc28e10"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/route_contract.rs",
+    "sha256": "da02acd9e8b4bfc7deaae20308df3b5f7cf39ce2b778ad64cba9b71d2514f7b5"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/session.rs",
+    "sha256": "69b91764730efc0955400baeaca56abce140d292a5b2ecee88353e17ae4030df"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/shared_hub_contract.rs",
+    "sha256": "c38cb81ddf558e2166edc83a9a23ee12fc3f9e6f326ab7cebb3523cc47322b3e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-proto/src/varint.rs",
+    "sha256": "8e5c7618ce98256a0912ef27dd7290b8b31550cbdaa422009dea8a68f294b30e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/Cargo.toml",
+    "sha256": "93455e86f04ab1095e5fe530b9a5502d2e9e3a493d190746349e5f6f194773a8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/benches/packet_engine.rs",
+    "sha256": "d2f3d185dd3f1905b262062b9bc6b10cb5a13261a0898959997777aff560a213"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/benches/shared_hub.rs",
+    "sha256": "1e7f8e60d671c486ccc20ad2c51a4db675dc1d045eca10e6b06202131a6bf06c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/benches/signed_control.rs",
+    "sha256": "dc8c620da06ffc6070da04440040a4faae4cdb69dec2cfba90d7e2620feea1c6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/src/control.rs",
+    "sha256": "9f57b4debee0f443ccf69a18fcc34e8b90f3e0778ec70e111876f0141aa9222c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/src/engine.rs",
+    "sha256": "cb551401c9fc3cc9d8b46a7d28f13e04e7c802838070adbc3d2593d00781918c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/src/fabric.rs",
+    "sha256": "4e688aad6e7f57d6b847bc0d662421de7944ff77863211c203659f46d2413925"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/src/failover.rs",
+    "sha256": "0b589bfdd8c727590323d5736d14afd63384e9613eb8f40113df78e3ec0727e8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/src/lib.rs",
+    "sha256": "9a2cc8ed1765d3880cb4763cd0c0cd0b85ca4a2b26d46cc3dd61987e02d3ea30"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/src/mtu.rs",
+    "sha256": "d875a53f7b84eae301b5e84d7359a765b7344eebe0ae67b39e1bd5f5064b2b86"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/src/packet.rs",
+    "sha256": "770f96a37a129d5225e3546ae06aee4e93aa66cd956fb532a79a942ab68f604c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/src/pump.rs",
+    "sha256": "b5a3ef9e05550515dca484562a732ca7a84241525a77bfc3e2dd6599e10ed7c0"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/src/queue.rs",
+    "sha256": "a0e6737d91c916eef1d4f633819ea02709a396b290fa47f7a6c549a710e4a6fe"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/src/replay.rs",
+    "sha256": "f876db40f44505fffb38f81efb91674339cc67710afd6873b553f29bb8d40aac"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/src/route.rs",
+    "sha256": "b5461ac020963cdf2c33b0a576eb502cfa38ee20bb053dc8aff1a469266e6656"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/src/shared.rs",
+    "sha256": "fb1aa026f1daa024a2506703f939acae26852fa56c285adcacdc39678dc6869b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/src/supervisor.rs",
+    "sha256": "80891286a636ad4197a219182ac2cd54564c1635cb8e6175a29b7064abefdf9c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/src/terminal.rs",
+    "sha256": "7019e9dd8be777ca683dc9b3210876b48c2c1783f6588fbeea133ba32569fc0b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/tests/attachment_failover.rs",
+    "sha256": "b2154db0209bebe2b94e4cc7721425d9d8eb80e3877a5921bc03b28273a951b3"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/tests/expansion_control.rs",
+    "sha256": "11ff39b95d2e155bac057fb9c373c4b4e194c694c7129d4e8a2fe3b54924e5cc"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/tests/hub_fabric.rs",
+    "sha256": "72e87088939d4d44b6d6e0db4f4a91ea39fd00f465484c2b5fb38c81a0992f62"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/tests/pipeline.rs",
+    "sha256": "6fa8bbdda7e6120c7b05449d71e9c547cb76754e29f16b28635d423b3dbd8a7b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/tests/routing_domain_supervisor.rs",
+    "sha256": "eced050338cc3fa6fa318c8ac5a5a9db757a22c12104f3dccd0cfd6ce5f0d17d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/tests/shared_hub.rs",
+    "sha256": "33b17cbda239682c28822d26a6fcc994b90a890fd3654be8a462bcc8ac95522f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/tests/signed_control.rs",
+    "sha256": "635b798e44cbd097aa59f0e043497925c10c0e452937a87dc8f0ba1c5c084804"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/tests/site_to_site.rs",
+    "sha256": "fcc922cd8c95a2d318eaf5bafcc1c4509e59024c395bfed6d2ccf6a91b3fe5ee"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/tests/terminal_authorization.rs",
+    "sha256": "cfa0e51167ee8795d3cb8a4d58015b2b39a6fd43f54fc48e8cc9ea0ee840a53a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/tests/terminal_data_plane.rs",
+    "sha256": "1b21314b8872fef86aa6dc1037b0177ffd247a7b7967015d02a0f813382bb34c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/crates/candy-tun/tests/tun_pump.rs",
+    "sha256": "b54abb6efe74336173b0495baccbeaf04b4899e7409b8034e283f607ae014c58"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/interop/README.md",
+    "sha256": "98a9767258cb8c3e0375888ca26afa8c7f8faddb3eaa14b8f5f191836be91b77"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/interop/vectors/candy-cloud-grant-v1.json",
+    "sha256": "567d69f381b9967103cf017b14651347f35b2656bc60c12804ee8a239038703b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/interop/vectors/candy-ip-packet-tunnel-v1.json",
+    "sha256": "cbf02c41a8296a64f34a9e4966d27eef063ff7b19e51e64eb7e54de5d6f31574"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/interop/vectors/candy-sdwan-route-contract-v1.json",
+    "sha256": "c18a70131b815a52c813be923d275f777df2c7a17b242f3ab88f555bf6d2b6bd"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/interop/vectors/candy-v1.json",
+    "sha256": "020cfca9f64c5209e98811efa78cf1af02fb29cb98cc150088e49666dafa52c3"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/build_cloud_module_bundle.sh",
+    "sha256": "9af648bd07405d305b96c19f065057b2b17277ae9731fd85162b92c2e311db0c"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/build_cloud_module_in_container.sh",
+    "sha256": "bf5ea220e1f41ebbc1b1d41d1a7d0e9b7479921a9d82e485761fd77fce4f9392"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/build_core_bundle.sh",
+    "sha256": "c8d8d0a2d790cb4cb23eaf0bdc1c07a309b5dbe528aacfc81179298e5164eef5"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/build_core_in_container.sh",
+    "sha256": "2aee59b570bb14592e33ddd7ffc7ccb10a4f13474c05d8fe8294ce20cef5c337"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/candy_bbr_test.sh",
+    "sha256": "984066621813f630e0bdb1dcc97224654e6a89443e93354da48ac7e433709556"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/candy_ip_tunnel_protocol_test.sh",
+    "sha256": "f61820683c6870527e43ccfd72348d2a46dc1ecbb13ce0c73080028cd4e646d3"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/candy_proto_name_gate.sh",
+    "sha256": "1cc1d8bc30d2c6f90d2698e47e639d9ffb63f22578418955d8483cbcbf2dbb05"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/candy_public_name_gate.sh",
+    "sha256": "d7911b5137dee5f922ac46006b3cb43b5de44abce2ed792ff3646ccaef71ade8"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/candy_sdwan_control_contract_test.sh",
+    "sha256": "d31d912a014e2d4f6b3af7307d14dcd2151777d8b96c7ec438ea3488f697903b"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/candy_security_probe_smoke.sh",
+    "sha256": "165d2c751422472c9f5abd02eaa23fa05a137132b8053ead067454b8ec8c78da"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/candy_tun_packet_engine_test.sh",
+    "sha256": "fe6fdeaee1ea48762eec2abc11e4ab1d10b36492ae1623e527404135aef75a42"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/candy_version_test.sh",
+    "sha256": "f5636d877e1a64464bcdbf50efd26ce6082d22cdf5e24c545a880122b0a727b6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/scripts/cloud_module_builder.Dockerfile",
+    "sha256": "a84a6db1bad4649b37423ec966ea5e1214b6c4e065c83de0cecbd7fc136b72a0"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/scripts/core_builder.Dockerfile",
+    "sha256": "4eed37adde123d6060e8906d868c358797972ade81796bb71bf9335fdb48061e"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/install_pinned_musl_toolchain.sh",
+    "sha256": "79de045e6583a81771da0757dd3297a9dbec4d3773e9ecbca0616dfdd49129d3"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/publish_core_release.sh",
+    "sha256": "330d850f87259bee73f580013a171baa01b35ffc331666837d0bd784d2ce8559"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/publish_core_release_test.sh",
+    "sha256": "282a9e048cac70cdd9c07af1a760890632b7ab20107b1ec420f62f983560666e"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/publish_unified_core_release.sh",
+    "sha256": "b9460ab39b101929bbafad6b76e1055d37b363f52562ec643d259c7bb9110c42"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/stage_core_cloud_module_release.sh",
+    "sha256": "762e2688ad99fccc0799143a6a88609883049d0ae7d8ae193c766a7464fbfd3f"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/stage_unsigned_core_release.sh",
+    "sha256": "2a0fffe29a71ca67c7b993666443a4c6bbac8cd301f1625bba49430b1d17995c"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/usign_manifest_signer.sh",
+    "sha256": "4c34420f9cd2900023f6d949d6268974a70c85e63655a28cd03408622458fc93"
+  },
+  {
+    "mode": 493,
+    "path": "candy-core/scripts/usign_manifest_signer_test.sh",
+    "sha256": "a6011245c87456e9296a44a131a37f1c0119c9536429a0fc3d52ba6835a28376"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/Cargo.lock",
+    "sha256": "5da3ee0bd6578afb564ffd8715a38be85a0805061520c459f942810264c90f9a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/Cargo.toml",
+    "sha256": "7264e5a67dc66dbe340b7baf609b0cce89dd937bc787bba3fc4d0d03891ba63f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/Cargo.toml.orig",
+    "sha256": "c9c7be63547a0fcf725f1d2b68c9aad24da87008aa6df4b49f0ae51ebb7358d6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/LICENSE",
+    "sha256": "eef7770e932a552c42e66ac6b07095b59edf017d730564da20cc33d4fe9fbaec"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/README.md",
+    "sha256": "f74613bc323727a0ae50d57b266ab50ea1539b0b5243d5995da2c4688775567c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/examples/fips_enabled.rs",
+    "sha256": "4176d0cac11ee5275a15a4cf6b9ea96d9e72f26e2d1da263a6690ab5521798ce"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/examples/mk_certs.rs",
+    "sha256": "5f5f155f705a7192d9cf1147aa6a55c5f0eb6bf2c6ae370c87aa2be7b163c5cc"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/aead.rs",
+    "sha256": "df226630fb524f415eaca1009869b65e3672ba5f62bd3f27c92df86f42077ae2"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/aes.rs",
+    "sha256": "dc28b4253e8b764a4de387474819ac2cc14c3815b2a597345c01aec0f85aa7fa"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/asn1.rs",
+    "sha256": "14c446c1d1168208a1ab06f530a9a31d0eac30e06c245776501f9077c8381c10"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/base64.rs",
+    "sha256": "6f647e35e3dd887470d486b46ebfebd17d65fc59df94c54257cc6a8ee787da76"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/bio.rs",
+    "sha256": "f1349534e1bcf481e1bd1f8af29680b14c616b0c879e000eee3f1cb59be3dba6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/bn.rs",
+    "sha256": "248dc16565dee0cfc0c1264a2f779036f08f31fdb629129da4bc58dfd65144c1"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/conf.rs",
+    "sha256": "afdfcee160197681947c06398663c9afe7ef82b4ac53a667ba8b499ec55d2177"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/derive.rs",
+    "sha256": "64396b03adfc73c0311715942b2ca1342b3c761a9e52315ff79fb780c3b57e69"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/dh.rs",
+    "sha256": "372cc81d441b765918c191ab03b2b8fc434ee25bcd3d82741ebc2cde413a2a81"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/dsa.rs",
+    "sha256": "5d3cb08d30059fc1666bbd3c7784587ff45da49ebf4d00cc8d3c9f84fc70ef8c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ec.rs",
+    "sha256": "5f212465eef967858fe851037e380a87cd197a91974795621df2d1f45d776d21"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ecdsa.rs",
+    "sha256": "f740b960aca9a16a654a716944b5b562245aec7b308225762abf17f3cf94ec56"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/error.rs",
+    "sha256": "382f8aa82e210cf4371d22189e4fd5ffc24fd903ec8641110665497b25347b99"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ex_data.rs",
+    "sha256": "f5a1a51184b416cf52874c0580e7a03db1a760587b74c075abd5ff6decc4479d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/fips.rs",
+    "sha256": "98ec830a9b9efbb183f2feaea24eacaa18a81d4f61995226b03ff0aa5798b08b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/hash.rs",
+    "sha256": "429f62bcae2813f2d6ee3f8258032c1e2044d80143827512bdfe93d897c5ec2b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/hmac.rs",
+    "sha256": "d064932fc7934f97b1779a5371fd38bb549069252ff4ce7cd48087e20568dcc4"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/hpke.rs",
+    "sha256": "ab2a533d7aa3ced4e51464aed721d0d9d12919e30a613cb6d4f50027d6c2189b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/lib.rs",
+    "sha256": "b8dd4e8eafc1bcdfb9570caae904f67c278ba9c54a2c9f684d6d60f2da339b5c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/macros.rs",
+    "sha256": "a06e2427d234ce7fbd54afe8b19bf547ca8cf36b2dd404895619b45c5fe7ac44"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/memcmp.rs",
+    "sha256": "e25221a85aaf33f6ec8855762329bb7a22f0baa0317ad84c9d774e29979c8986"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/mlkem.rs",
+    "sha256": "2d4b248923f65b88128024067b98b276cdd70f1fc090f22f285afdaa3212b270"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/nid.rs",
+    "sha256": "226296340b575103737d95e5e735589ca6532ae2618b2c31f80314f9d28d93e6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/pkcs12.rs",
+    "sha256": "a41e9e6e3964e630fb64c05d35b7114bdad5bcb25c507e7c253c6c3678edc353"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/pkcs5.rs",
+    "sha256": "239b7d0a7f7536818c1e892d9f29e8f0d1170c81dc8534f0ccb643b7dbd989b8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/pkey.rs",
+    "sha256": "3c5cba3ce99133235336bb0d72b8b6fa480039d92074c3807b6893b1db824438"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/prf.rs",
+    "sha256": "1ad3a71110a42cd350b45ca4a9390308a3be9d99f869e85e2295d5d7ea04bd04"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/rand.rs",
+    "sha256": "91427cf00e8ce3a910a22b8a1ee15834dd05d8dd994b63e4179181be6d62d70c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/rsa.rs",
+    "sha256": "6f48cae687fd3dbd37505587de2ab4dc1f91fcae7d2b9b92ed545878f2f82600"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/sha.rs",
+    "sha256": "ac2024b38980f6a6b97de7cfe60bf5c5b9202b47d80cd334a71eb404135b5e20"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/sign.rs",
+    "sha256": "afbb50d1825b26a0c01bdfaaab3dbf06ab4d660656b1fa280d43cc21836a9800"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/srtp.rs",
+    "sha256": "318b00192247be4618579d45c6057183335f6eb50a73f593e5a8dc57beba5fc2"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/async_callbacks.rs",
+    "sha256": "e2da4af26ff7dfb9caf138299d64e94f9d2a35f67f2ecdfd8622a33d5e522b23"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/bio.rs",
+    "sha256": "38d6d9ff836854b62c12c1a170738863f8c233a5958286ef8b33f6ee09218aba"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/callbacks.rs",
+    "sha256": "974ac432603120ef14cf1919e8b0e6c397044b523f17494b4ec75279754d6829"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/connector.rs",
+    "sha256": "eed8e320afc03cebdb12ecca23ed5aa16b22aa92fdc3514c0a5189e0c8c68586"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/credential.rs",
+    "sha256": "8d43bc82ae4377e54a67041c4c44fd65ea4afb4eb33c5d7e33fe5776108d1dbc"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/ech.rs",
+    "sha256": "28f9e18ff96ca3e290888c58670a115a02f6220903697fbd65d8bebbbf3b632f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/error.rs",
+    "sha256": "12de03774b86638d442968f6128e53bf0af97451a4a857c9d1d4654e1597bbe6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/mod.rs",
+    "sha256": "33b414ffc107f808bd14db3adaf590783d27f927b4af2ca950a3c17a941506bf"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/mut_only.rs",
+    "sha256": "c1b9f99622a4c9c1c3b1c891bc2d454959765e6b74d1a326c2773fdf27f69ffd"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/test/cert_compressor.rs",
+    "sha256": "41a61144adc111b9f3de334e494204c180fc65578c1e266c9422c705bcbb30e8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/test/cert_verify.rs",
+    "sha256": "73a839a07c4e389e562aa092eebfd54719e4ed0a77c7716921ef4b2c098e8404"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/test/custom_verify.rs",
+    "sha256": "b8c0183b98216b69e0d94493d941cb7c8bb86baa55311824a5b78ec370b926b3"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/test/ech.rs",
+    "sha256": "fea071557d466cbc9f92ecc36fa01df41dfba54846e191bcb5f3d79f807ca204"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/test/mod.rs",
+    "sha256": "e46021624ef1034603ef8c4482f7bbdd5146e0be011d81d68c7ba1d65c828221"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/test/private_key_method.rs",
+    "sha256": "f7fa9831520bcb27a782a01301e89172724bfaa3dca0d6ff010c0b9a13d4c2e6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/test/server.rs",
+    "sha256": "5e03a3e5a0668cffae417acb6907c870f3c8fe3351a56de54585feea65caca3e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/test/session.rs",
+    "sha256": "7cfda88c01003529b7463350ae9d5c2b32539c9f071e12c0fb9392b1b381f244"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/test/session_resumption.rs",
+    "sha256": "a88703b2bf349e6d17006d4aeb03e8f2f1ded9319dd13c12b552bf51059924d4"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/ssl/test/verify.rs",
+    "sha256": "910e31c805c20cbae843f849326a0373d2f790d83a466e1225d1b62f4e51973f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/stack.rs",
+    "sha256": "1faddba404317c50d5055aa0abbabc94d6a02a6ae3de052c54ef332976cc2b73"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/string.rs",
+    "sha256": "3b99e58f0c87fc65c64b6a9dcde5af4bf9cbd402d6b466c0ec07882314fa2591"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/symm.rs",
+    "sha256": "44452f461fa4a0e23a58a13e3d92ff1be904b9ba9cd087427228e39e428e1a3d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/util.rs",
+    "sha256": "a9e9f3f53bc26b74d713a5f5c5a9cfb2c6443df35170a7363f9db90abd46aeb5"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/version.rs",
+    "sha256": "6ed06c35cffc1f52c3923c828c0e1d6058fc68a57731e5fc1f7040558ad096b4"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/x509/extension.rs",
+    "sha256": "0912e05c223a9e8049fa82102c3423fc0386da77dfefc4c13b0b0932eeab4fc3"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/x509/mod.rs",
+    "sha256": "e98f18a2dd94757a79963b2a1bafadc1f9bdb00c9bc1130c45957cfae8983a08"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/x509/store.rs",
+    "sha256": "2e774db7a30d8680108810a7fb24f412d34844ef0858c93fc0ab2ee569637516"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/x509/tests/mod.rs",
+    "sha256": "54c4582ab1121610d870ebeaaf18896b089185e5e4df2ba7ea1f84879bbd7664"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/x509/tests/trusted_first.rs",
+    "sha256": "a716e00c09698c98cf3845099c89cfba5570c840bb0c23e6599959b71a687931"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/src/x509/verify.rs",
+    "sha256": "7a4462318a493a772d0de468953b25ad4ae68bce1f9e74209a576246e841efa1"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/alt_name_cert.pem",
+    "sha256": "f3cc0a1d21657164918dffab0dac8f1c499fc1cf5717805420a0134b3aee128c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/cert-wildcard.pem",
+    "sha256": "adab6310c86a167736ffd8623b9b56c7ed212f9d11ef9e91bf7c472cd8a6efdd"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/cert-with-intermediate.pem",
+    "sha256": "80e0b9a99f16cdf9ffb1050c7513f860a0714886d6b2228c981dbf40e302b2a8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/cert.pem",
+    "sha256": "53c8b338be254490c71a6b13da90dc5a59ba596587c548be5673657e04824afb"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/certs.pem",
+    "sha256": "106d5d22c86e26c3db619b9525567f22333d22de82e4d2850ed379150c638008"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/cms.p12",
+    "sha256": "d33fc5edd6b9caa672e7570b869135235bb2583580a273f6e88c6a6c68fd5a8a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/cms_pubkey.der",
+    "sha256": "03682a732e1fd861f5fa687915a8e6f5c935d10273b0f6f73f3db52a8d71fc6d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/dhparams.pem",
+    "sha256": "14d9461949d9ae8ca50a393b008ee2168254f14342b0e17b56c0a62d2905b963"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/dsa.pem",
+    "sha256": "826d513234205fd3dee0bbbf844f0b6fea501145bdf05ea3b14e14df98cbe090"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/dsa.pem.pub",
+    "sha256": "721677bebf9ab28b8650f98a0cd27658de0c1acd867a4b6e985fe1df95a8bd37"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/dsaparam.pem",
+    "sha256": "94a1284bdd7d7566151cfde0c7f245e84f7b99ba840f202e3f27ea0160f82988"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/echconfig",
+    "sha256": "46e4d57cbcc9a53b2dfaeb8f21df3b93fca0a6af389e8a938a5cdd118417faf9"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/echconfig-2",
+    "sha256": "c57c99e02b956169cdb4846e2e8154c16174c039d240735d35939dbdf0ed8117"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/echconfiglist",
+    "sha256": "9af1ab5180107aaa5ea758daf3435f20e4815af6889436ad6d884ea139b0c74f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/echconfiglist-2",
+    "sha256": "80c009c9132e75887f27cbbfffbe36e5acf6ae5bbae83989f83908e273e1a51d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/echkey",
+    "sha256": "bda298fc8229796a3cc2446b0037f4e5870ba8e75b8031b2b4053edac491d37c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/echkey-2",
+    "sha256": "13a0cc9f6c3a472d68f0182fec0bf9c625f63e0042c3e0832312e957ac0f0ac8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/identity.p12",
+    "sha256": "aceeb3e5516471bd5af9a44bbeffc9559c4f228f67c677d29f36a4b368e2779f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/intermediate-ca.key",
+    "sha256": "4f7cf62428a4ae2acc97b16111b9c6534c0b7d02d8ad02df2dc824050978f79d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/intermediate-ca.pem",
+    "sha256": "0f4b3df03e137f21d0f0016ee94c1671b5455b87aa18fa4b0c9642529d0c4ac4"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/key.der",
+    "sha256": "e8842cd6674b5c77a83e0283cd876a91de404561dfc86d79ce525f6e55b28197"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/key.der.pub",
+    "sha256": "e559d56bb6ec57ad743dbf972bbcaf263a9fa7d320433baa71b04f849d987060"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/key.pem",
+    "sha256": "12d9105a92bf39b615ccb4820c5c1e38c61905483cd30be13f9ab99b98af64ed"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/key.pem.pub",
+    "sha256": "f5d030df843ddbaba5bf316ae18f1434de5a63a955be66442429dd4f16f161ef"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/keystore-empty-chain.p12",
+    "sha256": "bbea280f6fe10556d7470df7072ef0e4ee3997e2c0b3666197f423430c0e6b61"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/nid_test_cert.pem",
+    "sha256": "7047e8d317e284c6b698eee4a0f1a629d50cd4615ad7da85fe90a2ffb6c21611"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/nid_uid_test_cert.pem",
+    "sha256": "a735211f3b40edbde7084337138fb0aea06aea6c78369c52015253e4b7a17d83"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/pkcs1.pem.pub",
+    "sha256": "4d446864b63c4178ec2c7dc8df9b7121d9271851c1f4701231fccb8b07c94918"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/pkcs8-nocrypt.der",
+    "sha256": "5590d03cc0d037c6c27d78fafc937f48defb226e9a52cde84d54df68086d0575"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/pkcs8.der",
+    "sha256": "8719fc002d59313fb97e46e068ae40db4d9acc0e2debd308ac9eb46329bea487"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/root-ca-2.key",
+    "sha256": "8559852a4a5078158589ff3703ae42cf3752eba15ccbdf53ccd5a80ac88b6efa"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/root-ca-2.pem",
+    "sha256": "6b47524d67f8cde3b7c8519d1bc11eca3806afdbf4b01c3dd640470397fabff0"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/root-ca-cross.pem",
+    "sha256": "331bad62f00ff5c350d6613113bf62673c73ac4a3acccd456db202603a06f4a9"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/root-ca.key",
+    "sha256": "b37cf88614980c38e43c4329cdf7162bae48cc8af1fafd54db2fe0d17e458e1d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/root-ca.pem",
+    "sha256": "59b9200c35e818bf21be4aaa97ba87bb6a18fd780527a9f9c51cc74212c631a0"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/rsa-encrypted.pem",
+    "sha256": "ea41b0f1816056672de6abbab43d0e8089da047c329ceed14aace5a5bde713f1"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/rsa.pem",
+    "sha256": "f866a5506ea9a37ed2f73f62f503e1aff32f7e4145be62b023535f4da1c24416"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/btls/test/rsa.pem.pub",
+    "sha256": "2c5eeea39708e90396f9f09d920f2af8b7e9f84ace963c1319072224dd3d302b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/.gitignore",
+    "sha256": "c9bcde5435215713bf160eb0708e336b0d620432e4cda859e6b29455f1e4c55a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/Cargo.toml",
+    "sha256": "91c36c44771a8274b38f61b58bc2b19eb0515fa1d59a87cd723fd9a7b1fea25e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/Cargo.toml.orig",
+    "sha256": "8df5bc89a784676a8906c062db58cbba3759865188e11a4e78619cf57125d746"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/LICENSE-APACHE",
+    "sha256": "984b29df83b920186add8aaeded9d7f9a691eb8f1232ad35a31e4b76ae7889c6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/LICENSE-MIT",
+    "sha256": "ac6abac3109524ddad790399aa68f6c922c14027fe7120dac1c536c309bc94bf"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/README.md",
+    "sha256": "5f49dfa242162fd101ec13be7cdbdfec32ee25fd158e19c64af5506b15457fea"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/examples/client.rs",
+    "sha256": "80bc780d876dc2a6912b3785ee635401a211abcec9cc05136267577497c7e685"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/aead.rs",
+    "sha256": "bd61f69e5e7e168f10027062ce051db3bde3ffc0cafeb44d46b53ab18c92d41c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/alert.rs",
+    "sha256": "3c187d5b2d33b7b64eb2ae29e0942b3198a4831fc697b2d91dea4263641f816e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/alpn.rs",
+    "sha256": "f1b9580a35e1586fc1f522073169bb97c64275dc45f46be4d6470c3a1a56536a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/bffi_ext.rs",
+    "sha256": "7297e47f7f308ce559309adbd74424672112fd07989954f192f0a7957fcf882c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/client/mod.rs",
+    "sha256": "f3c7ded6a55a27242e4b1ff4d1e77164129ce29e2b7f67978d667c9114815c8f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/error.rs",
+    "sha256": "242589b50db0958225d3e8e3078ec2e8cdb30bdfdadb9dd65d029e0bb1efcd70"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/handshake_token.rs",
+    "sha256": "c5fd56ca5ded462628f3c7a898696e532ff8b0ae6a0e0a645b565e601d3a81ee"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/hkdf.rs",
+    "sha256": "4feb7cb982a43cdfaced533a7fcc075d927903f6bd2794f997ffde31cd4972ac"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/hmac.rs",
+    "sha256": "6204d4513dbc77cb7b05383b8ba3964157b060b83de92986b78cf23aa156d1b8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/key.rs",
+    "sha256": "f490b85db4f44170a9b98f05d578af596b53b4b241967ca81951f509ec34ee93"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/lib.rs",
+    "sha256": "a0ec7d87c315a631488c7e92a88893c2e4c46f2730d369019582e4dc9c50bbbb"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/macros.rs",
+    "sha256": "0d989a5d5bc5ba46a3ea591beb7bdf5299df9b3abbc6f3f8d4dfea2f668609e7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/retry.rs",
+    "sha256": "f4c96cb8cbe6931b43705891ffb8d15f34ed33ffc10a95f0663ba950318472fb"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/secret.rs",
+    "sha256": "cbb9014f0f1c8b90084470e1109f49d068c75d713fd309ad541ed1da8586c3f9"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/server/mod.rs",
+    "sha256": "3ef85c9c8a2fda0e0178868081ae24b03d1cac79fe7a00193e29eeae5faab3b8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/session_cache.rs",
+    "sha256": "23a81eb92d05e030bafd13bee72c4f50efcb77f25a018924e8a0bb91530e4bba"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/session_state.rs",
+    "sha256": "9af3a0d2eaaeca20f8194008e7d9d9d5bbd31cf4df88e7679a45655f2eb62095"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/suite.rs",
+    "sha256": "de05d5946280320f45a58826434cd0747cbd7dabb7572b056463035ea3f14dee"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-btls/src/version.rs",
+    "sha256": "cd138678d50d8d1a657568f6bb85386987722b30ef2b7c5c41cc83d5d33708a4"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/Cargo.lock",
+    "sha256": "87b5919bab054c17ba66b1b0500ccf232bc4a1d058d18c7959e6e69d375f5408"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/Cargo.toml",
+    "sha256": "dc73d926817ab2d5fd05f94f5dcf9f03615f08fda70050c1af94bd471621958b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/Cargo.toml.orig",
+    "sha256": "8d9a96714da305182c6f10d2e11aeda5e9fbea27a2a1c6d17366aa4d8e6fc6d2"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/LICENSE-APACHE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/LICENSE-MIT",
+    "sha256": "4b2d0aca6789fa39e03d6738e869ea0988cceba210ca34ebb59c15c463e93a04"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/bloom_token_log.rs",
+    "sha256": "31429b70f6a12a9f599ded18f6bd22a9bc98e723c37baa68b23f0218592dc105"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/cid_generator.rs",
+    "sha256": "aa5ab58ed6f080224f6367fd5dc25f0d42ed0f9e3621c4cda7f33ad99b4359d1"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/cid_queue.rs",
+    "sha256": "fea22a193fe004690b5359ce424d42fdaf29959ff145be2b11c53af300fc66e5"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/coding.rs",
+    "sha256": "a446ee044f718ae8c0587815367b8df180311773e9fc31dca1515b348116bb5a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/config/mod.rs",
+    "sha256": "80752a32b21fb780827fc9a00308ec6ac2cdd87c485a043488ff5d23290dd56d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/config/transport.rs",
+    "sha256": "3b9c7c2906fffec807845ee7a30b8090e691ff1b844e4bc2b8ac836e7af2594a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/congestion.rs",
+    "sha256": "00a46b3f1223b5e04a163cb2024d50a58ad5943cd55a99118ae8600ff7fd9ecc"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/congestion/bbr/bw_estimation.rs",
+    "sha256": "63307b44c8be5c91618ebcd36521705ed9dfe6b07978e4cd017c24118626ec8b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/congestion/bbr/min_max.rs",
+    "sha256": "06385ee5e040ebc9270b232cf593add9165342bb509f58e5d986b4f5dbdab6df"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/congestion/bbr/mod.rs",
+    "sha256": "56f36bc43c34b3651e09c38ba49e64529ea6efc834521b9b1fc920e2953b22c5"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/congestion/cubic.rs",
+    "sha256": "6187ae3acbdcd0aaa19cb191e168372ea81208f102d268f3fdbc4fc836f527c7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/congestion/new_reno.rs",
+    "sha256": "a6325a8be904c67f87c1541a926d3b779c58eac2d9676f29ce81fa56330e0c2f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/ack_frequency.rs",
+    "sha256": "0ef4a57e27361a7e31584149518fdb70bca0ac4bc3c6f815f82e8b43d7a4aa1a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/assembler.rs",
+    "sha256": "555a58d2288dc65c97d2d929b1753f6bc0d0702e7ccbfe20745f707681924ae8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/cid_state.rs",
+    "sha256": "080f7fe5fc26c2b375e4c9d86c189b495b1b59584ed91c1263a5e5f1c47262fd"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/datagrams.rs",
+    "sha256": "2466a2140fe488292986c4675214b4370180f122fa7092253a8b26222d4f8150"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/mod.rs",
+    "sha256": "1bcd4fa85bae5b8c3533541ad60c09b97c50172d117f8e52b4009808cc8e9b14"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/mtud.rs",
+    "sha256": "e5ae7633025c47794cf90f3743823fbd1bd98795ba6272c2546b7008fb3b5f85"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/pacing.rs",
+    "sha256": "6987491cf8661abb75683517139bd1e61ef7f744d064e87cf9bd4906fc7ab43d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/packet_builder.rs",
+    "sha256": "da453b4bcab48f1d65fdacbabb18c49521f77500ac3f8f379a8b352bfd4139c5"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/packet_crypto.rs",
+    "sha256": "3b227fe068dd6e4316cfc735a8aaca0a48b4b176d8bd58c10dbcf5b4d9910695"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/paths.rs",
+    "sha256": "843a8848f8ab773bec74d39f96a7a518766c2623cdda4b1779bdca3f1dd840a4"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/qlog.rs",
+    "sha256": "c82bb17617a446f5fb6aedfa0e157e4b9bad189e7aae2f33348bb149ab1b04ca"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/send_buffer.rs",
+    "sha256": "155f3595987c5bb63c78dda50cbc80b9c6c027c02d6cef35e068032132a5a9db"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/spaces.rs",
+    "sha256": "babbbc8fb06b66deb6577b6990ca488a75bf8b4c799502f56af21a681cdd23f9"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/stats.rs",
+    "sha256": "5c37205248c16e1ec64f0086e144a2d3b0c187d7e36123f15823e7fbe1b8737a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/streams/mod.rs",
+    "sha256": "912831f0f4ecb4b86ad25d77574cd1d9cfc67f731776d8aadb74d035c5f71805"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/streams/recv.rs",
+    "sha256": "00946b9c1f2f6748e51343339bb17b54a69d42a87ad155ea4f44a31d79d8b12e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/streams/send.rs",
+    "sha256": "cdec50d5b3d99d51d4fa9a7503c167121c322d61d841a657c605639288b40c52"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/streams/state.rs",
+    "sha256": "8e9da6571eebf3b1106269331cdcb44afbad60a1888828586687b1630c10a028"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/connection/timer.rs",
+    "sha256": "7deb170226d84472f4c0b1cc0badc384948458894b65f17277fe15a5705af7e3"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/constant_time.rs",
+    "sha256": "35540c4e65fc083894bfedcb811c3495cd5f4168d2f1c25b73cdcdcfe3a44f3b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/crypto.rs",
+    "sha256": "ffa9d1d3071110eb5907af47123379378cac12c229d8251e8c69b967388e23b2"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/crypto/ring_like.rs",
+    "sha256": "ea8cfef31b7a238d539ac7a95cf77e34a007a61eb1dcfd2838c4da648a9b2a53"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/crypto/rustls.rs",
+    "sha256": "1b487025d07deea95daa7b8596bf6f7eb792436891667a54592697b1c2d479f8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/endpoint.rs",
+    "sha256": "49069357acaf1872a06734f25d73b666964c558b8c1ff802c98c85ff3dee8f02"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/frame.rs",
+    "sha256": "ff9bc94eed5eaa96400c41f40dc0d73c68b71a60b98acbaf045885d0522341e3"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/lib.rs",
+    "sha256": "cf40840076b56b9b2c61b207604f60226157728d2af7b206bc3e4a2bebbb4488"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/packet.rs",
+    "sha256": "b73d99c36983c4c0cb47e6cc38ba7f723e2f924e397aedd63bf9b8e4cf6a57a9"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/range_set/array_range_set.rs",
+    "sha256": "b8372411b941df99a8da2a9a2948f4f8fed8bd116ac7e4b7f7960da36991bc07"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/range_set/btree_range_set.rs",
+    "sha256": "02a40dbda0ead57584e27ea6e15a7c77277c12844b3cea921aab9b0bfa12dd3b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/range_set/mod.rs",
+    "sha256": "34180938d54029c07d2bee70501e3c6e865581d1be1411c4e5319bf82e98a657"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/range_set/tests.rs",
+    "sha256": "195a6ced04ff4fb5d85f7d1aee3404de66ac4325e228cdb0d5fb3c82bb3b657d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/shared.rs",
+    "sha256": "126c72d2c933a8e27cb9264d6d973239fbde78620af7a91b9967a4481ec49599"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/tests/mod.rs",
+    "sha256": "c14cdaf29ef5760bf8c08406c00949ab177b66f69b965b36678c5b23f9a2a480"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/tests/token.rs",
+    "sha256": "f648dd0c171d1f2c498e0363b68c6211d5e9ec2f2b305db4a262d3ec47ebbc79"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/tests/util.rs",
+    "sha256": "147b3c45aa083fc13fb72818eb098f1ec14548830612040e7a1c521c41f12a3d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/token.rs",
+    "sha256": "aabf469094bcc6e546720c997883504762321f5efc21140e5a7eaf846b7a3349"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/token_memory_cache.rs",
+    "sha256": "c0910ecff80d300ed1a21f9f165b78b83b098bba7db01db06adac42a9d5c81ce"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/transport_error.rs",
+    "sha256": "ba17c89e103e44917ec74698bc7e4cc72a4101c344bba37e06b08f87ffd3230f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/transport_parameters.rs",
+    "sha256": "ca67acdbce6373b02f05c3dd44a30dba35398655b42333b65129658439a71a0f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-core/vendor/quinn-proto/src/varint.rs",
+    "sha256": "6f07845002d5fe7b0a1388fc18eecba0f1d3870110494052d1eeaf963eb1d132"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/Cargo.lock",
+    "sha256": "164e8b0f3a33002041a11ee9e6182f396fdb9a0aa24d887b5a6831816e102ab8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/Cargo.toml",
+    "sha256": "bd27ee36a2a3cdfb6bfe81feeaa310acbf65d17caaf2aa8d29903003961fe2ef"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/client/apps/candy-client/candy-client",
+    "sha256": "3ed21cd99b34b1ff3c20b95be8d27f00ed820872214c8f18fd3e372a44c965f3"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/client/apps/candy-sdwan/candy-sdwan",
+    "sha256": "b1352412fb4ee6520ea32ea01581251d99e9ba67029cbeec7656640681cd66b4"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/client/apps/candy/candy",
+    "sha256": "7224a75e7af1db6f7b42d3b5d2f8e469e463800bd03e47333204ea15180167cf"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/client/config/candy-sdwan.example.toml",
+    "sha256": "1f9d070b0c8c53b2f4cee9f1ef2cc76388cacdb1e580256286a9c30f8f99e9a0"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/client/packaging/candy-client.service",
+    "sha256": "957f010e92c8367f71fba17d6854558ac861ade574d5f7c9e449bfcf220ff719"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/client/packaging/candy-cloud-sync.service",
+    "sha256": "df9efb21c991e54922d073ce3456b7da22c087a2f5a1ab89ff2eb2f5f970c02c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/client/packaging/candy-cloud-sync.timer",
+    "sha256": "fd6359be8f251b669a08c5f8bb9a325af121474b2a6eeb78daf01e9ed320aae2"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/client/packaging/candy-cloud-upgrade.service",
+    "sha256": "d6a14c7f03f2cdbd2d0e98824826fb7fbcf44984ff1f332babd1eb16372f9ab4"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/client/packaging/candy-netd.service",
+    "sha256": "68d138a8c7fc6cf34fb4c993891d09f9056fdae3386e0539ea6b1199ed8bccd3"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/client/packaging/candy-sdwan.service",
+    "sha256": "fd78e32628c865688a9aecfa3e314eaddedf8972f68078d1f3c448db9053e250"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/client/packaging/candy.sysusers",
+    "sha256": "51a6e0844d39923eccd4f1142dd28bfb968e187e6bed9734b1507ec5717a71d2"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/client/packaging/candy.tmpfiles",
+    "sha256": "42568c3facaa8fe61948ee0e479d1091e49bfa3e7d4d177f49ee305ec07e0a1a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/client/packaging/client.example.toml",
+    "sha256": "8d4bf8437d5e20488eea9f96af81d42ccb026896c21f0d6f30c5166c0136b568"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/client/packaging/sdwan-agent.env.example",
+    "sha256": "306d0a126dc84364b2c25d3f7b1b7e5a03e36671e6b525126e5850db52bcbd2a"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/client/tests/candy_sdwan_runtime_test.sh",
+    "sha256": "6585e6cfabce74675dd80ddb517ff0abfe659657628803676069640fc0471e32"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-cloud-enroll/Cargo.toml",
+    "sha256": "32fc471ac38439f046fa53108be9ef818a83018deb082ee4e0c76d3796e88441"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-cloud-enroll/src/main.rs",
+    "sha256": "eae9bcafb82f4f7e33fc0f52c6b72bdd5111230aad544cd0b695a789a8e65396"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-cloud-sync/Cargo.toml",
+    "sha256": "1d2bd62bb7b1115c4b037e51a469128ff87255548afdf23fbe0acd56c1e3c2cc"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-cloud-sync/src/command_probe.rs",
+    "sha256": "63480fd39079a95c4a65c77837d078bf81df51526ba35954e9bb9358af05c4c0"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-cloud-sync/src/grant.rs",
+    "sha256": "4876617ed03265181fcb7742fbb4626b6db15121cc858b772b2dd628bcd3a23f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-cloud-sync/src/invocation.rs",
+    "sha256": "86c5578b53bed21b1605c4612362e025bfc38cae93cbb556fdb7b5ee39ba9487"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-cloud-sync/src/lib.rs",
+    "sha256": "e34f4282bc4d4b447e25a2c42292e2139ebdedadbc3f1f7eb05c2c7244761da7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-cloud-sync/src/main.rs",
+    "sha256": "b0bd952fc97b2263941fc7678ab2f397d939c45b0b546ecfe4a7525cf1819337"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-cloud-sync/src/tests/cloud_fault_tests.rs",
+    "sha256": "f5cddda5adf7752239407aef3405f04adfd2c7a916a85b561816eab4eeffb8bb"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-cloud-sync/src/transport_identity.rs",
+    "sha256": "6b58c8a0d98af4122990671cb0a6e633afda2be98dd4415d8cf561d72a14cbb0"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-cloud-sync/src/upgrade.rs",
+    "sha256": "7b48025e298bd040c0617a80017cd4cc6789e51f0e25cb9bc0823e49c3eb54ab"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/Cargo.toml",
+    "sha256": "a5598e30f7cd2f025da432ecc690c83023877078ec03a76524acfb24f67fd749"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/README-v2.md",
+    "sha256": "9f4bf5e26d720f56996dc5ef7dbfae9f5c242b5ccf9ba0e3c6f616c4f3bb8f9a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/examples/signed_commit_reply_loss.rs",
+    "sha256": "e0ae5cd1ee9c22bca48c9d5351a884e73a0fd0faa05b8b82ff5c9c76383f6d4c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/src/journal.rs",
+    "sha256": "78843d454af7fafa62dca03f4b9a7d647fe443ccf13ff0e166f0f112b64f24c7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/src/lib.rs",
+    "sha256": "a220d444ab9b3d1b812b91b32828d7bab986982be25884db603b3fb22b72ca58"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/src/linux.rs",
+    "sha256": "8fba42d60ced632f54a270bb381095dd1f22fff16a7153316445e2245a5ec616"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/src/main.rs",
+    "sha256": "817022b21f39ba77a3493b5bb2ab205af57c2418ec20be763efcdf3a239bfb7e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/src/network.rs",
+    "sha256": "bd22e6b833b82f5a749443031e19ef29169764ccb1d4eb6b6050f5ee56554ab3"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/src/nft.rs",
+    "sha256": "7c65ea1ee5430feb41dece4b0ecbbb897be5a0b914189d74ee0986d88286fc47"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/src/v2.rs",
+    "sha256": "37f050116cccb17f3c2e97b98f2b9923086c0fa1e1d4dc2ad8c89242b03e82d7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/src/v2/clock.rs",
+    "sha256": "eb637716ba02f375071862ba428c9b9336668c3178b679bc6ffb39b554433b1d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/src/v2/domains.rs",
+    "sha256": "decf6dbc429d006d25c30b1f9784a02794b819fee09b5f70f446ac3d4464aef5"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/tests/domains_v2.rs",
+    "sha256": "ab893d6912166d9846bff9533b009859d87d373de5719413055f5f22a1cffd6d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/tests/file_journal.rs",
+    "sha256": "ff7aa02b8c9aeb7b6a2779f8d5c84804a82f652037239be386d8d78add66eaf5"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/tests/infrastructure_v2.rs",
+    "sha256": "f8f5506779d906849e2bc8ba5eb3ba28b16cbe9dbed2ab34eabc1ae55369007f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/tests/linux_backend.rs",
+    "sha256": "df6b1b05feebc0db9e6897dd27fbefa5f59d36678c1d2612c9ac8825bf2331d7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/tests/linux_plan.rs",
+    "sha256": "a3a645e9afe8d3e60afb7d6fdfff5bf5d3bb20a505d631377aa73b8eb1e8aea7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/tests/network_transaction.rs",
+    "sha256": "f90860df579d1a39cc01d8fb6b70e29856a37bfac9dd4260a45a28891fa3a6ce"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/tests/service.rs",
+    "sha256": "4d02dbc42ae6b089f6aee4b49c9a925b3ccbd54734c6095d02e24677e57343e6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-netd/tests/socket_security.rs",
+    "sha256": "851b1459568621515383c1c143851f194b3c87530d3d1ecf1e9d27baf7b6856f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-sdwan-agent/Cargo.toml",
+    "sha256": "1d69d89f392d246e72d98dab0e62fbcdb53a5f63605f41002902027aa7cda1d0"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-sdwan-agent/src/candidate_core_control.rs",
+    "sha256": "989fb2c332ebcd72752b2d823014e909aab9215787097d089f36bbd116f015ea"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-sdwan-agent/src/candidate_ownership.rs",
+    "sha256": "2c07c174508c54839ff38c1fa12f26eadf471bc8b6c445df3d8eed3b7f31413f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-sdwan-agent/src/cloud_plan_bridge.rs",
+    "sha256": "19f23a4ccf1c6b3c29d0b10de2e1f7960766cc52782ee738583890367aa4d07e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-sdwan-agent/src/experimental_tunio.rs",
+    "sha256": "3842617a2346effef46289a43798a26b56cbe5cb0f7b0a03569bb56e10b3578d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-sdwan-agent/src/lib.rs",
+    "sha256": "758b4bcecb26e8871a58f1ff0730ba746d6e82f0bb65aa29896093097832c24f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-sdwan-agent/src/listener_registration.rs",
+    "sha256": "e6c21ac569d6ebc0602450539cb75209ca533bbc74f6d439930bb424fcabe8d7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-sdwan-agent/src/main.rs",
+    "sha256": "d521c52c551e79967fe877d4151a7b7d69359abe3c5ffbc01cb0727949214778"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-sdwan-agent/src/process_record.rs",
+    "sha256": "06e6763598b476bbf87ca791bc151ca99e1061c1ec56aae5ec58fcd1912deb8f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-sdwan-agent/src/runtime_agent.rs",
+    "sha256": "e5788b25ae741777a1ab4caf22481a67fe811770261e597c2220afed7f6ad5fe"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-sdwan-agent/src/shared_pool.rs",
+    "sha256": "53defc8cbb2dcd7b5f78d6fa92121769f07cc9e3f5177f98b89499a3e70835ca"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-sdwan-agent/src/shared_worker.rs",
+    "sha256": "aa671ff9b8b9c20b0a02ce2f52f8b94fcdc3a3b1825737804b8402e861b3f97f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-sdwan-agent/src/signed_mbb.rs",
+    "sha256": "5523005d3303abb0b2115442c55d47a353dd0e8bbfb6416df5e9a7076eeae09d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-sdwan-agent/src/signed_renewal.rs",
+    "sha256": "b52f5c50d9e27784ab545f431c488f70721b9658879c948ec1b76c7ba9d67b39"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-sdwan-agent/src/signed_snapshot.rs",
+    "sha256": "287a01f041b0998c47dd67d2990487b80befd794bbcb4c0374b459e1282a3185"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/common/apps/candy-sdwan-runtime/candy-sdwan-runtime",
+    "sha256": "44ead8605228468ed352128ffe4943e81e56fd38ca5277735ec50516fbdfd111"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/.gitignore",
+    "sha256": "306fd52e74fca6746e12acc750f232de15e71da917756a1270d74c91f5eb7368"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/Cargo.lock",
+    "sha256": "b58f2d938fac3aa5ee1bcce24a6688e1064c367207d7f6fbca1a31bb0637d812"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/Cargo.toml",
+    "sha256": "e7f665d89c0bec2b595a2d0b2f9befecd15a4737c158370bd6349a07098a2ab2"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/README.md",
+    "sha256": "2089288dd31eab170ca980a58dd35b580a368312428a41d30f73fbca9f03cd2f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/src/attach_control.rs",
+    "sha256": "f5886e471d52c5bcf4b0b4ab1f89c807e89097da02c2c24f612af4d684e8dc03"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/src/authority_control.rs",
+    "sha256": "3c66d1532a133184fe7eb281fd66218be6e5bacf2f9d51330cf0d0fbfefb5936"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/src/control.rs",
+    "sha256": "4fa2f2f9c7cbdd808c08e146cd7c9d4ecc523ea3f1e28c4ebfc5e584ea4796b9"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/src/lib.rs",
+    "sha256": "27ad2f83dbc786a54dd4ee3e51d326c3911a574fc6b01fd3de54103f04389227"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/src/logging.rs",
+    "sha256": "439167b69659e28138b70cb8380a94e59ea20abf543be3d4eeeb028042808a05"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/src/main.rs",
+    "sha256": "3413f3a00221803754194131ff1dda7af5b55ebeacca967ae07894b3caef16de"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/tests/fixtures/candidate_failover.rs",
+    "sha256": "bc8f5f067698c191e178eafabac6c8bf2d47ecf07e2730c71aa1651dc469b778"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/tests/fixtures/cloud_mtls_outage.py",
+    "sha256": "2c4792e208aae8bd17c0fe8e84464b883a0e2f7364fc79c6c544d1de004912c9"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/tests/fixtures/shared_listener.rs",
+    "sha256": "d92984ca048f67dd3c15dc0d8768d320218b03f1654dc6900b22155ad11a19c8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/tests/fixtures/shared_pool.rs",
+    "sha256": "d95d6b6dea51e04c5b9cdb392c85717fbc470def0f616d240402964c0b6bbfb6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/tests/fixtures/slot_rotation.rs",
+    "sha256": "2548341752a7e0a22f58430e0380c110b6864073a7611568eda8bd87361a08e9"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/tests/linux_infrastructure.rs",
+    "sha256": "328f1ab1b44ff1c4ae597c8b7d79a0a030db94de0fffef2cd05ce4afc5b4128b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/apps/candy-tunio/tests/signed_cli.rs",
+    "sha256": "e04cc5e0417690e87f7cf56bd6e19f45d20c0f056f2c3c908840e3146a8c781d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/crates/candy-netd-client/Cargo.toml",
+    "sha256": "30338282b2ca4a590d08d2edbf6755760aa3466e58bf1481b36abc24547aa97b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/crates/candy-netd-client/src/lib.rs",
+    "sha256": "b42e02155dab70c77b03445ecc8e777169e12b1e3eada12db890c2af08c17bca"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/crates/candy-netd-client/src/probe.rs",
+    "sha256": "042394c63c91a3ee06686b61a9bfc22ef4be2b219c56fec1c199da7989576bd0"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/crates/candy-netd-client/src/v2.rs",
+    "sha256": "a640e00ea49338b7ac5795d0513f1d69fafa80a958d64f997d85bae0d3fa09de"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/crates/candy-netd-client/tests/fd_transfer.rs",
+    "sha256": "174e6b6cb6ba9291b86ebfaecb1bc36e584cf40779e3a1c5fe7144d9628bbdf6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/crates/candy-netd-client/tests/transaction.rs",
+    "sha256": "0428133c6788eca2c9458e39be0df2b876e77c6c2bf66f5210cc7690dca5b7a3"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/crates/candy-netd-proto/Cargo.toml",
+    "sha256": "aba0a2fcffde2fce738fe61198ff07c80d7788dbf5eb0ee4041779efbe90c006"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/crates/candy-netd-proto/src/lib.rs",
+    "sha256": "5ffcaf64bbb597150899ad12511288cadcc8330d40c139a60a653a5091654e22"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/crates/candy-netd-proto/src/v2.rs",
+    "sha256": "e430b6cec4f4a71ca0ad27a6e1d8290373767e5de87c0493c596b684569038a5"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/crates/candy-netd-proto/tests/protocol.rs",
+    "sha256": "7c89bb3321e9b72f126ec25e699298af614d3a6f23131fa5d537c846380f7136"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/crates/candy-netd-proto/tests/vectors.rs",
+    "sha256": "70509084aeb0bfadec8a171dfe3394f11f24bfb57d1836f251b9c24ca86faa0e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/crates/candy-process-control/Cargo.toml",
+    "sha256": "a20ab23849daaef4672b597a60f5a306e33627056668dd65b298c58fb22dd957"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/crates/candy-process-control/src/lib.rs",
+    "sha256": "fa0a8666d606b77b9c94b59de7f0fa7522d6f8aaca648b118d229595db6a641c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/crates/candy-runtime-log/Cargo.toml",
+    "sha256": "d2b601bf574e5068f2d428b377e04ffe06714a570661e777e0f39f3cf2fa0263"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/crates/candy-runtime-log/src/lib.rs",
+    "sha256": "cf06f22a64b780e1bcc3dd39c9360c67400e2bc0b8241c866fd16054ccbdd8d0"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/common/interop/vectors/candy-netd-v1.json",
+    "sha256": "2aaabf48df204dd9655588510c2255baf9db1c1ba2557fdf15d284aa9ed5b4e0"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/server/README.md",
+    "sha256": "c4cb54a013a134e0d2a5eaab9822a8d202f53c0e341333468cfb7da1a73ae399"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/server/apps/candy-server/Dockerfile",
+    "sha256": "bcd312dbef4b2efa3ee2fb70088e70d98ebfd741d3f03080d72888647d179d7f"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/server/apps/candy-server/candy-core-manager",
+    "sha256": "afe6d50885aafbdafd9666bf04a0a43aab9abaa89c124eef91864ebe62fa7703"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/server/apps/candy-server/candy-server",
+    "sha256": "1e4d6a10b7eaab2de53a8792b47712d8420932e69b00cc53f2d8d21a80ef537d"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/server/apps/candy-server/candy-server-health-check",
+    "sha256": "cc69a3aa3a87fb998203448c04118751e05a71acd11943d4346d51414fd09b58"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/server/apps/candy-server/serverd-linux",
+    "sha256": "3e2ba8df1c2761aef0f1725a7b75e3751a40ec259951995cdf10a6ef7cd8c578"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/server/docker/server.example.toml",
+    "sha256": "e74eaa9617f72154208aa866044a12a613dbd0921a3b7b0afd96a0147dc37785"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/server/packaging/candy-cloud-sync.service",
+    "sha256": "553674dfcbcc9d72e279858416d381b52a9020bd00433cbffe72c991062b2836"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/server/packaging/candy-cloud-upgrade.service",
+    "sha256": "f7853e9a4554c1f3ee721d22429f2051df06a1b29ef978fd0769203811313a87"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/server/packaging/candy-netd.service",
+    "sha256": "2b34d87c872add05a9a33a7625c9e17b7d8ed414eea35b70fb4ff648ec48d638"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/server/packaging/candy-proxy.service",
+    "sha256": "541d8cafca6402f0a3bd2f0c4d0f09505d4594d246c23adc18d4842ef74ef19f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/server/packaging/candy-server.service",
+    "sha256": "2f4599ba004e38ea80525ba1add200e61cee6d46ca01d2b27459e619bf2068d6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/server/packaging/candy.tmpfiles",
+    "sha256": "eea76edfe6306090bc8375f5e7c20fcf240ef3f405e426e4bd084de9928065c3"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/linux/server/packaging/cloud-sync.env.example",
+    "sha256": "0b691300b7b6530306d5e4ece34ef7f4edfd60e36f0030ec0177600b4ca86e10"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/server/packaging/install-candy-server.sh",
+    "sha256": "abbe3a80d49a3bfd4c3605fd237ced97e542eff7b117f609722509537f479d79"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/server/packaging/upgrade-candy-server.sh",
+    "sha256": "d901fd5e468b8a49d29ff664a1fc26b84477fda804e6f6f39217ed166407e62d"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/server/tests/candy_core_docker_e2e.sh",
+    "sha256": "7e164ee0ec1b61eb121de1fbac3239edfdeffa0da6e2ae637ce572618ac33b8e"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/server/tests/candy_core_manager_test.sh",
+    "sha256": "d375675c57b2b7259e7fedae65c3e2e5a75bbeeb859df3f0c4d9ac9de7815cd9"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/server/tests/candy_server_health_check_test.sh",
+    "sha256": "5ba91113a6b6274c3aa52ce9ae4257f131e340e85c1548ede8accd0e8947d6b5"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/server/tests/candy_server_launcher_test.sh",
+    "sha256": "c254caf3c7f22a92d692f9f70a5e69ffd1a91764695669b76ca388eecbb45f35"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/server/tests/candy_server_product_command_test.sh",
+    "sha256": "280e06c8976ca31b375deddb8246ffdf3adf10ed8e364761ebf6a43a285eaf48"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/server/tests/install_candy_server_endpoint_test.sh",
+    "sha256": "7587286333d74304de3eeeaa3a5f6e41fe6c3c2eff9429057f7103cf717ae8c5"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/server/tests/join_linux_server_node_test.sh",
+    "sha256": "49e09adbc55ff4649ccfb7518be83abd1d7a3c2b08cb0036041491a99522fa46"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/linux/server/tests/upgrade_candy_server_test.sh",
+    "sha256": "4d3b2048e96a1a15a7eaee171acc371cb3ff72a0408cf47b8e6f5ff7977ff0af"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/Makefile",
+    "sha256": "4208e3311f5301ed840a98ad00d74b38e0684ea7866e891d1c8dc242e7fcc14b"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/candy-client",
+    "sha256": "69760fab0951eebede7c5ca4fe853815e22f59e9af664e77dc18011df02e3198"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/candy-cloud-sync-handoff",
+    "sha256": "90cff679cef4ad5833b1121f49ed276ddc213ea96e615f9fc5a9cd2b1901293b"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/candy-cloud-sync-loop",
+    "sha256": "fdd55fb4f56f08061db7bffcaeb4a5bab7f016ca3da8fed46883b165194a80b6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/candy-cloud-sync.init",
+    "sha256": "a7a02511458682779c2bc4aed8aea323eb34f2e0651ef7b877086ea14a515d3e"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/candy-core-manager",
+    "sha256": "4e268f00f3a1feceacd074a64fc1aea346abe97a25374f5b641a3c60794cb4b8"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/candy-runtime-health-check",
+    "sha256": "2c69e746d372ea22fb38b6a3c7142b2fb152521e9ab55f92b106d28e19bf9abd"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/candy-sdwan",
+    "sha256": "fde06170f56e35d2b31fbda12d987d40f8f7483df9d6131eac2a76cad311c28f"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/candy-update-manager",
+    "sha256": "a26573fea629d642d5d041be9b3ce5388f314c0bc054339acc84362b4549e09e"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/candy.config",
+    "sha256": "6d048b43390a08c910e2f8b4627966733e80521187667414e4c03b8a7b1eafca"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/candy.init",
+    "sha256": "3f369f87d1012678213a8e8e3cef84a27f627454e83d26aa849b165eff1711df"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/catalog-release.pub",
+    "sha256": "28c93053f816f12bb9b2d9b5f8c101c0abe701176043c742787affa74ac032de"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/core-release.pub",
+    "sha256": "5a58b341bdb28923ce9441e46c139fb5dd063b3102da7af1c6888e64926e78cd"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/nftables/10-candy-sdwan.nft",
+    "sha256": "9a161a7246160f96809bbbc7672f8a76507b893770064e51af78acd477ddc8c7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/rulesets/PROVENANCE.md",
+    "sha256": "712d615fd4f1f2ca631338220a9c7b917f7d42c422661f141e6307567e266c2b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/rulesets/SHA256SUMS",
+    "sha256": "38db9d196e4e27144f0277cc7954c4dc19c39e0f6699abfa5cbd17d9cf76b149"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/rulesets/cn-ip.cidr",
+    "sha256": "53c14f1e12809c0afa97fc4556e99935c8cae157249f7ed6fee977030830f4fd"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/rulesets/gfwlist.domains",
+    "sha256": "8b4cbea2cbebc441ed9653cb2ad1b4508d6b38be07f4895d7f80bdcdbd924e18"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/candy-client/rulesets/manifest.json",
+    "sha256": "b305fc4fb286326dec42e34b63d0d31ea3eb26836c313e12e44fbf49d3fe12ba"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/Makefile",
+    "sha256": "dad00875f4c329779579868007bb7d37548cee5788343caa44f41910cb2aa0da"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/po/zh-cn/candy.zh-cn.po",
+    "sha256": "4bf2746eb2b2441f6cfb3caab54ef835d5b615dd1adba12ff25566c246a4967f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/candy/process.lua",
+    "sha256": "48c180bbc6e0603715bde3c263d74108211cde40372f0bf19dba3966421df398"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/controller/candy.lua",
+    "sha256": "bc94ec2436fc18627cefde332bd0c47c01f0665522d1b337bdab502828bb81b4"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/controller/candy_update.lua",
+    "sha256": "d9cf1a05885a2e3bace85a084d9039a575f0a0a89169f5a2ee4f461e06a2d555"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/model/cbi/candy/advanced.lua",
+    "sha256": "4ff872a9eefc745aec2a4a3bf5a205228ecb580f3523de1974b97005de363eb7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/model/cbi/candy/dns.lua",
+    "sha256": "ccd98c5e97add380e21f6873e41e9493767b27ed19c98fb55194fda16992ac1c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/model/cbi/candy/nodes.lua",
+    "sha256": "8eaf661353dbc3f00b36bbaf1c8691f038232ddf10fd4405ee3f39a524d502b4"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/view/candy/core.htm",
+    "sha256": "211bdc0fd4781743d0da7d9b19a554be4179a97436da490fe9f09dfc4f07b1bc"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/view/candy/diagnostics.htm",
+    "sha256": "088c4ff6a6119ec34f903fb7b483bc53f80ca5e1e5168a2b7fab691f0eb6c4be"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/view/candy/dns_tunnel_status.htm",
+    "sha256": "ea969fb9f55c2f19b834d9bca169e3fa825d8682f9a78f0b2b2840c07e4ab2f2"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/view/candy/lifecycle.htm",
+    "sha256": "fbe8919a992898c00f38a956c4c53a9f4526efc0613f7da81a2cb1b35d8d2e2c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/view/candy/log.htm",
+    "sha256": "f0ecadec11d2c434acb67cb3aa80b8455daa66a011f159d13d05324f916bc8e1"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/view/candy/provider_update.htm",
+    "sha256": "4f839acf91287ec4c2cd1597d32a260535e9678451df67b875538a7b68c9ecea"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/view/candy/rules.htm",
+    "sha256": "35798f8e29efdf8fdea331595ad19a3aac92980f8c26ad4e04e738eb3d46394b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/view/candy/sdwan.htm",
+    "sha256": "1b07fa749e73445dfb98039194fcb04d61cdd84a9c837a3f5d682ac029571768"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/view/candy/settings.htm",
+    "sha256": "c82b20fc71054a95c2f3f98bb50db02bc767e6ff326e6fed6e4f299b60489108"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/view/candy/status.htm",
+    "sha256": "3e33c60d434ac3ce7274ccb3552c0f81c2b8e15957cf1bb6e73cb458fd26453b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/root/usr/lib/lua/luci/view/candy/update.htm",
+    "sha256": "2f5ca25cded1e4e67160983c9a2bac421102a9f35e088e27dc593d18ed220ff7"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/tools/po2lmo/Makefile",
+    "sha256": "3c0cfdbb944097c5ea95d3c67a0fe2dd873c0d4542a1abbdda5489ba4219fdd9"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/tools/po2lmo/src/po2lmo.c",
+    "sha256": "01427851b286270520f59426e253291cde67b798a0e890d53ee7eb963ac72914"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/tools/po2lmo/src/template_lmo.c",
+    "sha256": "6f6be2b39d72e0db664a7bd9201ec8e05cb65442a454f4ba85fc875082f25a66"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/packages/luci-app-candy/tools/po2lmo/src/template_lmo.h",
+    "sha256": "b4ed73bb2f6b0e9734423326c129730a180bbfcf8638fa7080208f2c1f7a50e6"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/openwrt/client/tests/cloud_sync_loop_test.sh",
+    "sha256": "3334e039b493c05a6398f4056f1c2ae9f02926a0f47360adb60403b99f025bbe"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/openwrt/client/tests/init_config_test.sh",
+    "sha256": "0ddb25d3d25b2ca91c5adcf40daccaae250bf3453320432034b6723d077cd2c9"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/tests/json_dns_rule_test.sh",
+    "sha256": "5fac0e5a797b98cafcf950675a794d3abcfdb6100c3dfc81bdb9ca1ce7939787"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/tests/lifecycle_diagnostics_test.sh",
+    "sha256": "275c7cf98e02d06fa6cdaf8665d81b0aec8750dd334fef305771b6b0738c8bee"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/tests/log_diagnostics_test.lua",
+    "sha256": "b36e29de06055ffd3818519293b282db1dcb271bae188ad0a17abb347c903b81"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/openwrt/client/tests/luci_package_test.sh",
+    "sha256": "8755cf89a63f6c50ea750819fb411c938bf115527697e7fe71e863c1a8d4355d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/tests/process_timeout_test.lua",
+    "sha256": "5c1180ce5921d7be56ddb4cce5cedb23f9b358ef54ba1ef616233b1a40d31deb"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/client/tests/provider_update_test.lua",
+    "sha256": "c8756086ab85c0447b19d103862d31e91dfb09874b9b87213ef7b0be3ba16e4d"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/openwrt/client/tests/sdwan_cloud_activation_test.sh",
+    "sha256": "be95229af2557180d4cca4c53babf794d50088bb3c5da4b846c4b4ce3efd8429"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/openwrt/client/tests/sdwan_luci_upload_test.sh",
+    "sha256": "45704d6b8f39701b5830c4c5c85049d54cad24139d5026b23c6e8fff22754ac6"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/openwrt/client/tests/sdwan_productization_test.sh",
+    "sha256": "abe044e78d899a2fd5e26c7474994da54711cd83a84105c2ed1c3f4a80e66f42"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/openwrt/client/tests/traffic_flow_test.sh",
+    "sha256": "b1265032f7deed27fdb42d3eb1b238a70042d1e3cb9a29531f384d049371c26f"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/openwrt/client/tests/update_luci_test.sh",
+    "sha256": "bcafe90dac36f8c76601a59e322052011ea2257ae535aa1f03b4f9301982c723"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/openwrt/server/README.md",
+    "sha256": "db9607861f6d2c634cf65e0f844a5255870dbf462a1d6fa7b67a1fadd5446c63"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/build_openwrt_netd_gate.py",
+    "sha256": "053868a3757e90f436b5085a6fc65335c5f55bfe65b9b7d6b4c8ec5e63f09210"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/freeze_build_six.py",
+    "sha256": "4fb695183177f39bf106243d1937594957a7a479c9f66708e9d8eef0244a748f"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/scripts/install_pinned_arm_musl_toolchain.sh",
+    "sha256": "d52fe85ccd71abbcc8ad62e7fc712f642a8a650cc8508cd3a4630b1c03e28fcd"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/scripts/join-linux-server-node.sh",
+    "sha256": "2798cf2268212f1ec2a5a453fb4c0566ac224efdfc99b5b35ec5837e80b6cc79"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/scripts/openwrt_core_manager_test.sh",
+    "sha256": "c819f7851e67c3e26907abee725038cc8f81cc6f3fceb9004643c809fc667ebb"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/scripts/openwrt_runtime_health_check_test.sh",
+    "sha256": "e822d9a233a95b439f4e7463aeb1cb326590e81931cbf4ed598aa575114a9bee"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/scripts/openwrt_update_manager_test.sh",
+    "sha256": "83bb61f6854368e98634557b629a15c0a0de512557c297f911fa99ccb6c052f6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/openwrt_vm_gate.py",
+    "sha256": "eb38b7bc7d9e6aab5ced51942447f0dc7d4df00eae66d004a9a420cc4c8f3d76"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/openwrt_vm_gate_test.py",
+    "sha256": "1c094cc38aecf24b5461f9727881b225432d4c35ec6191f24039d52b5390dbcd"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/openwrt_vm_guest.sh",
+    "sha256": "e7d44fd5afc081ab20838593f9a4f7512be14146c377270e3daab65721023281"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/packet_port_package.py",
+    "sha256": "806655595425b2b7817936c12d4b17fbc65a7bb42e7eadbd0e2d176559810b25"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/packet_port_package_test.py",
+    "sha256": "03e7962a1c02aa822cafbed28f9648f105aa879dc0bf8dcdf5ba68968c4871e9"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/platform_release_gate.py",
+    "sha256": "f0ee57c53fccd72bb3d5d62174cb7f2e8e3adbbff834722b32b107d4378da979"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/platform_release_gate_test.py",
+    "sha256": "736fffe4d5854f54321d6f83ddb9e6584eb617be65c0361f88a1767bb137c62f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/proxy-gate/Dockerfile",
+    "sha256": "e06b03a285fdf340d540b8d186cf2c3f1399d8d3d33daeddf2a031541f835018"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/proxy-gate/Dockerfile.tools",
+    "sha256": "45908a759d830cce6374f5bd1f745d20514bb8882af5a00fecd86e34716c71e1"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/proxy-gate/README.md",
+    "sha256": "e58fbd23ecff0f08131a5b0fa33f5fa08a9014d7bd8690719cb92a55e5ce0c0a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/proxy-gate/active_drain.py",
+    "sha256": "6f8b4338137d5e562778c0ac7e630420ed2f642c8677fa2d10d3be63e0ad3423"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/proxy-gate/admission.py",
+    "sha256": "7251e0b2bf92dd998ae4cc75a10dcee7d1eae737102d85c4718e37ee1ce4ebfc"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/proxy-gate/guest.py",
+    "sha256": "302e9abd4e6e51b580787db192ca083a233ce6086425e0ba0e983cf71d9f9278"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/proxy-gate/load.py",
+    "sha256": "a0b3e26d6826652a9bf4748d84df71a3ce7066ca9da57b52375f5653a78d66d0"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/proxy-gate/log_fault.py",
+    "sha256": "7e9a05490086ba3ec8f03c5f1d6d8270f5773eab983b8c5ff50424ebeda11c80"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/proxy-gate/run.py",
+    "sha256": "687cad0730c977676bd92a84978a7ee295ae06aa5807bec88d9fb5f67fe3bd30"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/proxy-gate/scaling.py",
+    "sha256": "60be5aad773af42c27a08b6c13619a2e59d400d37823f65803a58ab11522bb25"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/proxy-gate/test_load.py",
+    "sha256": "c7e5bf5f4497a272dc1f4c948755007c361f46861c0fbbf5669db8675f38e89a"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/proxy-gate/timing.py",
+    "sha256": "0c16b312f6693391f1738041717f6bc9e63ddd284b0b317524b38df4d1b54598"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/proxy-gate/udp.py",
+    "sha256": "9f20bf8c52425dc4816aa910cdfdf8f59d7dadf880213edbb192b9f9245d6f2a"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/scripts/runtime_layout_test.sh",
+    "sha256": "43092996aaea78d1bb0292c93fbb7e82c9f9c05eded0f87b0a643b90b32c909a"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/scripts/runtime_preflight.sh",
+    "sha256": "71a3a04354171255f0546c1bd0ed347e86ab2f91170672d80624950a60567dd1"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/scripts/runtime_preflight_test.sh",
+    "sha256": "8f7b81806e03ba0ce6c39f4b4d9688cb2a6e20e5ff6b20c06dfd7895a99a1499"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/scripts/runtime_version_test.sh",
+    "sha256": "fd1f8a2cde6dc39141fd8bb8b1f83df6f7f320bb3de4388f5c34934f3a32823b"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/sdwan-perf/analyze-scheduler.mjs",
+    "sha256": "cf127a97437b656e9f7673b4de0e294fe458c22f1515a338f58ce106f11e87bc"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/sdwan-perf/candy-perf-probe.py",
+    "sha256": "625df90574bde65e41b21a88ff57e4bd4d2bd893d5ee6f0f66807eaa0f92d61c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/sdwan-perf/candy-perf-scheduler.py",
+    "sha256": "fe1a668cd7418b96a0ce24ac13e3b5608f40b8390b8be4d9b59347a9bb3bff63"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/sdwan-perf/host-observer.mjs",
+    "sha256": "571f416eac277f9da29bb7b5ec48c0c044c86efb18158953efc3b44981224212"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/sdwan-perf/renewing-integrity-test.mjs",
+    "sha256": "1b157997ef81f831797f17d4db98b5d2b344ab4e1ac6ee20117b98a13606a21d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/sdwan-perf/run-renewing-soak.mjs",
+    "sha256": "98256b730f20425d5dcae52c4965cdc0076298fd1a067d13687974b21b21f6e0"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/sdwan-perf/run-two-docker-perf.mjs",
+    "sha256": "dce1e3f2b6779f27b2c5d077ab059d7b1f2ce104720a9b8f3d99c0bddef8e6b8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/sdwan-perf/soak-gate-test.mjs",
+    "sha256": "aaec0f674d3d02370004a459b6aca9f0cdb2d839566811c488bf23b7e461a76c"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/sdwan-perf/soak-preflight-test.mjs",
+    "sha256": "4997da3c156732fe09c875ec82d3ce686732c160693ffc152ff6a9fafab8977f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/sdwan-perf/soak-preflight.mjs",
+    "sha256": "23a35aefa8b22dcff27a46cffa4a1c334a8659200e1ee512ae243bab9a05a537"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/sdwan-perf/summarize-renewing-run.mjs",
+    "sha256": "7cfbe34f309381a12b3421e7ec9fe7edfe4b7759ca0d10628fd2c1199143b8ed"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/sdwan-perf/summarize-supplemental-perf.mjs",
+    "sha256": "12d9ce93ba2c9ddecc0b6921be95358381a039a20d423339a2d2120c856be810"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/shared_pool_gate.py",
+    "sha256": "fbc1c82138689a3af59ff63de28512a47b1f755cd6ac261b59decb94800f3271"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/scripts/shared_pool_gate.sh",
+    "sha256": "07fbfb4f7e8b492a1bee9bdc785b06cffe7f77db5c81245784f0743a2469e1d4"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/scripts/systemd_supervisor_gate.sh",
+    "sha256": "19de91d4e3eb3c4d24617ea91a6af998c915006212cd6be2edd6fa834754670d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/scripts/two_candidate_gate.py",
+    "sha256": "489a2ae9d8e22b5cfad57b9a7578c368dc39cccaa105f6ca7d2f14accee44bc7"
+  },
+  {
+    "mode": 493,
+    "path": "candy-runtime/scripts/verify.sh",
+    "sha256": "a410175c811ba98775e93e9544450fa4ff4a76fe0c66c15b533e232770cef164"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/shared/contracts/core-process-api-v1.md",
+    "sha256": "11b48e14228e046a7a6196d78f4f0c1ca12b5813fca5c99ac909e6c60a6f427f"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/shared/contracts/packet-port-package-v1.md",
+    "sha256": "6c077ac2f9da35800fad15c74edaee30748aa4eef66627c8be0a2ff8c3e3d9f8"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/shared/vendor/candy-packet-port/Cargo.toml",
+    "sha256": "ce65fe9046d4e4868c7213874319a6b2bfd2d007ae4e3bc78a9ffba238ff2206"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/shared/vendor/candy-packet-port/provenance.json",
+    "sha256": "4399a1de7b65dcc119cb30707ec7c18ba3914d6f570f7ceb4ef92ed121f53c2d"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/shared/vendor/candy-packet-port/src/executor_diagnostics.rs",
+    "sha256": "b568fbedcc9029cb9a53fb70906214ae6fdef921c07069c004aa9d329b6d0a54"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/shared/vendor/candy-packet-port/src/fd.rs",
+    "sha256": "88004a466a58adb1be9b1620dc57b5421f2fa35787fc9c5cf5929925abc3daee"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/shared/vendor/candy-packet-port/src/lib.rs",
+    "sha256": "b3f0f9bbcfaa45cca9209144f253cf29dc452e421eaf91b94c5d483bcd16c555"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/shared/vendor/candy-packet-port/src/packet_port.rs",
+    "sha256": "33a13881f306d6ee87c6876fb2704513590c129ea5dfdb1e2e426c22aa6c62da"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/shared/vendor/candy-packet-port/src/packet_port_ipc.rs",
+    "sha256": "f10ae83ef24cfd8fc00c7a3d22555d03a3bd3711cc83f5c0473359f9fb98ed85"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/shared/vendor/candy-packet-port/src/packet_port_manager.rs",
+    "sha256": "c648db9bd7d5b17bbe7e4ae3182c93bfc4deb1604606c0137719f23520448fa6"
+  },
+  {
+    "mode": 420,
+    "path": "candy-runtime/shared/vendor/candy-packet-port/src/packet_port_transaction_tests.rs",
+    "sha256": "73e0e87023820d0be8482231c723d6c0caff077fea27107133fe51407b5a8112"
+  }
+]
