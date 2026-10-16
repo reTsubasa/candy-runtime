@@ -163,3 +163,41 @@ Runtime `418cdc9` adds the mixed-role quota/slow-consumer combination fixture;
 `1763f2f` supplies a frozen Runtime launcher and records its hash. At these
 commits the actual combined Linux gate is NOT_RUN. The two-hour soak remains
 deferred.
+
+## Frozen Release v12 Follow-up
+
+All six release artifacts built from Core `eca0872` and Runtime `f838e40`.
+Source manifest is
+`ad5b07ca15d882efe92e50e8b7e12ae41e0335d7c9563960cfcef4e5e1de1912`;
+Core ELF SHA-256 is
+`594bd0544371cae7d17204d3091415e18946e521501cd3d8489d17d957011094`.
+This set includes the independent full authorization witness, original absolute
+UDP deadlines, synchronous datagram credit check, PacketPort pending-output
+preservation and exact-policy netd owner handoff.
+
+| Evidence directory | Result | Boundary |
+| --- | --- | --- |
+| `shared-pool-negotiated-final-v12` | FAIL, 66.96 s fixture | Four domains have no missing ICMP sequences through `1→2`, and `forward_owner_committed_policy_preserved` is observed. `2→4` fails convergence with repeated `worker_candidate_transaction_busy`; the complete scale gate remains open. |
+| `mixed-role-fault-v12` | FAIL, 5.28 s fixture | Explicit principal quota rejection is observed; both real SD-WAN domains return 34/34 continuous ICMP. An existing Proxy request times out before quota-release/slow-consumer coverage; master reports one `expired_at_master` datagram. The failing operation was not yet recorded, so exact attribution needs further evidence. |
+| `proxy-release-v12-udp-v1` | FAIL | All five original cohorts return 300/300, without duplicate/corrupt payloads. 64/512-byte schedules are valid; ordinary 1200/4096-byte and original recovery schedules exceed the unchanged timing threshold. Later recovery also returns 300/300 with invalid scheduling. No `credit_unavailable` is reported; six master-queue drops occur around the deliberate burst. Packet integrity alone does not close load validity or the complete gate. |
+| `proxy-release-v12-active-drain-v1` | PASS | Runtime Rust held TCP tail/FIN, UDP/DNS, active negotiated drain and replacement admission. Overall release acceptance remains incomplete. |
+| `bilateral-mbb-final-v12` | PASS, 67.61 s runner | Two domains, two live policy rounds and exact Commit retry, continuous 400/400 ICMP per domain; original cap expiry and ordinary-redial checks complete. |
+| `successor-server-restart-v12` | FAIL, 73.29 s fixture | HTTP Proxy probe fails after the injected server-worker restart. Evidence retains accepted Proxy session 13 without a matching target HTTP request; the original probe omitted its caller and IO cause. No attribution or successful restart acceptance is inferred from v11. |
+| `shared-host-lifecycle-v12` | PASS | Selected shared-host lifecycle fixture only. |
+| `mixed-listener-two-domain-v12` | PASS, 19.71 s runner | Real two-domain ICMP/Proxy HTTP, worker recovery, listener restarts and infrastructure/process preservation assertions. |
+
+Linux mutable-source regressions: Agent 142/142; transport 206/206; pending
+PacketPort socket test 1/1; Runtime exact pending-Commit retry 1/1; netd
+infrastructure 25 passed, 4 ignored. Strict Linux Core and Runtime Clippy pass
+with `-D warnings`, using derived image
+`candy-short-gates-clippy:20261016`. Runtime `7e14ee2` only moves unchanged
+argument tests below production items to satisfy `items_after_test_module`;
+it is outside frozen v12 and changes no production behavior. Logs and the
+explicit mutable-source scope are retained in `short-linux-regression-v12`.
+
+Runtime `213694e` adds the missing mixed-fixture operation phase, traceback and
+exact target UDP sequences for the next frozen gate. It does not change packet
+retries, pacing, deadline or acceptance criteria. The v12 failures are retained.
+Runtime `94ffc19` records the failed Proxy probe caller, attempt count, elapsed
+time, IO error kind and detailed error without changing its existing retries or
+timeout. These diagnostics are outside frozen v12.
