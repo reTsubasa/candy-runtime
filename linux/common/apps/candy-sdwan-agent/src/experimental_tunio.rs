@@ -2017,8 +2017,17 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
         .independent_worker
         .as_ref()
         .context("effective independent Core plan absent")?;
-    record.validate_current(&plan.core, unix_time()?)?;
-    let status = record.private_status()?;
+    let status = record.validate_bound_status(&plan.core, unix_time()?)?;
+    // A lost master revokes only its transport owner. The independently owned
+    // listener remains able to authenticate replacement traffic even while the
+    // packet supervisor reports failed readiness for the previous connection.
+    // Re-register that exact process before waiting on reciprocal packet proof,
+    // otherwise registration and readiness wait on each other indefinitely.
+    if !matches!(status["lifecycle"].as_str(), Some("active" | "starting"))
+        && !(plan.shared_listener.is_some() && listener_registration::listener_available(&status))
+    {
+        return Err(ManagedProofPending.into());
+    }
     validate_worker_placement(&plan, &record, &status)?;
     if record.status_path != plan.core_status
         || record.policy_generation != plan.signed_generation
@@ -2081,6 +2090,7 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
     if adopted.controller != controller || adopted.controller_epoch == 0 {
         bail!("independent Core takeover ownership mismatch");
     }
+    listener_registration::publish_pending(&plan, &supervision.process_record);
     let mut netd = NetdControl::new(&plan);
     let (body, fd) = netd.exchange(Operation::ForwardStatus)?;
     if fd.is_some() {
@@ -2090,6 +2100,7 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
         owner: Some(previous),
         candidate_owner,
         phase: previous_phase,
+        last_fencing_token,
         ..
     } = body
     else {
@@ -2131,6 +2142,7 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
     let mut owner = ForwardOwner {
         fencing_token: previous
             .fencing_token
+            .max(last_fencing_token)
             .checked_add(1)
             .context("owner fence exhausted")?,
         auth_deadline_mono_ms: previous.auth_deadline_mono_ms.min(auth_deadline),
@@ -2321,6 +2333,19 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
             &request(ControlOperation::Stop),
         )?;
     }
+    let business_deadline = Instant::now() + Duration::from_secs(2);
+    while record.business_is_current()? && Instant::now() < business_deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    if record.business_is_current()? {
+        bail!("code=adopted_business_stop_pending module=process_supervisor detail=authenticated stop has not retired the adopted domain; preserve shared host receipts");
+    }
+    #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+    if let (Some(host), Some(instance)) =
+        (&record.shared_worker, &record.shared_domain_instance)
+    {
+        crate::shared_worker::forget_domain(host, instance)?;
+    }
     if shutdown_requested() {
         if let Some((identity, token, _, socket)) = io {
             let stop = ControlRequest {
@@ -2443,6 +2468,7 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
     let Body::ForwardStatus {
         owner: Some(previous),
         candidate_owner,
+        last_fencing_token,
         ..
     } = status
     else {
@@ -2520,6 +2546,7 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
         plan.fencing_token,
         recovered.fencing_token,
         previous.fencing_token,
+        last_fencing_token,
         candidate_owner
             .as_ref()
             .map_or(0, |owner| owner.fencing_token),
@@ -2722,6 +2749,7 @@ pub(super) fn rebind_core(path: &Path) -> Result<()> {
     let Body::ForwardStatus {
         owner: Some(previous),
         candidate_owner,
+        last_fencing_token,
         ..
     } = status
     else {
@@ -2769,7 +2797,8 @@ pub(super) fn rebind_core(path: &Path) -> Result<()> {
         .as_ref()
         .map_or(previous.fencing_token, |candidate| {
             candidate.fencing_token.max(previous.fencing_token)
-        });
+        })
+        .max(last_fencing_token);
     plan.worker_epoch = greatest_epoch
         .checked_add(1)
         .context("worker epoch exhausted")?;

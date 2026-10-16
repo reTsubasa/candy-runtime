@@ -1145,6 +1145,7 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
                             .candidate
                             .as_ref()
                             .map(|candidate| candidate.owner.clone()),
+                        last_fencing_token: next.last_fencing_token,
                         failure_revision: next
                             .forward
                             .as_ref()

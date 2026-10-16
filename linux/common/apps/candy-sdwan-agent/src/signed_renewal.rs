@@ -270,6 +270,9 @@ mod linux {
         }
         match status["lifecycle"].as_str() {
             Some("active" | "starting") => {}
+            Some("failed")
+                if plan.shared_listener.is_some()
+                    && listener_registration::listener_available(&status) => {}
             Some("failed" | "stopped") => {
                 eprintln!("level=warn code=signed_candidate_unavailable module=sdwan_activation pid={} lifecycle={} detail=authenticated_candidate_reported_terminal_lifecycle action=retry_verified_authority_preserve_infrastructure", record.pid, status["lifecycle"]);
                 return Err(CoreRecoveryRequired.into());
@@ -904,6 +907,7 @@ mod linux {
             owner: previous,
             phase: previous_phase,
             candidate_owner,
+            last_fencing_token,
             ..
         } = status
         else {
@@ -927,6 +931,7 @@ mod linux {
             &[
                 desired.fencing_token,
                 consumed_fence,
+                last_fencing_token,
                 previous.as_ref().map_or(0, |owner| owner.fencing_token),
             ],
         )?;

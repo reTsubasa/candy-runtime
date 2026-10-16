@@ -384,8 +384,8 @@ fn candidate_preparation_has_no_kernel_side_effects_and_failed_commit_restores_o
         .is_err());
     assert!(
         matches!(fixture.call(Operation::ForwardStatus, 7).unwrap().0,
-        Body::ForwardStatus { owner: Some(active), phase: Some(Phase::Active), candidate_owner: None, .. }
-        if active == owner())
+        Body::ForwardStatus { owner: Some(active), phase: Some(Phase::Active), candidate_owner: None, last_fencing_token, .. }
+        if active == owner() && last_fencing_token == next_owner.fencing_token)
     );
     assert_eq!(
         fixture.observed.lock().unwrap().active_declaration,
@@ -398,13 +398,29 @@ fn candidate_preparation_has_no_kernel_side_effects_and_failed_commit_restores_o
                 Operation::ForwardPrepare {
                     infra_id: [2; 16],
                     infra_generation: 1,
-                    owner: next_owner,
-                    declaration: next_policy,
+                    owner: next_owner.clone(),
+                    declaration: next_policy.clone(),
                 },
                 8
             )
             .is_err(),
         "failed candidate fence must not be reused"
+    );
+    let mut retry_owner = next_owner;
+    retry_owner.fencing_token += 1;
+    prepare_candidate(&mut fixture, &retry_owner, &next_policy);
+    fixture
+        .call(
+            Operation::ForwardCommit {
+                owner: retry_owner.clone(),
+            },
+            9,
+        )
+        .unwrap();
+    assert!(
+        matches!(fixture.call(Operation::ForwardStatus, 10).unwrap().0,
+        Body::ForwardStatus { owner: Some(active), phase: Some(Phase::Active), candidate_owner: None, last_fencing_token, .. }
+        if active == retry_owner && last_fencing_token == retry_owner.fencing_token)
     );
 }
 

@@ -141,8 +141,11 @@ fn committed_ack(registry: &Path, seed: u8) -> bool {
     let name = format!("{seed:02x}").repeat(16);
     let receipt = status(&registry.join(format!("{name}.domain")));
     let acknowledgement = status(&registry.join(format!("{name}.activation")));
+    let master = status(&registry.join("listener-master.json"));
     receipt.is_some_and(|receipt| {
-        receipt["prepared_ingress"] == false && acknowledgement.as_ref() == Some(&receipt)
+        receipt["prepared_ingress"] == false
+            && master.is_some_and(|master| master["instance"] == receipt["master_instance"])
+            && acknowledgement.as_ref() == Some(&receipt)
     })
 }
 

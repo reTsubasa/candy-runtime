@@ -248,7 +248,7 @@ pub(super) fn domain_running(host: &SharedWorker, instance: &Path) -> Result<boo
     if !candy_process_control::process_is_current_confirmed(host.identity)? {
         return Ok(false);
     }
-    Ok(exchange(
+    match exchange(
         host,
         instance
             .to_str()
@@ -256,13 +256,16 @@ pub(super) fn domain_running(host: &SharedWorker, instance: &Path) -> Result<boo
         "probe",
         &[],
         &[],
-    )?
-    .running)
+    ) {
+        Ok(response) => Ok(response.running),
+        Err(_) if !candy_process_control::process_is_current_confirmed(host.identity)? => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
 pub(super) fn forget_domain(host: &SharedWorker, instance: &Path) -> Result<()> {
-    exchange(
+    match exchange(
         host,
         instance
             .to_str()
@@ -270,8 +273,13 @@ pub(super) fn forget_domain(host: &SharedWorker, instance: &Path) -> Result<()> 
         "forget",
         &[],
         &[],
-    )?;
-    Ok(())
+    ) {
+        Ok(_) => Ok(()),
+        // A confirmed exited host cannot retain a business domain or its
+        // completion receipt. Recheck after exchange to cover a concurrent exit.
+        Err(_) if !candy_process_control::process_is_current_confirmed(host.identity)? => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) fn retire_host(host: &SharedWorker) -> Result<()> {
@@ -313,5 +321,22 @@ mod tests {
             Some(1)
         );
         assert!(!terminal_status(response(false, None)).unwrap().success());
+    }
+
+    #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+    #[test]
+    fn domain_cleanup_requires_confirmed_host_exit_or_successful_exchange() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = SharedWorker {
+            socket: root.path().join("missing-host.sock"),
+            identity: candy_process_control::process_identity(std::process::id()).unwrap(),
+        };
+        let instance = root.path().join("domain.sock");
+        assert!(domain_running(&host, &instance).is_err());
+        assert!(forget_domain(&host, &instance).is_err());
+
+        host.identity.start_ticks += 1;
+        assert!(!domain_running(&host, &instance).unwrap());
+        forget_domain(&host, &instance).unwrap();
     }
 }
