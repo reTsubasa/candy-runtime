@@ -384,6 +384,10 @@ fn drained_transaction_matches(journal: &serde_json::Value, status: &serde_json:
         })
 }
 
+fn scale_handoff_changed(record: &serde_json::Value, previous: Option<&serde_json::Value>) -> bool {
+    previous.is_some_and(|previous| record["worker_epoch"] != previous["worker_epoch"])
+}
+
 #[test]
 fn scale_ready_waits_for_exact_bilateral_drain() {
     let expected = serde_json::json!({"attachment_id":[14], "selector":{"id":"peer"}, "barrier":{"id":"barrier"}});
@@ -444,9 +448,21 @@ fn scale_ready_waits_for_exact_bilateral_drain() {
         &serde_json::Value::Null,
         &status
     ));
+    let bootstrap_recovered = serde_json::json!({"worker_epoch":3,"io_epoch":2});
+    assert!(!scale_handoff_changed(&bootstrap_recovered, None));
+    assert!(!scale_handoff_changed(
+        &bootstrap_recovered,
+        Some(&bootstrap_recovered)
+    ));
+    let prior = serde_json::json!({"worker_epoch":1,"io_epoch":1});
+    assert!(scale_handoff_changed(&bootstrap_recovered, Some(&prior)));
 }
 
-fn ready(domain: &mut Domain, worker: usize) -> Option<serde_json::Value> {
+fn ready(
+    domain: &mut Domain,
+    worker: usize,
+    previous: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
     let record = status(&domain.root.join("worker-process.json"))?;
     let desired = status(&domain.root.join("plan.json"))?;
     let current = candy_process_control::process_identity(record["pid"].as_u64()? as u32).ok()?;
@@ -462,8 +478,9 @@ fn ready(domain: &mut Domain, worker: usize) -> Option<serde_json::Value> {
     {
         return None;
     }
-    // Active packet ownership is published before asynchronous bilateral drain.
-    if record["worker_epoch"].as_u64()? > 1 {
+    // Bootstrap recovery may use a fresh IO epoch without a predecessor to drain.
+    // Scale handoffs must complete drain relative to the last confirmed owner.
+    if scale_handoff_changed(&record, previous) {
         let journal = status(&domain.root.join("worker-process.renewal.json"))?;
         if !drained_transaction_matches(&journal, &proof) {
             return None;
@@ -480,13 +497,23 @@ fn ready(domain: &mut Domain, worker: usize) -> Option<serde_json::Value> {
     Some(record)
 }
 
-fn wait_all(domains: &mut [Domain], workers: usize) -> Vec<serde_json::Value> {
+fn wait_all(
+    domains: &mut [Domain],
+    workers: usize,
+    previous: Option<&[serde_json::Value]>,
+) -> Vec<serde_json::Value> {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let snapshots = domains
             .iter_mut()
             .enumerate()
-            .map(|(index, domain)| ready(domain, index % workers + 1))
+            .map(|(index, domain)| {
+                ready(
+                    domain,
+                    index % workers + 1,
+                    previous.map(|records| &records[index]),
+                )
+            })
             .collect::<Option<Vec<_>>>();
         if let Some(snapshots) = snapshots {
             if domains.iter().all(ping) {
@@ -833,7 +860,7 @@ pub(super) fn verify_domains() {
             .spawn()
             .unwrap(),
     );
-    let original = wait_all(&mut domains, 1);
+    let original = wait_all(&mut domains, 1, None);
     let mut traffic = domains
         .iter()
         .map(|domain| {
@@ -866,7 +893,7 @@ pub(super) fn verify_domains() {
             // The previous handoffs' bounded receipts expire independently of
             // their active lanes. Exercise real traffic and another reservation.
             std::thread::sleep(Duration::from_secs(31));
-            let after_cap = wait_all(&mut domains, 1);
+            let after_cap = wait_all(&mut domains, 1, Some(&previous));
             for (actual, previous) in after_cap.iter().zip(&previous) {
                 assert_eq!(
                     actual["worker_epoch"], previous["worker_epoch"],
@@ -878,7 +905,7 @@ pub(super) fn verify_domains() {
             &desired,
             &serde_json::json!({"schema_version":1,"revision":revision+1,"workers":workers}),
         );
-        let records = wait_all(&mut domains, workers);
+        let records = wait_all(&mut domains, workers, Some(&previous));
         for process in &mut traffic {
             assert!(
                 process.0.try_wait().unwrap().is_none(),
@@ -1048,12 +1075,12 @@ pub(super) fn verify_domains() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    wait_all(&mut domains, 1);
+    let before_scale = wait_all(&mut domains, 1, None);
     private_json(
         &desired,
         &serde_json::json!({"schema_version":1,"revision":10,"workers":2}),
     );
-    let before = wait_all(&mut domains, 2);
+    let before = wait_all(&mut domains, 2, Some(&before_scale));
     unsafe {
         nix::libc::kill(
             before[0]["pid"].as_u64().unwrap() as i32,
@@ -1061,7 +1088,7 @@ pub(super) fn verify_domains() {
         );
     }
     assert!(ping(&domains[1]), "unrelated host failed with crashed host");
-    let after = wait_all(&mut domains, 2);
+    let after = wait_all(&mut domains, 2, None);
     for process in &mut traffic {
         assert!(
             process.0.try_wait().unwrap().is_none(),
