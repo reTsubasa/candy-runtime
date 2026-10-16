@@ -111,3 +111,24 @@ or fabricate a receipt. Unknown recovery outcomes retain the candidate and
 original owner pending exact reconciliation. Linux feature-enabled Agent tests
 pass 125/125; the strict end-to-end rerun remains required to accept the complete
 managed handoff. The failed v3 evidence remains unchanged.
+
+## Retirement Evidence Is Not Disposable Configuration
+
+The strict v4 run exposed a cleanup failure after a successful handoff:
+`Snapshot::retire` removed the signed closure and manifest, then failed with
+`ENOTEMPTY` because Core had written a candidate journal under that snapshot.
+The supervisor treated that unclassified error as terminal. Candidate journals
+can contain unresolved Commit evidence and cannot be recursively deleted.
+
+Retirement now inspects the directory before deleting the signed files. If it
+contains anything outside the exact manifest closure, it preserves the complete
+snapshot and logs `signed_snapshot_retained_evidence`. This does not assert that
+the journal completed or delete its original authority. It allows confirmed
+business retirement to finish without making evidence garbage collection a
+data-plane dependency. Other retirement errors retain `ManagedProofPending`
+and retry rather than terminating the domain supervisor.
+
+The focused native regression passes: repeated retirement preserves an unknown
+Commit file, the original manifest and a verifiable closure. After explicit
+removal of that test evidence, ordinary exact retirement succeeds. Durable
+terminal-journal compaction remains a separate resource-recovery requirement.

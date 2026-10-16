@@ -212,7 +212,7 @@ mod linux {
                     if snapshot.directory != directory || snapshot.config != plan.core_config {
                         bail!("retirement snapshot binding differs");
                     }
-                    snapshot.retire()?;
+                    snapshot.retire().context(ManagedProofPending)?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     let metadata = fs::symlink_metadata(directory)?;
@@ -883,7 +883,7 @@ mod linux {
                 previous_journal.phase = "retiring".into();
                 previous_journal.candidate_plan_snapshot = Some(previous_plan.clone());
                 publish(&journal_path, &previous_journal)?;
-                previous_journal.snapshot.retire()?;
+                previous_journal.snapshot.retire().context(ManagedProofPending)?;
                 for generated in [
                     &previous_plan.binding_file,
                     &previous_plan.core_status,
