@@ -109,13 +109,16 @@ extension remains a separate issue until its fix and tests complete.
 
 ## Remaining Acceptance
 
-- Fresh strict managed `1/2/4/2/1` with unchanged infrastructure and exact
-  bilateral actor/PacketPort/netd/drain receipts.
-- Independent server restart with durable activated-successor restoration.
-- Frozen mixed-role fault/quota isolation and shared-host recovery.
-- Fresh Proxy UDP recovery, DNS, held TCP tail/FIN, and negotiated drain.
-- Strict static checks for the final affected source and the isolated Linux
-  endpoint test correction.
+- Vanished-actor UNKNOWN retirement: durable exact actor/domain completion,
+  actual master revocation, authenticated bilateral confirmation, and a distinct
+  durable terminal before any fresh transaction. Foundations do not close it.
+- True control progress with data credits occupied through real QUIC and Unix
+  IPC, including the separate shared QUIC connection-window boundary.
+- New reconciliation/domain-evidence changes require their own frozen Linux
+  regression and affected traffic gates; v14 cannot certify later source edits.
+- The latest completed strict scaling, activated-successor restart, mixed-role,
+  Proxy UDP and negotiated-drain results are in the v14 table below. Earlier
+  failures remain retained; the passing subsets are not full release acceptance.
 - Two-hour renewal is deferred by the user's explicit choice. Performance and
   platform package acceptance are not claimed by short container gates.
 
@@ -233,3 +236,37 @@ These passes do not erase v12's failures or establish that the v12 Proxy
 timeout was caused by CFS throttling. Its original packet budget/age and precise
 failed operation were not recorded. The new control reserve addresses a
 separately demonstrated structural coupling and requires its own frozen gates.
+
+## Frozen Release v14 Follow-up
+
+Six artifacts built from Core `a2c842e` and Runtime `be48310`; source manifest
+`fe01e4a2b2190f5e9d20e5b4aeba7b4b507d606e4101e44f3fb9ba8ea4657178`.
+Core ELF SHA-256 is
+`8c16bf9508a11eb19de04bd139b9f36e1acc184e56531051cd4972906050bfde`.
+This set adds bounded directional control byte reserves carved from the existing
+worker/pool/shared totals. The exact classified first control stream receives
+the reserve; ordinary worker requests cannot select it. It does not add QUIC
+connection flow-control headroom or resolve vanished-actor UNKNOWN retirement.
+
+Frozen-source Linux transport tests pass 213/213. Strict all-target Core
+application/runtime/transport Clippy passes with `-D warnings`; commands and
+logs are retained in `short-linux-regression-v14`. Traffic runs are serial,
+without build/native-test contention; shared fixtures use three pinned VM CPUs
+without periodic CFS quota and Proxy fixtures use disjoint service/generator
+CPU sets. Receipt, identity, missing-sequence and load-validity criteria remain
+unchanged.
+
+| Evidence directory | Result | Boundary |
+| --- | --- | --- |
+| `mixed-role-fault-v14` | PASS, 14.71 s runner | Real quota rejection/release recovery, held TCP, 60 fresh TCP requests, 61 exact 4-KiB UDP packets and unchanged held UDP owner/socket. Never-read flow accepts 10,289,152 bytes and reaches two actual write timeouts before healthy probes, six afterward. Both SD-WAN domains return 115/115 with no loss. This does not prove data-credit saturation or QUIC control headroom. |
+| `shared-pool-negotiated-final-v14` | PASS, 60.18 s runner | Four domains, full `1→2→4→2→1→2→1`, zero missing ICMP at all scale stages, original operation-cap expiry, bilateral receipts, preserved infrastructure and resource bounds. Does not resolve vanished-actor UNKNOWN. |
+| `successor-server-restart-v14` | PASS, 63.84 s runner | Exact activated-successor restoration after injected server worker death, preserved TUNIO/unrelated identities, receipts and later Proxy probes. Recovery probes may fail on the deliberately killed domain; no zero-interruption claim. |
+| `proxy-release-v14-active-drain-v1` | PASS | Actual Runtime Rust client, held TCP tail/FIN and UDP/DNS, authenticated bounded negotiated drain, exact receipts, replacement admission overlap, original deadline and listener/master identities. All detailed drain subgates pass. |
+| `proxy-release-v14-udp-v1` | PASS | All five original cohorts (64/512/1200/4096-byte ordinary traffic and 1200-byte recovery one second after overload) return exactly 300/300 with zero duplicate/corrupt/foreign payloads. Every schedule is valid: zero lateness violations and zero rebases. Deliberate overload is 4096 packets of 4096 bytes; later TCP probe returns 262,144 bytes without a restart. This is bounded 100-PPS recovery, not maximum PPS or throughput acceptance. |
+
+The fixtures retain their diagnostic logs, including the isolated nft/iptables
+`DOCKER-USER` compatibility probe warnings and intentional fault responses.
+Passing traffic assertions do not mean that every diagnostic line is error-free.
+The v14 UDP pass closes this frozen build's bounded load/recovery gate; it does
+not establish why every earlier invalid-load or lost-packet cohort failed.
+Two-hour renewal remains deferred by the user's explicit choice.
