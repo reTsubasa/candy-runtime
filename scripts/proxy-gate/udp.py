@@ -103,6 +103,12 @@ def main():
                                   'elapsed_seconds': time.monotonic() - before}
         time.sleep(1)
         rows.append(rate(1200, 100, args.seconds, 'after-overload', args.direct))
+        if rows[-1]['gate'] != 'PASS':
+            # Retain the original recovery failure; a later observation only
+            # identifies whether it remains stuck or recovers without restart.
+            time.sleep(2)
+            result['late_recovery'] = rate(1200, 100, args.seconds,
+                                           'late-after-overload', args.direct)
         if not args.direct:
             import guest
             result['later_tcp_payload_bytes'] = guest.tcp_probe(617)
