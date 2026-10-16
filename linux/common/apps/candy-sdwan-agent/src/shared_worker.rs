@@ -9,6 +9,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus};
 use std::time::{Duration, Instant};
 
+// Standalone Stage 1 API. Prepare cannot use it until authenticated Core
+// control exposes the exact original CandidateJournalRecord checksum.
+#[allow(dead_code)]
+#[path = "shared_domain_evidence.rs"]
+pub(super) mod domain_evidence;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SharedWorker {
@@ -59,13 +65,13 @@ fn terminal_status(response: Response) -> Option<ExitStatus> {
     Some(ExitStatus::from_raw(code << 8))
 }
 
-fn exchange(
+fn exchange_bytes(
     host: &SharedWorker,
     instance: &str,
     operation: &str,
     arguments: &[String],
     fds: &[i32],
-) -> Result<Response> {
+) -> Result<Vec<u8>> {
     use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
     anyhow::ensure!(
         candy_process_control::process_is_current_confirmed(host.identity)?,
@@ -112,6 +118,17 @@ fn exchange(
         .read_to_end(&mut reply)
         .context("read bounded shared worker response")?;
     anyhow::ensure!(reply.len() <= 65536, "shared worker reply exceeds budget");
+    Ok(reply)
+}
+
+fn exchange(
+    host: &SharedWorker,
+    instance: &str,
+    operation: &str,
+    arguments: &[String],
+    fds: &[i32],
+) -> Result<Response> {
+    let reply = exchange_bytes(host, instance, operation, arguments, fds)?;
     let response: Response = serde_json::from_slice(&reply)?;
     anyhow::ensure!(
         response.live_domains + response.completed_domains <= response.max_domains,
