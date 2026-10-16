@@ -8,6 +8,11 @@ Neither API existence nor passing a related fixture closes an end-to-end gate.
 Current iteration and frozen v14/v15 outcomes:
 [P0/P1 progress](p0-p1-progress-20261015.md).
 
+Latest short-gate fixes and preserved failures:
+[2026-10-16 short reliability gates](SDWAN_SHORT_GATES_20261016.md).
+The two-hour renewal gate is explicitly deferred; the new strict scaling and
+UDP recovery failures are not superseded by older subset passes below.
+
 The user's current priority defers throughput optimization and the formal
 performance matrix. Correctness, fault isolation and recovery remain required;
 the historical performance failures below are retained as measurements, not
