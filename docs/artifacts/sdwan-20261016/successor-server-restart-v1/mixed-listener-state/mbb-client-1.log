@@ -1,0 +1,26 @@
+
+running 1 test
+2026-10-16T04:59:38.186169Z  INFO candy_core_process::process_limits: Core file descriptor budget is ready event="process_resource_limit_ready" module="process_limits" resource="RLIMIT_NOFILE" requested_soft=1048576 requested_hard=1048576 previous_soft=1048576 previous_hard=1048576 effective_soft=1048576 effective_hard=1048576
+2026-10-16T04:59:38.606743Z  INFO candy_carrier_transport: configured QUIC UDP socket buffers target_bytes=8388608 receive_bytes=16777216 send_bytes=16777216
+2026-10-16T04:59:38.661075Z  WARN candy_core_process: event="sdwan_outbound_candidate_failed" candidate_id=0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c peer_attachment_id=0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e error=stage=server_hello_read error_code=server_hello_read_failed
+2026-10-16T04:59:39.249270Z  INFO candy_carrier_transport: configured QUIC UDP socket buffers target_bytes=8388608 receive_bytes=16777216 send_bytes=16777216
+2026-10-16T04:59:39.287298Z  WARN candy_core_process: event="sdwan_outbound_candidate_failed" candidate_id=0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c peer_attachment_id=0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e error=stage=server_hello_read error_code=server_hello_read_failed
+2026-10-16T04:59:40.292239Z  INFO candy_carrier_transport: configured QUIC UDP socket buffers target_bytes=8388608 receive_bytes=16777216 send_bytes=16777216
+2026-10-16T04:59:40.323409Z  INFO candy_carrier_runtime::sdwan: event="sdwan_candidate_stream_preparing" attachment_id=0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e tunnel_id=102 connection_id=281472630966592
+2026-10-16T04:59:40.323952Z  INFO candy_carrier_runtime::sdwan: event="sdwan_candidate_stream_prepared" attachment_id=0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e tunnel_id=102 connection_id=281472630966592 elapsed_ms=0
+2026-10-16T04:59:40.324412Z  INFO candy_core_process: event="sdwan_outbound_peer_active" candidate_id=0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c peer_attachment_id=0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e effective_mtu=1180
+2026-10-16T04:59:43.602941Z  INFO candy_carrier_transport: configured QUIC UDP socket buffers target_bytes=8388608 receive_bytes=16777216 send_bytes=16777216
+2026-10-16T04:59:43.627992Z  INFO candy_carrier_runtime::sdwan: event="sdwan_candidate_stream_preparing" attachment_id=0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e tunnel_id=102 connection_id=281472563878096
+2026-10-16T04:59:43.628977Z  INFO candy_carrier_runtime::sdwan: event="sdwan_candidate_stream_prepared" attachment_id=0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e tunnel_id=102 connection_id=281472563878096 elapsed_ms=1
+2026-10-16T04:59:43.677269Z  INFO candy_core_process: event="sdwan_policy_prepared" transaction_id=0101aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa generation=2 base_generation=1
+2026-10-16T04:59:44.045352Z  WARN candy_core_process: authenticated peer connection closed event="sdwan_peer_connection_closed" code="peer_connection_closed" module="sdwan_peer_control" peer_attachment_id=04040404040404040404040404040404 error=closed by peer: SD-WAN acknowledged predecessor drain (code 0)
+2026-10-16T04:59:44.045486Z  WARN candy_carrier_runtime::sdwan: event="sdwan_peer_stream_failed" error_code="peer_stream_closed" attachment_id=0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e connection_id=281472630966592 generation=1 error=peer_stream_closed: closed by peer: SD-WAN acknowledged predecessor drain (code 0) close_reason=Some("closed by peer: SD-WAN acknowledged predecessor drain (code 0)")
+2026-10-16T04:59:45.100251Z  INFO candy_carrier_transport: configured QUIC UDP socket buffers target_bytes=8388608 receive_bytes=16777216 send_bytes=16777216
+2026-10-16T04:59:45.121762Z  INFO candy_carrier_runtime::sdwan: event="sdwan_candidate_stream_preparing" attachment_id=0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e tunnel_id=102 connection_id=281472566959760
+2026-10-16T04:59:45.122967Z  INFO candy_carrier_runtime::sdwan: event="sdwan_candidate_stream_prepared" attachment_id=0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e tunnel_id=102 connection_id=281472566959760 elapsed_ms=1
+2026-10-16T04:59:45.167346Z  INFO candy_core_process: event="sdwan_policy_prepared" transaction_id=0201aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa generation=3 base_generation=1
+2026-10-16T04:59:45.204582Z  WARN candy_carrier_runtime::sdwan: event="sdwan_packet_dropped" error_code="route_has_no_active_peer" dropped_packets=1
+2026-10-16T04:59:45.297514Z  WARN candy_core_process: authenticated peer connection closed event="sdwan_peer_connection_closed" code="peer_connection_closed" module="sdwan_peer_control" peer_attachment_id=04040404040404040404040404040404 error=closed by peer: SD-WAN acknowledged predecessor drain (code 0)
+2026-10-16T04:59:45.297657Z  WARN candy_carrier_runtime::sdwan: event="sdwan_peer_stream_failed" error_code="peer_stream_closed" attachment_id=0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e connection_id=281472563878096 generation=1 error=peer_stream_closed: closed by peer: SD-WAN acknowledged predecessor drain (code 0) close_reason=Some("closed by peer: SD-WAN acknowledged predecessor drain (code 0)")
+2026-10-16T04:59:45.297717Z  WARN candy_core_process: code="candidate_active_control_stopped" module="sdwan_initiator" detail=Ok(()) action="redial_affected_peer_preserve_infrastructure"
+2026-10-16T04:59:45.300155Z  INFO candy_carrier_transport: configured QUIC UDP socket buffers target_bytes=8388608 receive_bytes=16777216 send_bytes=16777216

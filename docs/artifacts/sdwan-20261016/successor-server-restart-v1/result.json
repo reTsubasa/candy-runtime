@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "test": "signed_cli_successor_server_restart_preserves_authorization",
+  "gate": "FAIL",
+  "scope": "isolated immutable binary snapshot; no source, release or platform acceptance",
+  "container": "candy-shared-gate-f08b6529d404",
+  "host_deadline_seconds": 300,
+  "binary_hashes": {
+    "candy-core": "4f045f05e8656558c07656821637eaad02c52bd5b2a7e68a83b52b3910f1c2d1",
+    "candy-netd": "d4cc67d5ddb4941fb30ffbb433a567b0d4c8c58003b86de07724596b75ce4b18",
+    "candy-agent": "8a8e59bd84b26db37588d476d37d9ffc78fd875c60aa6804ac776d844260093e",
+    "candy-tunio": "b2b18c00d001dcf3509c37840129651ba3e8417fcd4f6c5286213bd1404d5901",
+    "sdwan_signed_cli_fixture": "ece62ef35024703657e7fa5e6655b4ab2666f00782ab6831798e0d491a3a1535",
+    "signed_cli_helper": "ce73ded6b51b0585263f1486bb00585ebd5a29938fc346a2f23665a3609616a8"
+  },
+  "test_exit_code": 101,
+  "code": "test_or_harness_failed",
+  "test_executed": true,
+  "exact_one_test_passed": false,
+  "cleanup_exit_code": 0,
+  "elapsed_seconds": 41.517
+}
