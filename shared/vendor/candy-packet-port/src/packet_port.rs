@@ -1,9 +1,9 @@
 //! Packet boundary between routing workers and network I/O infrastructure.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::future::Future;
 use std::io;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
@@ -104,6 +104,7 @@ impl Drop for QueuedPacket {
 struct OutputProgress {
     accepted: AtomicU64,
     completed: AtomicU64,
+    completion_gaps: AtomicBool,
     failures: Mutex<OutputFailures>,
 }
 
@@ -111,6 +112,7 @@ struct OutputProgress {
 struct OutputFailures {
     serials: VecDeque<u64>,
     evicted_through: u64,
+    settled: BTreeSet<u64>,
 }
 
 impl OutputProgress {
@@ -118,19 +120,40 @@ impl OutputProgress {
         self.accepted.fetch_add(1, Ordering::Relaxed) + 1
     }
     fn complete(&self, serial: u64, delivered: bool) {
+        if delivered
+            && self
+                .completed
+                .compare_exchange(serial - 1, serial, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            && !self.completion_gaps.load(Ordering::Acquire)
+        {
+            return;
+        }
+        let mut failures = self
+            .failures
+            .lock()
+            .expect("output failure history poisoned");
         if !delivered {
-            let mut failures = self
-                .failures
-                .lock()
-                .expect("output failure history poisoned");
             if failures.serials.len() == OUTPUT_FAILURE_HISTORY {
                 let evicted = failures.serials.pop_front().expect("full failure history");
                 failures.evicted_through = failures.evicted_through.max(evicted);
             }
             failures.serials.push_back(serial);
-        } else {
-            self.completed.fetch_max(serial, Ordering::Release);
         }
+        // Cancellation can settle later queued packets before an earlier write.
+        // Publish the gap before sampling the frontier so its writer either
+        // coalesces here or joins this slow path after its atomic completion.
+        self.completion_gaps.store(true, Ordering::Release);
+        let mut completed = self.completed.load(Ordering::Acquire);
+        if serial > completed {
+            failures.settled.insert(serial);
+        }
+        while failures.settled.remove(&(completed + 1)) {
+            completed += 1;
+        }
+        self.completed.fetch_max(completed, Ordering::Release);
+        self.completion_gaps
+            .store(!failures.settled.is_empty(), Ordering::Release);
     }
 }
 
@@ -184,8 +207,8 @@ impl PacketOutput {
         self.progress.accepted.load(Ordering::Acquire)
     }
 
-    /// Delivered FIFO frontier, so a new interval also covers earlier packets
-    /// still queued when its transaction starts.
+    /// Contiguous settled FIFO frontier, including failed writes. A new interval
+    /// covers earlier pending packets without inheriting already settled failures.
     pub fn completed_checkpoint(&self) -> u64 {
         self.progress.completed.load(Ordering::Acquire)
     }
@@ -890,7 +913,37 @@ mod tests {
         assert!(progress.completed.load(Ordering::Acquire) < earlier);
         assert_eq!(progress.failures.lock().unwrap().serials[0], later);
         progress.complete(earlier, true);
-        assert_eq!(progress.completed.load(Ordering::Acquire), earlier);
+        assert_eq!(progress.completed.load(Ordering::Acquire), later);
+    }
+
+    #[test]
+    fn concurrent_out_of_order_settlements_advance_only_the_contiguous_frontier() {
+        for _ in 0..16 {
+            let progress = OutputProgress::default();
+            for _ in 0..OUTPUT_PACKET_LIMIT {
+                progress.accept();
+            }
+            std::thread::scope(|scope| {
+                for worker in 0..8 {
+                    let progress = &progress;
+                    scope.spawn(move || {
+                        for serial in (1..=OUTPUT_PACKET_LIMIT as u64)
+                            .rev()
+                            .filter(|serial| serial % 8 == worker)
+                        {
+                            progress.complete(serial, serial % 3 != 0);
+                            std::thread::yield_now();
+                        }
+                    });
+                }
+            });
+            assert_eq!(
+                progress.completed.load(Ordering::Acquire),
+                OUTPUT_PACKET_LIMIT as u64
+            );
+            assert!(progress.failures.lock().unwrap().settled.is_empty());
+            assert!(!progress.completion_gaps.load(Ordering::Acquire));
+        }
     }
 
     #[tokio::test]
@@ -941,7 +994,14 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert!(output.drained_between(failed_start, failed_end).is_err());
-        let healthy_start = output.checkpoint();
+        let healthy_start = output.completed_checkpoint();
+        assert_eq!(healthy_start, failed_end);
+        assert!(
+            output
+                .drained_between(healthy_start, output.checkpoint())
+                .unwrap(),
+            "an empty next transaction must not inherit a settled failure"
+        );
         port.ready.store(1, Ordering::Release);
         output.enqueue(vec![2; 100]).unwrap();
         let healthy_end = output.checkpoint();
