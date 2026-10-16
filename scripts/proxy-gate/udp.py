@@ -10,7 +10,7 @@ import time
 
 
 def rate(size, pps, seconds, case, direct=False):
-    sent, received = {}, {}
+    sent, received, planned = {}, {}, {}
     duplicates, corrupt, foreign = [], [], []
     prefix = hashlib.sha256(case.encode()).digest()[:8]
     body = hashlib.shake_256(prefix).digest(size - 16)
@@ -27,6 +27,8 @@ def rate(size, pps, seconds, case, direct=False):
             raise RuntimeError('UDP warmup payload mismatch')
         conn.settimeout(.05)
         start = time.monotonic() + .1
+        schedule_origin = start
+        schedule_rebases = []
         end = start + seconds
 
         def receive():
@@ -52,25 +54,34 @@ def rate(size, pps, seconds, case, direct=False):
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             receiver = executor.submit(receive)
             for sequence in range(count):
-                delay = start + sequence / pps - time.monotonic()
+                scheduled = schedule_origin + sequence / pps
+                delay = scheduled - time.monotonic()
                 if delay > 0:
                     time.sleep(delay)
+                elif -delay > .02:
+                    # Never catch up after a host pause by emitting a burst.
+                    now = time.monotonic()
+                    schedule_origin = now - sequence / pps
+                    schedule_rebases.append({'sequence': sequence,
+                                             'lag_ms': (-delay) * 1000})
                 payload = prefix + struct.pack('!Q', sequence) + body
+                planned[sequence] = scheduled
                 sent[sequence] = time.monotonic()
                 conn.sendto(payload, destination)
             receiver.result(timeout=seconds + 5)
         missing = sorted(set(sent) - set(received))
         late = [sequence for sequence, at in sent.items()
-                if at > start + sequence / pps + .02]
+                if at > planned[sequence] + .02]
         return {'payload_bytes': size, 'offered_pps': pps, 'seconds': seconds,
                 'sent': len(sent), 'unique_received': len(received),
                 'missing': missing, 'duplicates': duplicates, 'corrupt': corrupt,
                 'foreign': foreign, 'generator_late_over_20ms': late,
-                'load_validity_gate': 'FAIL' if late else 'PASS',
+                'schedule_rebases': schedule_rebases,
+                'load_validity_gate': 'FAIL' if late or schedule_rebases else 'PASS',
                 'network_integrity_gate': 'FAIL' if missing or duplicates or corrupt or foreign else 'PASS',
-                'transmissions': [{'sequence': sequence, 'scheduled_at': start + sequence / pps,
+                'transmissions': [{'sequence': sequence, 'scheduled_at': planned[sequence],
                                    'sent_at': at, 'reply_at': received.get(sequence),
-                                   'generator_lag_ms': (at - start - sequence / pps) * 1000}
+                                   'generator_lag_ms': (at - planned[sequence]) * 1000}
                                   for sequence, at in sent.items()],
                 'start': start, 'end': end, 'last_sent_at': max(sent.values()),
                 'receiver_payload_mbps': sum(start <= at <= end for at in received.values())
