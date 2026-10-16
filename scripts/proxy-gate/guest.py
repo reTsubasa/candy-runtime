@@ -138,16 +138,23 @@ def udp_target():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
         udp.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
         udp.bind((SERVER, 19001))
+        udp.settimeout(.2)
         write_json(ROOT / 'udp-target-socket.json',
                    {'receive_buffer_bytes': udp.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)})
         # Keep diagnostic disk work out of the target's per-packet hot path.
         with (ROOT / 'udp-target.jsonl').open('a', buffering=65536) as log:
             flushed = time.monotonic()
             while True:
-                data, peer = udp.recvfrom(65535)
+                try:
+                    data, peer = udp.recvfrom(65535)
+                except socket.timeout:
+                    log.flush()
+                    flushed = time.monotonic()
+                    continue
+                received_at = time.monotonic()
                 udp.sendto(data, peer)
                 log.write(json.dumps({'bytes': len(data), 'prefix': data[:16].hex(),
-                                      'peer': peer, 'received_at': time.monotonic()}) + '\n')
+                                      'peer': peer, 'received_at': received_at}) + '\n')
                 if time.monotonic() - flushed >= .2:
                     log.flush()
                     flushed = time.monotonic()
