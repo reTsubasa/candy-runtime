@@ -15,18 +15,29 @@ class RatePacer:
 
     def __init__(self, start, pps, clock=time.monotonic, sleep=time.sleep):
         self.start = start
+        self.origin = start
         self.period = 1 / pps
         self.clock, self.sleep = clock, sleep
         self.last_sent = None
 
     def wait(self, sequence):
         nominal = self.start + sequence * self.period
-        target = max(nominal, self.last_sent + self.period) if self.last_sent is not None else nominal
-        while self.clock() < target:
-            self.sleep(target - self.clock())
         now = self.clock()
+        target = self.origin + sequence * self.period
+        rebased = now - target > .02
+        if rebased:
+            self.origin = now - sequence * self.period
+            target = now
+        if self.last_sent is not None:
+            target = max(target, self.last_sent + self.period / 2)
+        if target > now:
+            self.sleep(target - now)
+        now = self.clock()
+        if now - target > .02:
+            self.origin = now - sequence * self.period
+            rebased = True
         self.last_sent = now
-        return nominal, target, now
+        return nominal, target, now, rebased
 
 
 def rate(size, pps, seconds, case, direct=False):
@@ -48,6 +59,7 @@ def rate(size, pps, seconds, case, direct=False):
         conn.settimeout(.05)
         start = time.monotonic() + .1
         pacer = RatePacer(start, pps)
+        schedule_rebases = []
         end = start + seconds
         sender_done = threading.Event()
         sender_finished = [None]
@@ -79,9 +91,12 @@ def rate(size, pps, seconds, case, direct=False):
             receiver = executor.submit(receive)
             try:
                 for sequence in range(count):
-                    nominal, target, now = pacer.wait(sequence)
+                    nominal, target, now, rebased = pacer.wait(sequence)
                     if now >= end + 5:
                         raise TimeoutError('UDP generator exceeded bounded send window')
+                    if rebased:
+                        schedule_rebases.append({'sequence': sequence,
+                                                 'lag_ms': (now - nominal) * 1000})
                     payload = prefix + struct.pack('!Q', sequence) + body
                     planned[sequence], paced[sequence] = nominal, target
                     sent[sequence] = now
@@ -97,7 +112,8 @@ def rate(size, pps, seconds, case, direct=False):
                 'sent': len(sent), 'unique_received': len(received),
                 'missing': missing, 'duplicates': duplicates, 'corrupt': corrupt,
                 'foreign': foreign, 'generator_late_over_20ms': late,
-                'load_validity_gate': 'FAIL' if late else 'PASS',
+                'schedule_rebases': schedule_rebases,
+                'load_validity_gate': 'FAIL' if late or schedule_rebases else 'PASS',
                 'network_integrity_gate': 'FAIL' if missing or duplicates or corrupt or foreign else 'PASS',
                 'transmissions': [{'sequence': sequence, 'scheduled_at': planned[sequence],
                                    'paced_at': paced[sequence],
@@ -108,7 +124,7 @@ def rate(size, pps, seconds, case, direct=False):
                 'receiver_drain_until': min(hard_deadline, sender_finished[0] + 1),
                 'receiver_payload_mbps': sum(start <= at <= end for at in received.values())
                     * size * 8 / seconds / 1e6,
-                'gate': 'PASS' if not (missing or duplicates or corrupt or foreign or late) else 'FAIL'}
+                'gate': 'PASS' if not (missing or duplicates or corrupt or foreign or late or schedule_rebases) else 'FAIL'}
 
 
 def main():
