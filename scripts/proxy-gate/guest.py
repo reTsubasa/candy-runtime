@@ -270,13 +270,31 @@ def client(profile, label):
                   f'/gate/{profile}/{label}-status.json'], env)
 
 
-def server(profile, workers, blocked_stderr=False):
+def server(profile, workers, blocked_stderr=False, drain_control=None, drain_token_file=None):
     (ROOT / profile / 'master').mkdir(mode=0o700, exist_ok=True)
     env = dict(os.environ, TOKIO_WORKER_THREADS='2', RUST_LOG='info')
-    start('master', ['/gate/candy-core', 'server', 'proxy-master', '--config',
-                     f'/gate/{profile}/server.toml', '--directory',
-                     f'/gate/{profile}/master', '--workers', str(workers)], env,
+    command = ['/gate/candy-core', 'server', 'proxy-master', '--config',
+               f'/gate/{profile}/server.toml', '--directory',
+               f'/gate/{profile}/master', '--workers', str(workers)]
+    if drain_control and drain_token_file:
+        command.extend(['--drain-control', drain_control,
+                        '--drain-control-token-file', drain_token_file])
+    start('master', command, env,
           blocked_stderr=blocked_stderr)
+
+
+def drain_control(path, token, worker_id, owner_epoch, remaining_ms):
+    request = json.dumps({'version': 1, 'token': token, 'worker_id': worker_id,
+                          'owner_epoch': owner_epoch, 'remaining_ms': remaining_ms}).encode()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as control:
+        control.settimeout(45)
+        control.connect(path)
+        control.sendall(request)
+        control.shutdown(socket.SHUT_WR)
+        data = bytearray()
+        while chunk := control.recv(4096):
+            data.extend(chunk)
+    print(data.decode())
 
 
 def baseline_server(profile):
@@ -384,7 +402,7 @@ def latency(seconds, direct):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['targets', 'configure', 'server', 'server-log-blocked', 'baseline-server', 'client',
+    parser.add_argument('action', choices=['targets', 'configure', 'server', 'server-log-blocked', 'baseline-server', 'client', 'drain-control',
                                           'stop', 'probe', 'probes', 'kill-workers',
                                           'snapshot', 'latency', 'timing'])
     parser.add_argument('--profile', default='recommended')
@@ -393,6 +411,11 @@ def main():
     parser.add_argument('--seconds', type=int, default=10)
     parser.add_argument('--direct', action='store_true')
     parser.add_argument('--port', type=int)
+    parser.add_argument('--drain-control')
+    parser.add_argument('--drain-token')
+    parser.add_argument('--worker-id', type=int)
+    parser.add_argument('--owner-epoch', type=int)
+    parser.add_argument('--remaining-ms', type=int, default=1200)
     args = parser.parse_args()
     if args.action == 'targets':
         import load
@@ -403,9 +426,11 @@ def main():
     elif args.action == 'configure':
         configure(args.workers, args.profile)
     elif args.action == 'server':
-        server(args.profile, args.workers)
+        server(args.profile, args.workers, drain_control=args.drain_control,
+               drain_token_file=args.drain_token)
     elif args.action == 'server-log-blocked':
-        server(args.profile, args.workers, blocked_stderr=True)
+        server(args.profile, args.workers, blocked_stderr=True,
+               drain_control=args.drain_control, drain_token_file=args.drain_token)
     elif args.action == 'baseline-server':
         baseline_server(args.profile)
     elif args.action == 'client':
@@ -418,6 +443,11 @@ def main():
         probes(args.profile)
     elif args.action == 'kill-workers':
         kill_worker()
+    elif args.action == 'drain-control':
+        if not args.drain_control or not args.drain_token or args.worker_id is None or args.owner_epoch is None:
+            raise RuntimeError('drain-control requires socket, token, worker id and owner epoch')
+        drain_control(args.drain_control, args.drain_token, args.worker_id,
+                      args.owner_epoch, args.remaining_ms)
     elif args.action == 'snapshot':
         snapshot(args.label)
     elif args.action == 'latency':

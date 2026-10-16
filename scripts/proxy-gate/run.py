@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,8 @@ def main():
     parser.add_argument('--image', default='candy-proxy-netem-runner:20261015')
     parser.add_argument('--pin-cpus', action='store_true',
                         help='require 8 VM CPUs; reserve 3 per service and 1 per namespace generator')
+    parser.add_argument('--drain-wire', action='store_true',
+                        help='run the opt-in local Unix per-worker negotiated drain smoke gate')
     args = parser.parse_args()
     if not 1 <= args.seconds <= 120 or not 1 <= args.rounds <= 10 or not 1 <= args.warmup <= 30:
         parser.error('seconds must be 1..120 and rounds 1..10')
@@ -106,7 +109,7 @@ def main():
     def guest(name, action, **kwargs):
         argv = ['python3', '/gate/guest.py', action]
         for key, value in kwargs.items():
-            argv.extend(['--' + key, str(value)])
+            argv.extend(['--' + key.replace('_', '-'), str(value)])
         return dex(name, *argv)
 
     def ready(label, timeout=30, port=15000, process_labels=('master', 'client')):
@@ -124,7 +127,15 @@ def main():
 
     def start(profile, workers, blocked_stderr=False):
         guest(server, 'configure', profile=profile, workers=workers)
-        guest(server, 'server-log-blocked' if blocked_stderr else 'server', profile=profile, workers=workers)
+        server_action = 'server-log-blocked' if blocked_stderr else 'server'
+        server_kwargs = {'profile': profile, 'workers': workers}
+        if args.drain_wire and profile == 'recommended' and not blocked_stderr:
+            token_path = root / profile / 'drain.token'
+            token_path.write_text('isolated-drain-wire-token-v1\n')
+            token_path.chmod(0o600)
+            server_kwargs.update(drain_control=f'/gate/{profile}/drain.sock',
+                                 drain_token=f'/gate/{profile}/drain.token')
+        guest(server, server_action, **server_kwargs)
         guest(client, 'client', profile=profile)
         return ready(f'{profile} workers={workers}')
 
@@ -199,6 +210,23 @@ def main():
                 pass
             time.sleep(.1)
         raise RuntimeError('passive status did not confirm applied settings and negotiated features')
+
+    def current_worker_epoch(worker_id):
+        """Read the active master's worker_ready receipt after replacement.
+
+        The negotiated drain protocol deliberately requires an exact owner
+        epoch.  The crash-recovery portion of this gate replaces workers before
+        the drain probe, so a fixed epoch would test stale-request rejection
+        rather than the live control path.
+        """
+        log = root / 'master.log'
+        pattern = re.compile(
+            rf'code="worker_ready".*?worker_id={worker_id}\b.*?epoch=Some\((\d+)\)')
+        for line in reversed(log.read_text().splitlines() if log.exists() else []):
+            match = pattern.search(line)
+            if match:
+                return int(match.group(1))
+        raise RuntimeError(f'worker {worker_id} has no current ready epoch')
 
     try:
         image = json.loads(run(['docker', 'image', 'inspect', args.image]).stdout)[0]
@@ -283,6 +311,28 @@ def main():
                 data = json.loads(guest(client, 'probes', profile=profile).stdout)
                 data.update(profile=profile)
                 rows.append(data)
+                if args.drain_wire and profile == 'recommended':
+                    owner_epoch = current_worker_epoch(1)
+                    receipt = dex(
+                        client,
+                        'python3', '/gate/guest.py', 'drain-control',
+                        '--drain-control', f'/gate/{profile}/drain.sock',
+                        '--drain-token', 'isolated-drain-wire-token-v1',
+                        '--worker-id', '1', '--owner-epoch', str(owner_epoch),
+                        '--remaining-ms', '1200', timeout=45, check=False,
+                    )
+                    drain_result = json.loads(receipt.stdout or '{}')
+                    drain_result['exit_code'] = receipt.returncode
+                    write('negotiated-drain-wire.json', drain_result)
+                    rows.append({'case': 'negotiated_proxy_drain_wire',
+                                 'gate': 'PASS' if receipt.returncode == 0 and
+                                 drain_result.get('transport_drained') and
+                                 drain_result.get('os_reaped') and
+                                 drain_result.get('replacement_ready') else 'FAIL',
+                                 'receipt': drain_result})
+                    if receipt.returncode or rows[-1]['gate'] != 'PASS':
+                        raise RuntimeError(f'negotiated drain receipt failed: {drain_result}')
+                    ready('replacement after negotiated drain')
                 if profile == 'recommended':
                     udp_before = {side: json.loads(guest(name, 'snapshot', label=label).stdout)
                                   for side, name, label in [('client', client, 'client'), ('server', server, 'master')]}
