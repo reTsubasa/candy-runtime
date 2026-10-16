@@ -727,6 +727,11 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
                             Err("code=owner_commit_expired module=packet_port_manager reason=prepare_or_authorization_deadline_elapsed action=preserve_active_owner".into())
                         } else if let Err(error) = (pending.as_ref().expect("validated pending transaction").authorization)() {
                             Err(format!("code=owner_commit_unauthorized module=packet_port_manager detail={error} action=preserve_active_owner"))
+                        } else if owner.as_ref().is_some_and(|previous| previous.to_worker.pending_packets() != 0) {
+                            // This actor is the only producer. No await separates
+                            // this check from the send fence and owner swap, so
+                            // accepted old output cannot be cancelled by commit.
+                            Err("code=owner_commit_queue_pending module=packet_port_manager reason=predecessor_outbound_packets_pending action=retry_exact_commit".into())
                         } else {
                             let candidate = pending.take().expect("validated pending transaction");
                             let mut replacement = candidate.owner;

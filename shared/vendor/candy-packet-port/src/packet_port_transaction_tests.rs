@@ -127,6 +127,106 @@ async fn kernel_packet(kernel: &UnixDatagram, value: u8) {
     assert_eq!(&packet[..length], &[value; 64]);
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn commit_preserves_queued_old_output_and_retries_exact_prepared_owner() {
+    struct ObservedTun {
+        port: InheritedPacketFd,
+        received: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl PacketPort for ObservedTun {
+        async fn recv_packet(&self) -> io::Result<Vec<u8>> {
+            let packet = self.port.recv_packet().await?;
+            self.received
+                .store(true, std::sync::atomic::Ordering::Release);
+            Ok(packet)
+        }
+        async fn send_packet(&self, packet: &[u8]) -> io::Result<()> {
+            self.port.send_packet(packet).await
+        }
+    }
+    let (tun, kernel) = UnixDatagram::pair().unwrap();
+    let received = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let tun = ObservedTun {
+        port: InheritedPacketFd::new(OwnedFd::from(tun.into_std().unwrap())).unwrap(),
+        received: received.clone(),
+    };
+    let (io, worker) = ports(1);
+    let mut prefilled = 0;
+    while io.try_send_packet(&[0x45; 64]).unwrap() {
+        prefilled += 1;
+        assert!(prefilled < 65_536, "socket never applied backpressure");
+    }
+    assert!(prefilled > 0);
+    let (updates, receiver) = mpsc::channel(8);
+    let (stop, shutdown) = watch::channel(false);
+    let task = tokio::spawn(run_managed_packet_port_bridge(
+        tun,
+        binding(1),
+        receiver,
+        shutdown,
+    ));
+    change(
+        &updates,
+        PacketPortOwnerChange::Attach {
+            port: io,
+            auth_deadline: Instant::now() + Duration::from_secs(10),
+        },
+    )
+    .await
+    .0
+    .unwrap();
+    let transaction = transaction(1, 2, Some(1));
+    let (io, next) = ports(2);
+    change(&updates, prepare(transaction.clone(), io))
+        .await
+        .0
+        .unwrap();
+    kernel.send(&[0x46; 64]).await.unwrap();
+    tokio::time::timeout(Duration::from_millis(50), async {
+        while !received.load(std::sync::atomic::Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let (result, receipt) = change(
+        &updates,
+        PacketPortOwnerChange::CommitOwner {
+            transaction: transaction.clone(),
+        },
+    )
+    .await;
+    assert!(result.unwrap_err().contains("owner_commit_queue_pending"));
+    assert_eq!(receipt.binding, Some(binding(1)));
+    assert_eq!(receipt.pending.as_ref().unwrap().transaction, transaction);
+    assert_eq!(
+        receipt.pending.unwrap().phase,
+        OwnerTransactionPhase::Prepared
+    );
+    for _ in 0..prefilled {
+        assert_eq!(worker.recv_packet().await.unwrap(), vec![0x45; 64]);
+    }
+    assert_eq!(worker.recv_packet().await.unwrap(), vec![0x46; 64]);
+    change(
+        &updates,
+        PacketPortOwnerChange::CommitOwner {
+            transaction: transaction.clone(),
+        },
+    )
+    .await
+    .0
+    .unwrap();
+    kernel.send(&[0x47; 64]).await.unwrap();
+    assert_eq!(next.recv_packet().await.unwrap(), vec![0x47; 64]);
+    stop.send_replace(true);
+    let counters = task.await.unwrap().unwrap();
+    assert_eq!(counters.to_worker_packets, 2);
+    assert_eq!(counters.queue_drops, 0);
+    assert_eq!(counters.stale_drops, 0);
+    assert_eq!(counters.deadline_drops, 0);
+}
+
 #[tokio::test]
 async fn failed_retirement_is_exact_bounded_idempotent_and_preserves_new_owner() {
     let f = Fixture::new().await;
