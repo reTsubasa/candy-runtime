@@ -1,6 +1,123 @@
 use super::*;
 
 #[cfg(any(test, all(feature = "experimental-tunio-rebind", target_os = "linux")))]
+#[derive(Debug, PartialEq, Eq)]
+enum ForwardReplay {
+    Prepare,
+    Prepared,
+    Active,
+}
+
+#[cfg(any(test, all(feature = "experimental-tunio-rebind", target_os = "linux")))]
+fn forward_replay(status: Body, expected: &ForwardOwner) -> Result<ForwardReplay> {
+    use candy_netd_proto::v2::Phase;
+    if let Body::Error {
+        code,
+        module,
+        reason,
+    } = status
+    {
+        return Err(NetdActivationFailure {
+            code,
+            module,
+            reason,
+        }
+        .into());
+    }
+    let Body::ForwardStatus {
+        owner,
+        phase,
+        candidate_owner,
+        last_fencing_token,
+        ..
+    } = status
+    else {
+        bail!("code=mbb_forward_status_missing module=sdwan_handoff action=preserve_original_transaction");
+    };
+    if let Some(candidate) = candidate_owner {
+        anyhow::ensure!(candidate == *expected,
+            "code=mbb_forward_candidate_conflict module=sdwan_handoff action=preserve_unknown_netd_transaction");
+        return Ok(ForwardReplay::Prepared);
+    }
+    if owner.as_ref() == Some(expected) {
+        return match phase {
+            Some(Phase::Active) => Ok(ForwardReplay::Active),
+            Some(Phase::Prepared) => Ok(ForwardReplay::Prepared),
+            _ => bail!("code=mbb_forward_owner_unavailable module=sdwan_handoff action=preserve_original_transaction"),
+        };
+    }
+    anyhow::ensure!(
+        last_fencing_token < expected.fencing_token
+            && owner
+                .as_ref()
+                .is_none_or(|current| current.fencing_token < expected.fencing_token),
+        "code=mbb_forward_owner_conflict module=sdwan_handoff action=preserve_consumed_fence"
+    );
+    Ok(ForwardReplay::Prepare)
+}
+
+#[cfg(any(test, all(feature = "experimental-tunio-rebind", target_os = "linux")))]
+fn mbb_final_owner(
+    original: &ForwardOwner,
+    frozen: bool,
+    authority_cap: u64,
+    now: u64,
+) -> Result<ForwardOwner> {
+    let mut owner = original.clone();
+    if !frozen {
+        owner.auth_deadline_mono_ms = owner
+            .auth_deadline_mono_ms
+            .min(authority_cap.saturating_sub(1));
+        owner.lease_deadline_mono_ms = now.saturating_add(30_000).min(owner.auth_deadline_mono_ms);
+    }
+    anyhow::ensure!(owner.auth_deadline_mono_ms <= authority_cap
+        && now < owner.auth_deadline_mono_ms
+        && owner.lease_deadline_mono_ms <= owner.auth_deadline_mono_ms,
+        "code=mbb_forward_owner_expired module=sdwan_handoff action=preserve_original_authority_cap");
+    Ok(owner)
+}
+
+#[cfg(any(test, all(feature = "experimental-tunio-rebind", target_os = "linux")))]
+fn mbb_repair_expired_lease(owner: &ForwardOwner, status: &Body, now: u64) -> Result<ForwardOwner> {
+    if now < owner.lease_deadline_mono_ms {
+        return Ok(owner.clone());
+    }
+    let Body::ForwardStatus {
+        owner: current,
+        phase,
+        candidate_owner: None,
+        last_fencing_token,
+        ..
+    } = status
+    else {
+        bail!("code=mbb_forward_expired_lease_unconfirmed module=sdwan_handoff action=preserve_unknown_netd_transaction");
+    };
+    // Scoped status runs behind earlier operations in this domain. Only a
+    // reclaimed exact owner or an older owner with no pending candidate may
+    // be replaced. A new local fence repairs the lease; signed authorization,
+    // business epoch and TUNIO transaction remain unchanged.
+    anyhow::ensure!(
+        now < owner.auth_deadline_mono_ms
+            && *last_fencing_token <= owner.fencing_token
+            && current.as_ref().is_none_or(|current| {
+                (current == owner && *phase == Some(candy_netd_proto::v2::Phase::Revoked))
+                    || (current.domain_id == owner.domain_id
+                        && current.signed_generation <= owner.signed_generation
+                        && current.fencing_token < owner.fencing_token)
+            }),
+        "code=mbb_forward_expired_lease_conflict module=sdwan_handoff action=preserve_original_authority_and_consumed_fence"
+    );
+    Ok(ForwardOwner {
+        fencing_token: owner
+            .fencing_token
+            .checked_add(1)
+            .context("MBB forwarding fence exhausted")?,
+        lease_deadline_mono_ms: now.saturating_add(30_000).min(owner.auth_deadline_mono_ms),
+        ..owner.clone()
+    })
+}
+
+#[cfg(any(test, all(feature = "experimental-tunio-rebind", target_os = "linux")))]
 fn next_authority_epochs(binding_epoch: u64, epochs: &[u64], fences: &[u64]) -> Result<(u64, u64)> {
     Ok((
         next_recovery_epoch(std::iter::once(binding_epoch).chain(epochs.iter().copied()))?,
@@ -38,7 +155,7 @@ pub(super) fn run(_: &Path) -> Result<()> {
 mod linux {
     use super::*;
     use crate::signed_snapshot::Snapshot;
-    use candy_netd_proto::v2::{ForwardAuthority, ForwardAuthorityReceipt};
+    use candy_netd_proto::v2::{Body, ForwardAuthority, ForwardAuthorityReceipt};
     use candy_process_control::{
         exchange, process_identity, process_is_current_confirmed, ControlOperation, ControlRequest,
         ProcessIdentity,
@@ -421,13 +538,20 @@ mod linux {
         let reported = status["reported_at_mono_ms"]
             .as_u64()
             .context("fresh packet report clock absent")?;
-        expect_ack(
-            netd,
-            Operation::ForwardAuthorize {
-                owner: owner.clone(),
-                authority: forward_authority(&envelope, identity),
-            },
-        )?;
+        let (status, fd) = netd.exchange(Operation::ForwardStatus)?;
+        if fd.is_some() {
+            bail!("unexpected FD in forwarding status");
+        }
+        let replay = forward_replay(status, owner)?;
+        if replay != ForwardReplay::Active {
+            expect_ack(
+                netd,
+                Operation::ForwardAuthorize {
+                    owner: owner.clone(),
+                    authority: forward_authority(&envelope, identity),
+                },
+            )?;
+        }
         expect_ack(
             netd,
             Operation::ForwardCommitAuthorized {
@@ -1476,6 +1600,195 @@ pub(super) fn commit_authorized(
 #[cfg(test)]
 mod epoch_tests {
     use super::*;
+
+    fn replay_owner() -> ForwardOwner {
+        ForwardOwner {
+            domain_id: [1; 16],
+            signed_generation: 3,
+            worker_epoch: 2,
+            fencing_token: 4,
+            auth_deadline_mono_ms: 100_000,
+            lease_deadline_mono_ms: 30_000,
+        }
+    }
+
+    fn replay_status(
+        owner: Option<ForwardOwner>,
+        phase: Option<candy_netd_proto::v2::Phase>,
+        candidate_owner: Option<ForwardOwner>,
+        fence: u64,
+    ) -> Body {
+        Body::ForwardStatus {
+            owner,
+            phase,
+            candidate_owner,
+            last_fencing_token: fence,
+            failure_revision: 0,
+            failed_prefixes: vec![],
+            pending_failure_revision: None,
+            pending_failed_prefixes: None,
+        }
+    }
+
+    #[test]
+    fn mbb_replays_exact_owner_after_prepare_authorize_and_commit_reply_loss() {
+        use candy_netd_proto::v2::Phase;
+        let owner = mbb_final_owner(&replay_owner(), false, 90_000, 10_000).unwrap();
+        let mut previous = owner.clone();
+        previous.worker_epoch -= 1;
+        previous.fencing_token -= 1;
+        assert_eq!(
+            forward_replay(
+                replay_status(Some(previous.clone()), Some(Phase::Active), None, 3),
+                &owner
+            )
+            .unwrap(),
+            ForwardReplay::Prepare
+        );
+        // Prepare and Authorize may finish after the caller's IPC deadline.
+        // Neither retry may recompute deadlines or consume a second fence.
+        for now in [10_100, 12_000, 20_000] {
+            let replayed = mbb_final_owner(&owner, true, 90_000, now).unwrap();
+            assert_eq!(replayed, owner);
+            assert_eq!(
+                forward_replay(
+                    replay_status(
+                        Some(previous.clone()),
+                        Some(Phase::Active),
+                        Some(owner.clone()),
+                        4
+                    ),
+                    &replayed
+                )
+                .unwrap(),
+                ForwardReplay::Prepared
+            );
+        }
+        // A lost Commit reply must skip Prepare/Authorize, while the caller
+        // still submits a fresh authority receipt to netd's idempotent commit.
+        assert_eq!(
+            forward_replay(
+                replay_status(Some(owner.clone()), Some(Phase::Active), None, 4),
+                &owner
+            )
+            .unwrap(),
+            ForwardReplay::Active
+        );
+        // A first owner without a retained predecessor follows the same path.
+        assert_eq!(
+            forward_replay(
+                replay_status(Some(owner.clone()), Some(Phase::Prepared), None, 4),
+                &owner
+            )
+            .unwrap(),
+            ForwardReplay::Prepared
+        );
+    }
+
+    #[test]
+    fn mbb_replay_rejects_changed_owner_consumed_fence_and_expired_authority() {
+        use candy_netd_proto::v2::Phase;
+        let owner = mbb_final_owner(&replay_owner(), false, 90_000, 10_000).unwrap();
+        for changed in [
+            ForwardOwner {
+                lease_deadline_mono_ms: owner.lease_deadline_mono_ms + 1,
+                ..owner.clone()
+            },
+            ForwardOwner {
+                auth_deadline_mono_ms: owner.auth_deadline_mono_ms - 1,
+                ..owner.clone()
+            },
+            ForwardOwner {
+                domain_id: [2; 16],
+                ..owner.clone()
+            },
+        ] {
+            assert!(forward_replay(
+                replay_status(Some(changed.clone()), Some(Phase::Active), None, 4),
+                &owner
+            )
+            .is_err());
+            assert!(forward_replay(replay_status(None, None, Some(changed), 4), &owner).is_err());
+        }
+        for phase in [Phase::Preparing, Phase::Guarded, Phase::Revoked] {
+            assert!(forward_replay(
+                replay_status(Some(owner.clone()), Some(phase), None, 4),
+                &owner
+            )
+            .is_err());
+        }
+        assert!(forward_replay(replay_status(None, None, None, 4), &owner).is_err());
+        assert!(forward_replay(Body::Ack, &owner).is_err());
+        assert!(mbb_final_owner(&owner, true, owner.auth_deadline_mono_ms - 1, 20_000).is_err());
+        assert!(mbb_final_owner(&owner, true, 90_000, owner.auth_deadline_mono_ms).is_err());
+        assert_eq!(
+            mbb_final_owner(&owner, true, 90_000, 20_000)
+                .unwrap()
+                .auth_deadline_mono_ms,
+            89_999
+        );
+    }
+
+    #[test]
+    fn mbb_expired_lease_repairs_with_new_fence_without_extending_authority() {
+        use candy_netd_proto::v2::Phase;
+        let owner = mbb_final_owner(&replay_owner(), false, 90_000, 10_000).unwrap();
+        let now = owner.lease_deadline_mono_ms;
+        let revoked = replay_status(Some(owner.clone()), Some(Phase::Revoked), None, 4);
+        let repaired = mbb_repair_expired_lease(&owner, &revoked, now).unwrap();
+        assert_eq!(repaired.fencing_token, owner.fencing_token + 1);
+        assert_eq!(repaired.auth_deadline_mono_ms, owner.auth_deadline_mono_ms);
+        assert_eq!(repaired.worker_epoch, owner.worker_epoch);
+        assert_eq!(repaired.lease_deadline_mono_ms, now + 30_000);
+        assert_eq!(
+            forward_replay(revoked, &repaired).unwrap(),
+            ForwardReplay::Prepare
+        );
+        // If Prepare succeeded but its response was lost, the same new fence
+        // and deadline are retained. No duplicate candidate is created.
+        let prepared = replay_status(
+            Some(owner.clone()),
+            Some(Phase::Revoked),
+            Some(repaired.clone()),
+            5,
+        );
+        assert_eq!(
+            mbb_repair_expired_lease(&repaired, &prepared, now + 100).unwrap(),
+            repaired
+        );
+        assert_eq!(
+            forward_replay(prepared, &repaired).unwrap(),
+            ForwardReplay::Prepared
+        );
+        let active = replay_status(Some(repaired.clone()), Some(Phase::Active), None, 5);
+        assert_eq!(
+            forward_replay(active, &repaired).unwrap(),
+            ForwardReplay::Active
+        );
+        // Expired, reclaimed candidates may leave only the prior owner and a
+        // consumed fence watermark; that scope also permits a greater fence.
+        let mut previous = owner.clone();
+        previous.fencing_token -= 1;
+        previous.worker_epoch -= 1;
+        let reclaimed = replay_status(Some(previous), Some(Phase::Revoked), None, 4);
+        assert_eq!(
+            mbb_repair_expired_lease(&owner, &reclaimed, now).unwrap(),
+            repaired
+        );
+        for conflicting in [
+            replay_status(Some(owner.clone()), Some(Phase::Active), None, 4),
+            replay_status(
+                Some(owner.clone()),
+                Some(Phase::Revoked),
+                Some(repaired.clone()),
+                5,
+            ),
+            replay_status(Some(owner.clone()), Some(Phase::Revoked), None, 5),
+        ] {
+            assert!(mbb_repair_expired_lease(&owner, &conflicting, now).is_err());
+        }
+        assert!(mbb_repair_expired_lease(&owner, &reclaimed, owner.auth_deadline_mono_ms).is_err());
+    }
 
     #[test]
     fn signed_renewal_clock_sample_survives_stop_spawn_crossing_wall_seconds() {

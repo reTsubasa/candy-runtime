@@ -888,6 +888,7 @@ fn mbb_finalize(
         .as_ref()
         .context("MBB predecessor absent")?
         .clone();
+    let owner_frozen = journal.mbb_outcome.is_some();
     let outcome = if drain_failed {
         "failed_drain_preserved"
     } else {
@@ -905,34 +906,58 @@ fn mbb_finalize(
     // short-lived reservation is solely for this handoff, never a boot target.
     plan.worker_candidate_plan = None;
     let mut netd = NetdControl::new(plan);
-    let mut owner = journal.owner.clone();
-    owner.auth_deadline_mono_ms = owner.auth_deadline_mono_ms.min(
+    // The owner is a transaction identity, not a lease suggestion.  Once the
+    // first finalization attempt is journaled, every retry must replay this
+    // exact owner.  Recomputing the deadlines here used to mutate the same
+    // fencing token after netd had accepted it, producing a permanent
+    // stale_forward_owner/forward_candidate_pending loop when an IPC reply
+    // was lost after the backend committed.
+    let mut owner = mbb_final_owner(
+        &journal.owner,
+        owner_frozen,
         actual
             .actual_deadline_mono_ms
-            .context("MBB actual authority cap absent")?
-            .saturating_sub(1),
-    );
-    owner.lease_deadline_mono_ms = monotonic_ms()?
-        .saturating_add(30_000)
-        .min(owner.auth_deadline_mono_ms);
-    journal.owner = owner.clone();
-    publish(journal_path, journal)?;
-    expect_ack(
-        &mut netd,
-        Operation::ForwardPrepare {
-            infra_id: plan.infrastructure.infra_id,
-            infra_generation: plan.infrastructure.generation,
-            owner: owner.clone(),
-            declaration: plan.declaration.clone(),
-        },
+            .context("MBB actual authority cap absent")?,
+        monotonic_ms()?,
     )?;
-    expect_ack(
-        &mut netd,
-        Operation::ForwardAuthorize {
-            owner: owner.clone(),
-            authority: forward_authority(&envelope, context.io_identity),
-        },
-    )?;
+    if !owner_frozen {
+        journal.owner = owner.clone();
+        publish(journal_path, journal)?;
+    }
+    let (forward_state, fd) = netd.exchange(Operation::ForwardStatus)?;
+    if fd.is_some() {
+        bail!("unexpected FD in forwarding status");
+    }
+    let repaired = mbb_repair_expired_lease(&owner, &forward_state, monotonic_ms()?)?;
+    if repaired != owner {
+        let old_fence = owner.fencing_token;
+        owner = repaired;
+        journal.owner = owner.clone();
+        publish(journal_path, journal)?;
+        eprintln!("level=warn code=mbb_forward_expired_lease_repaired module=sdwan_handoff transaction_id={} old_fence={} new_fence={} auth_deadline_mono_ms={} action=retain_exact_business_io_and_authority", envelope.transaction_id, old_fence, owner.fencing_token, owner.auth_deadline_mono_ms);
+    }
+    plan.fencing_token = plan.fencing_token.max(owner.fencing_token);
+    let replay = forward_replay(forward_state, &owner)?;
+    if replay == ForwardReplay::Prepare {
+        expect_ack(
+            &mut netd,
+            Operation::ForwardPrepare {
+                infra_id: plan.infrastructure.infra_id,
+                infra_generation: plan.infrastructure.generation,
+                owner: owner.clone(),
+                declaration: plan.declaration.clone(),
+            },
+        )?;
+    }
+    if replay != ForwardReplay::Active {
+        expect_ack(
+            &mut netd,
+            Operation::ForwardAuthorize {
+                owner: owner.clone(),
+                authority: forward_authority(&envelope, context.io_identity),
+            },
+        )?;
+    }
     let status = record.private_status()?;
     let token = status["readiness_token"]
         .as_str()

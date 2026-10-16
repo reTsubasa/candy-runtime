@@ -119,3 +119,59 @@ Production inspection and recovery code are unchanged. This is a source test
 change after the v10 freeze; v10 business binaries are not claimed to contain
 it. Native Agent tests passed 104/104; this Linux-only helper test still requires
 the coordinated next Linux test build.
+
+## v10 finalization replay defect
+
+The strict v10 scale gate reached exact bilateral drain in all four domains,
+but failed to converge to two workers within its unchanged 60-second deadline.
+Candidate Core status contained the exact installed transaction and complete
+drain markers. Client renewal journals recorded `mbb_outcome=drained`, while
+netd journals had already accepted the replacement owner for three domains.
+The remaining candidate and repeated `stale_forward_owner` /
+`forward_candidate_pending` errors are preserved under
+`shared-pool-negotiated-final-v10/shared-pool-state`.
+
+This is a production transaction replay defect. `mbb_finalize` recalculated the
+authorization and lease deadlines on every call, then blindly submitted
+ForwardPrepare and ForwardAuthorize for the same fencing token. A netd domain
+operation can complete after the caller's IPC deadline: replaying Prepare
+against an already Active owner then fails the monotonic fence check, while
+changing deadlines against a retained candidate fails exact owner equality.
+ForwardAuthorize is valid only for Prepared, so it also cannot be blindly
+replayed after Commit has succeeded. The IPC timeout alone does not prove that
+the backend operation failed.
+
+The fix persists the final owner once with the existing terminal MBB outcome
+and retains every field across retries. Scoped ForwardStatus selects Prepare,
+exact Prepared continuation, or exact Active continuation. An exact Active
+continuation skips Prepare and Authorize, then still replays
+ForwardCommitAuthorized with fresh actual TUNIO/Core evidence so netd checks
+the original authority, process identities, authorization cap and packet
+proof. It does not infer authority from public forwarding status alone.
+Unknown candidates, changed same-fence owners, consumed fences, Guarded or
+Revoked owners and expired authority remain explicit errors; their owner or
+deadline is never silently changed. Existing pre-fix journals whose exact
+owner was already corrupted are not automatically adopted by this repair.
+
+Native Agent full library tests passed 106/106. Two added regressions cover
+reply loss after Prepare/Authorize/Commit, exact candidate and Active replay,
+changed deadlines/domain identity, consumed fencing token, guarded/revoked
+state and immutable authorization expiry. Linux compilation, the real
+netd/TUNIO integration and strict dynamic 1/2/4/2/1 gate remain required on the
+next coordinated frozen build; v10 remains a recorded failure.
+
+When a replay reaches the lease deadline before the original authorization cap,
+the agent now has one scoped repair path. It requires netd status with no
+unknown candidate, an exact revoked/reclaimed owner or an older owner, and a
+watermark that has not consumed a higher fence. It allocates and journals a
+strictly higher forwarding fence, keeps the original signed authorization cap,
+worker epoch, transaction and declaration, and starts the normal Prepare /
+Authorize / receipt Commit sequence. The lease remains bounded by the original
+cap. An active same-fence owner, a higher watermark, an unknown candidate or
+the expired authorization cap is a hard preservation error and cannot be
+silently adopted or extended.
+
+After adding this lease-expiry repair, native Agent library tests passed
+107/107; all three focused MBB replay/expiry tests passed. The additional
+expiry test proves a new local fence is persisted/replayed exactly and cannot
+extend the original authorization cap or override a higher consumed fence.
