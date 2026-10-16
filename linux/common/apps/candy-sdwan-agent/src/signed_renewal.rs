@@ -1042,10 +1042,32 @@ mod linux {
         } else {
             reserve_worker_slot(&plan)?
         };
-        // Quiesce the live routing owner before stopping its Core. Retaining the
-        // route-to-TUN path lets TUNIO discard unavailable packets without
-        // injecting EHOSTUNREACH into existing UDP sockets during this bounded
-        // handoff. Expired/revoked authority keeps the explicit reject path.
+        // A candidate must be running before the old worker is retired whenever
+        // its placement can overlap safely. This is the local half of
+        // make-before-break: the old owner remains authenticated and the TUN/
+        // PacketPort infrastructure stays intact while the candidate performs
+        // its listener registration, authority attach and reciprocal probe.
+        // Only the shared listener has an authenticated ingress handoff that
+        // can accept both generations concurrently. Dedicated workers retain
+        // an exclusive slot (and ordinary workers may bind the same endpoint),
+        // so those paths use the bounded stop-then-spawn compatibility barrier.
+        let overlap_candidate = plan.shared_listener.is_some();
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        let mut child = if overlap_candidate {
+            eprintln!("level=info code=mbb_candidate_spawned_before_retire module=sdwan_activation transaction_id={} old_worker_present={} placement_overlap=true", transaction, old_worker.is_some());
+            Some(spawn_business_worker_with_slot(
+                &plan,
+                &worker_socket,
+                &token,
+                slot,
+            )?)
+        } else {
+            None
+        };
+        // Quiesce the live routing owner before committing the replacement.
+        // Guarding retains the route-to-TUN path and lets TUNIO discard packets
+        // for a briefly unavailable lane without injecting EHOSTUNREACH into
+        // existing UDP sockets.
         if let Some(previous) = &previous {
             if matches!(
                 previous_phase,
@@ -1058,6 +1080,9 @@ mod linux {
                     },
                 ) {
                     eprintln!("level=warn code=forward_guard_failed module=sdwan_activation owner_epoch={} detail={error:#} action=preserve_live_owner_abort_handoff_retry", previous.worker_epoch);
+                    if let Some(ref mut candidate) = child {
+                        stop_business(candidate);
+                    }
                     return Err(error.context(
                         "live forwarding owner could not be guarded; preserving it and retrying handoff",
                     ));
@@ -1066,22 +1091,28 @@ mod linux {
                 publish(&journal_path, &journal)?;
             }
         }
-        // A retired Core must not reconnect and replace the candidate's remote
-        // lane. Signed inputs and the recovery journal are durable before this
-        // business-only barrier; netd and TUNIO keep infrastructure ownership.
-        if let Some(old) = &old_worker {
-            if let Err(error) = stop_record(old, old_plan.as_ref().unwrap()) {
-                eprintln!("level=warn code=renewal_old_worker_barrier_pending module=sdwan_activation old_pid={} detail={error:#} action=retry_authenticated_stop_preserve_infrastructure", old.pid);
-                return Err(error.context(ManagedProofPending));
+        // A non-shared worker cannot be spawned while its endpoint or slot is
+        // owned by the old process. Retire that worker only after the guard has
+        // succeeded; shared-listener domains already have a live candidate.
+        if !overlap_candidate {
+            eprintln!("level=info code=mbb_slot_overlap_unavailable module=sdwan_activation transaction_id={} detail=dedicated_worker_slot_is_exclusive action=bounded_stop_spawn_fallback", transaction);
+            if let Some(old) = &old_worker {
+                if let Err(error) = stop_record(old, old_plan.as_ref().unwrap()) {
+                    eprintln!("level=warn code=renewal_old_worker_barrier_pending module=sdwan_activation old_pid={} detail={error:#} action=retry_authenticated_stop_preserve_infrastructure", old.pid);
+                    return Err(error.context(ManagedProofPending));
+                }
             }
-        }
-        journal.phase = "old_worker_retired".into();
-        publish(&journal_path, &journal)?;
-        if same_slot {
+            journal.phase = "old_worker_retired".into();
+            publish(&journal_path, &journal)?;
             slot = reserve_worker_slot(&plan)?;
+            child = Some(spawn_business_worker_with_slot(
+                &plan,
+                &worker_socket,
+                &token,
+                slot,
+            )?);
         }
-        let token = uuid::Uuid::new_v4().simple().to_string();
-        let mut child = spawn_business_worker_with_slot(&plan, &worker_socket, &token, slot)?;
+        let mut child = child.context("candidate worker was not spawned")?;
         drop(worker_socket);
         let candidate = process_identity(child.id())?;
         let new_binding = candy_tunio::attach_control::PacketPortBinding {
