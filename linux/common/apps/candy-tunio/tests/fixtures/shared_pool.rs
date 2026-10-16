@@ -339,6 +339,113 @@ fn ping(domain: &Domain) -> bool {
     .success()
 }
 
+fn drained_transaction_matches(journal: &serde_json::Value, status: &serde_json::Value) -> bool {
+    let proof = &status["worker_candidate_transaction"];
+    let Some(expected_peers) = journal["mbb_reservation"]["expected_peers"].as_array() else {
+        return false;
+    };
+    let Some(peers) = proof["peers"].as_array() else {
+        return false;
+    };
+    journal["phase"] == "committed"
+        && journal["mbb_outcome"] == "drained"
+        && proof["transaction_id"].is_string()
+        && proof["transaction_id"] == journal["envelope"]["transaction_id"]
+        && proof["phase"] == "installed"
+        && proof["local"]["packet_slot"].is_object()
+        && proof["local"]["packet_slot"] == journal["envelope"]["binding"]
+        && !expected_peers.is_empty()
+        && peers.len() == expected_peers.len()
+        && expected_peers.iter().enumerate().all(|(index, expected)| {
+            expected["attachment_id"].is_array()
+                && expected["selector"].is_object()
+                && expected["barrier"].is_object()
+                && !expected_peers[..index]
+                    .iter()
+                    .any(|prior| prior["attachment_id"] == expected["attachment_id"])
+                && peers
+                    .iter()
+                    .filter(|peer| {
+                        peer["attachment_id"] == expected["attachment_id"]
+                            && peer["selector"] == expected["selector"]
+                            && peer["barrier"] == expected["barrier"]
+                            && [
+                                "prepared",
+                                "installed",
+                                "probe_sent",
+                                "probe_received",
+                                "drain_complete",
+                            ]
+                            .iter()
+                            .all(|field| peer[field] == true)
+                    })
+                    .count()
+                    == 1
+        })
+}
+
+#[test]
+fn scale_ready_waits_for_exact_bilateral_drain() {
+    let expected = serde_json::json!({"attachment_id":[14], "selector":{"id":"peer"}, "barrier":{"id":"barrier"}});
+    let journal = serde_json::json!({"phase":"committed", "mbb_outcome":"drained",
+        "envelope":{"transaction_id":"exact", "binding":{"owner_epoch":2}},
+        "mbb_reservation":{"expected_peers":[expected]}});
+    let status = serde_json::json!({"worker_candidate_transaction":{
+        "phase":"installed", "transaction_id":"exact", "local":{"packet_slot":{"owner_epoch":2}},
+        "peers":[{"attachment_id":[14], "selector":{"id":"peer"}, "barrier":{"id":"barrier"},
+            "prepared":true,"installed":true,"probe_sent":true,"probe_received":true,"drain_complete":true}]}});
+    assert!(drained_transaction_matches(&journal, &status));
+    for field in [
+        "prepared",
+        "installed",
+        "probe_sent",
+        "probe_received",
+        "drain_complete",
+    ] {
+        let mut pending = status.clone();
+        pending["worker_candidate_transaction"]["peers"][0][field] = false.into();
+        assert!(!drained_transaction_matches(&journal, &pending), "{field}");
+    }
+    for (pointer, value) in [
+        (
+            "/worker_candidate_transaction/transaction_id",
+            serde_json::json!("stale"),
+        ),
+        (
+            "/worker_candidate_transaction/local/packet_slot/owner_epoch",
+            serde_json::json!(1),
+        ),
+        (
+            "/worker_candidate_transaction/peers/0/selector/id",
+            serde_json::json!("stale"),
+        ),
+        (
+            "/worker_candidate_transaction/peers/0/barrier/id",
+            serde_json::json!("stale"),
+        ),
+    ] {
+        let mut stale = status.clone();
+        *stale.pointer_mut(pointer).unwrap() = value;
+        assert!(!drained_transaction_matches(&journal, &stale), "{pointer}");
+    }
+    let mut duplicate = journal.clone();
+    duplicate["mbb_reservation"]["expected_peers"]
+        .as_array_mut()
+        .unwrap()
+        .push(expected);
+    let mut duplicate_status = status.clone();
+    let peer = duplicate_status["worker_candidate_transaction"]["peers"][0].clone();
+    duplicate_status["worker_candidate_transaction"]["peers"]
+        .as_array_mut()
+        .unwrap()
+        .push(peer);
+    assert!(!drained_transaction_matches(&duplicate, &duplicate_status));
+    assert!(!drained_transaction_matches(
+        &serde_json::Value::Null,
+        &status
+    ));
+}
+
 fn ready(domain: &mut Domain, worker: usize) -> Option<serde_json::Value> {
     let record = status(&domain.root.join("worker-process.json"))?;
     let desired = status(&domain.root.join("plan.json"))?;
@@ -354,6 +461,13 @@ fn ready(domain: &mut Domain, worker: usize) -> Option<serde_json::Value> {
         || proof["worker_placement"]["revision"] != desired["placement"]["revision"]
     {
         return None;
+    }
+    // Active packet ownership is published before asynchronous bilateral drain.
+    if record["worker_epoch"].as_u64()? > 1 {
+        let journal = status(&domain.root.join("worker-process.renewal.json"))?;
+        if !drained_transaction_matches(&journal, &proof) {
+            return None;
+        }
     }
     let (body, _) = domain
         .netd
