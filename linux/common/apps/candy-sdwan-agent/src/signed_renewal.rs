@@ -65,6 +65,12 @@ mod linux {
         candidate_record: PathBuf,
         owner: ForwardOwner,
         old_worker: Option<crate::process_record::ManagedProcessRecord>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate_owner: Option<super::super::candidate_ownership::CandidateOwner>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mbb_reservation: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mbb_failed_retirement: Option<super::super::candidate_ownership::CandidateProof>,
     }
 
     fn publish<T: Serialize>(path: &Path, object: &T) -> Result<()> {
@@ -581,6 +587,27 @@ mod linux {
             if previous_journal.schema_version != 1 {
                 bail!("renewal journal schema differs");
             }
+            if previous_journal.phase != "committed"
+                && (previous_journal.mbb_reservation.is_some()
+                    || previous_journal.phase.starts_with("mbb_"))
+            {
+                let mut previous_plan = read_plan(&previous_journal.candidate_plan)?;
+                let context = MbbContext::new(
+                    path,
+                    &desired,
+                    &io_record,
+                    takeover.controller_epoch,
+                    binding,
+                )?;
+                return run_mbb_transaction(
+                    &context,
+                    &mut previous_plan,
+                    &mut previous_journal,
+                    &journal_path,
+                    None,
+                )
+                .map_err(|error| error.context(ManagedProofPending));
+            }
             consumed_epoch = consumed_epoch.max(previous_journal.owner.worker_epoch);
             consumed_fence = consumed_fence.max(previous_journal.owner.fencing_token);
             if previous_journal.phase == "committed" {
@@ -1016,6 +1043,9 @@ mod linux {
                 .clone(),
             owner: owner.clone(),
             old_worker: old_worker.clone(),
+            candidate_owner: None,
+            mbb_reservation: None,
+            mbb_failed_retirement: None,
         };
         if let Err(error) = publish(&journal_path, &journal) {
             if read_private::<Journal>(&journal_path).is_ok_and(|persisted| {
@@ -1030,6 +1060,31 @@ mod linux {
             return Err(error);
         }
         snapshot_cleanup.transfer();
+        let old_worker_current = old_worker
+            .as_ref()
+            .map(|record| record.business_is_current())
+            .transpose()
+            .context(ManagedProofPending)?
+            .unwrap_or(false);
+        if plan.shared_listener.is_some() && actual.owner_active && old_worker_current {
+            journal.phase = "mbb_reserving".into();
+            publish(&journal_path, &journal)?;
+            let context = MbbContext::new(
+                path,
+                &desired,
+                &io_record,
+                takeover.controller_epoch,
+                binding,
+            )?;
+            return run_mbb_transaction(
+                &context,
+                &mut plan,
+                &mut journal,
+                &journal_path,
+                Some(report),
+            )
+            .map_err(|error| error.context(ManagedProofPending));
+        }
         create_binding(&plan)?;
         let (io_socket, worker_socket) = UnixDatagram::pair()?;
         snapshot.verify()?;
@@ -1100,7 +1155,7 @@ mod linux {
         // owned by the old process. Retire that worker only after the guard has
         // succeeded; shared-listener domains already have a live candidate.
         if !overlap_candidate {
-            eprintln!("level=info code=mbb_slot_overlap_unavailable module=sdwan_activation transaction_id={} detail=dedicated_worker_slot_is_exclusive action=bounded_stop_spawn_fallback", transaction);
+            eprintln!("level=info code=mbb_slot_overlap_unavailable module=sdwan_activation transaction_id={transaction} detail=dedicated_worker_slot_is_exclusive action=bounded_stop_spawn_fallback");
             if let Some(old) = &old_worker {
                 if let Err(error) = stop_record(old, old_plan.as_ref().unwrap()) {
                     eprintln!("level=warn code=renewal_old_worker_barrier_pending module=sdwan_activation old_pid={} detail={error:#} action=retry_authenticated_stop_preserve_infrastructure", old.pid);
@@ -1379,6 +1434,8 @@ mod linux {
         let _ = publish(&journal_path, &journal);
         result
     }
+
+    include!("signed_mbb.rs");
 }
 
 #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]

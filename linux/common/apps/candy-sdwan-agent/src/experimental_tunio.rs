@@ -59,6 +59,8 @@ struct Plan {
     placement: Option<WorkerPlacement>,
     #[serde(default)]
     shared_listener: Option<listener_registration::ListenerPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worker_candidate_plan: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -138,6 +140,12 @@ struct AuthorityProof {
     transaction_id: String,
 }
 
+#[cfg(any(test, all(feature = "experimental-tunio-rebind", target_os = "linux")))]
+#[path = "candidate_core_control.rs"]
+mod candidate_core_control;
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+#[path = "candidate_ownership.rs"]
+mod candidate_ownership;
 #[path = "listener_registration.rs"]
 mod listener_registration;
 #[path = "signed_renewal.rs"]
@@ -925,6 +933,12 @@ fn spawn_business_worker_with_slot(
                     authority.transaction_id.clone(),
                 ]);
             }
+            if let Some(candidate) = &plan.worker_candidate_plan {
+                arguments.extend([
+                    "--worker-candidate-plan".to_owned(),
+                    candidate.display().to_string(),
+                ]);
+            }
             arguments.extend(listener_registration::arguments(plan)?);
             let namespace = plan
                 .routing_namespace
@@ -980,6 +994,9 @@ fn spawn_business_worker_with_slot(
                 .arg(&authority.sha256)
                 .arg("--worker-transaction-id")
                 .arg(&authority.transaction_id);
+        }
+        if let Some(candidate) = &plan.worker_candidate_plan {
+            command.arg("--worker-candidate-plan").arg(candidate);
         }
     }
     if let Some(placement) = &plan.placement {
@@ -1445,6 +1462,7 @@ pub(super) fn cloud_activation_plan(
         if plan.independent_worker.is_none()
             || plan.independent_supervision.is_none()
             || plan.authority.is_some()
+            || plan.worker_candidate_plan.is_some()
             || plan.pair_recovery.is_some()
             || plan.effective_plan_file.is_some()
             || plan.authorization_snapshot_sha256.is_some()
@@ -1998,9 +2016,7 @@ pub fn adopt_worker(path: &Path, gate: bool) -> Result<()> {
 }
 
 fn stop_recorded_process(plan: &Plan, record_path: &Path, worker: bool) -> Result<()> {
-    use candy_process_control::{
-        exchange, ControlOperation, ControlRequest, ProcessIdentity,
-    };
+    use candy_process_control::{exchange, ControlOperation, ControlRequest, ProcessIdentity};
     let Some(record) = crate::process_record::read_optional(record_path)? else {
         return Ok(());
     };
@@ -2135,8 +2151,8 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
     // packet supervisor reports failed readiness for the previous connection.
     // Re-register that exact process before waiting on reciprocal packet proof,
     // otherwise registration and readiness wait on each other indefinitely.
-    if !matches!(status["lifecycle"].as_str(), Some("active" | "starting"))
-        && !(plan.shared_listener.is_some() && listener_registration::listener_available(&status))
+    if !(matches!(status["lifecycle"].as_str(), Some("active" | "starting"))
+        || plan.shared_listener.is_some() && listener_registration::listener_available(&status))
     {
         return Err(ManagedProofPending.into());
     }

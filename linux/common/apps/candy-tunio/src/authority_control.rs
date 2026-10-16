@@ -67,6 +67,7 @@ pub(crate) struct AuthorityState {
     owner_terminal: Option<(OwnerAuthority, OwnerTransactionPhase)>,
     retained_owner_binding: Option<PacketPortBinding>,
     old_owner_drained: bool,
+    forced_retirement: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +124,7 @@ pub enum AuthorityOperation {
     },
     CommitOwner,
     FinishOwnerDrain,
+    RetireOwnerAfterFailure,
     AbortOwner,
 }
 
@@ -172,6 +174,8 @@ pub struct AuthorityControlResponse {
     pub retained_owner_binding: Option<PacketPortBinding>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub old_owner_drained: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub forced_retirement: bool,
 }
 
 pub fn authority_control_path(supervision: &Path) -> PathBuf {
@@ -488,6 +492,7 @@ fn reconcile_owner(state: &mut AuthorityState, actual: &PacketPortReceipt) {
     state.owner_highest_revision = actual.highest_transaction_revision;
     state.retained_owner_binding = actual.retained_owner_binding;
     state.old_owner_drained = actual.old_owner_drained;
+    state.forced_retirement = actual.forced_retirement;
     if let Some(mut record) = state.owner_candidate.take() {
         if actual
             .pending
@@ -740,6 +745,7 @@ fn apply_request(
             AuthorityOperation::PrepareOwner { .. }
                 | AuthorityOperation::CommitOwner
                 | AuthorityOperation::FinishOwnerDrain
+                | AuthorityOperation::RetireOwnerAfterFailure
                 | AuthorityOperation::AbortOwner
         )
     {
@@ -851,7 +857,9 @@ fn apply_request(
                 deadline,
             )?;
         }
-        AuthorityOperation::CommitOwner | AuthorityOperation::FinishOwnerDrain => {
+        AuthorityOperation::CommitOwner
+        | AuthorityOperation::FinishOwnerDrain
+        | AuthorityOperation::RetireOwnerAfterFailure => {
             let record = owner_record(&state.authority, &request.transaction_id)
                 .cloned().context("code=owner_transaction_unknown module=tunio_authority reason=no_exact_prepared_or_terminal_transaction")?;
             if request.envelope.as_ref() != Some(&record.envelope) {
@@ -866,12 +874,25 @@ fn apply_request(
                         && *phase == OwnerTransactionPhase::Committed
                 })
             {
-                validate_envelope(state, &record.envelope)?;
+                // The exact cached authority survives authenticated controller
+                // takeover. Revalidate its original candidate and deadlines;
+                // only the request's current management capability changes.
+                let mut adopted = record.envelope.clone();
+                adopted.controller = state.controller;
+                adopted.controller_epoch = state.epoch;
+                validate_envelope(state, &adopted)?;
             }
             apply_owner_change(
                 state,
                 updates,
-                if matches!(request.operation, AuthorityOperation::FinishOwnerDrain) {
+                if matches!(
+                    request.operation,
+                    AuthorityOperation::RetireOwnerAfterFailure
+                ) {
+                    PacketPortOwnerChange::RetireOwnerAfterFailure {
+                        transaction: record.transaction,
+                    }
+                } else if matches!(request.operation, AuthorityOperation::FinishOwnerDrain) {
                     PacketPortOwnerChange::FinishOwnerDrain {
                         transaction: record.transaction,
                     }
@@ -1202,6 +1223,8 @@ pub(crate) fn start(
                                 .flatten(),
                             old_owner_drained: request.schema_version == 3
                                 && state.authority.old_owner_drained,
+                            forced_retirement: request.schema_version == 3
+                                && state.authority.forced_retirement,
                         };
                         drop(state);
                         let bytes = serde_json::to_vec(&reply)?;
@@ -1578,6 +1601,182 @@ mod tests {
             self.stop.send(true).unwrap();
             self.task.await.unwrap().unwrap();
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_retirement_is_explicit_and_never_becomes_successful_finish() {
+        let harness = Harness::start(Duration::from_secs(30)).await;
+        let envelope = harness.envelope(2, 2, 1);
+        let transaction = envelope.transaction_id.clone();
+        harness
+            .exchange(
+                harness.request(
+                    AuthorityOperation::StageAuthority,
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        let (fd, _worker) = ports(2, 2);
+        harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::PrepareOwner {
+                        expected_active_epoch: Some(1),
+                        prepare_deadline_mono_ms: monotonic_ms().unwrap() + 150,
+                    },
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                Some(fd),
+            )
+            .await
+            .unwrap();
+        harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::CommitOwner,
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::RetireOwnerAfterFailure,
+                    Some(envelope.clone()),
+                    &transaction
+                ),
+                None
+            )
+            .await
+            .is_err());
+        tokio::time::sleep(Duration::from_millis(170)).await;
+        let failed = harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::RetireOwnerAfterFailure,
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(failed.forced_retirement && !failed.old_owner_drained);
+        assert_eq!(failed.actual_owner_binding, Some(envelope.binding));
+        assert_eq!(failed.active, Some(envelope.clone()));
+        assert!(failed.retained_owner_binding.is_none());
+        let repeated = harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::RetireOwnerAfterFailure,
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(repeated.forced_retirement && !repeated.old_owner_drained);
+        assert!(harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::FinishOwnerDrain,
+                    Some(envelope),
+                    &transaction
+                ),
+                None
+            )
+            .await
+            .is_err());
+        harness.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inherited_prepared_owner_commits_exact_authority_after_controller_takeover() {
+        let harness = Harness::start(Duration::from_secs(30)).await;
+        let envelope = harness.envelope(2, 2, 1);
+        let transaction = envelope.transaction_id.clone();
+        harness
+            .exchange(
+                harness.request(
+                    AuthorityOperation::StageAuthority,
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        let (fd, _worker) = ports(2, 2);
+        harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::PrepareOwner {
+                        expected_active_epoch: Some(1),
+                        prepare_deadline_mono_ms: monotonic_ms().unwrap() + 5_000,
+                    },
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                Some(fd),
+            )
+            .await
+            .unwrap();
+        let old_request = harness.owner_request(
+            AuthorityOperation::CommitOwner,
+            Some(envelope.clone()),
+            &transaction,
+        );
+        harness.state.lock().unwrap().epoch += 1;
+        assert!(harness.exchange(old_request, None).await.is_err());
+        let mut changed = envelope.clone();
+        changed.effective_deadline_mono_ms += 1;
+        assert!(harness
+            .exchange(
+                harness.owner_request(AuthorityOperation::CommitOwner, Some(changed), &transaction),
+                None
+            )
+            .await
+            .is_err());
+        let (extra_fd, _extra_worker) = ports(2, 2);
+        assert!(harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::CommitOwner,
+                    Some(envelope.clone()),
+                    &transaction
+                ),
+                Some(extra_fd)
+            )
+            .await
+            .is_err());
+        let committed = harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::CommitOwner,
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(committed.active, Some(envelope.clone()));
+        assert_eq!(
+            committed
+                .owner_transaction
+                .unwrap()
+                .authorization_cap_mono_ms,
+            envelope.effective_deadline_mono_ms
+        );
+        harness.finish().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2010,6 +2209,20 @@ mod tests {
             .unwrap();
         assert_eq!(expired.owner_transaction.as_ref().unwrap().phase, "expired");
         assert!(expired.pending.is_none());
+        harness.state.lock().unwrap().epoch += 1;
+        let mut extended = envelope.clone();
+        extended.effective_deadline_mono_ms += 60_000;
+        assert!(harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::CommitOwner,
+                    Some(extended),
+                    &transaction
+                ),
+                None
+            )
+            .await
+            .is_err());
         let rejected = harness
             .outcome(
                 harness.owner_request(

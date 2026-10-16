@@ -116,6 +116,9 @@ pub enum PacketPortOwnerChange {
     FinishOwnerDrain {
         transaction: OwnerTransaction,
     },
+    RetireOwnerAfterFailure {
+        transaction: OwnerTransaction,
+    },
     AbortOwner {
         transaction: OwnerTransaction,
     },
@@ -182,6 +185,7 @@ pub struct PacketPortReceipt {
     pub highest_transaction_revision: u64,
     pub retained_owner_binding: Option<PacketPortBinding>,
     pub old_owner_drained: bool,
+    pub forced_retirement: bool,
 }
 
 /// Only the authenticated local Agent may supply these changes. It must verify
@@ -425,7 +429,7 @@ fn receipt(
     pending: Option<&PendingOwner>,
     last_transaction: Option<&OwnerTransactionReceipt>,
     highest_transaction_revision: u64,
-    drain: (Option<&Owner>, bool),
+    drain: (Option<&Owner>, bool, bool),
 ) -> PacketPortReceipt {
     PacketPortReceipt {
         binding: owner.map(|owner| owner.port.binding()),
@@ -440,6 +444,7 @@ fn receipt(
         highest_transaction_revision,
         retained_owner_binding: drain.0.map(|owner| owner.port.binding()),
         old_owner_drained: drain.1,
+        forced_retirement: drain.2,
     }
 }
 
@@ -768,6 +773,27 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
                             Ok(())
                         }
                     }
+                    PacketPortOwnerChange::RetireOwnerAfterFailure { transaction } => {
+                        if !last_transaction.as_ref().is_some_and(|last| last.transaction == transaction && last.phase == OwnerTransactionPhase::Committed)
+                            || owner.as_ref().is_none_or(|owner| owner.port.binding() != transaction.binding) {
+                            Err("code=owner_failure_retirement_not_committed module=packet_port_manager reason=exact_current_committed_transaction_required".into())
+                        } else if transaction.prepare_deadline > Instant::now() {
+                            Err("code=owner_failure_retirement_unexpired module=packet_port_manager reason=original_prepare_cap_still_valid action=retry_exact_drain".into())
+                        } else if old_owner_drained && retained.is_none() && !forced_retirement {
+                            Err("code=owner_failure_retirement_already_drained module=packet_port_manager reason=successful_drain_receipt_is_immutable".into())
+                        } else {
+                            if let Some(previous) = retained.take() {
+                                let known_queued_packets = previous.to_tun.pending_packets();
+                                tracing::warn!(code="owner_predecessor_retired_after_failure", module="packet_port_manager", known_queued_packets,
+                                    reason="original_prepare_deadline_elapsed", old_owner_drained=false,
+                                    "failed predecessor retired while preserving active owner and TUN");
+                                retire(previous, &mut retired);
+                            }
+                            forced_retirement = true;
+                            old_owner_drained = false;
+                            Ok(())
+                        }
+                    }
                     PacketPortOwnerChange::AbortOwner { transaction } => {
                         if pending.as_ref().is_some_and(|candidate| candidate.transaction == transaction) {
                             let candidate = pending.take().expect("validated candidate");
@@ -851,7 +877,7 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
                         highest_owner_epoch,
                         highest_policy_generation,
                         pending.as_ref(), last_transaction.as_ref(), highest_transaction_revision,
-                        (retained.as_ref(), old_owner_drained),
+                        (retained.as_ref(), old_owner_drained, forced_retirement),
                     ));
                 }
                 let _ = update.acknowledgement.send(result);

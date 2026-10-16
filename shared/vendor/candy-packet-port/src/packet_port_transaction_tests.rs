@@ -128,6 +128,82 @@ async fn kernel_packet(kernel: &UnixDatagram, value: u8) {
 }
 
 #[tokio::test]
+async fn failed_retirement_is_exact_bounded_idempotent_and_preserves_new_owner() {
+    let f = Fixture::new().await;
+    let mut tx = transaction(1, 2, Some(1));
+    tx.prepare_deadline = Instant::now() + Duration::from_millis(100);
+    let (io, next) = ports(2);
+    change(&f.tx, prepare(tx.clone(), io)).await.0.unwrap();
+    change(
+        &f.tx,
+        PacketPortOwnerChange::CommitOwner {
+            transaction: tx.clone(),
+        },
+    )
+    .await
+    .0
+    .unwrap();
+    assert!(change(
+        &f.tx,
+        PacketPortOwnerChange::RetireOwnerAfterFailure {
+            transaction: tx.clone()
+        }
+    )
+    .await
+    .0
+    .unwrap_err()
+    .contains("unexpired"));
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let mut changed = tx.clone();
+    changed.transaction_id[0] += 1;
+    assert!(change(
+        &f.tx,
+        PacketPortOwnerChange::RetireOwnerAfterFailure {
+            transaction: changed
+        }
+    )
+    .await
+    .0
+    .unwrap_err()
+    .contains("not_committed"));
+    let (_, receipt) = change(
+        &f.tx,
+        PacketPortOwnerChange::RetireOwnerAfterFailure {
+            transaction: tx.clone(),
+        },
+    )
+    .await;
+    assert!(receipt.forced_retirement);
+    assert!(!receipt.old_owner_drained);
+    assert_eq!(receipt.binding, Some(binding(2)));
+    assert!(receipt.retained_owner_binding.is_none());
+    let (replayed, repeated) = change(
+        &f.tx,
+        PacketPortOwnerChange::RetireOwnerAfterFailure {
+            transaction: tx.clone(),
+        },
+    )
+    .await;
+    replayed.unwrap();
+    assert!(repeated.forced_retirement && !repeated.old_owner_drained);
+    assert!(change(
+        &f.tx,
+        PacketPortOwnerChange::FinishOwnerDrain { transaction: tx }
+    )
+    .await
+    .0
+    .is_err());
+    next.send_packet(&[0x62; 64]).await.unwrap();
+    kernel_packet(&f.kernel, 0x62).await;
+    f.kernel.send(&[0x63; 64]).await.unwrap();
+    assert_eq!(next.recv_packet().await.unwrap(), vec![0x63; 64]);
+    let next_tx = transaction(2, 3, Some(2));
+    let (io, _third) = ports(3);
+    change(&f.tx, prepare(next_tx, io)).await.0.unwrap();
+    f.stop().await;
+}
+
+#[tokio::test]
 async fn dual_inbound_handoff_has_one_outbound_and_exact_finish_receipt() {
     let f = Fixture::new().await;
     let tx = transaction(1, 2, Some(1));
