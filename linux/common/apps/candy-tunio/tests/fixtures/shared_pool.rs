@@ -13,6 +13,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+#[path = "shared_domain_evidence.rs"]
+mod domain_evidence;
+
+pub(super) fn verify_domain_evidence() {
+    domain_evidence::verify();
+}
+
+pub(super) fn evidence_other_controller_helper() {
+    domain_evidence::other_controller_helper();
+}
+
 struct Host {
     child: Child,
     socket: PathBuf,

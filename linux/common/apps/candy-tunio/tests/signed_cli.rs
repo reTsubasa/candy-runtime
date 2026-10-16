@@ -29,6 +29,18 @@ fn signed_cli_shared_host_lifecycle_scale_gate() {
 }
 
 #[test]
+#[ignore = "requires isolated Linux and actual shared Core domain processes"]
+fn signed_cli_shared_domain_evidence_socket_gate() {
+    shared_pool::verify_domain_evidence();
+}
+
+#[test]
+#[ignore = "subprocess helper authenticates as a different controller PID"]
+fn signed_shared_domain_evidence_other_controller_helper() {
+    shared_pool::evidence_other_controller_helper();
+}
+
+#[test]
 #[ignore = "requires disposable privileged Linux with four real signed domains"]
 fn signed_cli_shared_pool_scales_and_isolates_four_domains() {
     shared_pool::verify_domains();

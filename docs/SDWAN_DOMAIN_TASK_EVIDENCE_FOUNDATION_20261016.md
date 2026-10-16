@@ -33,3 +33,40 @@ Native client validation tests **3/3** and shared-worker subset **4/4** passed.
 The Linux endpoint and real process evidence gates remain open. Unrelated
 concurrent `candidate_core_control.rs` native dead-code warnings remain outside
 this scope; strict Runtime Clippy is not claimed.
+
+## Actual Linux socket gate
+
+`signed_cli_shared_domain_evidence_socket_gate` creates an actual shared Core
+host and two signed SD-WAN tasks over Unix sockets and SCM_RIGHTS. The fixture
+compiles each signed configuration and takes the routing domain and policy
+generation from the compiled control report. Transport retry targets are private
+loopback endpoints; this gate makes no forwarding or performance claim.
+
+The original controller inspects, binds and queries the actual host-created
+task incarnation. The gate rejects changed owner/checksum/incarnation values
+and a second real controller process authenticated by SO_PEERCRED. It observes
+completion after cancellation and actual task join, verifies repeated queries,
+rejects retroactive binding and forgetting pinned evidence, and checks that the
+other real task remains running with the same authority and packet binding.
+It also reuses an unbound task's instance path and requires a new incarnation.
+Host death makes the socket unavailable; it does not manufacture completion.
+
+The fixed checksum and owner submitted here are **controller association test
+inputs**, not proof of a master-issued lease, original candidate installation,
+or owner retirement. The API remains disconnected from Prepare and cannot
+authorize a terminal transition. This gate does not close UNKNOWN P0.
+
+Run against frozen Linux artifacts with a fresh evidence directory:
+
+```sh
+python3 scripts/shared_pool_gate.py /absolute/fresh/evidence \
+  signed_cli_shared_domain_evidence_socket_gate --build /absolute/frozen/build
+```
+
+Evidence includes `domain-task-evidence.json` and the runner's test result.
+At source submission, Linux execution is **NOT_RUN** pending the coordinated
+frozen build. Native Python syntax and Rust formatting checks passed, as did
+`cargo check --target x86_64-unknown-linux-musl --test signed_cli` for the actual
+Linux fixture. Strict cross-target Clippy is blocked by unrelated preexisting
+`obfuscated_if_else` warnings in `tests/fixtures/shared_listener.rs`; no strict
+Clippy pass or real Linux execution is claimed.
