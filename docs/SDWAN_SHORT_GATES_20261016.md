@@ -201,3 +201,34 @@ retries, pacing, deadline or acceptance criteria. The v12 failures are retained.
 Runtime `94ffc19` records the failed Proxy probe caller, attempt count, elapsed
 time, IO error kind and detailed error without changing its existing retries or
 timeout. These diagnostics are outside frozen v12.
+
+## Frozen Release v13 Follow-up
+
+Six artifacts built from Core `d98c236` and Runtime `2233eab`; source manifest
+`d3e63292a6e2b303594c80e423edb372a1e4c46e485fe00e5737414fa7c01248`.
+This set contains synchronous candidate proof publication, exact publication
+retry, preserved unresolved original reservations, Prepared schema 3 local
+authorization-origin evidence, and detailed UDP expiry diagnostics. It excludes
+the later control byte-reserve implementation `a2c842e`.
+
+Frozen-source Linux checks pass: candidate journal 25/25, including actual
+Linux process capture; MBB recovery guard 3/3; Core application/runtime/transport
+and Runtime netd/Agent all-target strict Clippy with `-D warnings`. See
+`short-linux-regression-v13` for exact commands, scope and the retained initial
+read-only bind-mount setup failure, which did not execute tests.
+
+The following traffic gates use the same frozen artifact set, three pinned VM
+CPUs and no periodic CFS quota. Before/after `cpu.stat` records show zero
+throttling for these completed runs. This differs from v12's quota-based runner
+and is explicitly recorded; the missing-sequence, identity and receipt criteria
+are unchanged.
+
+| Evidence directory | Result | Boundary |
+| --- | --- | --- |
+| `shared-pool-negotiated-final-v13` | PASS, 61.61 s runner | All `1→2→4→2→1→2→1` stages have zero missing ICMP in four domains, including original transaction cap expiry; exact bilateral handoff receipts, infrastructure identities, host resource bounds, isolated host crash and shutdown tests complete. Does not prove vanished-actor UNKNOWN retirement. |
+| `mixed-role-fault-v13` | PASS, 13.25 s fixture | Real quota rejection and release recovery; 60 fresh TCP requests, held TCP, 61 exact 4-KiB UDP packets; 10,420,224 bytes accepted into a never-read flow and at least two actual socket write timeouts before healthy traffic checks. Both SD-WAN domains have zero loss (114/114 and 115/115), and held UDP process/socket/source port remain exact. |
+
+These passes do not erase v12's failures or establish that the v12 Proxy
+timeout was caused by CFS throttling. Its original packet budget/age and precise
+failed operation were not recorded. The new control reserve addresses a
+separately demonstrated structural coupling and requires its own frozen gates.
