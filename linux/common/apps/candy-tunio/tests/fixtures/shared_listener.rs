@@ -326,11 +326,78 @@ fn verify_live_reload(
             "candidate MBB replaced server TUNIO"
         );
     }
+    std::thread::sleep(Duration::from_secs(31));
+    probe_proxy();
+    unsafe {
+        nix::libc::kill(client_pids[0] as i32, nix::libc::SIGKILL);
+    }
+    unsafe {
+        nix::libc::waitpid(client_pids[0] as i32, std::ptr::null_mut(), 0);
+    }
+    let client_plan = root.join("domain-0/client/plan.json");
+    fs::remove_file(client_plan.with_file_name("reload.sock")).unwrap();
+    let _redial = spawn(
+        Command::new("ip")
+            .args(["netns", "exec", &clients[0]])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "signed_mbb_client_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CANDY_MBB_PLAN", &client_plan)
+            .env(
+                "CANDY_MBB_CONFIG",
+                root.join("domain-0/fixture/client.next-2.toml"),
+            )
+            .env("CANDY_MBB_IO_EPOCH", "2"),
+        &root.join("successor-ordinary-redial.log"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &clients[0],
+                "ping",
+                "-q",
+                "-I",
+                "10.251.1.10",
+                "-c",
+                "1",
+                "-W",
+                "1",
+                "10.251.2.10",
+            ])
+            .status()
+            .unwrap()
+            .success()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ordinary successor Grant redial failed after original reservation expiry"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(tun_identity(&clients[0]), tuns_before[0]);
+    for (plan, (_, io)) in server_plans.iter().zip(&server_before) {
+        assert_eq!(
+            status(&plan.with_file_name("io-process.json")).unwrap(),
+            *io,
+            "ordinary successor redial replaced server TUNIO"
+        );
+    }
+    probe_proxy();
     private_json(
         &root.join("mbb-evidence.json"),
         &serde_json::json!({"gate":"PASS","scope":"bilateral Rust Core candidate protocol with real netd TUN clients and Runtime shared-listener server domains",
         "rounds":receipts,"client_processes":client_before,"client_tun_ifindices":tuns_before,
-        "icmp_packets_per_domain":400,"icmp_loss":0,"proxy_survived":true,"runtime_cross_process_candidate_handoff":"separate_gate"}),
+        "icmp_packets_per_domain":400,"icmp_loss":0,"proxy_survived":true,
+        "successor_ordinary_redial_after_original_cap":true,"runtime_cross_process_candidate_handoff":"separate_gate"}),
     );
 }
 

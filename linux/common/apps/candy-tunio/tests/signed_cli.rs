@@ -69,7 +69,8 @@ fn signed_mbb_client_helper() {
             Operation::InfraAcquireIoFd {
                 infra_id: spec.infra_id,
                 generation: spec.generation,
-                io_epoch: 1,
+                io_epoch: std::env::var("CANDY_MBB_IO_EPOCH")
+                    .map_or(1, |value| value.parse().unwrap()),
             },
         )
         .unwrap();
@@ -84,7 +85,10 @@ fn signed_mbb_client_helper() {
     .unwrap();
     let error = Command::new(core())
         .args(["client", "sdwan", "run", "--config"])
-        .arg(plan["core_config"].as_str().unwrap())
+        .arg(
+            std::env::var("CANDY_MBB_CONFIG")
+                .unwrap_or_else(|_| plan["core_config"].as_str().unwrap().to_owned()),
+        )
         .arg("--tun-fd")
         .arg(fd.as_raw_fd().to_string())
         .arg("--status")

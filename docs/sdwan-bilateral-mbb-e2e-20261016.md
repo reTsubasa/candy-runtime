@@ -66,3 +66,17 @@ transfer changes require their own updated acceptance run.
 Run the Runtime candidate coordinator across two separate worker processes,
 then rerun dynamic 1/2/4/2/1 with strict sequence continuity on the final frozen
 binary set. A prior binary's PASS does not certify later source changes.
+
+The revised bilateral gate also waits 31 seconds after the signed successor
+rounds, kills one original client connection, and starts an ordinary Core client
+with the generation-three signed configuration and a fresh netd I/O epoch. It
+requires actual ICMP, the original client TUN and unchanged server TUNIO records.
+This specifically exercises a new authenticated handshake without a candidate
+selector after the old reservation cap has expired. Its result is pending the
+final integration binary run.
+
+P1 residual: the accepted successor context is retained by the live server
+actor. A server worker restart while its configured Cloud catalog still lags
+can lose that context. Recovery across such a restart needs a durable accepted
+policy cache, configured-trust revalidation and the fixed original signed
+expiry. It must remain independent of bounded candidate transaction receipts.
