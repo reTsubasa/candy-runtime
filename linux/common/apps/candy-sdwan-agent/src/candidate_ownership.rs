@@ -1323,6 +1323,55 @@ mod tests {
     }
 
     #[test]
+    fn pending_owner_queue_retries_original_commit_without_replacing_candidate() {
+        let mut owner = candidate();
+        let exact = proof(&owner);
+        let prepared = reply(&owner, "prepared");
+        let committed = reply(&owner, "committed");
+        let mut first_request = None;
+        let mut calls = 0;
+        let outcome = owner
+            .promote_with(
+                base(&owner),
+                &exact,
+                |_| Ok(()),
+                |request, fd| {
+                    assert!(fd.is_none());
+                    calls += 1;
+                    if calls == 1 {
+                        first_request = Some(serde_json::to_value(request).unwrap());
+                        anyhow::bail!("code=owner_commit_queue_pending module=packet_port_manager");
+                    }
+                    assert!(matches!(
+                        request.operation,
+                        AuthorityOperation::ProbeTransaction
+                    ));
+                    Ok(prepared.clone())
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome, OwnerState::Prepared);
+        assert!(owner.commit_is_uncertain());
+        let mut owner: CandidateOwner =
+            serde_json::from_slice(&serde_json::to_vec(&owner).unwrap()).unwrap();
+        assert!(owner.abort_request(base(&owner)).is_err());
+        assert!(owner.prepare_request(base(&owner), 1000).is_err());
+        let outcome = owner
+            .promote_with(
+                base(&owner),
+                &exact,
+                |_| Ok(()),
+                |request, fd| {
+                    assert!(fd.is_none());
+                    assert_eq!(Some(serde_json::to_value(request).unwrap()), first_request);
+                    Ok(committed.clone())
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome, OwnerState::Committed);
+    }
+
+    #[test]
     fn retirement_requires_every_peer_drain_receipt() {
         let owner = candidate();
         let mut exact = proof(&owner);
