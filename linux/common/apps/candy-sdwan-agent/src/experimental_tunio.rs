@@ -726,11 +726,7 @@ fn bind_shared_record(plan: &Plan, record: &mut crate::process_record::ManagedPr
 // complete without the experimental feature; callers still persist the normal
 // process identity and never silently claim shared ownership.
 #[cfg(all(not(feature = "experimental-tunio-rebind"), target_os = "linux"))]
-fn bind_shared_record(
-    _plan: &Plan,
-    _record: &mut crate::process_record::ManagedProcessRecord,
-) {
-}
+fn bind_shared_record(_plan: &Plan, _record: &mut crate::process_record::ManagedProcessRecord) {}
 
 fn business_is_current(
     plan: &Plan,
@@ -1826,12 +1822,23 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
                     if let Some(worker) = &plan.independent_worker {
                         listener_registration::publish_pending(&plan, &worker.process_record);
                     }
-                    if plan.independent_worker.is_some()
-                        && recovery_inputs(path).is_ok_and(|inputs| inputs != initial_inputs)
-                    {
-                        preserve_io = true;
-                        preserve_worker = true;
-                        return Err(DesiredStateChanged.into());
+                    if plan.independent_worker.is_some() {
+                        match recovery_inputs(path) {
+                            Ok(inputs) if inputs != initial_inputs => {
+                                preserve_io = true;
+                                preserve_worker = true;
+                                return Err(DesiredStateChanged.into());
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                // A transient read or fingerprint failure does not prove
+                                // that desired state changed. Keep the current owner and
+                                // its TUN path alive while the next poll retries the read.
+                                eprintln!(
+                                    "level=warn code=recovery_inputs_unknown module=sdwan_activation detail={error:#} action=preserve_current_owner_retry"
+                                );
+                            }
+                        }
                     }
                 }
                 let expired = monotonic_ms()? >= owner.auth_deadline_mono_ms;
@@ -2236,8 +2243,18 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
         if Instant::now() >= next_plan_check {
             next_plan_check = Instant::now() + Duration::from_secs(1);
             listener_registration::publish_pending(&plan, &supervision.process_record);
-            if recovery_inputs(path).is_ok_and(|inputs| inputs != initial_inputs) {
-                return Err(DesiredStateChanged.into());
+            match recovery_inputs(path) {
+                Ok(inputs) if inputs != initial_inputs => {
+                    return Err(DesiredStateChanged.into());
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    // Keep renewing the adopted owner while the control-plane
+                    // input is unreadable; it is not evidence of a new plan.
+                    eprintln!(
+                        "level=warn code=recovery_inputs_unknown module=process_supervisor detail={error:#} action=preserve_current_owner_retry"
+                    );
+                }
             }
         }
         if Instant::now() >= next_renewal {
@@ -2926,14 +2943,10 @@ pub(super) fn rebind_core(path: &Path) -> Result<()> {
         // The shared adoption loop owns lease renewal and complete failure snapshots.
         adopt_worker_with_io(path, true, true)
     })();
-    if result
-        .as_ref()
-        .err()
-        .is_some_and(|error| {
-            error.is::<DesiredStateChanged>()
-                || error.is::<candy_process_control::ProcessLivenessUnconfirmed>()
-        })
-    {
+    if result.as_ref().err().is_some_and(|error| {
+        error.is::<DesiredStateChanged>()
+            || error.is::<candy_process_control::ProcessLivenessUnconfirmed>()
+    }) {
         return result;
     }
     stop_business(&mut child);

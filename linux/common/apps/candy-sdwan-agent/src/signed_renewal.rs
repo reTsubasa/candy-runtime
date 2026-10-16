@@ -132,7 +132,7 @@ mod linux {
             pid: record.pid,
             start_ticks: record.process_start_ticks,
         };
-        if !record.business_is_current()? {
+        if !record.business_is_current().context(ManagedProofPending)? {
             if let (Some(host), Some(instance)) =
                 (&record.shared_worker, &record.shared_domain_instance)
             {
@@ -160,10 +160,12 @@ mod linux {
             )?;
         }
         let deadline = Instant::now() + Duration::from_secs(2);
-        while record.business_is_current()? && Instant::now() < deadline {
+        while record.business_is_current().context(ManagedProofPending)?
+            && Instant::now() < deadline
+        {
             thread::sleep(Duration::from_millis(20));
         }
-        if record.business_is_current()? {
+        if record.business_is_current().context(ManagedProofPending)? {
             bail!("code=renewal_old_core_stop_pending module=process_supervisor detail=authenticated stop did not retire old Core within deadline");
         }
         if let (Some(host), Some(instance)) =
@@ -238,7 +240,7 @@ mod linux {
         let old_plan = match &old.effective_plan_file {
             Some(path) if path.try_exists()? => read_plan(path)?,
             Some(_) => {
-                if old.business_is_current()? {
+                if old.business_is_current().context(ManagedProofPending)? {
                     bail!("code=renewal_old_core_cleanup_pending module=process_supervisor detail=old Core remains alive but immutable plan is absent");
                 }
                 return Ok(());
@@ -595,7 +597,9 @@ mod linux {
                     && new_plan.placement == desired.placement
                     && candidate.authorization_snapshot_sha256
                         == new_plan.authorization_snapshot_sha256
-                    && candidate.business_is_current()?
+                    && candidate
+                        .business_is_current()
+                        .context(ManagedProofPending)?
                 {
                     return adopt_worker_with_io(path, true, true);
                 }
@@ -1304,14 +1308,10 @@ mod linux {
             eprintln!("level=info code=signed_authority_committed module=sdwan_activation transaction_id={} authority_revision={} core_pid={} io_pid={} policy_generation={} action=preserve_original_tun",transaction,revision,child.id(),io_record.pid,plan.signed_generation);
             adopt_worker_with_io(path, true, true)
         })();
-        if result
-            .as_ref()
-            .err()
-            .is_some_and(|error| {
-                error.is::<DesiredStateChanged>()
-                    || error.is::<candy_process_control::ProcessLivenessUnconfirmed>()
-            })
-        {
+        if result.as_ref().err().is_some_and(|error| {
+            error.is::<DesiredStateChanged>()
+                || error.is::<candy_process_control::ProcessLivenessUnconfirmed>()
+        }) {
             return result;
         }
         if matches!(journal.phase.as_str(), "committed" | "commit_pending") {
