@@ -118,3 +118,48 @@ extension remains a separate issue until its fix and tests complete.
   endpoint test correction.
 - Two-hour renewal is deferred by the user's explicit choice. Performance and
   platform package acceptance are not claimed by short container gates.
+
+## Frozen Release v11 Follow-up
+
+The six release artifacts built successfully from Core `ce874e7` and Runtime
+`5a2e8d3`, source manifest
+`959a5cebd070a56cbf024dfca62d37746edea4cdf7cc7d762dde24af05f05b64`.
+Core ELF SHA-256 is
+`f0c8d7c851126ed2bc9442c65394a9be7e1168ed0790b00782c516f456aaa94e`.
+The IPC v2 build is verified on Linux; native transport IPC tests 20/20 and
+strict transport Clippy passed before freezing.
+
+| Evidence directory | Result | Boundary |
+| --- | --- | --- |
+| `shared-pool-negotiated-final-v11` | FAIL | Finalize now converges, but at workers=2 both domains moved to a new host lose ICMP seq50. Domains retained on the original host have no missing sequence. No zero-loss acceptance. |
+| `successor-server-restart-v11` | PASS, 63.32 s fixture | Exact activated-successor restoration and corrected Core/IO baseline assertions. Deliberate restart recovery includes failed reachability probes; this is not zero interruption during an injected death. |
+| `bilateral-mbb-final-v11` | PASS, 57.85 s fixture | Two domains, two live policy rounds, exact Prepare/Commit retries and 400/400 continuous ICMP per domain; later ordinary-redial probes are independently retried. Does not close cross-process scale continuity. |
+| `shared-host-lifecycle-v11` | PASS | Selected lifecycle fixture only; intentionally invalid child commands test exit isolation. |
+| `mixed-listener-two-domain-v11` | PASS, 15.35 s fixture | Real ICMP/Proxy HTTP, worker recovery, two listener master restarts, preserved TUNIO/domain workers. |
+| `proxy-release-v11-active-drain-v1` | PASS | Runtime Rust client held TCP tail/FIN, UDP/DNS and exact negotiated active-session drain/replacement admission. |
+| `proxy-release-v11-udp-v1` | FAIL | Valid 64-byte 100-PPS cohort loses seq95; target log also lacks seq95. Master reports one `credit_unavailable` drop. Other cohort details remain in the JSON evidence; a subset cannot close the gate. |
+
+Core `ca24a4f` and Runtime vendor `845acc9` address a separately proven
+PacketPort defect: CommitOwner cancelled accepted old outbound packets before
+drain. A nonempty old queue now retains Prepared and requires exact Commit
+retry. A deterministic Linux socket-backpressure test is added. This defect is
+not yet established as the cause of v11's missing seq50; fresh strict scale
+evidence is still required.
+
+The valid Proxy UDP loss is being investigated against the single-poll async
+credit probe. Pending async lock acquisition is not proof that byte capacity is
+exhausted. Any correction must retain real capacity limits, ownership fencing,
+rollback and fairness for waiting requests.
+
+The vanished-actor UNKNOWN Commit path remains **OPEN P0**, independently of
+the passing activated-successor restart. Core's
+`docs/sdwan-unknown-owner-retirement-design-20261016.md` records the missing
+durable process/domain completion, transport revocation, bilateral confirmation
+and distinct terminal contract. It is a design, not implemented automatic
+recovery. An elapsed operation cap cannot substitute for full authorization
+expiry or prove a prior activation never happened.
+
+Runtime `418cdc9` adds the mixed-role quota/slow-consumer combination fixture;
+`1763f2f` supplies a frozen Runtime launcher and records its hash. At these
+commits the actual combined Linux gate is NOT_RUN. The two-hour soak remains
+deferred.
