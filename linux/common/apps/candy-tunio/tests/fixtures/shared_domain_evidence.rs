@@ -5,6 +5,32 @@ use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
 use std::io::IoSlice;
 use std::os::unix::net::UnixDatagram;
 
+const READINESS_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+fn register_domain(host: &Host, control: &Path, index: u8) -> serde_json::Value {
+    use candy_process_control::{exchange, process_identity, ControlOperation, ControlRequest};
+    use sha2::{Digest, Sha256};
+    let process = process_identity(host.child.id()).unwrap();
+    let controller = process_identity(std::process::id()).unwrap();
+    let request = ControlRequest {
+        schema_version: 1,
+        operation: ControlOperation::Probe,
+        token_sha256: format!("{:x}", Sha256::digest(READINESS_TOKEN.as_bytes())),
+        nonce: format!("{index:032x}"),
+    };
+    // This authenticates the actual host PID/start ticks using SO_PEERCRED,
+    // then acknowledges this domain's registration as its original controller.
+    // A shared-host lifecycle probe cannot substitute for this handshake.
+    let response = exchange(control, process, &request).unwrap();
+    assert!(response.accepted, "{response:?}");
+    assert_eq!(response.code, "process_probed");
+    assert_eq!(response.process, process);
+    assert_eq!(response.controller, controller);
+    assert_eq!(response.controller_epoch, 1);
+    assert_eq!(response.nonce, request.nonce);
+    serde_json::to_value(response).unwrap()
+}
+
 fn exchange(
     socket: &Path,
     operation: &str,
@@ -69,6 +95,7 @@ fn rejected(reply: &serde_json::Value, code: &str) {
 struct RunningDomain {
     instance: String,
     status: PathBuf,
+    registration: serde_json::Value,
     _packet_peer: UnixDatagram,
 }
 
@@ -144,7 +171,7 @@ fn start_domain(host: &Host, root: &Path, index: u8) -> RunningDomain {
         "--status".into(),
         status.to_str().unwrap().into(),
         "--readiness-token".into(),
-        "0123456789abcdef0123456789abcdef".into(),
+        READINESS_TOKEN.into(),
     ];
     let (packet, peer) = UnixDatagram::pair().unwrap();
     let response = exchange(
@@ -156,11 +183,15 @@ fn start_domain(host: &Host, root: &Path, index: u8) -> RunningDomain {
     );
     assert_eq!(response["accepted"], true, "{response}");
     let deadline = Instant::now() + Duration::from_secs(5);
+    let mut registration = None;
     loop {
         let probe = request_for_domain(&host.socket, "probe", &instance);
         assert_eq!(probe["running"], true, "real Core domain failed: {probe}");
+        if registration.is_none() && control.exists() {
+            registration = Some(register_domain(host, &control, index));
+        }
         if super::super::status(&status).is_some_and(|status| status["packet_binding"].is_object())
-            && control.exists()
+            && registration.is_some()
         {
             break;
         }
@@ -173,6 +204,7 @@ fn start_domain(host: &Host, root: &Path, index: u8) -> RunningDomain {
     RunningDomain {
         instance,
         status,
+        registration: registration.unwrap(),
         _packet_peer: peer,
     }
 }
@@ -471,6 +503,7 @@ pub(super) fn verify() {
             &destination.join("domain-task-evidence.json"),
             &serde_json::json!({
             "scope":"actual Linux host/task socket; controller association only; no terminal authority",
+            "registrations":[first.registration,second.registration,second_reused.registration],
             "inspected":inspected,"bound":bound,"completed":completed,"forget_rejected":forgotten,
             "other_controller_rejected":serde_json::from_slice::<serde_json::Value>(&fs::read(response_path).unwrap()).unwrap(),
             "unrelated_domain":second_probe,"reused_task":reused}),

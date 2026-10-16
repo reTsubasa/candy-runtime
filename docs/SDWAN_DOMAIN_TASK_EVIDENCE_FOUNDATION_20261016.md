@@ -41,6 +41,10 @@ host and two signed SD-WAN tasks over Unix sockets and SCM_RIGHTS. The fixture
 compiles each signed configuration and takes the routing domain and policy
 generation from the compiled control report. Transport retry targets are private
 loopback endpoints; this gate makes no forwarding or performance claim.
+Each task also completes the actual authenticated per-domain management Probe
+registration before readiness is accepted. Its reply must match the host's
+current PID/start ticks, the original controller identity, epoch 1 and nonce;
+shared-host lifecycle probes alone cannot acknowledge this registration.
 
 The original controller inspects, binds and queries the actual host-created
 task incarnation. The gate rejects changed owner/checksum/incarnation values
@@ -70,3 +74,8 @@ frozen build. Native Python syntax and Rust formatting checks passed, as did
 Linux fixture. Strict cross-target Clippy is blocked by unrelated preexisting
 `obfuscated_if_else` warnings in `tests/fixtures/shared_listener.rs`; no strict
 Clippy pass or real Linux execution is claimed.
+
+Registration follow-up source validation passed the Linux-target check and
+Clippy with `-D warnings -A clippy::obfuscated-if-else`; the allowance isolates
+the already documented unrelated fixture lint and is not a strict whole-target
+Clippy pass. Real Linux execution remains pending the frozen artifact gate.
