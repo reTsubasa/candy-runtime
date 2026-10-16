@@ -8,6 +8,11 @@ Neither API existence nor passing a related fixture closes an end-to-end gate.
 Current iteration and frozen v14/v15 outcomes:
 [P0/P1 progress](p0-p1-progress-20261015.md).
 
+The user's current priority defers throughput optimization and the formal
+performance matrix. Correctness, fault isolation and recovery remain required;
+the historical performance failures below are retained as measurements, not
+used to block this prioritized reliability iteration or relabelled as passes.
+
 ## Verified Subsets
 
 | Area | Evidence | Exact boundary |
@@ -34,7 +39,7 @@ Current iteration and frozen v14/v15 outcomes:
 | P0 | Complete managed acceptance for staged peer replacement | Real Reserve/Prepare/Install/Activate/Drain is implemented and bilateral final gate passes. Strict Runtime scaling v1-v3 failed and exposed placement-selection, first-Prepare ordering and same-host rendezvous issues. Repair and rerun with immutable binaries before enabling capabilities |
 | P0 | UNKNOWN after process restart blocks replacement but does not rebuild the original coordinator's actor/transport | Reconcile the persisted original tuple against live participant receipts; reconstruct only authorized matching context; preserve old valid forwarding and TUN; do not convert absence of a reply into Abort or invent a fresh transaction |
 | P0 | Full managed make-before-break acceptance | Runtime caller, remote staged attachment, exact candidate selector, PacketPort commit and actor Installed receipts are connected. First-Prepare ordering is fixed by `bbed1e9`; complete strict cross-process traffic/Netd/journal evidence remains required |
-| P1 | Same-domain 1/2/4/2/1 continuous scaling | Implement/validate the domain worker set with unique peer/prefix owners, sticky sessions, bounded target reservation, drain and exact OS reap. Four independent domains or static Proxy worker counts do not close this gate |
+| P1 | Managed shared-pool 1/2/4/2/1 continuous scaling | Validate four signed domains migrating between shared hosts with exact per-domain actor/PacketPort/netd handoff, stable TUNs, zero sequence loss before faults, bounded target reservation, drain and exact OS reap. This does not certify splitting one domain's peer set across multiple simultaneous workers |
 | P1 | Final release validation for negotiated Proxy drain | The integrated frozen `proxy-integrated-final-v1` correctness/drain gate passes. Keep feature bit 20 off until the supported caller/release matrix passes; this does not close SD-WAN scaling or long-duration acceptance |
 | P1 | Frozen mixed-role failure and quota chain | Repeat two signed Runtime domains plus Proxy on one listener with current frozen binaries. Inject per-role exhaustion/slow worker/death while proving healthy-role traffic and unchanged TUN infrastructure |
 | P1 | Performance floor and architecture cost | Runner now supports simultaneous bidirectional, 16 streams per connection per direction, and four independent packaged Rust clients, with every client's resource cost and per-direction floors. Actual full valid measurements remain required: direct/B0/worker, 10 s warmup, 60 s samples, five repeats, >=800 Mbps, <=5% goodput regression, <=20% CPU increase and original p99 criterion |
