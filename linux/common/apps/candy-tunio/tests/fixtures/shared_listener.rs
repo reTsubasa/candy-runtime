@@ -465,32 +465,34 @@ fn verify_live_reload(
             "post-restart successor commit failed: {committed}"
         );
         assert_eq!(committed["generation"], 4);
-        let output = Command::new("ip")
-            .args([
-                "netns",
-                "exec",
-                &clients[0],
-                "ping",
-                "-q",
-                "-I",
-                "10.251.1.10",
-                "-c",
-                "20",
-                "-i",
-                "0.05",
-                "-W",
-                "1",
-                "10.251.2.10",
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success()
-                && String::from_utf8_lossy(&output.stdout)
-                    .contains("20 packets transmitted, 20 received, 0% packet loss"),
-            "post-restart successor did not carry traffic: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
+        for namespace in clients {
+            let output = Command::new("ip")
+                .args([
+                    "netns",
+                    "exec",
+                    namespace,
+                    "ping",
+                    "-q",
+                    "-I",
+                    "10.251.1.10",
+                    "-c",
+                    "20",
+                    "-i",
+                    "0.05",
+                    "-W",
+                    "1",
+                    "10.251.2.10",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .contains("20 packets transmitted, 20 received, 0% packet loss"),
+                "post-restart domain did not carry traffic namespace={namespace}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
         assert_eq!(tun_identity(&clients[0]), tuns_before[0]);
         for (plan, (_, io)) in server_plans.iter().zip(&server_before) {
             assert_eq!(
