@@ -31,6 +31,9 @@ used to block this prioritized reliability iteration or relabelled as passes.
 | Integrated Linux Proxy drain | Runtime `7c8394f`, Core `090f93d` | Runtime Rust client: TCP 24/24, native UDP first packets 24/24, DNS 104/104, zero generator retries; held TCP tail/FIN and UDP owner survive, exact old-worker OS reap, original master/listener retained |
 | Linux client local fault recovery | Core `a3e7209`, [fault report](../../candy-core/docs/proxy-linux-role-fault-gate-20261016.md) | Actual Rust client with test-only injected TCP/UDP/DNS/adaptive/dispatcher faults; 283/283 coverage and strict Linux Clippy; stable ingress sockets and recovered authenticated traffic; not uninstrumented release black-box acceptance |
 | Durable activated successor context | Core `a3e7209`, [recovery report](../../candy-core/docs/activated-successor-recovery-20261016.md) | Actual Activated receipt precedes durable publication; current trust and original signed expiry revalidated on restart. Native 105/105 and Linux 130/130 pass; independent server restart gate pending |
+| Unconsumed candidate descriptor recovery | Runtime `f7d3d24`, [recovery report](SDWAN_PRECOMMIT_RECOVERY_20261016.md) | Actual manager FIFO proof and exact old binding allow durable precommit cancellation; actual Prepared/Committed return original receipts, late Prepare is fenced. Linux Agent 129/129 and TUNIO 25/25, strict Clippy; not committed-actor recovery |
+| Candidate continuity defects | Core `d34f6bc`, `e682271`, [continuity report](../../candy-core/docs/sdwan-candidate-continuity-20261016.md) | Preserve original Prepare transport and local receipt after uncertainty; verified activation becomes Active, stream-ready does not downgrade it, old per-connection probes are removed on exact replacement, acknowledged predecessor close yields instead of redialling old policy. Focused tests and strict Clippy; fresh strict scaling pending |
+| Scoped restore/fencing isolation | Core `467ff27`, `414ce1c`, [recovery report](../../candy-core/docs/activated-successor-recovery-20261016.md) | Remote principal fence is independent of local Runtime fence; bounded partial restore preserves known contexts; corrupt, expired or unreadable same-scope successor cannot authorize static rollback. Focused component tests; immutable restart acceptance pending |
 
 ## Open Implementation And Acceptance
 
@@ -120,3 +123,12 @@ an nginx-style lossless executable handoff. Existing ordinary production
 listeners are not migrated by these gates. Source/test commits can be reviewed
 independently; release/signing, default capability advertisement and deployment
 require the relevant complete acceptance evidence.
+
+The strict v4 failure remains recorded in
+[the failure report](SDWAN_STRICT_GATES_V4_FAILURES_20261016.md). Its remote-fence,
+lost-Prepare-session and snapshot-retirement defects have source fixes; a
+successful component rerun does not change that failed end-to-end result. The
+same applies to the single lost ICMP sequence in successor-restart v1: continuity
+fixes require a fresh zero-loss gate. A committed candidate that loses its
+process/transport still requires explicit failure isolation and durable original
+receipts before fresh recovery; precommit cancellation does not cover it.
