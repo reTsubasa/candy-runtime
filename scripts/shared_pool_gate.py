@@ -20,6 +20,7 @@ CORE = RUNTIME.parent / "candy-core"
 TESTS = ("signed_cli_shared_pool_scales_and_isolates_four_domains",
          "signed_cli_shared_host_lifecycle_scale_gate",
          "signed_cli_bilateral_candidate_reload_preserves_traffic",
+         "signed_cli_successor_server_restart_preserves_authorization",
          "signed_cli_runtime_shared_listener_routes_two_domains")
 
 

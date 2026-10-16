@@ -210,6 +210,7 @@ fn verify_live_reload(
     clients: &[String],
     server_plans: &[PathBuf],
     client_pids: &[u32],
+    restart_successor_server: bool,
 ) {
     let server_before: Vec<_> = server_plans
         .iter()
@@ -328,6 +329,40 @@ fn verify_live_reload(
     }
     std::thread::sleep(Duration::from_secs(31));
     probe_proxy();
+    let mut recovered_server = None;
+    if restart_successor_server {
+        let process_path = server_plans[0].with_file_name("process.json");
+        let before = status(&process_path).unwrap();
+        let victim = candy_process_control::ProcessIdentity {
+            pid: before["pid"].as_u64().unwrap() as u32,
+            start_ticks: before["process_start_ticks"].as_u64().unwrap(),
+        };
+        assert!(candy_process_control::process_is_current(victim));
+        assert_eq!(before["policy_generation"], 1);
+        assert_eq!(
+            unsafe { nix::libc::kill(victim.pid as i32, nix::libc::SIGKILL) },
+            0
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(fresh) = status(&process_path) {
+                if fresh["pid"] != before["pid"] && committed_ack(&root.join("registry"), 40) {
+                    assert_eq!(
+                        fresh["policy_generation"], 1,
+                        "Cloud static catalog advanced unexpectedly"
+                    );
+                    recovered_server = Some(fresh);
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "successor server worker did not recover"
+            );
+            probe_proxy();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
     unsafe {
         nix::libc::kill(client_pids[0] as i32, nix::libc::SIGKILL);
     }
@@ -392,24 +427,109 @@ fn verify_live_reload(
         );
     }
     probe_proxy();
+    let mut post_restart_renewal = None;
+    if restart_successor_server {
+        let fixture = root.join("domain-0/fixture");
+        let generated = Command::new(std::env::var("CANDY_SIGNED_FIXTURE_BINARY").unwrap())
+            .env("CANDY_SIGNED_FIXTURE_ADVANCE_POLICY_ROOT", &fixture)
+            .env("CANDY_SIGNED_FIXTURE_POLICY_ROUND", "3")
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let socket = client_plan.with_file_name("reload.sock");
+        let transaction = format!("0300{}", "a".repeat(60));
+        let prepared = reload(
+            &socket,
+            serde_json::json!({
+                "schema_version":1,"action":"prepare","transaction_id":transaction,
+                "config":fixture.join("client.next-3.toml"),
+                "status":client_plan.with_file_name("core-status.json")
+            }),
+        );
+        assert_eq!(
+            prepared["ok"], true,
+            "post-restart successor prepare failed: {prepared}"
+        );
+        let committed = reload(
+            &socket,
+            serde_json::json!({
+                "schema_version":1,"action":"commit","transaction_id":transaction
+            }),
+        );
+        assert_eq!(
+            committed["ok"], true,
+            "post-restart successor commit failed: {committed}"
+        );
+        assert_eq!(committed["generation"], 4);
+        let output = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &clients[0],
+                "ping",
+                "-q",
+                "-I",
+                "10.251.1.10",
+                "-c",
+                "20",
+                "-i",
+                "0.05",
+                "-W",
+                "1",
+                "10.251.2.10",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .contains("20 packets transmitted, 20 received, 0% packet loss"),
+            "post-restart successor did not carry traffic: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(tun_identity(&clients[0]), tuns_before[0]);
+        for (plan, (_, io)) in server_plans.iter().zip(&server_before) {
+            assert_eq!(
+                status(&plan.with_file_name("io-process.json")).unwrap(),
+                *io
+            );
+        }
+        assert_eq!(
+            status(&server_plans[1].with_file_name("process.json")).unwrap(),
+            server_before[1].0,
+            "successor recovery restarted another domain"
+        );
+        probe_proxy();
+        post_restart_renewal =
+            Some(serde_json::json!({"prepared":prepared,"committed":committed,"icmp_received":20}));
+    }
     private_json(
         &root.join("mbb-evidence.json"),
         &serde_json::json!({"gate":"PASS","scope":"bilateral Rust Core candidate protocol with real netd TUN clients and Runtime shared-listener server domains",
         "rounds":receipts,"client_processes":client_before,"client_tun_ifindices":tuns_before,
         "icmp_packets_per_domain":400,"icmp_loss":0,"proxy_survived":true,
-        "successor_ordinary_redial_after_original_cap":true,"runtime_cross_process_candidate_handoff":"separate_gate"}),
+        "successor_ordinary_redial_after_original_cap":true,"runtime_cross_process_candidate_handoff":"separate_gate",
+        "recovered_static_generation_one_server":recovered_server,"post_restart_generation_four_renewal":post_restart_renewal}),
     );
 }
 
 pub(super) fn verify() {
-    verify_scenario(false);
+    verify_scenario(false, false);
 }
 
 pub(super) fn verify_mbb() {
-    verify_scenario(true);
+    verify_scenario(true, false);
 }
 
-fn verify_scenario(mbb: bool) {
+pub(super) fn verify_successor_restart() {
+    verify_scenario(true, true);
+}
+
+fn verify_scenario(mbb: bool, restart_successor_server: bool) {
     assert_eq!(
         std::env::var("CANDY_NETD_ISOLATED_KERNEL_TEST").as_deref(),
         Ok("1")
@@ -692,7 +812,13 @@ fn verify_scenario(mbb: bool) {
     ));
     probe_proxy();
     if mbb {
-        verify_live_reload(root, &client_names, &server_plans, &mbb_client_pids);
+        verify_live_reload(
+            root,
+            &client_names,
+            &server_plans,
+            &mbb_client_pids,
+            restart_successor_server,
+        );
         return;
     }
     let before: Vec<_> = server_plans

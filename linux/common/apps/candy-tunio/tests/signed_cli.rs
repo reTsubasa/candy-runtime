@@ -47,6 +47,12 @@ fn signed_cli_bilateral_candidate_reload_preserves_traffic() {
 }
 
 #[test]
+#[ignore = "requires durable activated successor recovery with an intentionally stale Cloud catalog"]
+fn signed_cli_successor_server_restart_preserves_authorization() {
+    shared_listener::verify_successor_restart();
+}
+
+#[test]
 #[ignore = "exec helper for isolated bilateral candidate reload"]
 fn signed_mbb_client_helper() {
     let path = PathBuf::from(std::env::var_os("CANDY_MBB_PLAN").unwrap());
