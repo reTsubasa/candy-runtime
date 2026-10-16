@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 
 ROOT, FIXTURE, CORE, WRAPPER = map(Path, sys.argv[1:5])
 NAMESPACES = sys.argv[5:]
@@ -22,6 +23,7 @@ RESULT = {'gate': 'FAIL', 'scope': 'real netd/TUN and Runtime Rust Proxy on one 
 STOP = threading.Event()
 TARGET_ERRORS = []
 UDP_PEERS = []
+UDP_SEQUENCES = []
 SLOW_ACCEPTED = threading.Event()
 
 
@@ -103,6 +105,7 @@ def udp_target():
             try:
                 payload, peer = udp.recvfrom(65535)
                 UDP_PEERS.append(peer)
+                UDP_SEQUENCES.append(int.from_bytes(payload[:8], 'big'))
                 udp.sendto(payload, peer)
             except socket.timeout:
                 continue
@@ -178,8 +181,11 @@ def udp_owner():
 
 def healthy_phase(held, udp, start, count=20):
     for index in range(count):
+        RESULT['operation'] = {'phase': start, 'index': index, 'kind': 'held_tcp'}
         exchange(held, f'held-{start}-{index}')
+        RESULT['operation']['kind'] = 'held_udp'
         udp_exchange(udp, start + index)
+        RESULT['operation']['kind'] = 'fresh_tcp'
         with socket.create_connection(('127.0.0.1', 19100), timeout=2) as fresh:
             fresh.settimeout(2)
             exchange(fresh, f'fresh-{start}-{index}')
@@ -196,6 +202,7 @@ def ping_result(text):
 def main():
     sockets = []
     try:
+        RESULT['phase'] = 'initial_connections'
         for namespace in NAMESPACES:
             output = (ROOT / f'mixed-continuous-{namespace}.log').open('wb')
             LOGS.append(output)
@@ -220,6 +227,7 @@ def main():
         sockets.append(holder_flow)
         reject_log = ROOT / 'master.log'
         baseline = reject_log.stat().st_size
+        RESULT['phase'] = 'quota_rejection'
         rejected = client('mixed-rejected', 19300)
         deadline = time.monotonic() + 10
         while True:
@@ -231,18 +239,21 @@ def main():
                 raise RuntimeError('missing explicit principal quota rejection in master log')
             time.sleep(.1)
         RESULT['quota_rejection_observed'] = True
+        RESULT['phase'] = 'at_quota_capacity'
         healthy_phase(held, udp, 100)
         exchange(holder_flow, 'quota-holder-at-capacity')
         assert holder.poll() is None and primary.poll() is None
         stop(rejected)
         holder_flow.close()
         stop(holder)
+        RESULT['phase'] = 'quota_release_recovery'
         recovered = client('mixed-recovered', 19400)
         recovered_flow = connect(19400, 15)
         exchange(recovered_flow, 'quota-recovered')
         recovered_flow.close()
         stop(recovered)
         RESULT['quota_released_and_recovered'] = True
+        RESULT['phase'] = 'after_quota_release'
         healthy_phase(held, udp, 200)
         # Same authenticated Proxy connection; only one egress consumer stalls.
         stalled = socket.create_connection(('127.0.0.1', 19102), timeout=2)
@@ -264,6 +275,7 @@ def main():
 
         write_thread = threading.Thread(target=writer, daemon=True)
         write_thread.start()
+        RESULT['phase'] = 'slow_consumer_backpressure'
         assert SLOW_ACCEPTED.wait(5), 'slow target did not receive actual Proxy egress'
         deadline = time.monotonic() + 15
         while pressure['write_timeouts'] < 2:
@@ -272,6 +284,7 @@ def main():
             time.sleep(.1)
         assert pressure['bytes'] > 0, 'slow target accepted but no actual data entered the flow'
         RESULT['slow_consumer_pressure_before'] = dict(pressure)
+        RESULT['phase'] = 'during_slow_consumer'
         healthy_phase(held, udp, 300)
         assert primary.poll() is None, 'Runtime client exited under slow consumer'
         RESULT['slow_consumer_pressure_after'] = dict(pressure)
@@ -286,6 +299,7 @@ def main():
                       slow_consumer_socket_backpressure=True)
     except Exception as error:
         RESULT['error'] = f'{type(error).__name__}: {error}'
+        RESULT['traceback'] = traceback.format_exc()
     finally:
         STOP.set()
         for conn in sockets:
@@ -305,6 +319,7 @@ def main():
             if row['gate'] != 'PASS':
                 RESULT['gate'] = 'FAIL'
         RESULT['continuous_sdwan'] = ping_rows
+        RESULT['udp_target_sequences'] = UDP_SEQUENCES
         (ROOT / 'mixed-role-fault-evidence.json').write_text(json.dumps(RESULT, indent=2) + '\n')
         print(json.dumps(RESULT))
     return 0 if RESULT['gate'] == 'PASS' else 1
