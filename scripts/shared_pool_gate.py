@@ -68,7 +68,7 @@ def main() -> int:
     parser.add_argument("evidence", type=Path, nargs="?")
     parser.add_argument("test", choices=TESTS, nargs="?", default=TESTS[0])
     parser.add_argument("--self-check", action="store_true")
-    parser.add_argument("--build", type=Path, help="run verified frozen release artifacts directly")
+    parser.add_argument("--build", type=Path, help="run verified frozen artifacts directly")
     parser.add_argument("--snapshot-helper", type=Path,
                         help="copy current Linux binaries and this test helper, then test immutable copies")
     args = parser.parse_args()
@@ -83,7 +83,8 @@ def main() -> int:
     started = time.monotonic()
     result = {"schema_version": 1, "test": args.test, "gate": "FAIL",
               "scope": "isolated source-worktree fixture; no release or platform acceptance",
-              "container": name, "host_deadline_seconds": 300}
+              "container": name, "host_deadline_seconds": 300,
+              "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
     exit_code = 1
     try:
         preflight = bounded_run(["docker", "info", "--format", "{{.ServerVersion}}"],
@@ -108,26 +109,38 @@ def main() -> int:
         if args.build:
             build = args.build.resolve()
             if json.loads((build / "result.json").read_text())["gate"] != "BUILD_PASS":
-                raise ValueError("frozen release build has not passed")
+                raise ValueError("frozen artifact build has not passed")
             hashes = json.loads((build / "binary-hashes.json").read_text())
             paths = {"CANDY_CORE_TEST_BINARY": "candy-core", "CANDY_NETD_TEST_BINARY": "candy-netd",
                      "CANDY_AGENT_TEST_BINARY": "candy-agent", "CANDY_SIGNED_FIXTURE_BINARY": "sdwan_signed_cli_fixture"}
             for label in (*paths.values(), "candy-tunio", "signed_cli_helper"):
                 if hashlib.sha256((build / "binaries" / label).read_bytes()).hexdigest() != hashes[label]:
-                    raise ValueError(f"frozen release binary checksum mismatch: {label}")
+                    raise ValueError(f"frozen artifact binary checksum mismatch: {label}")
             source = json.loads((build / "source-freeze.json").read_text())
-            result["scope"] = "isolated frozen release fixture; no platform or performance acceptance"
+            result["scope"] = "isolated frozen artifact fixture; no release, platform or performance acceptance"
             result["build"] = str(build)
             result["manifest_sha256"] = source["manifest_sha256"]
             result["binary_hashes"] = hashes
+            provenance = build / "build-provenance.json"
+            if provenance.exists():
+                result["build_provenance_sha256"] = hashlib.sha256(provenance.read_bytes()).hexdigest()
+                result["build_provenance"] = json.loads(provenance.read_text())
             command = ["docker", "run", "--name", name, "--rm", "--network", "none", "--privileged",
                        "--cpus", "3", "--memory", "3g", "--pids-limit", "512",
                        "-v", f"{build / 'binaries'}:/binaries:ro",
+                       # Cargo embeds this path in debug signed_cli fixtures.
+                       "-v", f"{build / 'binaries'}:/build/debug:ro",
                        "-v", f"{build / 'binaries'}:/build/release:ro", "-v", f"{evidence}:/evidence",
                        "-e", "CANDY_NETD_ISOLATED_KERNEL_TEST=1", "-e", "CANDY_SIGNED_EVIDENCE_DIR=/evidence"]
             for variable, label in paths.items():
                 command.extend(["-e", f"{variable}=/binaries/{label}"])
-            command.extend(["candy-sdwan-perf-runner:20261013", "timeout", "240",
+            command.extend(["candy-sdwan-perf-runner:20261013", "sh", "-eu", "-c",
+                            'for binary in /binaries/candy-core /binaries/candy-netd '
+                            '/binaries/candy-agent /binaries/signed_cli_helper '
+                            '/build/debug/candy-tunio /build/release/candy-tunio; do '
+                            'test -x "$binary" || { echo "code=frozen_binary_unavailable '
+                            'module=shared_pool_gate path=$binary" >&2; exit 70; }; done; exec "$@"',
+                            "frozen-gate", "timeout", "240",
                             "/binaries/signed_cli_helper", "--exact", args.test, "--ignored", "--nocapture"])
         if args.snapshot_helper:
             if args.build:
