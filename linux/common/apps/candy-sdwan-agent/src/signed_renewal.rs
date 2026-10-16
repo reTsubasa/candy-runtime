@@ -1069,7 +1069,17 @@ mod linux {
             .transpose()
             .context(ManagedProofPending)?
             .unwrap_or(false);
-        if plan.shared_listener.is_some() && actual.owner_active && old_worker_current {
+        // Outbound shared domains have no local listener registration. Their
+        // shared placement still permits a second domain incarnation, and must
+        // use the authenticated remote reservation instead of stopping the old.
+        let shared_placement = plan
+            .placement
+            .as_ref()
+            .is_some_and(|placement| placement.shared.is_some());
+        if (plan.shared_listener.is_some() || shared_placement)
+            && actual.owner_active
+            && old_worker_current
+        {
             journal.phase = "mbb_reserving".into();
             publish(&journal_path, &journal)?;
             let context = MbbContext::new(

@@ -60,7 +60,9 @@ cannot rewrite an existing terminal outcome.
 
 ## Local verification
 
-- Core packet-port tests: 60/60; strict all-target Clippy passed.
+- Core packet-port tests: 61/61; strict all-target Clippy passed. Completion
+  advances only over contiguous settled writes; failed intervals retain their
+  error while a later transaction gets a fresh baseline.
 - Linux TUNIO authority tests: 11/11; strict all-target Clippy passed.
 - Linux Runtime Agent library tests: 124/124, including exact installation,
   unknown Commit, original clock witness, mixed drain outcome and recovery action.
@@ -71,3 +73,19 @@ These are implementation and isolated local checks. Real multi-process dynamic
 1/2/4/2/1 and bilateral traffic/fault evidence is recorded by the separate Linux
 integration fixture; this document alone does not certify that gate or any
 production deployment. No production service restart was performed here.
+
+## Outbound Shared Placement Selection
+
+The immutable `shared-pool-negotiated-final-v1` gate failed at the first 1 -> 2
+transition: its committed journal had no negotiated reservation. Runtime had
+selected MBB only when the plan registered a local shared listener. An outbound
+client's shared worker placement has no such registration, so it incorrectly
+entered the dedicated compatibility stop/spawn path.
+
+The selection now also recognizes an authenticated shared worker placement.
+With an active TUNIO owner and current predecessor domain, it must enter the
+same Reserve/Prepare/Install/Activate/Drain transaction. Reservation errors or
+unknown outcomes preserve the original owner rather than downgrade that
+transaction to stop/spawn. Dedicated exclusive placements keep their existing
+compatibility path. The strict continuous-traffic fixture remains the acceptance
+gate; the first failed run is retained and does not certify the fix.
