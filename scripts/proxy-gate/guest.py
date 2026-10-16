@@ -196,7 +196,7 @@ def probes(profile):
                       'seconds': time.monotonic() - before}))
 
 
-def configure(workers, profile):
+def configure(workers, profile, proxy_drain=False):
     directory = ROOT / profile
     directory.mkdir(mode=0o700, exist_ok=True)
     cert, key = directory / 'cert.pem', directory / 'key.pem'
@@ -208,6 +208,8 @@ def configure(workers, profile):
     pin = 'sha256:' + hashlib.sha256(der).hexdigest()
     features = {'recommended': ['recommended'],
                 'stream_udp_fallback': ['stream_udp_fallback']}[profile]
+    if proxy_drain:
+        features.append('proxy_drain_v1')
     server = (f'listen = "{SERVER}:18443"\ncert_pem = "{cert}"\nkey_pem = "{key}"\n'
               'transport_memory_budget_mib = 2048\n'
               '[[users]]\nkey_id = "gate"\nsecret = "isolated-runtime-proxy-gate"\n'
@@ -416,6 +418,7 @@ def main():
     parser.add_argument('--worker-id', type=int)
     parser.add_argument('--owner-epoch', type=int)
     parser.add_argument('--remaining-ms', type=int, default=1200)
+    parser.add_argument('--proxy-drain', type=int, choices=(0, 1), default=0)
     args = parser.parse_args()
     if args.action == 'targets':
         import load
@@ -424,7 +427,7 @@ def main():
         threading.Thread(target=health_target, daemon=True).start()
         udp_target()
     elif args.action == 'configure':
-        configure(args.workers, args.profile)
+        configure(args.workers, args.profile, proxy_drain=bool(args.proxy_drain))
     elif args.action == 'server':
         server(args.profile, args.workers, drain_control=args.drain_control,
                drain_token_file=args.drain_token)
