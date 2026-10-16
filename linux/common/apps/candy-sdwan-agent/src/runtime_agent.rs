@@ -394,7 +394,7 @@ fn cloud_loop(
     update(&states, 0, &notifications, |state| state.phase = "stopped");
 }
 
-fn transient_error(error: &anyhow::Error) -> bool {
+pub(super) fn transient_error(error: &anyhow::Error) -> bool {
     // anyhow context values participate in Error::is/downcast_ref, but are
     // not exposed as their original type by std::error::Error::source.
     if error.is::<crate::experimental_tunio::NetdUnavailable>()
@@ -409,24 +409,27 @@ fn transient_error(error: &anyhow::Error) -> bool {
     {
         return true;
     }
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<nix::errno::Errno>()
-            .is_some_and(|error| {
-                matches!(
-                    *error,
-                    nix::errno::Errno::EINTR
-                        | nix::errno::Errno::EAGAIN
-                        | nix::errno::Errno::ENOMEM
-                        | nix::errno::Errno::EBUSY
-                        | nix::errno::Errno::ECONNRESET
-                        | nix::errno::Errno::ECONNREFUSED
-                        | nix::errno::Errno::EPIPE
-                        | nix::errno::Errno::ETIMEDOUT
-                )
-            })
-            || cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
-                matches!(
+    transient_cause(error.as_ref())
+}
+
+fn transient_cause(cause: &(dyn std::error::Error + 'static)) -> bool {
+    cause
+        .downcast_ref::<nix::errno::Errno>()
+        .is_some_and(|error| {
+            matches!(
+                *error,
+                nix::errno::Errno::EINTR
+                    | nix::errno::Errno::EAGAIN
+                    | nix::errno::Errno::ENOMEM
+                    | nix::errno::Errno::EBUSY
+                    | nix::errno::Errno::ECONNRESET
+                    | nix::errno::Errno::ECONNREFUSED
+                    | nix::errno::Errno::EPIPE
+                    | nix::errno::Errno::ETIMEDOUT
+            )
+        })
+        || cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
                     error.kind(),
                     std::io::ErrorKind::Interrupted
                         | std::io::ErrorKind::WouldBlock
@@ -438,8 +441,11 @@ fn transient_error(error: &anyhow::Error) -> bool {
                         | std::io::ErrorKind::NotConnected
                         | std::io::ErrorKind::OutOfMemory
                 ) || error.raw_os_error() == Some(nix::libc::EBUSY)
-            })
-    })
+                    // io::Error::source skips an inner error itself. Inspect
+                    // that typed value before following its source chain.
+                    || error.get_ref().is_some_and(|inner| transient_cause(inner))
+        })
+        || cause.source().is_some_and(transient_cause)
 }
 
 fn inputs(path: &Path) -> Result<Vec<u8>> {
@@ -828,6 +834,36 @@ mod tests {
         assert!(!transient_error(
             &std::io::Error::from(std::io::ErrorKind::NotFound).into()
         ));
+    }
+    #[test]
+    fn contextual_business_control_errors_retain_typed_retry_classification() {
+        for errno in [
+            nix::libc::EAGAIN,
+            nix::libc::ECONNRESET,
+            nix::libc::ETIMEDOUT,
+        ] {
+            let wrapped = anyhow::Error::from(std::io::Error::from_raw_os_error(errno))
+                .context("shared domain completion");
+            assert!(
+                transient_error(&wrapped),
+                "errno {errno} lost its retry type"
+            );
+        }
+        let permanent =
+            anyhow::anyhow!("invalid signed authorization").context("shared domain completion");
+        assert!(!transient_error(&permanent));
+    }
+    #[test]
+    fn typed_nested_io_errors_keep_retry_classification() {
+        let temporary = anyhow::Error::from(std::io::Error::other(
+            std::io::Error::from_raw_os_error(nix::libc::EAGAIN),
+        ));
+        assert!(transient_error(&temporary));
+        let permanent = anyhow::Error::from(std::io::Error::other(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid signed authorization",
+        )));
+        assert!(!transient_error(&permanent));
     }
     #[test]
     fn context_wrapped_recovery_signals_keep_the_existing_bounded_retry() {

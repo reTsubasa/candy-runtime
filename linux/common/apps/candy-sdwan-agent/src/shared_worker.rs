@@ -71,7 +71,8 @@ fn exchange(
         candy_process_control::process_is_current_confirmed(host.identity)?,
         "code=shared_worker_identity_changed module=sdwan_host"
     );
-    let mut stream = UnixStream::connect(&host.socket)?;
+    let mut stream =
+        UnixStream::connect(&host.socket).context("connect shared worker control endpoint")?;
     anyhow::ensure!(
         candy_process_control::peer_identity(&stream)? == host.identity,
         "shared worker endpoint identity differs"
@@ -99,10 +100,17 @@ fn exchange(
         &serde_json::json!({"schema_version":1,"operation":operation,"instance":instance,"arguments":arguments,"namespace":fds.len()==2}),
     )?;
     anyhow::ensure!(bytes.len() <= 65536, "shared worker request exceeds budget");
-    stream.write_all(&bytes)?;
-    stream.shutdown(std::net::Shutdown::Write)?;
+    stream
+        .write_all(&bytes)
+        .context("write bounded shared worker request")?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .context("finish shared worker request")?;
     let mut reply = Vec::new();
-    stream.take(65537).read_to_end(&mut reply)?;
+    stream
+        .take(65537)
+        .read_to_end(&mut reply)
+        .context("read bounded shared worker response")?;
     anyhow::ensure!(reply.len() <= 65536, "shared worker reply exceeds budget");
     let response: Response = serde_json::from_slice(&reply)?;
     anyhow::ensure!(
@@ -200,30 +208,29 @@ impl BusinessWorker {
             Self::Shared(domain) => domain.host.identity.pid,
         }
     }
-    pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+    // Keep control errors typed so transient IPC failures remain retryable.
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
         match self {
-            Self::Dedicated(child) => child.try_wait(),
-            Self::Shared(domain) => domain.completion().map_err(std::io::Error::other),
+            Self::Dedicated(child) => Ok(child.try_wait()?),
+            Self::Shared(domain) => domain.completion(),
         }
     }
-    pub fn kill(&mut self) -> std::io::Result<()> {
+    pub fn kill(&mut self) -> Result<()> {
         match self {
-            Self::Dedicated(child) => child.kill(),
-            Self::Shared(domain) => domain.stop().map_err(std::io::Error::other),
+            Self::Dedicated(child) => Ok(child.kill()?),
+            Self::Shared(domain) => domain.stop(),
         }
     }
-    pub fn wait(&mut self) -> std::io::Result<ExitStatus> {
+    pub fn wait(&mut self) -> Result<ExitStatus> {
         match self {
-            Self::Dedicated(child) => child.wait(),
-            Self::Shared(domain) => domain
-                .completion()
-                .map_err(std::io::Error::other)?
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::WouldBlock,
-                        "shared domain is still running",
-                    )
-                }),
+            Self::Dedicated(child) => Ok(child.wait()?),
+            Self::Shared(domain) => domain.completion()?.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "shared domain is still running",
+                )
+                .into()
+            }),
         }
     }
 }
@@ -321,6 +328,38 @@ mod tests {
             Some(1)
         );
         assert!(!terminal_status(response(false, None)).unwrap().success());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shared_completion_timeout_preserves_retryable_io_cause() {
+        use std::os::unix::net::UnixListener;
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            connection.read_to_end(&mut request).unwrap();
+            std::thread::sleep(Duration::from_millis(1200));
+        });
+        let mut worker = BusinessWorker::Shared(SharedDomain {
+            host: SharedWorker {
+                socket,
+                identity: candy_process_control::process_identity(std::process::id()).unwrap(),
+            },
+            instance: "domain".into(),
+            control: root.path().join("domain.sock"),
+            token_sha256: "unused".into(),
+        });
+        let error = worker.try_wait().unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        assert!(crate::runtime_agent::transient_error(&error));
+        server.join().unwrap();
     }
 
     #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
