@@ -110,8 +110,7 @@ fn verify_failed_domain_isolated(host: &Host) {
     let retirement = request(&host.socket, "retire");
     assert_eq!(retirement["accepted"], false, "{retirement}");
     assert_eq!(
-        retirement["code"],
-        "worker_has_unacknowledged_domains",
+        retirement["code"], "worker_has_unacknowledged_domains",
         "{retirement}"
     );
     assert_eq!(retirement["completed_domains"], 1, "{retirement}");
@@ -215,6 +214,51 @@ struct Domain {
 }
 
 struct SharedEvidence(PathBuf);
+
+fn ping_continuity(text: &str) -> serde_json::Value {
+    let mut sequences = BTreeSet::new();
+    let mut previous_timestamp = None::<f64>;
+    let mut max_gap_seconds = 0.0f64;
+    for line in text.lines() {
+        let Some(sequence) = line.split_whitespace().find_map(|token| {
+            token
+                .strip_prefix("icmp_seq=")
+                .and_then(|value| value.parse::<u64>().ok())
+        }) else {
+            continue;
+        };
+        if !line.contains(" bytes from ") {
+            continue;
+        }
+        sequences.insert(sequence);
+        if let Some(timestamp) = line
+            .split_whitespace()
+            .next()
+            .and_then(|value| value.strip_prefix('['))
+            .and_then(|value| value.strip_suffix(']'))
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite())
+        {
+            if let Some(previous) = previous_timestamp {
+                max_gap_seconds = max_gap_seconds.max(timestamp - previous);
+            }
+            previous_timestamp = Some(timestamp);
+        }
+    }
+    let highest = sequences.last().copied().unwrap_or_default();
+    serde_json::json!({"received_unique":sequences.len(),"highest_sequence":highest,
+        "missing_sequences":highest.saturating_sub(sequences.len() as u64),
+        "max_reply_gap_seconds":max_gap_seconds})
+}
+
+#[test]
+fn ping_continuity_cannot_count_child_liveness_or_duplicates_as_lossless_traffic() {
+    let evidence = ping_continuity("PING target\n[1.0] 64 bytes from target: icmp_seq=1 ttl=64 time=1\n[1.1] 64 bytes from target: icmp_seq=3 ttl=64 time=1\n[1.2] 64 bytes from target: icmp_seq=3 ttl=64 time=1 (DUP!)\n");
+    assert_eq!(evidence["received_unique"], 2);
+    assert_eq!(evidence["missing_sequences"], 1);
+    assert!(evidence["max_reply_gap_seconds"].as_f64().unwrap() >= 0.09);
+    assert_eq!(ping_continuity("PING target")["received_unique"], 0);
+}
 
 fn publish_scale_evidence(evidence: &[serde_json::Value]) {
     if let Some(destination) = std::env::var_os("CANDY_SIGNED_EVIDENCE_DIR") {
@@ -686,9 +730,26 @@ pub(super) fn verify_domains() {
                 assert_eq!(records[index][field], original[index][field]);
             }
         }
-        evidence
-            .push(serde_json::json!({"workers":workers,"records":records,"hosts":host_metrics}));
+        let continuity: Vec<_> = domains
+            .iter()
+            .map(|domain| {
+                ping_continuity(
+                    &fs::read_to_string(domain.root.join("continuous-ping.log")).unwrap(),
+                )
+            })
+            .collect();
+        evidence.push(
+            serde_json::json!({"workers":workers,"records":records,"hosts":host_metrics,
+            "icmp_continuity":continuity}),
+        );
         publish_scale_evidence(&evidence);
+        for (domain, continuity) in continuity.iter().enumerate() {
+            assert!(
+                continuity["received_unique"].as_u64().unwrap() > 0
+                    && continuity["missing_sequences"] == 0,
+                "dynamic scale lost real packets workers={workers} domain={domain}: {continuity}"
+            );
+        }
     }
     // One unavailable peer must not kill its shared host or affect other domains.
     domains[0].server_process.0.kill().unwrap();
@@ -757,7 +818,10 @@ pub(super) fn verify_domains() {
         if String::from_utf8_lossy(&log[log_offset..]).contains("managed_process_proof_pending") {
             break;
         }
-        assert!(Instant::now() < deadline, "proof-retry shutdown fault was not exercised");
+        assert!(
+            Instant::now() < deadline,
+            "proof-retry shutdown fault was not exercised"
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
     evidence.push(serde_json::json!({"fault":"shutdown_during_unavailable_bound_proof","pid":unavailable["pid"]}));

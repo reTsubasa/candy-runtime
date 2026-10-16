@@ -40,6 +40,63 @@ fn signed_cli_runtime_shared_listener_routes_two_domains() {
     shared_listener::verify();
 }
 
+#[test]
+#[ignore = "real authenticated Reserve/Prepare/Install/Activate/Drain with two netd TUN clients and Runtime server domains"]
+fn signed_cli_bilateral_candidate_reload_preserves_traffic() {
+    shared_listener::verify_mbb();
+}
+
+#[test]
+#[ignore = "exec helper for isolated bilateral candidate reload"]
+fn signed_mbb_client_helper() {
+    let path = PathBuf::from(std::env::var_os("CANDY_MBB_PLAN").unwrap());
+    let plan: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let spec: InfraSpec = serde_json::from_value(plan["infrastructure"].clone()).unwrap();
+    let instance: [u8; 16] = serde_json::from_value(plan["instance_id"].clone()).unwrap();
+    let domain: [u8; 16] = serde_json::from_value(plan["domain_id"].clone()).unwrap();
+    let mut client = InfrastructureClient::new(plan["netd_socket"].as_str().unwrap(), instance);
+    let (body, _) = client
+        .exchange_in_domain(domain, spec.infra_id, Operation::InfraEnsure(spec.clone()))
+        .unwrap();
+    assert!(
+        matches!(body, Body::InfraStatus { spec: Some(_), .. }),
+        "{body:?}"
+    );
+    let (body, fd) = client
+        .exchange_in_domain(
+            domain,
+            spec.infra_id,
+            Operation::InfraAcquireIoFd {
+                infra_id: spec.infra_id,
+                generation: spec.generation,
+                io_epoch: 1,
+            },
+        )
+        .unwrap();
+    assert!(matches!(body, Body::IoFd { .. }), "{body:?}");
+    let fd = fd.unwrap();
+    ip(&["link", "set", "candy0", "up"]);
+    ip(&["route", "replace", "10.251.2.0/24", "dev", "candy0"]);
+    nix::fcntl::fcntl(
+        fd.as_raw_fd(),
+        nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
+    )
+    .unwrap();
+    let error = Command::new(core())
+        .args(["client", "sdwan", "run", "--config"])
+        .arg(plan["core_config"].as_str().unwrap())
+        .arg("--tun-fd")
+        .arg(fd.as_raw_fd().to_string())
+        .arg("--status")
+        .arg(plan["core_status"].as_str().unwrap())
+        .arg("--readiness-token")
+        .arg("0123456789abcdef0123456789abcdef")
+        .arg("--reload-socket")
+        .arg(path.with_file_name("reload.sock"))
+        .exec();
+    panic!("Core exec failed: {error}");
+}
+
 struct Process(Child);
 impl Drop for Process {
     fn drop(&mut self) {

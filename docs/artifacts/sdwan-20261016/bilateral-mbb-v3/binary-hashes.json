@@ -1,0 +1,8 @@
+{
+  "candy-core": "052cc392a811c190358109feb93efb8d3423c74b5050481172871636120a6b13",
+  "candy-netd": "d4cc67d5ddb4941fb30ffbb433a567b0d4c8c58003b86de07724596b75ce4b18",
+  "candy-agent": "f1fc5eca7dc66f0ea84670dc776ba3c7fd49e5ac670156d87516ce7f58bc0054",
+  "candy-tunio": "98eaef0ea3cd65e2d1272cb0b6a510dbd3fe89637700f980b750893a0a27bf38",
+  "sdwan_signed_cli_fixture": "ece62ef35024703657e7fa5e6655b4ab2666f00782ab6831798e0d491a3a1535",
+  "signed_cli_helper": "2e9d5f5b5fa2dede198496d598bf8e80ceb2b29d0c9fed5f892766d3938faf8c"
+}

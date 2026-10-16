@@ -24,7 +24,16 @@ impl Drop for Evidence {
                     copy(&entry.path(), &target.join(entry.file_name()))?;
                 } else if matches!(
                     entry.path().extension().and_then(|value| value.to_str()),
-                    Some("json" | "log" | "journal" | "domain" | "activation")
+                    Some(
+                        "json"
+                            | "log"
+                            | "journal"
+                            | "domain"
+                            | "activation"
+                            | "reservation"
+                            | "candidate"
+                            | "candidate-admission"
+                    )
                 ) {
                     fs::copy(entry.path(), target.join(entry.file_name()))?;
                 }
@@ -168,7 +177,172 @@ fn master_workers(pid: u32) -> Vec<candy_process_control::ProcessIdentity> {
         .collect()
 }
 
+fn reload(socket: &Path, request: serde_json::Value) -> serde_json::Value {
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream
+        .write_all(&serde_json::to_vec(&request).unwrap())
+        .unwrap();
+    stream.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    serde_json::from_slice(&response).unwrap()
+}
+
+fn tun_identity(namespace: &str) -> serde_json::Value {
+    let output = Command::new("ip")
+        .args(["-n", namespace, "-j", "link", "show", "candy0"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "client infrastructure TUN missing");
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()[0]["ifindex"].clone()
+}
+
+fn verify_live_reload(
+    root: &Path,
+    clients: &[String],
+    server_plans: &[PathBuf],
+    client_pids: &[u32],
+) {
+    let server_before: Vec<_> = server_plans
+        .iter()
+        .map(|path| {
+            (
+                status(&path.with_file_name("process.json")).unwrap(),
+                status(&path.with_file_name("io-process.json")).unwrap(),
+            )
+        })
+        .collect();
+    let client_before: Vec<_> = client_pids
+        .iter()
+        .map(|pid| candy_process_control::process_identity(*pid).unwrap())
+        .collect();
+    let tuns_before: Vec<_> = clients.iter().map(|name| tun_identity(name)).collect();
+    let mut traffic = Vec::new();
+    for (domain, namespace) in clients.iter().enumerate() {
+        traffic.push(spawn(
+            Command::new("ip").args([
+                "netns",
+                "exec",
+                namespace,
+                "ping",
+                "-q",
+                "-I",
+                "10.251.1.10",
+                "-i",
+                "0.05",
+                "-c",
+                "400",
+                "-W",
+                "1",
+                "10.251.2.10",
+            ]),
+            &root.join(format!("mbb-ping-{domain}.log")),
+        ));
+    }
+    let mut receipts = Vec::new();
+    for round in 1..=2 {
+        for domain in 0..clients.len() {
+            let fixture = root.join(format!("domain-{domain}/fixture"));
+            let generated = Command::new(std::env::var("CANDY_SIGNED_FIXTURE_BINARY").unwrap())
+                .env("CANDY_SIGNED_FIXTURE_ADVANCE_POLICY_ROOT", &fixture)
+                .env("CANDY_SIGNED_FIXTURE_POLICY_ROUND", round.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                generated.status.success(),
+                "{}",
+                String::from_utf8_lossy(&generated.stderr)
+            );
+            let socket = root.join(format!("domain-{domain}/client/reload.sock"));
+            let transaction = format!("{round:02x}{domain:02x}{}", "a".repeat(60));
+            let prepared = reload(
+                &socket,
+                serde_json::json!({"schema_version":1,"action":"prepare",
+                "transaction_id":transaction,"config":fixture.join(format!("client.next-{round}.toml")),
+                "status":root.join(format!("domain-{domain}/client/core-status.json"))}),
+            );
+            assert_eq!(
+                prepared["ok"], true,
+                "candidate preparation failed: {prepared}"
+            );
+            probe_proxy();
+            let committed = reload(
+                &socket,
+                serde_json::json!({"schema_version":1,"action":"commit","transaction_id":transaction}),
+            );
+            assert_eq!(
+                committed["ok"], true,
+                "bilateral candidate commit failed: {committed}"
+            );
+            let duplicate = reload(
+                &socket,
+                serde_json::json!({"schema_version":1,"action":"commit","transaction_id":transaction}),
+            );
+            assert_eq!(duplicate, committed, "exact commit retry changed outcome");
+            receipts.push(serde_json::json!({"round":round,"domain":domain,"prepared":prepared,"committed":committed,"duplicate":duplicate}));
+            probe_proxy();
+        }
+    }
+    for (domain, process) in traffic.iter_mut().enumerate() {
+        assert!(
+            process.0.wait().unwrap().success(),
+            "continuous ICMP failed domain={domain}"
+        );
+        let log = fs::read_to_string(root.join(format!("mbb-ping-{domain}.log"))).unwrap();
+        assert!(
+            log.contains("400 packets transmitted, 400 received, 0% packet loss"),
+            "ICMP loss during candidate MBB domain={domain}: {log}"
+        );
+    }
+    for ((pid, before), (name, tun)) in client_pids
+        .iter()
+        .zip(&client_before)
+        .zip(clients.iter().zip(&tuns_before))
+    {
+        assert_eq!(
+            candy_process_control::process_identity(*pid).unwrap(),
+            *before,
+            "client restarted during MBB"
+        );
+        assert_eq!(tun_identity(name), *tun, "MBB replaced client TUN");
+    }
+    for (plan, (worker, io)) in server_plans.iter().zip(&server_before) {
+        assert_eq!(
+            status(&plan.with_file_name("process.json")).unwrap(),
+            *worker,
+            "candidate MBB restarted server domain"
+        );
+        assert_eq!(
+            status(&plan.with_file_name("io-process.json")).unwrap(),
+            *io,
+            "candidate MBB replaced server TUNIO"
+        );
+    }
+    private_json(
+        &root.join("mbb-evidence.json"),
+        &serde_json::json!({"gate":"PASS","scope":"bilateral Rust Core candidate protocol with real netd TUN clients and Runtime shared-listener server domains",
+        "rounds":receipts,"client_processes":client_before,"client_tun_ifindices":tuns_before,
+        "icmp_packets_per_domain":400,"icmp_loss":0,"proxy_survived":true,"runtime_cross_process_candidate_handoff":"separate_gate"}),
+    );
+}
+
 pub(super) fn verify() {
+    verify_scenario(false);
+}
+
+pub(super) fn verify_mbb() {
+    verify_scenario(true);
+}
+
+fn verify_scenario(mbb: bool) {
     assert_eq!(
         std::env::var("CANDY_NETD_ISOLATED_KERNEL_TEST").as_deref(),
         Ok("1")
@@ -206,6 +380,9 @@ pub(super) fn verify() {
             )
             .env("CANDY_SIGNED_FIXTURE_ENDPOINT", "10.200.0.2:18443")
             .env("CANDY_SIGNED_FIXTURE_GRANT_TTL_SECS", "600");
+        if mbb {
+            generator.env("CANDY_SIGNED_FIXTURE_CONNECTION_LIMIT", "4");
+        }
         if domain != 0 {
             generator.env(
                 "CANDY_SIGNED_FIXTURE_CERT_SOURCE",
@@ -340,6 +517,9 @@ pub(super) fn verify() {
     // Client and server are separate logical hosts. Each Agent owns one
     // supervisor per domain; their infrastructure identities are independent.
     for side in ["client", "server"] {
+        if mbb && side == "client" {
+            continue;
+        }
         let cloud = root.join(format!("cloud-{side}"));
         fs::create_dir(&cloud).unwrap();
         fs::set_permissions(&cloud, fs::Permissions::from_mode(0o700)).unwrap();
@@ -362,6 +542,28 @@ pub(super) fn verify() {
                 .arg(agent),
             &root.join(format!("agent-{side}.log")),
         ));
+    }
+    let mut mbb_client_pids = Vec::new();
+    if mbb {
+        for (domain, namespace) in client_names.iter().enumerate() {
+            processes.push(spawn(
+                Command::new("ip")
+                    .args(["netns", "exec", namespace])
+                    .arg(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "signed_mbb_client_helper",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .env(
+                        "CANDY_MBB_PLAN",
+                        root.join(format!("domain-{domain}/client/plan.json")),
+                    ),
+                &root.join(format!("mbb-client-{domain}.log")),
+            ));
+            mbb_client_pids.push(processes.last().unwrap().0.id());
+        }
     }
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
@@ -422,6 +624,10 @@ pub(super) fn verify() {
         &root.join("proxy.log"),
     ));
     probe_proxy();
+    if mbb {
+        verify_live_reload(root, &client_names, &server_plans, &mbb_client_pids);
+        return;
+    }
     let before: Vec<_> = server_plans
         .iter()
         .map(|path| status(&path.with_file_name("io-process.json")).unwrap())

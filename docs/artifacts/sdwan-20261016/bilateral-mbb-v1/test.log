@@ -1,0 +1,16 @@
+
+running 1 test
+
+thread 'signed_cli_bilateral_candidate_reload_preserves_traffic' panicked at tests/fixtures/shared_listener.rs:390:9:
+Error: invalid cloud grant semantics
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test signed_cli_bilateral_candidate_reload_preserves_traffic ... FAILED
+
+failures:
+
+failures:
+    signed_cli_bilateral_candidate_reload_preserves_traffic
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.17s
+

@@ -11,6 +11,13 @@ It then injects one unavailable peer and a killed shared host to verify recovery
 and isolation. These results do not constitute production deployment, OpenWrt
 acceptance or the deferred throughput target.
 
+The v19 continuous ping assertion checks process liveness; `wait_all` samples
+successful forwarding after each reconciliation. It does not prove zero packet
+loss during migration. The updated fixture now records sequence loss and reply
+gaps at every scale step and requires zero missing sequences before injected
+faults. That stricter continuity gate remains pending on the final Runtime
+cross-process MBB implementation.
+
 ## Discovered Defects And Changes
 
 1. `shared-pool-e2e-v8` failed on scale-down from four hosts to two. Core accepted

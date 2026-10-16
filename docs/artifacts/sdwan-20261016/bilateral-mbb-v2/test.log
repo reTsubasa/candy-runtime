@@ -1,0 +1,17 @@
+
+running 1 test
+
+thread 'signed_cli_bilateral_candidate_reload_preserves_traffic' panicked at tests/fixtures/shared_listener.rs:272:13:
+assertion `left == right` failed: candidate preparation failed: {"error":"stage=auth_result_validate error_code=auth_rejected authentication rejected: Some(\"authentication failed\")","generation":null,"ok":false,"schema_version":1}
+  left: Bool(false)
+ right: true
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test signed_cli_bilateral_candidate_reload_preserves_traffic ... FAILED
+
+failures:
+
+failures:
+    signed_cli_bilateral_candidate_reload_preserves_traffic
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 1.96s
+
