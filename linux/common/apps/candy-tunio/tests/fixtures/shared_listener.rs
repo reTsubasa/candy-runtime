@@ -119,10 +119,14 @@ pub(super) fn declaration(report: &serde_json::Value) -> PrepareDeclaration {
     }
 }
 
+#[track_caller]
 fn probe_proxy() {
+    let started = Instant::now();
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut attempts = 0;
     loop {
-        let success = (|| -> std::io::Result<()> {
+        attempts += 1;
+        let result = (|| -> std::io::Result<()> {
             let mut stream = TcpStream::connect_timeout(
                 &"127.0.0.1:19002".parse().unwrap(),
                 Duration::from_millis(200),
@@ -135,14 +139,13 @@ fn probe_proxy() {
                 return Err(std::io::Error::other("proxy HTTP response mismatch"));
             }
             Ok(())
-        })()
-        .is_ok();
-        if success {
-            return;
-        }
+        })();
+        let Err(error) = result else { return };
         assert!(
             Instant::now() < deadline,
-            "Proxy failed through the shared listener"
+            "Proxy failed through the shared listener attempts={attempts} elapsed_ms={} error_kind={:?} detail={error}",
+            started.elapsed().as_millis(),
+            error.kind(),
         );
         std::thread::sleep(Duration::from_millis(100));
     }
