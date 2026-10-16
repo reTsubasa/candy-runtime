@@ -32,6 +32,20 @@ Reservation expiry, a local precommit cancellation, and a failed candidate with 
 
 Required Linux filter: `cargo test -p candy-sdwan-agent --features experimental-tunio-rebind signed_renewal::linux::mbb_tests`.
 
+## Original-tuple read-only reconciliation
+
+The authenticated worker-control endpoint now accepts `candidate_reconcile` for the retained original plan. It checks the original transaction, signed authorization, controller and owner identity. The operation queries the original actor with Probe; it does not read the original barrier reply receiver, issue another Prepare/Commit/Abort, renew the original operation cap, or clear the reservation. Local actor phase is reported separately from the remote outcome. An absent remote receipt remains `unknown`, including when the local actor reports Installed.
+
+After validating CommitAck on the original authenticated control stream, Core retains the ACK in memory before the first persistence await. It publishes an immutable private `.outbound-installed` receipt containing the exact selector, barrier, connection identity, local/peer attachments, Reserve/Reserved hashes and encoded ACK. Failed or cancelled persistence can retry the same historical ACK without consuming the only ACK or sending another Commit. Publishing already authenticated history after operation-cap expiry does not authorize further installation or extend the cap.
+
+Each live-session reconciliation re-reads the actual private `.outbound-installed` file and verifies its original request/response hashes, ACK, connection and attachment binding. It does not trust a cached receipt. A missing file reports remote UNKNOWN; corruption fails reconciliation while preserving the original transaction. If the actor Probe fails, the response records that query error separately and can still report a fully verified historical peer ACK.
+
+Runtime checks the read-only response against the preserved original reservation, boot, deadline, transaction, owner epoch, expected peer coverage, selector, barrier and original Reserve/Reserved hashes before saving `mbb-peer-reconciliation.json`. It uses the authenticated Core endpoint's validation of the encoded wire ACK; it does not implement a second wire parser. This evidence is diagnostic history and is never a substitute for a live installation proof or PacketPort commit authority. Within the original effective window, a failed Install continues the original Install phase. Outside that window the same journal remains pending.
+
+This first reconciliation step deliberately does not recover a lost process's transport, reconstruct a session from an ACK file, provide a remote terminal/cancellation receipt, or infer safe replacement from an expired local owner. Those remain separate implementation and fault-gate requirements.
+
+Native verification of this step: Core candidate tests 6/6 passed; application all-target strict Clippy passed. Runtime full native library regression passed 110/110. The two new `candidate_ownership` tests are Linux-only: the native filter selects zero tests, so their execution and Linux MBB integration remain pending the next frozen Linux gate. The Core historical receipt regression checks actual file re-read, immutable exact retry after expiry, all original tuple mutations, wrong ACK type, corrupted saved hash rejection and missing-file UNKNOWN.
+
 ## Remaining OPEN items
 
 The current wire protocol does not provide an authenticated, durable peer terminal receipt for a failed reservation before coordinated drain. Reservation expiry or absence of a local PacketPort commit does not prove that the remote actor never installed. Such transactions intentionally remain unresolved; this change prevents destructive recovery and does not claim automatic recovery for them.

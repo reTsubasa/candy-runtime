@@ -53,6 +53,7 @@ pub(super) fn exchange_candidate(
                 | "candidate_activate"
                 | "candidate_drain"
                 | "candidate_status"
+                | "candidate_reconcile"
                 | "candidate_retire_old"
                 | "candidate_retire_after_failure"
                 | "candidate_finalize_failure"

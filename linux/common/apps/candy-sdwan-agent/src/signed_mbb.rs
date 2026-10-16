@@ -168,6 +168,35 @@ fn mbb_precommit_peer_outcome_pending(
     anyhow::bail!("code=mbb_precommit_peer_outcome_unknown module=sdwan_handoff reason={reason} action=reconcile_original_transaction_preserve_candidate");
 }
 
+fn mbb_reconcile_peer_evidence(
+    plan: &Plan,
+    journal: &Journal,
+    record: &crate::process_record::ManagedProcessRecord,
+) -> Result<()> {
+    let owner = journal
+        .candidate_owner
+        .as_ref()
+        .context("MBB original owner absent")?;
+    let reservation = journal
+        .mbb_reservation
+        .as_ref()
+        .context("MBB original reservation absent")?;
+    let value = mbb_core_exchange(
+        plan,
+        record,
+        "candidate_reconcile",
+        &serde_json::json!({"transaction_id":owner.envelope.transaction_id}),
+    )?;
+    owner.require_peer_reconciliation(&value, reservation)?;
+    publish(
+        &journal
+            .snapshot
+            .directory
+            .join("mbb-peer-reconciliation.json"),
+        &value,
+    )
+}
+
 fn run_mbb_transaction(
     context: &MbbContext<'_>,
     plan: &mut Plan,
@@ -229,6 +258,11 @@ fn run_mbb_transaction(
             publish(&evidence, journal)?;
             journal.mbb_outcome = Some("local_expired_remote_unknown".into());
             publish(&evidence, journal)?;
+            if let Ok(record) = crate::process_record::read(&journal.candidate_record) {
+                if let Err(error) = mbb_reconcile_peer_evidence(plan, journal, &record) {
+                    eprintln!("level=warn code=mbb_peer_reconciliation_pending module=sdwan_handoff transaction_id={} detail={error:#} action=preserve_original_expired_transaction", candidate.envelope.transaction_id);
+                }
+            }
             return mbb_precommit_peer_outcome_pending(
                 journal,
                 journal_path,
@@ -474,6 +508,11 @@ fn run_mbb_transaction(
     }
     let envelope = journal.envelope.as_ref().unwrap().clone();
     let record = crate::process_record::read(&journal.candidate_record)?;
+    if journal.phase == "mbb_peer_reconciliation_pending" {
+        // This RPC only queries original actor state and durable ACK evidence.
+        // Its success is not authority to replace the original transaction.
+        mbb_reconcile_peer_evidence(plan, journal, &record)?;
+    }
     let mut candidate_owner = journal
         .candidate_owner
         .clone()
@@ -589,12 +628,16 @@ fn run_mbb_transaction(
             journal.phase = "mbb_peer_install_pending".into();
             publish(journal_path, journal)?;
         }
-        let proof = mbb_proof(mbb_core_exchange(
-            plan,
-            &record,
-            "candidate_install",
-            &payload,
-        )?)?;
+        let installation = mbb_core_exchange(plan, &record, "candidate_install", &payload);
+        let proof = match installation {
+            Ok(value) => mbb_proof(value)?,
+            Err(error) => {
+                if let Err(reconciliation) = mbb_reconcile_peer_evidence(plan, journal, &record) {
+                    eprintln!("level=warn code=mbb_peer_reconciliation_pending module=sdwan_handoff transaction_id={} detail={reconciliation:#} action=retry_original_install", envelope.transaction_id);
+                }
+                return Err(error);
+            }
+        };
         proof.require_installed(&envelope, &expected)?;
         candidate_owner.read_installed_proof(plan, &record, monotonic_ms()?)?;
         let committed = candidate_owner.promote_with(

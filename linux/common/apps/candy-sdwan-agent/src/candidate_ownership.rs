@@ -215,6 +215,106 @@ pub(super) struct CandidateOwner {
 }
 
 impl CandidateOwner {
+    /// Verify a historical peer result obtained through the original worker's
+    /// authenticated control endpoint. This deliberately does not authorize a
+    /// PacketPort commit or turn local actor state into a remote installation.
+    pub(super) fn require_peer_reconciliation(
+        &self,
+        value: &serde_json::Value,
+        reservation: &serde_json::Value,
+    ) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        ensure!(
+            value["schema_version"] == 1
+                && value["read_only"] == true
+                && value["phase"] == "reconciled_original_candidate"
+                && value["transaction_id"] == self.envelope.transaction_id
+                && value["authorization_sha256"] == self.envelope.signed_control_hash
+                && value["owner_epoch"] == self.envelope.binding.owner_epoch
+                && value["original_deadline_mono_ms"] == reservation["original_deadline_mono_ms"]
+                && value["original_deadline_mono_ms"]
+                    .as_u64()
+                    .is_some_and(|cap| cap != 0)
+                && value["boot_id"] == reservation["boot_id"]
+                && value["boot_id"] == self.envelope.boot_id,
+            "code=candidate_reconciliation_identity_mismatch module=sdwan_handoff"
+        );
+        let peers = value["peers"]
+            .as_array()
+            .context("candidate reconciliation peers absent")?;
+        let originals = reservation["plan"]["peers"]
+            .as_array()
+            .context("candidate original reservation peers absent")?;
+        ensure!(
+            !peers.is_empty()
+                && peers.len() == self.expected_peers.len()
+                && originals.len() == peers.len(),
+            "code=candidate_reconciliation_coverage_mismatch module=sdwan_handoff"
+        );
+        for (index, expected) in self.expected_peers.iter().enumerate() {
+            ensure!(
+                self.expected_peers[..index]
+                    .iter()
+                    .all(|other| other.attachment_id != expected.attachment_id),
+                "code=candidate_reconciliation_duplicate_expected_peer module=sdwan_handoff"
+            );
+            let matches: Vec<_> = peers
+                .iter()
+                .filter(|peer| peer["attachment_id"] == serde_json::json!(expected.attachment_id))
+                .collect();
+            ensure!(
+                matches.len() == 1,
+                "candidate reconciliation duplicate or missing peer"
+            );
+            let peer = matches[0];
+            ensure!(
+                peer["selector"] == serde_json::to_value(&expected.selector)?
+                    && peer["barrier"] == serde_json::to_value(&expected.barrier)?,
+                "code=candidate_reconciliation_peer_mismatch module=sdwan_handoff"
+            );
+            let original: Vec<_> = originals
+                .iter()
+                .filter(|original| original["expected"]["attachment_id"] == peer["attachment_id"])
+                .collect();
+            ensure!(
+                original.len() == 1
+                    && original[0]["expected"]["selector"] == peer["selector"]
+                    && original[0]["expected"]["barrier"] == peer["barrier"],
+                "candidate reconciliation original peer missing"
+            );
+            let remote = &peer["remote_installation"];
+            if remote.is_null() {
+                ensure!(
+                    peer["remote_outcome"] == "unknown",
+                    "code=candidate_reconciliation_remote_unproven module=sdwan_handoff"
+                );
+                continue;
+            }
+            let request: Vec<u8> =
+                serde_json::from_value(original[0]["reservation"]["intent"]["request"].clone())?;
+            let response: Vec<u8> =
+                serde_json::from_value(original[0]["reservation"]["response"]["response"].clone())?;
+            let request_hash: [u8; 32] = Sha256::digest(request).into();
+            let response_hash: [u8; 32] = Sha256::digest(response).into();
+            ensure!(
+                remote["schema_version"] == 1
+                    && peer["remote_outcome"] == "installed_ack_recorded"
+                    && peer["commit_intent"] == true
+                    && remote["selector"] == peer["selector"]
+                    && remote["barrier"] == peer["barrier"]
+                    && remote["peer_attachment_id"] == peer["attachment_id"]
+                    && remote["request_sha256"] == serde_json::json!(request_hash)
+                    && remote["response_sha256"] == serde_json::json!(response_hash)
+                    && remote["commit_ack"]
+                        .as_array()
+                        .is_some_and(|ack| !ack.is_empty())
+                    && !remote["connection"].is_null(),
+                "code=candidate_reconciliation_remote_receipt_mismatch module=sdwan_handoff"
+            );
+        }
+        Ok(())
+    }
+
     pub(super) fn new(
         envelope: AuthorityEnvelope,
         expected_active: Option<PacketPortBinding>,
@@ -711,6 +811,127 @@ mod tests {
             envelope: None,
             transaction_id: owner.envelope.transaction_id.clone(),
         }
+    }
+
+    fn reconciliation(owner: &CandidateOwner) -> (serde_json::Value, serde_json::Value) {
+        use sha2::{Digest, Sha256};
+        let peer = &owner.expected_peers[0];
+        let request = vec![1_u8, 2, 3];
+        let response = vec![4_u8, 5, 6];
+        let request_hash: [u8; 32] = Sha256::digest(&request).into();
+        let response_hash: [u8; 32] = Sha256::digest(&response).into();
+        let original = serde_json::json!({
+            "original_deadline_mono_ms":20_000,"boot_id":"boot",
+            "plan":{"peers":[{"expected":peer,"reservation":{
+                "intent":{"request":request},"response":{"response":response}}}]}});
+        let result = serde_json::json!({
+            "schema_version":1,"read_only":true,"phase":"reconciled_original_candidate",
+            "transaction_id":owner.envelope.transaction_id,
+            "authorization_sha256":owner.envelope.signed_control_hash,
+            "owner_epoch":owner.envelope.binding.owner_epoch,
+            "original_deadline_mono_ms":20_000,"boot_id":"boot",
+            "peers":[{"attachment_id":peer.attachment_id,"selector":peer.selector,
+                "barrier":peer.barrier,"commit_intent":true,"local_actor_phase":"Installed",
+                "remote_outcome":"installed_ack_recorded","remote_installation":{
+                    "schema_version":1,"selector":peer.selector,"barrier":peer.barrier,
+                    "connection":{"Direct":90},"local_attachment_id":vec![2_u8;16],
+                    "peer_attachment_id":peer.attachment_id,
+                    "request_sha256":request_hash,"response_sha256":response_hash,
+                    "commit_ack":[1,2,3]}}]});
+        (result, original)
+    }
+
+    #[test]
+    fn historical_peer_reconciliation_binds_original_tuple_and_reservation() {
+        let owner = candidate();
+        let (result, original) = reconciliation(&owner);
+        owner
+            .require_peer_reconciliation(&result, &original)
+            .unwrap();
+        for (pointer, changed) in [
+            ("/read_only", serde_json::json!(false)),
+            ("/transaction_id", serde_json::json!("different")),
+            ("/authorization_sha256", serde_json::json!("different")),
+            ("/owner_epoch", serde_json::json!(3)),
+            ("/original_deadline_mono_ms", serde_json::json!(20_001)),
+            ("/boot_id", serde_json::json!("other")),
+            ("/peers/0/attachment_id", serde_json::json!(vec![9_u8; 16])),
+            ("/peers/0/selector/owner_epoch", serde_json::json!(99)),
+            ("/peers/0/barrier/fence", serde_json::json!(99)),
+            ("/peers/0/commit_intent", serde_json::json!(false)),
+            (
+                "/peers/0/remote_installation/request_sha256",
+                serde_json::json!(vec![0_u8; 32]),
+            ),
+            (
+                "/peers/0/remote_installation/response_sha256",
+                serde_json::json!(vec![0_u8; 32]),
+            ),
+            (
+                "/peers/0/remote_installation/peer_attachment_id",
+                serde_json::json!(vec![9_u8; 16]),
+            ),
+            (
+                "/peers/0/remote_installation/selector/tunnel_id",
+                serde_json::json!(99),
+            ),
+            (
+                "/peers/0/remote_installation/barrier/hash",
+                serde_json::json!(vec![0_u8; 32]),
+            ),
+            (
+                "/peers/0/remote_installation/commit_ack",
+                serde_json::json!([]),
+            ),
+            (
+                "/peers/0/remote_installation/connection",
+                serde_json::Value::Null,
+            ),
+        ] {
+            let mut forged = result.clone();
+            *forged.pointer_mut(pointer).unwrap() = changed;
+            assert!(
+                owner
+                    .require_peer_reconciliation(&forged, &original)
+                    .is_err(),
+                "accepted {pointer}"
+            );
+        }
+        let mut altered = original.clone();
+        altered["plan"]["peers"][0]["reservation"]["intent"]["request"] = serde_json::json!([7]);
+        assert!(owner
+            .require_peer_reconciliation(&result, &altered)
+            .is_err());
+        let mut duplicate = result.clone();
+        duplicate["peers"]
+            .as_array_mut()
+            .unwrap()
+            .push(result["peers"][0].clone());
+        assert!(owner
+            .require_peer_reconciliation(&duplicate, &original)
+            .is_err());
+    }
+
+    #[test]
+    fn local_installed_without_authenticated_peer_ack_remains_unknown() {
+        let owner = candidate();
+        let (mut result, original) = reconciliation(&owner);
+        result["peers"][0]["remote_installation"] = serde_json::Value::Null;
+        result["peers"][0]["remote_outcome"] = "unknown".into();
+        owner
+            .require_peer_reconciliation(&result, &original)
+            .unwrap();
+        assert!(!owner.commit_intent);
+        result["peers"][0]["remote_outcome"] = "installed_ack_recorded".into();
+        assert!(owner
+            .require_peer_reconciliation(&result, &original)
+            .is_err());
+        result["peers"][0]["remote_outcome"] = "unknown".into();
+        let mut changed_original = original;
+        changed_original["plan"]["peers"][0]["expected"]["barrier"]["fence"] = 99.into();
+        assert!(owner
+            .require_peer_reconciliation(&result, &changed_original)
+            .is_err());
     }
 
     fn proof(owner: &CandidateOwner) -> CandidateProof {
