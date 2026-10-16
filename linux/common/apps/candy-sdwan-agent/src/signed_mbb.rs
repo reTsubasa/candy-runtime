@@ -175,6 +175,121 @@ fn run_mbb_transaction(
         retire_old_worker(journal, context.desired, parent)?;
         return adopt_worker_with_io(context.path, true, true);
     }
+    // Reconcile the original committed owner before compiling signed inputs:
+    // expired business authorization must not block failure isolation forever.
+    if let Some(mut candidate) = journal
+        .candidate_owner
+        .clone()
+        .filter(|owner| owner.commit_is_uncertain())
+    {
+        let actual = context.authority(
+            &context.request(
+                AuthorityControlOperation::ProbeTransaction,
+                None,
+                &candidate.envelope.transaction_id,
+            ),
+            None,
+        )?;
+        if actual
+            .owner_transaction
+            .as_ref()
+            .is_some_and(|receipt| receipt.phase == "expired")
+        {
+            candidate.retire_expired_commit_with(
+                context.request(
+                    AuthorityControlOperation::ProbeTransaction,
+                    None,
+                    &candidate.envelope.transaction_id,
+                ),
+                |owner| {
+                    journal.candidate_owner = Some(owner.clone());
+                    journal.phase = "mbb_expired_commit_retiring".into();
+                    publish(journal_path, journal)
+                },
+                |request| context.authority(request, None),
+            )?;
+            let evidence = journal
+                .snapshot
+                .directory
+                .join("mbb-expired-commit-recovery.json");
+            publish(&evidence, journal)?;
+            let record = crate::process_record::read(&journal.candidate_record)?;
+            stop_record(&record, plan)?;
+            journal.mbb_reservation = None;
+            journal.phase = "expired_commit_retired".into();
+            journal.mbb_outcome = Some("local_expired_remote_unknown".into());
+            publish(&evidence, journal)?;
+            publish(journal_path, journal)?;
+            eprintln!("level=warn code=mbb_expired_commit_retired module=sdwan_handoff transaction_id={} local_outcome=expired remote_outcome=unknown action=fresh_authorization_preserve_old_owner_and_tun", candidate.envelope.transaction_id);
+            return Err(CoreRecoveryRequired.into());
+        }
+        if candidate.require_committed_outcome(&actual).is_ok() {
+            let record = crate::process_record::read(&journal.candidate_record)?;
+            let failed = candidate.committed_isolation_needed(
+                &actual,
+                record.business_is_current().context(ManagedProofPending),
+            )?;
+            if failed {
+                return mbb_isolate_failed_commit(
+                    context,
+                    plan,
+                    journal,
+                    journal_path,
+                    &mut candidate,
+                    &record,
+                    &actual,
+                );
+            }
+            if monotonic_ms()? >= candidate.prepare_deadline_mono_ms {
+                if actual.old_owner_drained
+                    && !actual.forced_retirement
+                    && actual.retained_owner_binding.is_none()
+                {
+                    let confirmation = mbb_core_exchange(
+                        plan,
+                        &record,
+                        "candidate_status",
+                        &serde_json::json!({"transaction_id": candidate.envelope.transaction_id}),
+                    )
+                    .and_then(mbb_proof)
+                    .and_then(|proof| {
+                        proof.require_drained(&candidate.envelope, &candidate.expected_peers)
+                    });
+                    confirmation.context(ManagedProofPending)?;
+                    journal.snapshot.verify()?;
+                    return mbb_finalize(
+                        context,
+                        plan,
+                        journal,
+                        journal_path,
+                        &record,
+                        &actual,
+                        false,
+                    );
+                }
+                let retirement = mbb_core_exchange(
+                    plan,
+                    &record,
+                    "candidate_retire_after_failure",
+                    &serde_json::json!({"transaction_id": candidate.envelope.transaction_id}),
+                )
+                .and_then(mbb_proof)
+                .and_then(|proof| {
+                    proof.require_failed_retirement(&candidate.envelope, &candidate.expected_peers)
+                });
+                retirement.context(ManagedProofPending)?;
+                journal.snapshot.verify()?;
+                return mbb_retire_failed(
+                    context,
+                    plan,
+                    journal,
+                    journal_path,
+                    &candidate,
+                    &record,
+                );
+            }
+        }
+    }
     journal.snapshot.verify()?;
     let report = match report {
         Some(report) => report,
@@ -424,11 +539,15 @@ fn run_mbb_transaction(
     }
     let candidate_current = record.business_is_current().context(ManagedProofPending)?;
     if !candidate_current && owner_state == OwnerState::Committed {
-        journal.mbb_reservation = None;
-        journal.candidate_owner = None;
-        journal.phase = "retry_wait".into();
-        publish(journal_path, journal)?;
-        return Err(CoreRecoveryRequired.into());
+        return mbb_isolate_failed_commit(
+            context,
+            plan,
+            journal,
+            journal_path,
+            &mut candidate_owner,
+            &record,
+            &actual,
+        );
     }
     if owner_state != OwnerState::Committed
         && !candidate_owner.commit_is_uncertain()
@@ -633,6 +752,59 @@ fn run_mbb_transaction(
         &actual,
         false,
     )
+}
+
+fn mbb_isolate_failed_commit(
+    context: &MbbContext<'_>,
+    plan: &mut Plan,
+    journal: &mut Journal,
+    journal_path: &Path,
+    candidate: &mut super::super::candidate_ownership::CandidateOwner,
+    record: &crate::process_record::ManagedProcessRecord,
+    actual: &candy_tunio::authority_control::AuthorityControlResponse,
+) -> Result<()> {
+    candidate.record_committed_failure(actual, |owner| {
+        journal.candidate_owner = Some(owner.clone());
+        journal.phase = "mbb_committed_isolating".into();
+        publish(journal_path, journal)
+    })?;
+    // Retain the signed closure and original participant identities as failure
+    // evidence even when normal renewal later retires its generated files.
+    let evidence = journal.snapshot.directory.join("mbb-failure-recovery.json");
+    publish(&evidence, journal)?;
+    stop_record(record, plan)?;
+    let isolated = context.authority(
+        &context.request(
+            AuthorityControlOperation::IsolateCommittedOwner {
+                expected_active: candidate
+                    .expected_active
+                    .context("committed isolation original binding absent")?,
+            },
+            Some(candidate.envelope.clone()),
+            &candidate.envelope.transaction_id,
+        ),
+        None,
+    )?;
+    candidate.record_committed_isolation(&isolated, |owner| {
+        journal.candidate_owner = Some(owner.clone());
+        publish(journal_path, journal)
+    })?;
+    publish(&evidence, journal)?;
+    let old = journal
+        .old_worker
+        .as_ref()
+        .context("failed MBB predecessor absent")?;
+    let old_plan = match &old.effective_plan_file {
+        Some(path) => read_plan(path)?,
+        None => context.desired.clone(),
+    };
+    stop_record(old, &old_plan)?;
+    journal.mbb_reservation = None;
+    journal.phase = "committed_owner_isolated".into();
+    publish(journal_path, journal)?;
+    publish(&evidence, journal)?;
+    eprintln!("level=warn code=mbb_committed_owner_isolated module=sdwan_handoff transaction_id={} outcome=failed_owner_isolated action=fresh_authorization_preserve_tun", candidate.envelope.transaction_id);
+    Err(CoreRecoveryRequired.into())
 }
 
 fn mbb_retire_failed(

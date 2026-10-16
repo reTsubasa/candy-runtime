@@ -9,7 +9,9 @@ use candy_packet_port::{
         PacketPortOwnerUpdate, PacketPortReceipt,
     },
 };
-use candy_process_control::{peer_identity, process_is_current, ProcessIdentity};
+use candy_process_control::{
+    peer_identity, process_is_current, process_is_current_confirmed, ProcessIdentity,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -69,12 +71,15 @@ pub(crate) struct AuthorityState {
     old_owner_drained: bool,
     forced_retirement: bool,
     precommit_cancelled: Option<AuthorityEnvelope>,
+    isolated_committed: Option<AuthorityEnvelope>,
+    retired_expired_commit: Option<AuthorityEnvelope>,
 }
 
 #[derive(Debug, Clone)]
 struct OwnerAuthority {
     envelope: AuthorityEnvelope,
     transaction: OwnerTransaction,
+    expected_active_binding: Option<PacketPortBinding>,
     requested_prepare_deadline_mono_ms: u64,
     prepared: bool,
 }
@@ -130,6 +135,12 @@ pub enum AuthorityOperation {
     RecoverPrecommit {
         expected_active: PacketPortBinding,
     },
+    IsolateCommittedOwner {
+        expected_active: PacketPortBinding,
+    },
+    RetireExpiredCommit {
+        expected_active: PacketPortBinding,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -182,6 +193,10 @@ pub struct AuthorityControlResponse {
     pub forced_retirement: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub precommit_cancelled: Option<AuthorityEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolated_committed: Option<AuthorityEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired_expired_commit: Option<AuthorityEnvelope>,
 }
 
 pub fn authority_control_path(supervision: &Path) -> PathBuf {
@@ -698,6 +713,7 @@ fn prepare_record(
     envelope: &AuthorityEnvelope,
     expected_active_epoch: Option<u64>,
     prepare_deadline_mono_ms: u64,
+    expected_active_binding: Option<PacketPortBinding>,
 ) -> Result<OwnerAuthority> {
     let anchor = tokio::time::Instant::now();
     let now = monotonic_ms()?;
@@ -710,6 +726,7 @@ fn prepare_record(
     let auth_deadline = owner_deadline(envelope)?;
     Ok(OwnerAuthority {
         envelope: envelope.clone(),
+        expected_active_binding,
         transaction: OwnerTransaction {
             transaction_id: transaction_bytes(&envelope.transaction_id)?,
             revision: envelope.authority_revision,
@@ -754,6 +771,8 @@ fn apply_request(
                 | AuthorityOperation::RetireOwnerAfterFailure
                 | AuthorityOperation::AbortOwner
                 | AuthorityOperation::RecoverPrecommit { .. }
+                | AuthorityOperation::IsolateCommittedOwner { .. }
+                | AuthorityOperation::RetireExpiredCommit { .. }
         )
     {
         bail!("code=owner_protocol_required module=tunio_authority reason=owner_transactions_require_schema_3 action=preserve_existing_owner");
@@ -768,6 +787,84 @@ fn apply_request(
         manager_change(updates, PacketPortOwnerChange::Probe, deadline)?,
     )?;
     match request.operation {
+        AuthorityOperation::RetireExpiredCommit { expected_active } => {
+            let envelope = request
+                .envelope
+                .as_ref()
+                .context("expired retirement requires exact envelope")?;
+            let record = owner_record(&state.authority, &request.transaction_id)
+                .cloned().context("code=owner_expired_context_unknown module=tunio_authority action=preserve_original_transaction")?;
+            let actual = manager_change(updates, PacketPortOwnerChange::Probe, deadline)?;
+            reconcile(state, actual.clone())?;
+            if record.envelope != *envelope
+                || envelope.transaction_id != request.transaction_id
+                || record.expected_active_binding != Some(expected_active)
+                || record.transaction.expected_active_epoch != Some(expected_active.owner_epoch)
+                || !actual.last_transaction.as_ref().is_some_and(|last| {
+                    last.transaction == record.transaction
+                        && last.phase == OwnerTransactionPhase::Expired
+                })
+                || actual.highest_transaction_revision != envelope.authority_revision
+                || !state.owner_active
+                || actual.binding != Some(expected_active)
+                || actual.pending.is_some()
+                || actual.retained_owner_binding.is_some()
+                || state.authority.pending.is_some()
+            {
+                bail!("code=owner_expired_retirement_unconfirmed module=tunio_authority action=preserve_original_transaction");
+            }
+            state.authority.retired_expired_commit = Some(envelope.clone());
+        }
+        AuthorityOperation::IsolateCommittedOwner { expected_active } => {
+            let envelope = request
+                .envelope
+                .as_ref()
+                .context("committed isolation requires exact envelope")?;
+            let record = owner_record(&state.authority, &request.transaction_id)
+                .cloned().context("code=owner_isolation_context_unknown module=tunio_authority action=preserve_original_transaction")?;
+            let actual = manager_change(updates, PacketPortOwnerChange::Probe, deadline)?;
+            reconcile(state, actual.clone())?;
+            if record.envelope != *envelope
+                || envelope.transaction_id != request.transaction_id
+                || record.transaction.expected_active_epoch != Some(expected_active.owner_epoch)
+                || record.expected_active_binding != Some(expected_active)
+                || !infrastructure_matches(expected_active, envelope.binding)
+                || !actual.last_transaction.as_ref().is_some_and(|last| {
+                    last.transaction == record.transaction
+                        && last.phase == OwnerTransactionPhase::Committed
+                })
+                || actual.highest_transaction_revision != envelope.authority_revision
+                || actual.owner_epoch != envelope.binding.owner_epoch
+                || actual.pending.is_some()
+                || actual
+                    .binding
+                    .is_some_and(|binding| binding != envelope.binding)
+                || actual
+                    .retained_owner_binding
+                    .is_some_and(|binding| binding != expected_active)
+            {
+                bail!("code=owner_isolation_identity_mismatch module=tunio_authority action=preserve_current_owner");
+            }
+            if state.owner_active && process_is_current_confirmed(envelope.candidate)? {
+                bail!("code=owner_isolation_live_candidate module=tunio_authority reason=prepare_cap_is_not_business_failure action=preserve_original_transaction");
+            }
+            apply_owner_change(
+                state,
+                updates,
+                PacketPortOwnerChange::Revoke {
+                    owner_epoch: envelope.binding.owner_epoch,
+                },
+                deadline,
+            )?;
+            if state.owner_active
+                || state.authority.actual_owner_binding.is_some()
+                || state.authority.retained_owner_binding.is_some()
+                || state.authority.owner_pending.is_some()
+            {
+                bail!("code=owner_isolation_unconfirmed module=tunio_authority action=preserve_original_transaction");
+            }
+            state.authority.isolated_committed = Some(envelope.clone());
+        }
         AuthorityOperation::RecoverPrecommit { expected_active } => {
             let envelope = request
                 .envelope
@@ -803,6 +900,7 @@ fn apply_request(
                 if exact.envelope != *envelope
                     || exact.transaction != history.transaction
                     || exact.transaction.expected_active_epoch != Some(expected_active.owner_epoch)
+                    || exact.expected_active_binding != Some(expected_active)
                 {
                     bail!("code=owner_precommit_context_conflict module=tunio_authority action=preserve_original_candidate");
                 }
@@ -913,6 +1011,14 @@ fn apply_request(
             {
                 bail!("code=owner_precommit_cancelled module=tunio_authority action=use_fresh_transaction_after_durable_retirement");
             }
+            if state
+                .authority
+                .retired_expired_commit
+                .as_ref()
+                .is_some_and(|retired| retired.transaction_id == envelope.transaction_id)
+            {
+                bail!("code=owner_expired_commit_retired module=tunio_authority action=use_fresh_transaction");
+            }
             let cached = owner_record(&state.authority, &request.transaction_id).cloned();
             let active_epoch = state
                 .authority
@@ -933,7 +1039,12 @@ fn apply_request(
                 if state.authority.pending.as_ref() != Some(envelope) {
                     bail!("code=authority_stage_mismatch module=tunio_authority reason=Prepare_requires_exact_staged_authority");
                 }
-                prepare_record(envelope, expected_active_epoch, prepare_deadline_mono_ms)?
+                prepare_record(
+                    envelope,
+                    expected_active_epoch,
+                    prepare_deadline_mono_ms,
+                    state.authority.actual_owner_binding,
+                )?
             };
             let port = packet_port(
                 descriptors.pop().expect("checked one fd"),
@@ -960,6 +1071,14 @@ fn apply_request(
         AuthorityOperation::CommitOwner
         | AuthorityOperation::FinishOwnerDrain
         | AuthorityOperation::RetireOwnerAfterFailure => {
+            if state
+                .authority
+                .retired_expired_commit
+                .as_ref()
+                .is_some_and(|retired| retired.transaction_id == request.transaction_id)
+            {
+                bail!("code=owner_expired_commit_retired module=tunio_authority action=use_fresh_transaction");
+            }
             let record = owner_record(&state.authority, &request.transaction_id)
                 .cloned().context("code=owner_transaction_unknown module=tunio_authority reason=no_exact_prepared_or_terminal_transaction")?;
             if request.envelope.as_ref() != Some(&record.envelope) {
@@ -1032,6 +1151,14 @@ fn apply_request(
                 bail!("Stage transaction differs");
             }
             validate_envelope(state, envelope)?;
+            if state
+                .authority
+                .retired_expired_commit
+                .as_ref()
+                .is_some_and(|retired| retired.transaction_id == envelope.transaction_id)
+            {
+                bail!("code=owner_expired_commit_retired module=tunio_authority action=use_fresh_transaction");
+            }
             if state
                 .authority
                 .precommit_cancelled
@@ -1159,6 +1286,8 @@ fn apply_request(
     if matches!(
         request.operation,
         AuthorityOperation::RecoverPrecommit { .. }
+            | AuthorityOperation::IsolateCommittedOwner { .. }
+            | AuthorityOperation::RetireExpiredCommit { .. }
     ) {
         fs::File::open(
             state
@@ -1348,6 +1477,14 @@ pub(crate) fn start(
                                 && state.authority.forced_retirement,
                             precommit_cancelled: (request.schema_version == 3)
                                 .then(|| state.authority.precommit_cancelled.clone())
+                                .flatten()
+                                .filter(|record| record.transaction_id == request.transaction_id),
+                            isolated_committed: (request.schema_version == 3)
+                                .then(|| state.authority.isolated_committed.clone())
+                                .flatten()
+                                .filter(|record| record.transaction_id == request.transaction_id),
+                            retired_expired_commit: (request.schema_version == 3)
+                                .then(|| state.authority.retired_expired_commit.clone())
                                 .flatten()
                                 .filter(|record| record.transaction_id == request.transaction_id),
                         };
@@ -1840,6 +1977,196 @@ mod tests {
                 .unwrap();
             assert_eq!(prepared.owner_transaction.unwrap().phase, "prepared");
             harness.old_still_works().await;
+            harness.finish().await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn committed_isolation_preserves_outcome_and_tun_and_allows_fresh_owner() {
+        for dead_process in [false, true] {
+            let mut harness = Harness::start(Duration::from_secs(30)).await;
+            let envelope = harness.envelope(2, 2, 1);
+            let transaction = envelope.transaction_id.clone();
+            harness
+                .exchange(
+                    harness.request(
+                        AuthorityOperation::StageAuthority,
+                        Some(envelope.clone()),
+                        &transaction,
+                    ),
+                    None,
+                )
+                .await
+                .unwrap();
+            let prepare_deadline = monotonic_ms().unwrap() + 2_000;
+            let (fd, worker) = ports(2, 2);
+            let mut worker = Some(worker);
+            harness
+                .exchange(
+                    harness.owner_request(
+                        AuthorityOperation::PrepareOwner {
+                            expected_active_epoch: Some(1),
+                            prepare_deadline_mono_ms: prepare_deadline,
+                        },
+                        Some(envelope.clone()),
+                        &transaction,
+                    ),
+                    Some(fd),
+                )
+                .await
+                .unwrap();
+            harness
+                .exchange(
+                    harness.owner_request(
+                        AuthorityOperation::CommitOwner,
+                        Some(envelope.clone()),
+                        &transaction,
+                    ),
+                    None,
+                )
+                .await
+                .unwrap();
+            let operation = AuthorityOperation::IsolateCommittedOwner {
+                expected_active: binding(1, 1),
+            };
+            assert!(harness
+                .exchange(
+                    harness.owner_request(operation, Some(envelope.clone()), &transaction),
+                    None
+                )
+                .await
+                .is_err());
+            assert!(harness
+                .exchange(
+                    harness.owner_request(
+                        AuthorityOperation::IsolateCommittedOwner {
+                            expected_active: binding(1, 9)
+                        },
+                        Some(envelope.clone()),
+                        &transaction
+                    ),
+                    None
+                )
+                .await
+                .is_err());
+            if dead_process {
+                harness.candidate.0.kill().unwrap();
+                harness.candidate.0.wait().unwrap();
+            } else {
+                tokio::time::sleep(Duration::from_millis(
+                    prepare_deadline.saturating_sub(monotonic_ms().unwrap()) + 20,
+                ))
+                .await;
+                assert!(harness
+                    .exchange(
+                        harness.owner_request(operation, Some(envelope.clone()), &transaction),
+                        None
+                    )
+                    .await
+                    .is_err());
+                drop(worker.take());
+                // Shared hosts may outlive a stopped business domain. The
+                // actual Manager must first confirm that its port is gone.
+                harness.kernel.send(&[0x45; 64]).await.unwrap();
+                for _ in 0..100 {
+                    let actual = harness
+                        .exchange(
+                            harness.owner_request(
+                                AuthorityOperation::ProbeTransaction,
+                                None,
+                                &transaction,
+                            ),
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                    if !actual.owner_active {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                let status = harness.state.lock().unwrap().status.clone();
+                let original = fs::read(&status).unwrap();
+                fs::remove_file(&status).unwrap();
+                fs::create_dir(&status).unwrap();
+                let uncertain = harness
+                    .outcome(
+                        harness.owner_request(operation, Some(envelope.clone()), &transaction),
+                        None,
+                    )
+                    .await;
+                assert!(!uncertain.accepted);
+                fs::remove_dir(&status).unwrap();
+                fs::write(&status, original).unwrap();
+            }
+            let isolated = harness
+                .exchange(
+                    harness.owner_request(operation, Some(envelope.clone()), &transaction),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(isolated.isolated_committed, Some(envelope.clone()));
+            assert_eq!(isolated.owner_transaction.unwrap().phase, "committed");
+            assert!(
+                !isolated.owner_active
+                    && isolated.actual_owner_binding.is_none()
+                    && isolated.retained_owner_binding.is_none()
+            );
+            assert!(!isolated.old_owner_drained);
+            assert!(!harness.task.is_finished());
+            let retry = harness
+                .exchange(
+                    harness.owner_request(operation, Some(envelope.clone()), &transaction),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(retry.isolated_committed, Some(envelope.clone()));
+            // A live process is necessary for new authority, so this positive
+            // successor case uses the still-alive candidate fixture.
+            if !dead_process {
+                let fresh = harness.envelope(3, 3, 2);
+                harness
+                    .exchange(
+                        harness.request(
+                            AuthorityOperation::StageAuthority,
+                            Some(fresh.clone()),
+                            &fresh.transaction_id,
+                        ),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let (fd, worker) = ports(3, 3);
+                harness
+                    .exchange(
+                        harness.request(
+                            AuthorityOperation::AttachAuthorized,
+                            Some(fresh.clone()),
+                            &fresh.transaction_id,
+                        ),
+                        Some(fd),
+                    )
+                    .await
+                    .unwrap();
+                assert!(harness
+                    .exchange(
+                        harness.owner_request(operation, Some(envelope), &transaction),
+                        None
+                    )
+                    .await
+                    .is_err());
+                while harness.kernel.try_recv(&mut [0; 100]).is_ok() {}
+                harness.kernel.send(&[0x45; 64]).await.unwrap();
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(1), worker.recv_packet())
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    vec![0x45; 64]
+                );
+            }
             harness.finish().await;
         }
     }
@@ -2648,6 +2975,7 @@ mod tests {
         let harness = Harness::start(Duration::from_secs(30)).await;
         let envelope = harness.envelope(2, 2, 1);
         let transaction = envelope.transaction_id.clone();
+        let prepare_deadline = monotonic_ms().unwrap() + 2_000;
         harness
             .exchange(
                 harness.request(
@@ -2665,7 +2993,7 @@ mod tests {
                 harness.owner_request(
                     AuthorityOperation::PrepareOwner {
                         expected_active_epoch: Some(1),
-                        prepare_deadline_mono_ms: monotonic_ms().unwrap() + 100,
+                        prepare_deadline_mono_ms: prepare_deadline,
                     },
                     Some(envelope.clone()),
                     &transaction,
@@ -2674,7 +3002,10 @@ mod tests {
             )
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        tokio::time::sleep(Duration::from_millis(
+            prepare_deadline.saturating_sub(monotonic_ms().unwrap()) + 20,
+        ))
+        .await;
         let expired = harness
             .exchange(
                 harness.owner_request(AuthorityOperation::ProbeTransaction, None, &transaction),
@@ -2702,7 +3033,7 @@ mod tests {
             .outcome(
                 harness.owner_request(
                     AuthorityOperation::CommitOwner,
-                    Some(envelope),
+                    Some(envelope.clone()),
                     &transaction,
                 ),
                 None,
@@ -2710,7 +3041,144 @@ mod tests {
             .await;
         assert!(!rejected.accepted);
         assert_eq!(rejected.owner_transaction, expired.owner_transaction);
+        let retirement = AuthorityOperation::RetireExpiredCommit {
+            expected_active: binding(1, 1),
+        };
+        assert!(harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::RetireExpiredCommit {
+                        expected_active: binding(1, 9)
+                    },
+                    Some(envelope.clone()),
+                    &transaction
+                ),
+                None
+            )
+            .await
+            .is_err());
+        let status = harness.state.lock().unwrap().status.clone();
+        let original = fs::read(&status).unwrap();
+        fs::remove_file(&status).unwrap();
+        fs::create_dir(&status).unwrap();
+        let uncertain = harness
+            .outcome(
+                harness.owner_request(retirement, Some(envelope.clone()), &transaction),
+                None,
+            )
+            .await;
+        assert!(!uncertain.accepted);
+        fs::remove_dir(&status).unwrap();
+        fs::write(&status, original).unwrap();
+        let retired = harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::RetireExpiredCommit {
+                        expected_active: binding(1, 1),
+                    },
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(retired.retired_expired_commit, Some(envelope.clone()));
+        assert!(serde_json::to_vec(&retired).unwrap().len() <= CONTROL_BYTES);
+        let repeated = harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::RetireExpiredCommit {
+                        expected_active: binding(1, 1),
+                    },
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            repeated.retired_expired_commit,
+            retired.retired_expired_commit
+        );
+        assert_eq!(repeated.owner_transaction, expired.owner_transaction);
+        for operation in [
+            AuthorityOperation::CommitOwner,
+            AuthorityOperation::StageAuthority,
+            AuthorityOperation::PrepareOwner {
+                expected_active_epoch: Some(1),
+                prepare_deadline_mono_ms: prepare_deadline,
+            },
+        ] {
+            let fd = matches!(&operation, AuthorityOperation::PrepareOwner { .. })
+                .then(|| ports(2, 2).0);
+            assert!(harness
+                .exchange(
+                    harness.owner_request(operation, Some(envelope.clone()), &transaction),
+                    fd
+                )
+                .await
+                .is_err());
+        }
         harness.old_still_works().await;
+        let fresh = harness.envelope(3, 3, 2);
+        harness
+            .exchange(
+                harness.request(
+                    AuthorityOperation::StageAuthority,
+                    Some(fresh.clone()),
+                    &fresh.transaction_id,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        let (fresh_fd, fresh_worker) = ports(3, 3);
+        harness
+            .exchange(
+                harness.request(
+                    AuthorityOperation::AttachAuthorized,
+                    Some(fresh.clone()),
+                    &fresh.transaction_id,
+                ),
+                Some(fresh_fd),
+            )
+            .await
+            .unwrap();
+        for operation in [
+            AuthorityOperation::CommitOwner,
+            AuthorityOperation::StageAuthority,
+            AuthorityOperation::PrepareOwner {
+                expected_active_epoch: Some(1),
+                prepare_deadline_mono_ms: prepare_deadline,
+            },
+        ] {
+            let fd = matches!(&operation, AuthorityOperation::PrepareOwner { .. })
+                .then(|| ports(2, 2).0);
+            assert!(harness
+                .exchange(
+                    harness.owner_request(operation, Some(envelope.clone()), &transaction),
+                    fd
+                )
+                .await
+                .is_err());
+        }
+        harness.kernel.send(&[0x45; 64]).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), fresh_worker.recv_packet())
+                .await
+                .unwrap()
+                .unwrap(),
+            vec![0x45; 64]
+        );
+        fresh_worker.send_packet(&[0x46; 64]).await.unwrap();
+        let mut packet = [0; 100];
+        let len = tokio::time::timeout(Duration::from_secs(1), harness.kernel.recv(&mut packet))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&packet[..len], &[0x46; 64]);
         harness.finish().await;
     }
 

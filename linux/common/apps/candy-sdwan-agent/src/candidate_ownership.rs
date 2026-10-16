@@ -206,6 +206,12 @@ pub(super) struct CandidateOwner {
     commit_intent: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     precommit_cancellation: Option<AuthorityControlResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    committed_failure: Option<AuthorityControlResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    committed_isolation: Option<AuthorityControlResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expired_commit_retirement: Option<AuthorityControlResponse>,
 }
 
 impl CandidateOwner {
@@ -235,6 +241,9 @@ impl CandidateOwner {
             expected_peers,
             commit_intent: false,
             precommit_cancellation: None,
+            committed_failure: None,
+            committed_isolation: None,
+            expired_commit_retirement: None,
         })
     }
 
@@ -345,6 +354,8 @@ impl CandidateOwner {
         ensure!(
             !self.commit_intent
                 && self.precommit_cancellation.is_none()
+                && self.expired_commit_retirement.is_none()
+                && self.committed_isolation.is_none()
                 && self.prepare_deadline_mono_ms > now_mono_ms
                 && self.prepare_deadline_mono_ms <= self.envelope.effective_deadline_mono_ms
                 && self.prepare_deadline_mono_ms - now_mono_ms <= 30_000,
@@ -413,7 +424,9 @@ impl CandidateOwner {
         persist: impl FnOnce(&Self) -> Result<()>,
     ) -> Result<AuthorityControlRequest> {
         ensure!(
-            self.precommit_cancellation.is_none(),
+            self.precommit_cancellation.is_none()
+                && self.expired_commit_retirement.is_none()
+                && self.committed_isolation.is_none(),
             "code=candidate_owner_cancelled module=sdwan_handoff action=retire_original_candidate"
         );
         proof.require_installed(&self.envelope, &self.expected_peers)?;
@@ -443,6 +456,66 @@ impl CandidateOwner {
 
     pub(super) fn commit_is_uncertain(&self) -> bool {
         self.commit_intent
+    }
+
+    pub(super) fn require_committed_outcome(&self, reply: &AuthorityControlResponse) -> Result<()> {
+        let receipt = reply
+            .owner_transaction
+            .as_ref()
+            .context("code=candidate_committed_receipt_missing module=sdwan_handoff")?;
+        ensure!(self.commit_intent && reply.schema_version == 3 && reply.accepted
+            && receipt.transaction_id == self.envelope.transaction_id
+            && receipt.authority_revision == self.envelope.authority_revision
+            && receipt.phase == "committed" && receipt.binding == self.envelope.binding
+            && receipt.expected_active_epoch == self.expected_active.map(|binding| binding.owner_epoch)
+            && receipt.authorization_cap_mono_ms == self.envelope.effective_deadline_mono_ms
+            && receipt.requested_prepare_deadline_mono_ms == self.prepare_deadline_mono_ms
+            && reply.owner_highest_revision == Some(self.envelope.authority_revision)
+            && reply.pending.is_none()
+            && reply.actual_owner_binding.is_none_or(|binding| binding == self.envelope.binding)
+            && reply.retained_owner_binding.is_none_or(|binding| Some(binding) == self.expected_active),
+            "code=candidate_committed_recovery_mismatch module=sdwan_handoff action=preserve_original_transaction");
+        Ok(())
+    }
+
+    pub(super) fn record_committed_failure(
+        &mut self,
+        reply: &AuthorityControlResponse,
+        persist: impl FnOnce(&Self) -> Result<()>,
+    ) -> Result<()> {
+        self.require_committed_outcome(reply)?;
+        if self.committed_failure.is_none() {
+            self.committed_failure = Some(reply.clone());
+        }
+        persist(self)
+    }
+
+    pub(super) fn committed_isolation_needed(
+        &self,
+        reply: &AuthorityControlResponse,
+        business_current: Result<bool>,
+    ) -> Result<bool> {
+        self.require_committed_outcome(reply)?;
+        // Unknown process/domain state cannot become proof of business death.
+        if !reply.owner_active {
+            return Ok(true);
+        }
+        Ok(!business_current?)
+    }
+
+    pub(super) fn record_committed_isolation(
+        &mut self,
+        reply: &AuthorityControlResponse,
+        persist: impl FnOnce(&Self) -> Result<()>,
+    ) -> Result<()> {
+        self.require_committed_outcome(reply)?;
+        ensure!(self.committed_failure.is_some()
+            && reply.isolated_committed.as_ref() == Some(&self.envelope)
+            && !reply.owner_active && reply.actual_owner_binding.is_none()
+            && reply.retained_owner_binding.is_none(),
+            "code=candidate_committed_isolation_unconfirmed module=sdwan_handoff action=preserve_original_transaction");
+        self.committed_isolation = Some(reply.clone());
+        persist(self)
     }
 
     pub(super) fn recover_precommit_with(
@@ -488,6 +561,39 @@ impl CandidateOwner {
         Ok(OwnerState::CancelledBeforePrepare)
     }
 
+    pub(super) fn retire_expired_commit_with(
+        &mut self,
+        mut request: AuthorityControlRequest,
+        persist: impl FnOnce(&Self) -> Result<()>,
+        exchange: impl FnOnce(&AuthorityControlRequest) -> Result<AuthorityControlResponse>,
+    ) -> Result<()> {
+        ensure!(
+            self.commit_intent,
+            "code=candidate_commit_intent_missing module=sdwan_handoff"
+        );
+        let expected = self
+            .expected_active
+            .context("expired commit original binding absent")?;
+        request.schema_version = 3;
+        request.operation = AuthorityOperation::RetireExpiredCommit {
+            expected_active: expected,
+        };
+        request.envelope = Some(self.envelope.clone());
+        request.transaction_id = self.envelope.transaction_id.clone();
+        let reply = exchange(&request)?;
+        ensure!(reply.process == request.process && reply.controller == request.controller
+            && reply.controller_epoch == request.controller_epoch && reply.nonce == request.nonce
+            && reply.retired_expired_commit.as_ref() == Some(&self.envelope)
+            && self.observe(&reply)? == OwnerState::Expired
+            && reply.owner_active && reply.actual_owner_binding == Some(expected)
+            && reply.current_binding == expected && reply.pending.is_none()
+            && reply.retained_owner_binding.is_none()
+            && reply.owner_highest_revision == Some(self.envelope.authority_revision),
+            "code=candidate_expired_commit_retirement_unconfirmed module=sdwan_handoff action=preserve_original_transaction");
+        self.expired_commit_retirement = Some(reply);
+        persist(self)
+    }
+
     pub(super) fn commit_request(
         &self,
         mut base: AuthorityControlRequest,
@@ -496,6 +602,10 @@ impl CandidateOwner {
         proof.require_installed(&self.envelope, &self.expected_peers)?;
         ensure!(self.commit_intent,
             "code=candidate_owner_commit_intent_missing module=sdwan_handoff action=persist_original_transaction");
+        ensure!(
+            self.expired_commit_retirement.is_none() && self.committed_isolation.is_none(),
+            "code=candidate_owner_retired module=sdwan_handoff action=use_fresh_transaction"
+        );
         base.schema_version = 3;
         base.operation = AuthorityOperation::CommitOwner;
         base.envelope = Some(self.envelope.clone());
@@ -582,6 +692,9 @@ mod tests {
             }],
             commit_intent: false,
             precommit_cancellation: None,
+            committed_failure: None,
+            committed_isolation: None,
+            expired_commit_retirement: None,
         }
     }
 
@@ -671,6 +784,8 @@ mod tests {
             old_owner_drained: false,
             forced_retirement: false,
             precommit_cancelled: None,
+            isolated_committed: None,
+            retired_expired_commit: None,
         }
     }
 
@@ -682,6 +797,134 @@ mod tests {
         response.owner_highest_revision = Some(owner.envelope.authority_revision - 1);
         response.precommit_cancelled = Some(owner.envelope.clone());
         response
+    }
+
+    fn expired_retirement_reply(owner: &CandidateOwner) -> AuthorityControlResponse {
+        let mut response = reply(owner, "expired");
+        response.pending = None;
+        response.current_binding = owner.expected_active.unwrap();
+        response.retired_expired_commit = Some(owner.envelope.clone());
+        response
+    }
+
+    #[test]
+    fn expired_commit_retirement_preserves_intent_and_exact_receipt_across_restart() {
+        let mut owner = candidate();
+        assert!(owner
+            .retire_expired_commit_with(
+                base(&owner),
+                |_| panic!("no intent"),
+                |_| panic!("no RPC without intent")
+            )
+            .is_err());
+        owner.commit_intent = true;
+        let response = expired_retirement_reply(&owner);
+        let expected = owner.clone();
+        let mut saved = Vec::new();
+        owner.retire_expired_commit_with(base(&owner), |candidate| {
+            saved = serde_json::to_vec(candidate)?;
+            Ok(())
+        }, |request| {
+                    assert_eq!(request.envelope, Some(expected.envelope.clone()));
+            assert!(matches!(request.operation, AuthorityOperation::RetireExpiredCommit { expected_active }
+                        if Some(expected_active) == expected.expected_active));
+            Ok(response.clone())
+        }).unwrap();
+        let mut restored: CandidateOwner = serde_json::from_slice(&saved).unwrap();
+        assert!(restored.commit_intent);
+        assert_eq!(
+            restored
+                .expired_commit_retirement
+                .as_ref()
+                .unwrap()
+                .owner_transaction
+                .as_ref()
+                .unwrap()
+                .phase,
+            "expired"
+        );
+        assert!(restored.abort_request(base(&restored)).is_err());
+        assert!(restored.prepare_request(base(&restored), 1000).is_err());
+        assert!(restored
+            .commit_request(base(&restored), &proof(&restored))
+            .is_err());
+        let installed = proof(&restored);
+        assert!(restored
+            .begin_commit(base(&restored), &installed, |_| panic!("retired"))
+            .is_err());
+        restored
+            .retire_expired_commit_with(base(&restored), |_| Ok(()), |_| Ok(response.clone()))
+            .unwrap();
+        assert!(restored.commit_intent);
+    }
+
+    #[test]
+    fn expired_commit_retirement_rejects_unknown_or_changed_evidence() {
+        for mutation in 0..14 {
+            let mut owner = candidate();
+            owner.commit_intent = true;
+            let mut response = expired_retirement_reply(&owner);
+            match mutation {
+                0 => response.accepted = false,
+                1 => response.schema_version = 2,
+                2 => response.process.start_ticks += 1,
+                3 => response.controller.start_ticks += 1,
+                4 => response.controller_epoch += 1,
+                5 => response.nonce = "1".repeat(32),
+                6 => {
+                    response
+                        .retired_expired_commit
+                        .as_mut()
+                        .unwrap()
+                        .signed_control_hash = "9".repeat(64)
+                }
+                7 => {
+                    response
+                        .actual_owner_binding
+                        .as_mut()
+                        .unwrap()
+                        .routing_domain_id = [9; 16]
+                }
+                8 => response.current_binding.policy_generation += 1,
+                9 => response.owner_active = false,
+                10 => response.owner_highest_revision = Some(owner.envelope.authority_revision + 1),
+                11 => response.pending = Some(owner.envelope.clone()),
+                12 => response.retained_owner_binding = owner.expected_active,
+                _ => response.owner_transaction.as_mut().unwrap().phase = "aborted".into(),
+            }
+            assert!(
+                owner
+                    .retire_expired_commit_with(
+                        base(&owner),
+                        |_| panic!("invalid evidence cannot persist"),
+                        |_| Ok(response)
+                    )
+                    .is_err(),
+                "accepted mutation {mutation}"
+            );
+            assert!(owner.expired_commit_retirement.is_none());
+            assert!(owner.commit_intent);
+        }
+        let mut owner = candidate();
+        owner.commit_intent = true;
+        assert!(owner
+            .retire_expired_commit_with(
+                base(&owner),
+                |_| panic!("unknown cannot persist"),
+                |_| anyhow::bail!("manager timeout")
+            )
+            .is_err());
+        assert!(owner.expired_commit_retirement.is_none());
+        let response = expired_retirement_reply(&owner);
+        assert!(owner
+            .retire_expired_commit_with(
+                base(&owner),
+                |_| anyhow::bail!("fsync failed"),
+                |_| Ok(response)
+            )
+            .is_err());
+        assert!(owner.commit_intent && owner.expired_commit_retirement.is_some());
+        assert!(owner.commit_request(base(&owner), &proof(&owner)).is_err());
     }
 
     #[test]
@@ -714,6 +957,79 @@ mod tests {
                 .unwrap(),
             OwnerState::CancelledBeforePrepare
         );
+    }
+
+    #[test]
+    fn committed_failure_keeps_actual_outcome_and_requires_durable_exact_isolation() {
+        let mut owner = candidate();
+        owner.commit_intent = true;
+        let mut committed = reply(&owner, "committed");
+        assert!(!owner
+            .committed_isolation_needed(&committed, Ok(true))
+            .unwrap());
+        assert!(owner
+            .committed_isolation_needed(&committed, Ok(false))
+            .unwrap());
+        assert!(owner
+            .committed_isolation_needed(&committed, Err(anyhow::anyhow!("domain RPC timed out")))
+            .is_err());
+        // A closed candidate port does not change the transaction's actual
+        // Committed outcome into Abort or Unknown.
+        committed.owner_active = false;
+        committed.actual_owner_binding = None;
+        committed.active = None;
+        assert!(owner
+            .committed_isolation_needed(&committed, Ok(true))
+            .unwrap());
+        assert!(owner
+            .committed_isolation_needed(&committed, Err(anyhow::anyhow!("domain RPC timed out")))
+            .unwrap());
+        assert!(owner
+            .record_committed_failure(&committed, |_| anyhow::bail!("fsync failed"))
+            .is_err());
+        assert!(owner.committed_failure.is_some());
+        let mut isolated = committed.clone();
+        isolated.isolated_committed = Some(owner.envelope.clone());
+        isolated.retained_owner_binding = None;
+        let mut saved = Vec::new();
+        owner
+            .record_committed_isolation(&isolated, |candidate| {
+                saved = serde_json::to_vec(candidate)?;
+                Ok(())
+            })
+            .unwrap();
+        let restored: CandidateOwner = serde_json::from_slice(&saved).unwrap();
+        assert!(restored.commit_is_uncertain());
+        assert!(restored.committed_failure.is_some() && restored.committed_isolation.is_some());
+        assert_eq!(
+            restored
+                .committed_failure
+                .unwrap()
+                .owner_transaction
+                .unwrap()
+                .phase,
+            "committed"
+        );
+        for mutation in 0..5 {
+            let mut owner = candidate();
+            owner.commit_intent = true;
+            owner
+                .record_committed_failure(&committed, |_| Ok(()))
+                .unwrap();
+            let mut invalid = isolated.clone();
+            match mutation {
+                0 => invalid.owner_active = true,
+                1 => invalid.actual_owner_binding = Some(owner.envelope.binding),
+                2 => invalid.isolated_committed = None,
+                3 => invalid.owner_highest_revision = Some(owner.envelope.authority_revision + 1),
+                _ => invalid.retained_owner_binding = owner.expected_active,
+            }
+            assert!(owner
+                .record_committed_isolation(&invalid, |_| panic!(
+                    "unknown isolation cannot persist"
+                ))
+                .is_err());
+        }
     }
 
     #[test]
