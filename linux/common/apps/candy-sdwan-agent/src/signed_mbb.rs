@@ -154,6 +154,20 @@ fn mbb_old_drained(
     Ok(drained)
 }
 
+fn mbb_precommit_peer_outcome_pending(
+    journal: &mut Journal,
+    journal_path: &Path,
+    reason: &str,
+) -> Result<()> {
+    // TUNIO cancellation or expiry proves only the local PacketPort outcome.
+    // The peer actor may already have installed the same candidate. Preserve
+    // its immutable reservation, epoch and process until both ends reconcile;
+    // no subsequent Reserve may overtake this original transaction.
+    journal.phase = "mbb_peer_reconciliation_pending".into();
+    publish(journal_path, journal)?;
+    anyhow::bail!("code=mbb_precommit_peer_outcome_unknown module=sdwan_handoff reason={reason} action=reconcile_original_transaction_preserve_candidate");
+}
+
 fn run_mbb_transaction(
     context: &MbbContext<'_>,
     plan: &mut Plan,
@@ -213,15 +227,13 @@ fn run_mbb_transaction(
                 .directory
                 .join("mbb-expired-commit-recovery.json");
             publish(&evidence, journal)?;
-            let record = crate::process_record::read(&journal.candidate_record)?;
-            stop_record(&record, plan)?;
-            journal.mbb_reservation = None;
-            journal.phase = "expired_commit_retired".into();
             journal.mbb_outcome = Some("local_expired_remote_unknown".into());
             publish(&evidence, journal)?;
-            publish(journal_path, journal)?;
-            eprintln!("level=warn code=mbb_expired_commit_retired module=sdwan_handoff transaction_id={} local_outcome=expired remote_outcome=unknown action=fresh_authorization_preserve_old_owner_and_tun", candidate.envelope.transaction_id);
-            return Err(CoreRecoveryRequired.into());
+            return mbb_precommit_peer_outcome_pending(
+                journal,
+                journal_path,
+                "local_expired_commit_retired_remote_actor_outcome_unconfirmed",
+            );
         }
         if candidate.require_committed_outcome(&actual).is_ok() {
             let record = crate::process_record::read(&journal.candidate_record)?;
@@ -384,12 +396,11 @@ fn run_mbb_transaction(
             )?;
         }
         if monotonic_ms()? >= reservation_cap {
-            journal.mbb_reservation = None;
-            plan.worker_candidate_plan = None;
-            journal.candidate_plan_snapshot = Some(plan.clone());
-            journal.phase = "retry_wait".into();
-            publish(journal_path, journal)?;
-            return Err(CoreRecoveryRequired.into());
+            return mbb_precommit_peer_outcome_pending(
+                journal,
+                journal_path,
+                "original_reservation_cap_elapsed_before_owner_prepare",
+            );
         }
         create_binding(plan)?;
         let (io_socket, worker_socket) = UnixDatagram::pair()?;
@@ -527,15 +538,11 @@ fn run_mbb_transaction(
     };
     let mut actual = recovered.context("MBB exact recovery receipt absent")?;
     if owner_state == OwnerState::CancelledBeforePrepare {
-        // Keep the original candidate and journal until the authenticated
-        // cancellation and cleanup intent have both reached durable storage.
-        journal.phase = "mbb_precommit_retiring".into();
-        publish(journal_path, journal)?;
-        stop_record(&record, plan)?;
-        journal.mbb_reservation = None;
-        journal.phase = "precommit_cancelled".into();
-        publish(journal_path, journal)?;
-        return Err(CoreRecoveryRequired.into());
+        return mbb_precommit_peer_outcome_pending(
+            journal,
+            journal_path,
+            "local_owner_cancelled_remote_actor_outcome_unconfirmed",
+        );
     }
     let candidate_current = record.business_is_current().context(ManagedProofPending)?;
     if !candidate_current && owner_state == OwnerState::Committed {
@@ -555,31 +562,11 @@ fn run_mbb_transaction(
         && actual.actual_owner_binding == candidate_owner.expected_active
         && actual.active.as_ref() != Some(&envelope)
     {
-        if owner_state == OwnerState::Prepared {
-            context.authority(
-                &candidate_owner.abort_request(context.request(
-                    AuthorityControlOperation::ProbeTransaction,
-                    None,
-                    &envelope.transaction_id,
-                ))?,
-                None,
-            )?;
-        } else if actual.pending.as_ref() == Some(&envelope) {
-            context.authority(
-                &context.request(
-                    AuthorityControlOperation::DiscardAuthority,
-                    None,
-                    &envelope.transaction_id,
-                ),
-                None,
-            )?;
-        }
-        stop_record(&record, plan)?;
-        journal.mbb_reservation = None;
-        journal.candidate_owner = None;
-        journal.phase = "retry_wait".into();
-        publish(journal_path, journal)?;
-        return Err(CoreRecoveryRequired.into());
+        return mbb_precommit_peer_outcome_pending(
+            journal,
+            journal_path,
+            "candidate_unavailable_or_prepare_cap_elapsed_remote_actor_outcome_unconfirmed",
+        );
     }
     exact_ready(plan, &record, &envelope)?;
     listener_registration::publish_prepared_pending(plan);
@@ -592,7 +579,16 @@ fn run_mbb_transaction(
     );
     let payload = serde_json::json!({"transaction_id": envelope.transaction_id});
     if owner_state == OwnerState::Prepared {
-        mbb_core_exchange(plan, &record, "candidate_prepare", &payload)?;
+        // Freeze the operation before dispatch. If Core executed Install but
+        // publishing its status failed, the exact Install must be retried;
+        // re-entering Prepare would overtake its retained completion.
+        if journal.phase != "mbb_peer_install_pending" {
+            journal.phase = "mbb_peer_prepare_pending".into();
+            publish(journal_path, journal)?;
+            mbb_core_exchange(plan, &record, "candidate_prepare", &payload)?;
+            journal.phase = "mbb_peer_install_pending".into();
+            publish(journal_path, journal)?;
+        }
         let proof = mbb_proof(mbb_core_exchange(
             plan,
             &record,
@@ -1052,6 +1048,73 @@ fn mbb_finalize(
 #[cfg(test)]
 mod mbb_tests {
     use super::*;
+
+    #[test]
+    fn unresolved_precommit_retains_original_reservation_and_epoch_across_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        for name in ["segment", "projection"] {
+            fs::write(directory.path().join(name), name).unwrap();
+        }
+        let config = directory.path().join("config.toml");
+        fs::write(
+            &config,
+            format!(
+                "segment_snapshot = {:?}\nsite_projection = {:?}\n",
+                directory.path().join("segment"),
+                directory.path().join("projection")
+            ),
+        )
+        .unwrap();
+        let snapshot = Snapshot::capture(&config, directory.path()).unwrap();
+        let owner = ForwardOwner {
+            domain_id: [1; 16],
+            signed_generation: 1,
+            worker_epoch: 3,
+            fencing_token: 8,
+            auth_deadline_mono_ms: 100_000,
+            lease_deadline_mono_ms: 30_000,
+        };
+        let original = serde_json::json!({"transaction_id":"original", "owner_epoch":3,
+            "original_deadline_mono_ms":1234,"peers":[{"tuple":"immutable"}]});
+        let mut journal = Journal {
+            schema_version: 1,
+            phase: "mbb_reserved".into(),
+            snapshot,
+            envelope: None,
+            candidate_plan: directory.path().join("original-plan.json"),
+            candidate_plan_snapshot: None,
+            candidate_record: directory.path().join("original-process.json"),
+            owner: owner.clone(),
+            old_worker: None,
+            candidate_owner: None,
+            mbb_reservation: Some(original.clone()),
+            mbb_failed_retirement: None,
+            mbb_outcome: None,
+        };
+        let path = directory.path().join("renewal.json");
+        let expected_record = journal.candidate_record.clone();
+        for reason in ["cap_elapsed", "owner_cancelled", "candidate_unavailable"] {
+            assert!(mbb_precommit_peer_outcome_pending(&mut journal, &path, reason).is_err());
+            let recovered: Journal = read_private(&path).unwrap();
+            assert_eq!(recovered.phase, "mbb_peer_reconciliation_pending");
+            assert_eq!(recovered.mbb_reservation, Some(original.clone()));
+            assert_eq!(recovered.owner, owner);
+            assert_eq!(recovered.candidate_record, expected_record);
+            recovered.snapshot.verify().unwrap();
+            journal = recovered;
+        }
+        // Failed publication also leaves the in-memory original transaction
+        // intact, so it cannot turn into an empty journal on the next retry.
+        assert!(mbb_precommit_peer_outcome_pending(
+            &mut journal,
+            &directory.path().join("missing/renewal.json"),
+            "fsync_failed"
+        )
+        .is_err());
+        assert_eq!(journal.mbb_reservation, Some(original));
+        assert_eq!(journal.owner, owner);
+    }
 
     #[test]
     fn original_cap_requires_same_boot_and_persisted_monotonic_witness() {

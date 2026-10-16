@@ -613,6 +613,7 @@ impl CandidateOwner {
         Ok(base)
     }
 
+    #[cfg(test)]
     pub(super) fn abort_request(
         &self,
         mut base: AuthorityControlRequest,
