@@ -386,8 +386,42 @@ fn run_mbb_transaction(
             |request, descriptor| context.authority(request, descriptor),
         )?;
     }
-    let mut actual = context.authority(&base, None)?;
-    let owner_state = candidate_owner.observe(&actual)?;
+    let mut recovered = None;
+    let owner_state = if new_fd.is_none() && !candidate_owner.commit_is_uncertain() {
+        candidate_owner.recover_precommit_with(
+            context.request(
+                AuthorityControlOperation::ProbeTransaction,
+                None,
+                &envelope.transaction_id,
+            ),
+            |candidate| {
+                journal.candidate_owner = Some(candidate.clone());
+                publish(journal_path, journal)
+            },
+            |request| {
+                let reply = context.authority(request, None)?;
+                recovered = Some(reply.clone());
+                Ok(reply)
+            },
+        )?
+    } else {
+        let reply = context.authority(&base, None)?;
+        let state = candidate_owner.observe(&reply)?;
+        recovered = Some(reply);
+        state
+    };
+    let mut actual = recovered.context("MBB exact recovery receipt absent")?;
+    if owner_state == OwnerState::CancelledBeforePrepare {
+        // Keep the original candidate and journal until the authenticated
+        // cancellation and cleanup intent have both reached durable storage.
+        journal.phase = "mbb_precommit_retiring".into();
+        publish(journal_path, journal)?;
+        stop_record(&record, plan)?;
+        journal.mbb_reservation = None;
+        journal.phase = "precommit_cancelled".into();
+        publish(journal_path, journal)?;
+        return Err(CoreRecoveryRequired.into());
+    }
     let candidate_current = record.business_is_current().context(ManagedProofPending)?;
     if !candidate_current && owner_state == OwnerState::Committed {
         journal.mbb_reservation = None;

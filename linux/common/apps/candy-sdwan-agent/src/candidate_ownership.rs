@@ -193,6 +193,7 @@ pub(super) enum OwnerState {
     Aborted,
     Expired,
     Unknown,
+    CancelledBeforePrepare,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -203,6 +204,8 @@ pub(super) struct CandidateOwner {
     pub prepare_deadline_mono_ms: u64,
     pub expected_peers: Vec<PeerExpectation>,
     commit_intent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    precommit_cancellation: Option<AuthorityControlResponse>,
 }
 
 impl CandidateOwner {
@@ -231,6 +234,7 @@ impl CandidateOwner {
             prepare_deadline_mono_ms,
             expected_peers,
             commit_intent: false,
+            precommit_cancellation: None,
         })
     }
 
@@ -340,6 +344,7 @@ impl CandidateOwner {
     ) -> Result<AuthorityControlRequest> {
         ensure!(
             !self.commit_intent
+                && self.precommit_cancellation.is_none()
                 && self.prepare_deadline_mono_ms > now_mono_ms
                 && self.prepare_deadline_mono_ms <= self.envelope.effective_deadline_mono_ms
                 && self.prepare_deadline_mono_ms - now_mono_ms <= 30_000,
@@ -407,6 +412,10 @@ impl CandidateOwner {
         proof: &CandidateProof,
         persist: impl FnOnce(&Self) -> Result<()>,
     ) -> Result<AuthorityControlRequest> {
+        ensure!(
+            self.precommit_cancellation.is_none(),
+            "code=candidate_owner_cancelled module=sdwan_handoff action=retire_original_candidate"
+        );
         proof.require_installed(&self.envelope, &self.expected_peers)?;
         // An fsync failure may still have persisted the intent. Keep the
         // uncertainty fence until the original transaction is reconciled.
@@ -434,6 +443,49 @@ impl CandidateOwner {
 
     pub(super) fn commit_is_uncertain(&self) -> bool {
         self.commit_intent
+    }
+
+    pub(super) fn recover_precommit_with(
+        &mut self,
+        mut request: AuthorityControlRequest,
+        persist: impl FnOnce(&Self) -> Result<()>,
+        mut exchange: impl FnMut(&AuthorityControlRequest) -> Result<AuthorityControlResponse>,
+    ) -> Result<OwnerState> {
+        ensure!(!self.commit_intent,
+            "code=candidate_owner_commit_unknown module=sdwan_handoff action=reconcile_original_transaction");
+        let expected = self
+            .expected_active
+            .context("code=candidate_precommit_original_owner_missing module=sdwan_handoff")?;
+        request.schema_version = 3;
+        request.operation = AuthorityOperation::RecoverPrecommit {
+            expected_active: expected,
+        };
+        request.envelope = Some(self.envelope.clone());
+        request.transaction_id = self.envelope.transaction_id.clone();
+        let reply = exchange(&request)?;
+        ensure!(
+            reply.process == request.process
+                && reply.controller == request.controller
+                && reply.controller_epoch == request.controller_epoch
+                && reply.nonce == request.nonce,
+            "code=candidate_precommit_response_fence_mismatch module=sdwan_handoff"
+        );
+        if reply.precommit_cancelled.is_none() {
+            return self.observe(&reply);
+        }
+        ensure!(reply.precommit_cancelled.as_ref() == Some(&self.envelope)
+            && reply.schema_version == 3 && reply.accepted && reply.owner_active
+            && reply.actual_owner_binding == Some(expected) && reply.current_binding == expected
+            && reply.active.as_ref() != Some(&self.envelope) && reply.pending.is_none()
+            && reply.retained_owner_binding.is_none() && reply.owner_transaction.is_none()
+            && reply.owner_highest_revision.is_some_and(|revision| revision < self.envelope.authority_revision)
+            && reply.highest_revision == self.envelope.authority_revision
+            && reply.highest_owner_epoch == self.envelope.binding.owner_epoch
+            && reply.highest_policy_generation == self.envelope.binding.policy_generation,
+            "code=candidate_precommit_cancellation_unconfirmed module=sdwan_handoff action=preserve_original_candidate");
+        self.precommit_cancellation = Some(reply);
+        persist(self)?;
+        Ok(OwnerState::CancelledBeforePrepare)
     }
 
     pub(super) fn commit_request(
@@ -529,6 +581,7 @@ mod tests {
                 },
             }],
             commit_intent: false,
+            precommit_cancellation: None,
         }
     }
 
@@ -617,7 +670,148 @@ mod tests {
             retained_owner_binding: committed.then_some(owner.expected_active).flatten(),
             old_owner_drained: false,
             forced_retirement: false,
+            precommit_cancelled: None,
         }
+    }
+
+    fn cancelled_reply(owner: &CandidateOwner) -> AuthorityControlResponse {
+        let mut response = reply(owner, "prepared");
+        response.owner_transaction = None;
+        response.pending = None;
+        response.current_binding = owner.expected_active.unwrap();
+        response.owner_highest_revision = Some(owner.envelope.authority_revision - 1);
+        response.precommit_cancelled = Some(owner.envelope.clone());
+        response
+    }
+
+    #[test]
+    fn precommit_recovery_requires_durable_exact_cancellation_and_original_owner() {
+        let mut owner = candidate();
+        let response = cancelled_reply(&owner);
+        let expected = owner.clone();
+        let mut persisted = false;
+        assert_eq!(owner.recover_precommit_with(base(&expected), |candidate| {
+            assert!(candidate.precommit_cancellation.is_some());
+            persisted = true;
+            Ok(())
+        }, |request| {
+            assert!(matches!(request.operation, AuthorityOperation::RecoverPrecommit { expected_active }
+                if Some(expected_active) == expected.expected_active));
+            assert_eq!(request.envelope, Some(expected.envelope.clone()));
+            Ok(response.clone())
+        }).unwrap(), OwnerState::CancelledBeforePrepare);
+        assert!(persisted);
+        assert!(owner.prepare_request(base(&owner), 1000).is_err());
+        let installed = proof(&owner);
+        assert!(owner
+            .begin_commit(base(&expected), &installed, |_| Ok(()))
+            .is_err());
+        let saved = serde_json::to_vec(&owner).unwrap();
+        let mut restored: CandidateOwner = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(
+            restored
+                .recover_precommit_with(base(&expected), |_| Ok(()), |_| Ok(response.clone()))
+                .unwrap(),
+            OwnerState::CancelledBeforePrepare
+        );
+    }
+
+    #[test]
+    fn precommit_recovery_preserves_prepared_committed_and_uncertain_outcomes() {
+        for phase in ["prepared", "committed"] {
+            let mut owner = candidate();
+            let response = reply(&owner, phase);
+            let expected = if phase == "prepared" {
+                OwnerState::Prepared
+            } else {
+                OwnerState::Committed
+            };
+            assert_eq!(
+                owner
+                    .recover_precommit_with(
+                        base(&owner),
+                        |_| panic!("actual outcome is not cancellation"),
+                        |_| Ok(response.clone())
+                    )
+                    .unwrap(),
+                expected
+            );
+            assert!(owner.precommit_cancellation.is_none());
+        }
+        let mut owner = candidate();
+        assert!(owner
+            .recover_precommit_with(
+                base(&owner),
+                |_| panic!("manager failure is not absence"),
+                |_| anyhow::bail!("manager disconnected")
+            )
+            .is_err());
+        assert!(owner.precommit_cancellation.is_none());
+        owner.commit_intent = true;
+        assert!(owner
+            .recover_precommit_with(
+                base(&owner),
+                |_| panic!("uncertain commit cannot cancel"),
+                |_| panic!("no cancellation RPC after intent")
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn precommit_recovery_rejects_weak_absence_forged_scope_and_lost_persistence() {
+        for mutation in 0..9 {
+            let mut owner = candidate();
+            let mut response = cancelled_reply(&owner);
+            match mutation {
+                0 => response.owner_active = false,
+                1 => {
+                    response
+                        .actual_owner_binding
+                        .as_mut()
+                        .unwrap()
+                        .routing_domain_id = [9; 16]
+                }
+                2 => response.owner_highest_revision = Some(owner.envelope.authority_revision),
+                3 => {
+                    response
+                        .precommit_cancelled
+                        .as_mut()
+                        .unwrap()
+                        .signed_control_hash = "9".repeat(64)
+                }
+                4 => response.retained_owner_binding = owner.expected_active,
+                5 => response.accepted = false,
+                6 => response.nonce = "9".repeat(32),
+                7 => response.highest_policy_generation += 1,
+                _ => response.pending = Some(owner.envelope.clone()),
+            }
+            assert!(owner
+                .recover_precommit_with(
+                    base(&owner),
+                    |_| panic!("invalid absence cannot persist"),
+                    |_| Ok(response.clone())
+                )
+                .is_err());
+            assert!(owner.precommit_cancellation.is_none());
+        }
+        let mut owner = candidate();
+        let response = cancelled_reply(&owner);
+        assert!(owner
+            .recover_precommit_with(
+                base(&owner),
+                |_| anyhow::bail!("uncertain directory fsync"),
+                |_| Ok(response.clone())
+            )
+            .is_err());
+        // The in-memory cancellation fence remains, but no caller received a
+        // retirement decision until an exact recovery publication succeeds.
+        assert!(owner.precommit_cancellation.is_some());
+        assert_eq!(
+            owner
+                .recover_precommit_with(base(&owner), |_| Ok(()), |_| Ok(response.clone()))
+                .unwrap(),
+            OwnerState::CancelledBeforePrepare
+        );
     }
 
     #[test]
