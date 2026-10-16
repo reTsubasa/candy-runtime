@@ -41,6 +41,12 @@ fn signed_cli_runtime_shared_listener_routes_two_domains() {
 }
 
 #[test]
+#[ignore = "requires disposable privileged Linux and the Runtime Rust Proxy launcher"]
+fn signed_cli_mixed_role_quota_and_slow_consumer_isolation() {
+    shared_listener::verify_mixed_role_fault_isolation();
+}
+
+#[test]
 #[ignore = "real authenticated Reserve/Prepare/Install/Activate/Drain with two netd TUN clients and Runtime server domains"]
 fn signed_cli_bilateral_candidate_reload_preserves_traffic() {
     shared_listener::verify_mbb();

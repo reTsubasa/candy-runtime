@@ -560,7 +560,102 @@ pub(super) fn verify_successor_restart() {
     verify_scenario(true, true);
 }
 
+/// Exercise the two roles through one listener while one Proxy role is
+/// resource constrained.  The test deliberately uses the Runtime launcher;
+/// a direct Core invocation would bypass the production launcher boundary.
+pub(super) fn verify_mixed_role_fault_isolation() {
+    verify_scenario_mode(false, false, true);
+}
+
 fn verify_scenario(mbb: bool, restart_successor_server: bool) {
+    verify_scenario_mode(mbb, restart_successor_server, false);
+}
+
+fn verify_fault_isolation(root: &Path, fixture: &Path, registry: &Path, clients: &[String]) {
+    let before: Vec<_> = (0..2)
+        .flat_map(|domain| {
+            ["client", "server"].map(move |side| {
+                let directory = root.join(format!("domain-{domain}/{side}"));
+                (
+                    directory.clone(),
+                    status(&directory.join("process.json")).unwrap(),
+                    status(&directory.join("io-process.json")).unwrap(),
+                )
+            })
+        })
+        .collect();
+    let master = status(&registry.join("listener-master.json")).unwrap();
+    let proxy_workers = master_workers(master["process"]["pid"].as_u64().unwrap() as u32);
+    assert_eq!(
+        proxy_workers.len(),
+        1,
+        "exact Proxy worker population absent"
+    );
+    let tuns: Vec<_> = clients.iter().map(|name| tun_identity(name)).collect();
+    let output = Command::new("python3")
+        .args(["-c", include_str!("mixed_role_faults.py")])
+        .arg(root)
+        .arg(fixture)
+        .arg(core())
+        .arg(
+            std::env::var_os("CANDY_PROXY_CLIENT_BINARY")
+                .expect("Runtime candy-client launcher required"),
+        )
+        .args(clients)
+        .output()
+        .unwrap();
+    fs::write(root.join("mixed-role-faults.log"), &output.stdout).unwrap();
+    fs::write(root.join("mixed-role-faults-stderr.log"), &output.stderr).unwrap();
+    assert!(
+        output.status.success(),
+        "mixed-role quota/slow-consumer gate failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for (directory, worker, io) in before {
+        assert_eq!(
+            status(&directory.join("process.json")).unwrap(),
+            worker,
+            "Proxy pressure replaced SD-WAN worker"
+        );
+        assert_eq!(
+            status(&directory.join("io-process.json")).unwrap(),
+            io,
+            "Proxy pressure replaced infrastructure TUNIO"
+        );
+    }
+    for (name, tun) in clients.iter().zip(tuns) {
+        assert_eq!(
+            tun_identity(name),
+            tun,
+            "Proxy pressure replaced infrastructure TUN"
+        );
+    }
+    assert_eq!(
+        status(&registry.join("listener-master.json")).unwrap(),
+        master,
+        "Proxy pressure replaced shared listener"
+    );
+    for identity in &proxy_workers {
+        assert!(
+            candy_process_control::process_is_current(*identity),
+            "Proxy pressure restarted healthy worker"
+        );
+    }
+    assert!(
+        (40..42).all(|seed| committed_ack(registry, seed)),
+        "Proxy pressure lost exact SD-WAN activation"
+    );
+    private_json(
+        &root.join("mixed-role-infrastructure-evidence.json"),
+        &serde_json::json!({"gate":"PASS","master":master,"proxy_workers":proxy_workers,
+            "sdwan_domains":2,"domain_worker_records_unchanged":true,
+            "tunio_records_unchanged":true,"tun_ifindices_unchanged":true,
+            "exact_sdwan_activation_preserved":true}),
+    );
+}
+
+fn verify_scenario_mode(mbb: bool, restart_successor_server: bool, fault_isolation: bool) {
     assert_eq!(
         std::env::var("CANDY_NETD_ISOLATED_KERNEL_TEST").as_deref(),
         Ok("1")
@@ -718,7 +813,13 @@ fn verify_scenario(mbb: bool, restart_successor_server: bool) {
     let master = root.join("master.toml");
     // SIGKILL is a QUIC blackhole: negotiate an explicit bounded idle timeout
     // so the fault gate measures recovery rather than the Linux 120s default.
-    fs::write(&master, format!("listen = \"10.200.0.2:18443\"\ncert_pem = {:?}\nkey_pem = {:?}\n[transport]\nkeep_alive_seconds = 1\nidle_timeout_seconds = 4\n[[users]]\nkey_id = \"alice\"\nsecret = \"shared-listener-test-secret-2026\"\n", fixture.join("server.cert.pem"), fixture.join("server.key.pem"))).unwrap();
+    let admission = fault_isolation
+        .then_some("[admission]\nmax_connections = 6\nmax_connections_per_user = 2\n")
+        .unwrap_or("");
+    let features = fault_isolation
+        .then_some("features = [\"recommended\"]\n")
+        .unwrap_or("");
+    fs::write(&master, format!("listen = \"10.200.0.2:18443\"\ncert_pem = {:?}\nkey_pem = {:?}\n[transport]\nkeep_alive_seconds = 1\nidle_timeout_seconds = 4\n{}[[users]]\nkey_id = \"alice\"\nsecret = \"shared-listener-test-secret-2026\"\n{}", fixture.join("server.cert.pem"), fixture.join("server.key.pem"), admission, features)).unwrap();
     fs::set_permissions(&master, fs::Permissions::from_mode(0o600)).unwrap();
     let mut master_index = processes.len();
     processes.push(spawn(
@@ -821,6 +922,10 @@ fn verify_scenario(mbb: bool, restart_successor_server: bool) {
             "Runtime shared listener failed exact activation and real ICMP"
         );
         std::thread::sleep(Duration::from_millis(100));
+    }
+    if fault_isolation {
+        verify_fault_isolation(root, &fixture, &registry, &client_names);
+        return;
     }
     // Keep both actual Runtime workers alive while admitting Proxy work.
     let transport = fs::read_to_string(fixture.join("transport.toml")).unwrap();
