@@ -357,8 +357,37 @@ fn run_mbb_transaction(
         None,
         &envelope.transaction_id,
     );
+    if let Some(fd) = new_fd.as_ref() {
+        // A newly registered candidate has no PacketPort transaction to probe.
+        // Transfer its live descriptor before probing or waiting for readiness;
+        // a deferred readiness check must not discard the only descriptor.
+        context.authority(
+            &context.request(
+                AuthorityControlOperation::StageAuthority,
+                Some(envelope.clone()),
+                &envelope.transaction_id,
+            ),
+            None,
+        )?;
+        journal.phase = "mbb_prepare_pending".into();
+        publish(journal_path, journal)?;
+        candidate_owner.prepare_with(
+            context.request(
+                AuthorityControlOperation::ProbeTransaction,
+                None,
+                &envelope.transaction_id,
+            ),
+            fd,
+            monotonic_ms()?,
+            |candidate| {
+                journal.candidate_owner = Some(candidate.clone());
+                publish(journal_path, journal)
+            },
+            |request, descriptor| context.authority(request, descriptor),
+        )?;
+    }
     let mut actual = context.authority(&base, None)?;
-    let mut owner_state = candidate_owner.observe(&actual)?;
+    let owner_state = candidate_owner.observe(&actual)?;
     let candidate_current = record.business_is_current().context(ManagedProofPending)?;
     if !candidate_current && owner_state == OwnerState::Committed {
         journal.mbb_reservation = None;
@@ -402,31 +431,7 @@ fn run_mbb_transaction(
     exact_ready(plan, &record, &envelope)?;
     listener_registration::publish_prepared_pending(plan);
     if owner_state == OwnerState::Unknown {
-        let fd = new_fd.as_ref().context("code=mbb_prepare_receipt_unknown module=sdwan_handoff action=preserve_original_candidate_until_exact_reconciliation")?;
-        context.authority(
-            &context.request(
-                AuthorityControlOperation::StageAuthority,
-                Some(envelope.clone()),
-                &envelope.transaction_id,
-            ),
-            None,
-        )?;
-        journal.phase = "mbb_prepare_pending".into();
-        publish(journal_path, journal)?;
-        owner_state = candidate_owner.prepare_with(
-            context.request(
-                AuthorityControlOperation::ProbeTransaction,
-                None,
-                &envelope.transaction_id,
-            ),
-            fd,
-            monotonic_ms()?,
-            |candidate| {
-                journal.candidate_owner = Some(candidate.clone());
-                publish(journal_path, journal)
-            },
-            |request, descriptor| context.authority(request, descriptor),
-        )?;
+        anyhow::bail!("code=mbb_prepare_receipt_unknown module=sdwan_handoff action=preserve_original_candidate_until_exact_reconciliation");
     }
     anyhow::ensure!(
         matches!(owner_state, OwnerState::Prepared | OwnerState::Committed),

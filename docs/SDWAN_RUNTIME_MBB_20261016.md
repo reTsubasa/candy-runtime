@@ -64,7 +64,7 @@ cannot rewrite an existing terminal outcome.
   advances only over contiguous settled writes; failed intervals retain their
   error while a later transaction gets a fresh baseline.
 - Linux TUNIO authority tests: 11/11; strict all-target Clippy passed.
-- Linux Runtime Agent library tests: 124/124, including exact installation,
+- Linux Runtime Agent library tests: 125/125, including exact installation,
   unknown Commit, original clock witness, mixed drain outcome and recovery action.
 - Linux process-control tests: 5/5, including authenticated bounded JSON exchange.
 - The four Core/Runtime packet-port mirrors compare byte-identical.
@@ -89,3 +89,25 @@ unknown outcomes preserve the original owner rather than downgrade that
 transaction to stop/spawn. Dedicated exclusive placements keep their existing
 compatibility path. The strict continuous-traffic fixture remains the acceptance
 gate; the first failed run is retained and does not certify the fix.
+
+## First Prepare Ordering
+
+The feature-enabled strict v3 run exposed a separate registration boundary bug:
+the predecessor reservation and candidate envelope were durable, but Runtime
+probed the new PacketPort transaction before ever sending its descriptor to
+TUNIO. The manager correctly returned `owner_transaction_unknown`. Returning
+from that attempt discarded the only local descriptor, so subsequent attempts
+could not prepare the candidate.
+
+When the newly created descriptor is still held, Runtime now performs Stage
+and Prepare before requesting the exact transaction receipt or checking worker
+readiness. Prepare preserves the predecessor as outbound owner. A worker whose
+readiness publication is delayed can therefore be reconciled against an actual
+prepared transaction on the next iteration. Prepare acknowledgement loss still
+queries the original transaction through `CandidateOwner::prepare_with`.
+
+An existing transaction with no live local descriptor does not repeat Prepare
+or fabricate a receipt. Unknown recovery outcomes retain the candidate and
+original owner pending exact reconciliation. Linux feature-enabled Agent tests
+pass 125/125; the strict end-to-end rerun remains required to accept the complete
+managed handoff. The failed v3 evidence remains unchanged.
