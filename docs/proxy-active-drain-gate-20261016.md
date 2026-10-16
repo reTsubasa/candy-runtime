@@ -153,7 +153,42 @@ isolated reruns before this report can claim the DNS transition gate passes.
 This report does not claim physical-platform, production, complete compatibility
 matrix, performance, or long-duration acceptance.
 
-## DNS Follow-Up
+## Final Immutable Proxy Result
+
+Core commit `ff9403f` fixes TCP/UDP negative admission reselection, DNS
+reselection within the original query deadline, and manager retirement ordering.
+The isolated Proxy-only Linux aarch64 test ELF has SHA-256:
+
+`892d03eeadab84439eb86f2f4826726eede0d8a846892c8bd083fd93eed9ebf3`
+
+It is a Docker verification artifact, not an OpenWrt release artifact. Both
+final runs use this exact ELF and the real Runtime Rust client:
+
+| Parent workspace evidence directory | Result | TCP single attempts | UDP first packets | DNS single sends | Old / replacement PID |
+| --- | --- | --- | --- | --- | --- |
+| `docs/artifacts/sdwan-20261016/proxy-active-drain-v11-final-controlled` | PASS | 24/24 | 24/24 | 90/90 | 10697 / 10846 |
+| `docs/artifacts/sdwan-20261016/proxy-active-drain-v12-final-dense` | PASS | 24/24 | 24/24 | 104/104 | 13507 / 13768 |
+
+Both preserve held TCP tail/FIN and the held UDP owner/socket/source port,
+prove replacement overlap, and complete the exact six-second original drain
+request within collection tolerance. They also pass private socket permissions,
+wrong-token rejection and partial-read timeout while healthy flows continue.
+The master PID/start time is unchanged. Public listener inodes remain
+`6614501` and `6625272`, respectively. Retirement receipts identify old worker
+`(1,1,PID)` and replacement `(2,1,PID)` and confirm drain, OS reap and readiness.
+
+At the same isolated source boundary, the full client library passes 280/280
+tests with four test threads; real worker-manager OS tests pass 12/12. Strict
+Clippy passes for client, runtime, server and Core process all targets. An
+earlier unconstrained parallel client run had a paused-clock keepalive failure;
+the complete bounded-thread rerun passes.
+
+This closes the tested Proxy drain admission and DNS transition gates. It does
+not close bilateral SD-WAN MBB, physical installation/rollback, two-hour
+stability, release-artifact comparisons or the remaining performance matrix.
+Those require their own evidence at the final integrated binary boundary.
+
+## DNS Follow-Up (Historical Findings)
 
 Read-only review identified a separate foreign-egress DNS transition gap:
 
@@ -166,6 +201,6 @@ Read-only review identified a separate foreign-egress DNS transition gap:
   just before drain therefore cannot reselect the published replacement within
   the current query's original deadline.
 
-This can fail the current foreign DNS attempt at the transition; it does not
-prove a permanent outage, because subsequent queries can select the new
-transport. The active flow fixture does not yet exercise DNS query forwarding.
+These findings described the pre-fix transition failure. Final v11/v12 above
+exercise the corrected production DNS forwarding path. The earlier negative
+stress results remain evidence and are not reclassified as passing runs.
