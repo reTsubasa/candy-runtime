@@ -41,6 +41,15 @@ class PacingTests(unittest.TestCase):
         self.assertFalse(second[3])
         self.assertGreaterEqual(second[2] - first[2], .01 - 1e-9)
 
+    def test_small_sleep_jitter_does_not_accumulate(self):
+        clock = Clock()
+        pacer = RatePacer(.1, 100, clock.read, clock.sleep)
+        for sequence in range(300):
+            clock.oversleep = .001
+            nominal, _, actual, rebased = pacer.wait(sequence)
+            self.assertAlmostEqual(actual - nominal, .001)
+            self.assertFalse(rebased)
+
     def test_oversleep_rebases_and_short_jitter_has_bounded_catch_up(self):
         clock = Clock()
         pacer = RatePacer(.1, 100, clock.read, clock.sleep)
