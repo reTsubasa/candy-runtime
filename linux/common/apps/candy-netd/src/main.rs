@@ -66,35 +66,6 @@ enum ProbeProtocol {
     V2,
 }
 
-#[cfg(test)]
-mod argument_tests {
-    use super::*;
-
-    #[test]
-    fn probe_protocol_is_explicit_and_server_arguments_still_work() {
-        assert!(Args::try_parse_from([
-            "candy-netd",
-            "--socket",
-            "/tmp/test.sock",
-            "--allowed-uid",
-            "0",
-            "--allowed-gid",
-            "0"
-        ])
-        .is_ok());
-        let probe = Args::try_parse_from([
-            "candy-netd",
-            "--probe-socket",
-            "/tmp/test.sock",
-            "--probe-protocol",
-            "v2",
-        ])
-        .unwrap();
-        assert!(matches!(probe.probe_protocol, ProbeProtocol::V2));
-        assert!(Args::try_parse_from(["candy-netd", "--probe-protocol", "v2"]).is_err());
-    }
-}
-
 fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     return run_linux(Args::parse());
@@ -312,4 +283,33 @@ fn monotonic_millis() -> anyhow::Result<u64> {
         .checked_mul(1000)
         .and_then(|millis| millis.checked_add(nanos / 1_000_000))
         .ok_or_else(|| anyhow::anyhow!("monotonic clock overflow"))
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+
+    #[test]
+    fn probe_protocol_is_explicit_and_server_arguments_still_work() {
+        assert!(Args::try_parse_from([
+            "candy-netd",
+            "--socket",
+            "/tmp/test.sock",
+            "--allowed-uid",
+            "0",
+            "--allowed-gid",
+            "0"
+        ])
+        .is_ok());
+        let probe = Args::try_parse_from([
+            "candy-netd",
+            "--probe-socket",
+            "/tmp/test.sock",
+            "--probe-protocol",
+            "v2",
+        ])
+        .unwrap();
+        assert!(matches!(probe.probe_protocol, ProbeProtocol::V2));
+        assert!(Args::try_parse_from(["candy-netd", "--probe-protocol", "v2"]).is_err());
+    }
 }
