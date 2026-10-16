@@ -188,6 +188,23 @@ not close bilateral SD-WAN MBB, physical installation/rollback, two-hour
 stability, release-artifact comparisons or the remaining performance matrix.
 Those require their own evidence at the final integrated binary boundary.
 
+## Integrated MBB Binary Regression
+
+`docs/artifacts/sdwan-20261016/proxy-integrated-final-v1/` reruns the dense
+active-session gate against the immutable Core `090f93d` integration binary:
+`63453aee5e9cee4d93c59424165a0d8544f7912695b07c23bde57c4a64f888d4`.
+The real Runtime Rust client passes 24/24 single-attempt TCP admissions,
+24/24 first-packet UDP flows and 104/104 single-send DNS queries. All generator
+retry counters are zero. The held TCP tail/FIN and original UDP owner survive;
+replacement overlap, exact six-second drain deadline and OS reap pass.
+Worker `(1,1,57116)` retires for `(2,1,57259)` while the master incarnation and
+public listener inode `7179928` remain unchanged. Dedicated test containers and
+the private control volume were removed successfully.
+
+This verifies Proxy regression at the shared Core integration binary boundary.
+It does not certify later P1 source changes, physical release artifacts,
+two-hour stability or the deferred performance matrix.
+
 ## DNS Follow-Up (Historical Findings)
 
 Read-only review identified a separate foreign-egress DNS transition gap:

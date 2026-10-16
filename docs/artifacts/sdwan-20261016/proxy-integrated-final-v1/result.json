@@ -1,0 +1,5152 @@
+{
+  "schema_version": 1,
+  "gate": "PASS",
+  "client": "Runtime candy-client -> Rust candy-core client",
+  "scope": "isolated Linux active-session drain only; no full release acceptance",
+  "deprecated_profiles": [
+    "legacy_datagram_only_without_fragmentation_or_stream_fallback"
+  ],
+  "requested_matrix": {
+    "workers": [
+      1,
+      2,
+      4
+    ],
+    "directions": [
+      "upload",
+      "download",
+      "bidirectional"
+    ],
+    "independent_connections": 1,
+    "flows": [
+      1,
+      4,
+      16
+    ],
+    "rounds": 1,
+    "seconds": 1,
+    "warmup_seconds": 1
+  },
+  "release_acceptance": "INCOMPLETE",
+  "performance_gate": "NOT_RUN",
+  "cpu_isolation": {
+    "cfs_quota_cpus_per_namespace": 3
+  },
+  "remaining_gates": [
+    "released-artifact B0 comparison",
+    "simultaneous bidirectional traffic",
+    "independent connection aggregate throughput",
+    "mixed SD-WAN traffic",
+    "two-hour stability and renewal",
+    "physical platform installation and rollback"
+  ],
+  "binary_sha256": "63453aee5e9cee4d93c59424165a0d8544f7912695b07c23bde57c4a64f888d4",
+  "wrapper_sha256": "69760fab0951eebede7c5ca4fe853815e22f59e9af664e77dc18011df02e3198",
+  "guest_sha256": "302e9abd4e6e51b580787db192ca083a233ce6086425e0ba0e983cf71d9f9278",
+  "load_sha256": "a0b3e26d6826652a9bf4748d84df71a3ce7066ca9da57b52375f5653a78d66d0",
+  "udp_sha256": "9f20bf8c52425dc4816aa910cdfdf8f59d7dadf880213edbb192b9f9245d6f2a",
+  "admission_sha256": "7251e0b2bf92dd998ae4cc75a10dcee7d1eae737102d85c4718e37ee1ce4ebfc",
+  "timing_sha256": "0c16b312f6693391f1738041717f6bc9e63ddd284b0b317524b38df4d1b54598",
+  "log_fault_sha256": "7e9a05490086ba3ec8f03c5f1d6d8270f5773eab983b8c5ff50424ebeda11c80",
+  "scaling_sha256": "60be5aad773af42c27a08b6c13619a2e59d400d37823f65803a58ab11522bb25",
+  "active_drain_sha256": "6f8b4338137d5e562778c0ac7e630420ed2f642c8677fa2d10d3be63e0ad3423",
+  "runner_sha256": "687cad0730c977676bd92a84978a7ee295ae06aa5807bec88d9fb5f67fe3bd30",
+  "compatibility": [
+    {
+      "case": "active_session_negotiated_proxy_drain",
+      "gate": "PASS",
+      "scope": "active TCP/UDP wire retention, deadline and replacement admission",
+      "requested_remaining_ms": 6000,
+      "tcp_exchanges": [
+        {
+          "sequence": 0,
+          "at": 82614.812577516
+        },
+        {
+          "sequence": -1,
+          "at": 82614.891705725
+        },
+        {
+          "sequence": -2,
+          "at": 82616.928089976
+        },
+        {
+          "sequence": 1,
+          "at": 82617.030321184
+        },
+        {
+          "sequence": 2,
+          "at": 82617.099282601
+        },
+        {
+          "sequence": 3,
+          "at": 82617.224530059
+        },
+        {
+          "sequence": 4,
+          "at": 82617.294770143
+        },
+        {
+          "sequence": 5,
+          "at": 82617.362508018
+        },
+        {
+          "sequence": 6,
+          "at": 82617.430857393
+        },
+        {
+          "sequence": 7,
+          "at": 82617.498735601
+        },
+        {
+          "sequence": 8,
+          "at": 82617.569215184
+        },
+        {
+          "sequence": 9,
+          "at": 82617.642357434
+        },
+        {
+          "sequence": 10,
+          "at": 82617.716682268
+        },
+        {
+          "sequence": 11,
+          "at": 82617.787179851
+        },
+        {
+          "sequence": 12,
+          "at": 82617.856732768
+        },
+        {
+          "sequence": 13,
+          "at": 82617.926514351
+        },
+        {
+          "sequence": 14,
+          "at": 82617.998518935
+        },
+        {
+          "sequence": 15,
+          "at": 82618.07063556
+        },
+        {
+          "sequence": 16,
+          "at": 82618.143095476
+        },
+        {
+          "sequence": 17,
+          "at": 82618.219950851
+        },
+        {
+          "sequence": 18,
+          "at": 82618.297363768
+        },
+        {
+          "sequence": 19,
+          "at": 82618.379532226
+        },
+        {
+          "sequence": 20,
+          "at": 82618.45863606
+        },
+        {
+          "sequence": 21,
+          "at": 82618.535156018
+        },
+        {
+          "sequence": 22,
+          "at": 82618.61476506
+        },
+        {
+          "sequence": 23,
+          "at": 82618.694508893
+        },
+        {
+          "sequence": 24,
+          "at": 82618.770424602
+        },
+        {
+          "sequence": 25,
+          "at": 82618.850714977
+        },
+        {
+          "sequence": 26,
+          "at": 82618.92935806
+        },
+        {
+          "sequence": 27,
+          "at": 82619.00569231
+        },
+        {
+          "sequence": 28,
+          "at": 82619.077660018
+        },
+        {
+          "sequence": 29,
+          "at": 82619.150489477
+        },
+        {
+          "sequence": 30,
+          "at": 82619.222732102
+        }
+      ],
+      "udp_exchanges": [
+        {
+          "sequence": 0,
+          "at": 82614.844524433,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": -1,
+          "at": 82614.907549558,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": -2,
+          "at": 82616.948726059,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 1,
+          "at": 82617.044216517,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 2,
+          "at": 82617.171695142,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 3,
+          "at": 82617.241734726,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 4,
+          "at": 82617.310903809,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 5,
+          "at": 82617.377399851,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 6,
+          "at": 82617.445113268,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 7,
+          "at": 82617.514031101,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 8,
+          "at": 82617.588479268,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 9,
+          "at": 82617.662382684,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 10,
+          "at": 82617.732270476,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 11,
+          "at": 82617.803938893,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 12,
+          "at": 82617.873764434,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 13,
+          "at": 82617.942923518,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 14,
+          "at": 82618.014319393,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 15,
+          "at": 82618.087215476,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 16,
+          "at": 82618.162302143,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 17,
+          "at": 82618.239987143,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 18,
+          "at": 82618.317126518,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 19,
+          "at": 82618.402434601,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 20,
+          "at": 82618.47964131,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 21,
+          "at": 82618.555242768,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 22,
+          "at": 82618.635530768,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 23,
+          "at": 82618.712277352,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 24,
+          "at": 82618.791059227,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 25,
+          "at": 82618.870670102,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 26,
+          "at": 82618.948986643,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 27,
+          "at": 82619.022554268,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 28,
+          "at": 82619.09385131,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 29,
+          "at": 82619.168647268,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        },
+        {
+          "sequence": 30,
+          "at": 82619.237282977,
+          "pid": 57116,
+          "worker_id": 1,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            36702
+          ],
+          "inode": [
+            "7181007"
+          ]
+        }
+      ],
+      "dns_profile": "dense_burst",
+      "old_tcp_owner": {
+        "pid": 57116,
+        "worker_id": 1,
+        "owner_epoch": 1,
+        "peer": [
+          "10.202.0.2",
+          59212
+        ],
+        "inode": [
+          "7179247"
+        ]
+      },
+      "old_udp_owner": {
+        "pid": 57116,
+        "worker_id": 1,
+        "owner_epoch": 1,
+        "peer": [
+          "10.202.0.2",
+          36702
+        ],
+        "inode": [
+          "7181007"
+        ]
+      },
+      "dns_warmup": {
+        "domain": "q999.drain-gate.example",
+        "sequence": 999,
+        "gate": "PASS",
+        "sends": 1,
+        "sent_at": 82614.844559558,
+        "rcode": 0,
+        "reply_at": 82614.877848183,
+        "reply_peer": [
+          "127.0.0.1",
+          15353
+        ]
+      },
+      "old_owner_epoch": 1,
+      "control_socket_mode": "0o600",
+      "control_socket_permissions_gate": "PASS",
+      "wrong_token_control": {
+        "elapsed_seconds": 0.0004608329909387976,
+        "response": {
+          "code": "drain_control_request_failed",
+          "detail": "code=drain_control_unauthorized module=proxy_master detail=version or token mismatch",
+          "module": "proxy_master",
+          "version": 1
+        }
+      },
+      "wrong_token_preserves_healthy_flows_gate": "PASS",
+      "partial_control": {
+        "elapsed_seconds": 2.003528916990035,
+        "response": {
+          "code": "drain_control_request_failed",
+          "detail": "code=drain_control_read_timeout module=proxy_master",
+          "module": "proxy_master",
+          "version": 1
+        }
+      },
+      "partial_timeout_preserves_healthy_flows_gate": "PASS",
+      "passive_proxy_drain_before": {
+        "supported": true,
+        "authorized": true,
+        "active": false,
+        "evidence": 0
+      },
+      "negotiated_capability_gate": "PASS",
+      "drain_requested_at": 82616.953513767,
+      "client_notice_observed_at": 82617.087757351,
+      "held_completed_at": 82619.292783893,
+      "tcp_tail_fin_gate": "PASS",
+      "udp_owner_retention_gate": "PASS",
+      "drain_receipt_at": 82623.429636728,
+      "drain_receipt": {
+        "version": 1,
+        "worker_id": 1,
+        "old_owner_epoch": 1,
+        "new_owner_epoch": 1,
+        "new_worker_id": 2,
+        "old_pid": 57116,
+        "new_pid": 57259,
+        "requested_remaining_ms": 6000,
+        "transport_drained": true,
+        "os_reaped": true,
+        "replacement_ready": true,
+        "detail": "old worker drained and reaped; replacement ready while listener remained enabled"
+      },
+      "new_admission": {
+        "gate": "PASS",
+        "at": 82617.178557142,
+        "owner": {
+          "pid": 57259,
+          "worker_id": 2,
+          "owner_epoch": 1,
+          "peer": [
+            "10.202.0.2",
+            59258
+          ],
+          "inode": [
+            "7181194"
+          ]
+        },
+        "attempts": [
+          {
+            "at": 82617.040308726,
+            "state": "old_owner_still_accepting_before_drain",
+            "owner": {
+              "pid": 57116,
+              "worker_id": 1,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59216
+              ],
+              "inode": [
+                "7183024"
+              ]
+            }
+          }
+        ]
+      },
+      "new_udp_admissions": {
+        "gate": "PASS",
+        "flows": [
+          {
+            "sequence": 0,
+            "gate": "PASS",
+            "local_source_port": 33647,
+            "sent_at": 82616.955630392,
+            "sends": 1,
+            "reply_at": 82617.027649517,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57116,
+              "worker_id": 1,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                57390
+              ],
+              "inode": [
+                "7183820"
+              ]
+            }
+          },
+          {
+            "sequence": 1,
+            "gate": "PASS",
+            "local_source_port": 56459,
+            "sent_at": 82617.006182767,
+            "sends": 1,
+            "reply_at": 82617.085374934,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                47835
+              ],
+              "inode": [
+                "7181130"
+              ]
+            }
+          },
+          {
+            "sequence": 2,
+            "gate": "PASS",
+            "local_source_port": 51843,
+            "sent_at": 82617.057413017,
+            "sends": 1,
+            "reply_at": 82617.138216184,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                35650
+              ],
+              "inode": [
+                "7181140"
+              ]
+            }
+          },
+          {
+            "sequence": 3,
+            "gate": "PASS",
+            "local_source_port": 51439,
+            "sent_at": 82617.108826517,
+            "sends": 1,
+            "reply_at": 82617.191470517,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                44852
+              ],
+              "inode": [
+                "7187481"
+              ]
+            }
+          },
+          {
+            "sequence": 4,
+            "gate": "PASS",
+            "local_source_port": 58388,
+            "sent_at": 82617.159724809,
+            "sends": 1,
+            "reply_at": 82617.195587601,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                35989
+              ],
+              "inode": [
+                "7183094"
+              ]
+            }
+          },
+          {
+            "sequence": 5,
+            "gate": "PASS",
+            "local_source_port": 56432,
+            "sent_at": 82617.212556267,
+            "sends": 1,
+            "reply_at": 82617.238534392,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                47531
+              ],
+              "inode": [
+                "7184938"
+              ]
+            }
+          },
+          {
+            "sequence": 6,
+            "gate": "PASS",
+            "local_source_port": 42917,
+            "sent_at": 82617.263618017,
+            "sends": 1,
+            "reply_at": 82617.290537476,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                46629
+              ],
+              "inode": [
+                "7184963"
+              ]
+            }
+          },
+          {
+            "sequence": 7,
+            "gate": "PASS",
+            "local_source_port": 41266,
+            "sent_at": 82617.314267143,
+            "sends": 1,
+            "reply_at": 82617.341337934,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                34170
+              ],
+              "inode": [
+                "7183126"
+              ]
+            }
+          },
+          {
+            "sequence": 8,
+            "gate": "PASS",
+            "local_source_port": 60356,
+            "sent_at": 82617.365411809,
+            "sends": 1,
+            "reply_at": 82617.392226934,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                33798
+              ],
+              "inode": [
+                "7181216"
+              ]
+            }
+          },
+          {
+            "sequence": 9,
+            "gate": "PASS",
+            "local_source_port": 48635,
+            "sent_at": 82617.416584184,
+            "sends": 1,
+            "reply_at": 82617.443608518,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                52554
+              ],
+              "inode": [
+                "7187568"
+              ]
+            }
+          },
+          {
+            "sequence": 10,
+            "gate": "PASS",
+            "local_source_port": 60651,
+            "sent_at": 82617.467790726,
+            "sends": 1,
+            "reply_at": 82617.495484184,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                58272
+              ],
+              "inode": [
+                "7187595"
+              ]
+            }
+          },
+          {
+            "sequence": 11,
+            "gate": "PASS",
+            "local_source_port": 38046,
+            "sent_at": 82617.519315143,
+            "sends": 1,
+            "reply_at": 82617.546204393,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                36276
+              ],
+              "inode": [
+                "7187623"
+              ]
+            }
+          },
+          {
+            "sequence": 12,
+            "gate": "PASS",
+            "local_source_port": 34238,
+            "sent_at": 82617.570602268,
+            "sends": 1,
+            "reply_at": 82617.596413101,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                49217
+              ],
+              "inode": [
+                "7185021"
+              ]
+            }
+          },
+          {
+            "sequence": 13,
+            "gate": "PASS",
+            "local_source_port": 33805,
+            "sent_at": 82617.621408309,
+            "sends": 1,
+            "reply_at": 82617.651317351,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                38956
+              ],
+              "inode": [
+                "7185027"
+              ]
+            }
+          },
+          {
+            "sequence": 14,
+            "gate": "PASS",
+            "local_source_port": 36358,
+            "sent_at": 82617.672971851,
+            "sends": 1,
+            "reply_at": 82617.704263768,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                57308
+              ],
+              "inode": [
+                "7183199"
+              ]
+            }
+          },
+          {
+            "sequence": 15,
+            "gate": "PASS",
+            "local_source_port": 52413,
+            "sent_at": 82617.723253851,
+            "sends": 1,
+            "reply_at": 82617.754244768,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                45340
+              ],
+              "inode": [
+                "7183207"
+              ]
+            }
+          },
+          {
+            "sequence": 16,
+            "gate": "PASS",
+            "local_source_port": 56244,
+            "sent_at": 82617.773496393,
+            "sends": 1,
+            "reply_at": 82617.803857059,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                51577
+              ],
+              "inode": [
+                "7186652"
+              ]
+            }
+          },
+          {
+            "sequence": 17,
+            "gate": "PASS",
+            "local_source_port": 32801,
+            "sent_at": 82617.824527184,
+            "sends": 1,
+            "reply_at": 82617.856655601,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                41315
+              ],
+              "inode": [
+                "7183984"
+              ]
+            }
+          },
+          {
+            "sequence": 18,
+            "gate": "PASS",
+            "local_source_port": 54469,
+            "sent_at": 82617.875842601,
+            "sends": 1,
+            "reply_at": 82617.907640184,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                34372
+              ],
+              "inode": [
+                "7183991"
+              ]
+            }
+          },
+          {
+            "sequence": 19,
+            "gate": "PASS",
+            "local_source_port": 34672,
+            "sent_at": 82617.926420059,
+            "sends": 1,
+            "reply_at": 82617.958070643,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                57176
+              ],
+              "inode": [
+                "7182179"
+              ]
+            }
+          },
+          {
+            "sequence": 20,
+            "gate": "PASS",
+            "local_source_port": 43110,
+            "sent_at": 82617.977288101,
+            "sends": 1,
+            "reply_at": 82618.013658393,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                49091
+              ],
+              "inode": [
+                "7186031"
+              ]
+            }
+          },
+          {
+            "sequence": 21,
+            "gate": "PASS",
+            "local_source_port": 38379,
+            "sent_at": 82618.028459893,
+            "sends": 1,
+            "reply_at": 82618.062497101,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                60041
+              ],
+              "inode": [
+                "7186039"
+              ]
+            }
+          },
+          {
+            "sequence": 22,
+            "gate": "PASS",
+            "local_source_port": 48256,
+            "sent_at": 82618.079666768,
+            "sends": 1,
+            "reply_at": 82618.112529226,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                34876
+              ],
+              "inode": [
+                "7182185"
+              ]
+            }
+          },
+          {
+            "sequence": 23,
+            "gate": "PASS",
+            "local_source_port": 55455,
+            "sent_at": 82618.132301435,
+            "sends": 1,
+            "reply_at": 82618.165086226,
+            "reply_peer": [
+              "127.0.0.1",
+              15005
+            ],
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                33435
+              ],
+              "inode": [
+                "7186053"
+              ]
+            }
+          }
+        ],
+        "generator_retransmissions": 0
+      },
+      "new_tcp_admissions": {
+        "gate": "PASS",
+        "requests": [
+          {
+            "sequence": 0,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82616.954959309,
+            "completed_at": 82617.081109434,
+            "owner": {
+              "pid": 57116,
+              "worker_id": 1,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59232
+              ],
+              "inode": [
+                "7183816"
+              ]
+            }
+          },
+          {
+            "sequence": 1,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82616.981320726,
+            "completed_at": 82617.188204642,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59238
+              ],
+              "inode": [
+                "7181125"
+              ]
+            }
+          },
+          {
+            "sequence": 2,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.007237892,
+            "completed_at": 82617.190125267,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59242
+              ],
+              "inode": [
+                "7181131"
+              ]
+            }
+          },
+          {
+            "sequence": 3,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.034017976,
+            "completed_at": 82617.129133351,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59234
+              ],
+              "inode": [
+                "7181108"
+              ]
+            }
+          },
+          {
+            "sequence": 4,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.081119434,
+            "completed_at": 82617.215365517,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59254
+              ],
+              "inode": [
+                "7181183"
+              ]
+            }
+          },
+          {
+            "sequence": 5,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.129148101,
+            "completed_at": 82617.242282101,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59266
+              ],
+              "inode": [
+                "7183871"
+              ]
+            }
+          },
+          {
+            "sequence": 6,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.188221226,
+            "completed_at": 82617.274302309,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59274
+              ],
+              "inode": [
+                "7183101"
+              ]
+            }
+          },
+          {
+            "sequence": 7,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.190137476,
+            "completed_at": 82617.274427726,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59290
+              ],
+              "inode": [
+                "7183110"
+              ]
+            }
+          },
+          {
+            "sequence": 8,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.215376476,
+            "completed_at": 82617.296345476,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59304
+              ],
+              "inode": [
+                "7184947"
+              ]
+            }
+          },
+          {
+            "sequence": 9,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.242291601,
+            "completed_at": 82617.323350768,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59318
+              ],
+              "inode": [
+                "7184957"
+              ]
+            }
+          },
+          {
+            "sequence": 10,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.274324309,
+            "completed_at": 82617.354351768,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59336
+              ],
+              "inode": [
+                "7184975"
+              ]
+            }
+          },
+          {
+            "sequence": 11,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.274435517,
+            "completed_at": 82617.356567101,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59326
+              ],
+              "inode": [
+                "7184973"
+              ]
+            }
+          },
+          {
+            "sequence": 12,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.296356809,
+            "completed_at": 82617.376139768,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59348
+              ],
+              "inode": [
+                "7184989"
+              ]
+            }
+          },
+          {
+            "sequence": 13,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.323365351,
+            "completed_at": 82617.403386976,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59356
+              ],
+              "inode": [
+                "7183135"
+              ]
+            }
+          },
+          {
+            "sequence": 14,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.354373559,
+            "completed_at": 82617.438065893,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59360
+              ],
+              "inode": [
+                "7183146"
+              ]
+            }
+          },
+          {
+            "sequence": 15,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.356577518,
+            "completed_at": 82617.438186643,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59374
+              ],
+              "inode": [
+                "7183154"
+              ]
+            }
+          },
+          {
+            "sequence": 16,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.376162476,
+            "completed_at": 82617.456210768,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59388
+              ],
+              "inode": [
+                "7187550"
+              ]
+            }
+          },
+          {
+            "sequence": 17,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.403402143,
+            "completed_at": 82617.484428018,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59390
+              ],
+              "inode": [
+                "7187558"
+              ]
+            }
+          },
+          {
+            "sequence": 18,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.438083268,
+            "completed_at": 82617.517485018,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59406
+              ],
+              "inode": [
+                "7187577"
+              ]
+            }
+          },
+          {
+            "sequence": 19,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.449536643,
+            "completed_at": 82617.529192768,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59408
+              ],
+              "inode": [
+                "7187587"
+              ]
+            }
+          },
+          {
+            "sequence": 20,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.475085309,
+            "completed_at": 82617.556404393,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59410
+              ],
+              "inode": [
+                "7187604"
+              ]
+            }
+          },
+          {
+            "sequence": 21,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.502378768,
+            "completed_at": 82617.584554559,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59422
+              ],
+              "inode": [
+                "7187615"
+              ]
+            }
+          },
+          {
+            "sequence": 22,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.528408309,
+            "completed_at": 82617.611508809,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59434
+              ],
+              "inode": [
+                "7187631"
+              ]
+            }
+          },
+          {
+            "sequence": 23,
+            "gate": "PASS",
+            "attempts": 1,
+            "started_at": 82617.554314226,
+            "completed_at": 82617.642110809,
+            "owner": {
+              "pid": 57259,
+              "worker_id": 2,
+              "owner_epoch": 1,
+              "peer": [
+                "10.202.0.2",
+                59436
+              ],
+              "inode": [
+                "7185012"
+              ]
+            }
+          }
+        ],
+        "generator_retries": 0
+      },
+      "dns_admissions": {
+        "gate": "PASS",
+        "queries": [
+          {
+            "domain": "q0.drain-gate.example",
+            "sequence": 0,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82616.956231976,
+            "rcode": 0,
+            "reply_at": 82616.990583976,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q1.drain-gate.example",
+            "sequence": 1,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82616.965502434,
+            "rcode": 0,
+            "reply_at": 82617.084379934,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q2.drain-gate.example",
+            "sequence": 2,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82616.975387267,
+            "rcode": 0,
+            "reply_at": 82617.098931309,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q3.drain-gate.example",
+            "sequence": 3,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82616.985281017,
+            "rcode": 0,
+            "reply_at": 82617.093588726,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q4.drain-gate.example",
+            "sequence": 4,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82616.995108351,
+            "rcode": 0,
+            "reply_at": 82617.084054434,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q5.drain-gate.example",
+            "sequence": 5,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.005297142,
+            "rcode": 0,
+            "reply_at": 82617.079663017,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q6.drain-gate.example",
+            "sequence": 6,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.015317934,
+            "rcode": 0,
+            "reply_at": 82617.079600517,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q7.drain-gate.example",
+            "sequence": 7,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.025246309,
+            "rcode": 0,
+            "reply_at": 82617.075989934,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q8.drain-gate.example",
+            "sequence": 8,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.035414267,
+            "rcode": 0,
+            "reply_at": 82617.079559351,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q9.drain-gate.example",
+            "sequence": 9,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.045566976,
+            "rcode": 0,
+            "reply_at": 82617.076101226,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q10.drain-gate.example",
+            "sequence": 10,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.055947101,
+            "rcode": 0,
+            "reply_at": 82617.103534476,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q11.drain-gate.example",
+            "sequence": 11,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.065193309,
+            "rcode": 0,
+            "reply_at": 82617.112469892,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q12.drain-gate.example",
+            "sequence": 12,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.075704601,
+            "rcode": 0,
+            "reply_at": 82617.171881517,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q13.drain-gate.example",
+            "sequence": 13,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.085245809,
+            "rcode": 0,
+            "reply_at": 82617.172462392,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q14.drain-gate.example",
+            "sequence": 14,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.095157392,
+            "rcode": 0,
+            "reply_at": 82617.193273059,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q15.drain-gate.example",
+            "sequence": 15,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.105206767,
+            "rcode": 0,
+            "reply_at": 82617.196698434,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q16.drain-gate.example",
+            "sequence": 16,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.115152976,
+            "rcode": 0,
+            "reply_at": 82617.197494517,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q17.drain-gate.example",
+            "sequence": 17,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.125197851,
+            "rcode": 0,
+            "reply_at": 82617.197445559,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q18.drain-gate.example",
+            "sequence": 18,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.135111517,
+            "rcode": 0,
+            "reply_at": 82617.198814726,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q19.drain-gate.example",
+            "sequence": 19,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.145084851,
+            "rcode": 0,
+            "reply_at": 82617.198658892,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q20.drain-gate.example",
+            "sequence": 20,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.155123809,
+            "rcode": 0,
+            "reply_at": 82617.198690684,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q21.drain-gate.example",
+            "sequence": 21,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.165446601,
+            "rcode": 0,
+            "reply_at": 82617.198740642,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q22.drain-gate.example",
+            "sequence": 22,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.175090351,
+            "rcode": 0,
+            "reply_at": 82617.198769601,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q23.drain-gate.example",
+            "sequence": 23,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.185260059,
+            "rcode": 0,
+            "reply_at": 82617.199299684,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q24.drain-gate.example",
+            "sequence": 24,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.195219517,
+            "rcode": 0,
+            "reply_at": 82617.207577434,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q25.drain-gate.example",
+            "sequence": 25,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.295207018,
+            "rcode": 0,
+            "reply_at": 82617.307809476,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q26.drain-gate.example",
+            "sequence": 26,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.395232976,
+            "rcode": 0,
+            "reply_at": 82617.409218143,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q27.drain-gate.example",
+            "sequence": 27,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.495420851,
+            "rcode": 0,
+            "reply_at": 82617.508897226,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q28.drain-gate.example",
+            "sequence": 28,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.595246434,
+            "rcode": 0,
+            "reply_at": 82617.608657476,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q29.drain-gate.example",
+            "sequence": 29,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.695536601,
+            "rcode": 0,
+            "reply_at": 82617.710847309,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q30.drain-gate.example",
+            "sequence": 30,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.796168101,
+            "rcode": 0,
+            "reply_at": 82617.810696393,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q31.drain-gate.example",
+            "sequence": 31,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.895850143,
+            "rcode": 0,
+            "reply_at": 82617.907797559,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q32.drain-gate.example",
+            "sequence": 32,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82617.995522351,
+            "rcode": 0,
+            "reply_at": 82618.012401601,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q33.drain-gate.example",
+            "sequence": 33,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82618.097512768,
+            "rcode": 0,
+            "reply_at": 82618.111674935,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q34.drain-gate.example",
+            "sequence": 34,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82618.196865226,
+            "rcode": 0,
+            "reply_at": 82618.213748685,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q35.drain-gate.example",
+            "sequence": 35,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82618.29629706,
+            "rcode": 0,
+            "reply_at": 82618.311892351,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q36.drain-gate.example",
+            "sequence": 36,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82618.396348018,
+            "rcode": 0,
+            "reply_at": 82618.410345435,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q37.drain-gate.example",
+            "sequence": 37,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82618.497130851,
+            "rcode": 0,
+            "reply_at": 82618.516369018,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q38.drain-gate.example",
+            "sequence": 38,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82618.598866976,
+            "rcode": 0,
+            "reply_at": 82618.616580226,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q39.drain-gate.example",
+            "sequence": 39,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82618.696387643,
+            "rcode": 0,
+            "reply_at": 82618.711246227,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q40.drain-gate.example",
+            "sequence": 40,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82618.79905706,
+            "rcode": 0,
+            "reply_at": 82618.817059477,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q41.drain-gate.example",
+            "sequence": 41,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82618.895537268,
+            "rcode": 0,
+            "reply_at": 82618.915104018,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q42.drain-gate.example",
+            "sequence": 42,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82618.996261393,
+            "rcode": 0,
+            "reply_at": 82619.013219477,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q43.drain-gate.example",
+            "sequence": 43,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82619.095787185,
+            "rcode": 0,
+            "reply_at": 82619.111996268,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q44.drain-gate.example",
+            "sequence": 44,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82619.19523531,
+            "rcode": 0,
+            "reply_at": 82619.210246477,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q45.drain-gate.example",
+            "sequence": 45,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82619.295439893,
+            "rcode": 0,
+            "reply_at": 82619.313673143,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q46.drain-gate.example",
+            "sequence": 46,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82619.395326477,
+            "rcode": 0,
+            "reply_at": 82619.413441685,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q47.drain-gate.example",
+            "sequence": 47,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82619.495450644,
+            "rcode": 0,
+            "reply_at": 82619.50838306,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q48.drain-gate.example",
+            "sequence": 48,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82619.59944481,
+            "rcode": 0,
+            "reply_at": 82619.615878519,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q49.drain-gate.example",
+            "sequence": 49,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82619.705219769,
+            "rcode": 0,
+            "reply_at": 82619.722303935,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q50.drain-gate.example",
+            "sequence": 50,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82619.798154477,
+            "rcode": 0,
+            "reply_at": 82619.81774356,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q51.drain-gate.example",
+            "sequence": 51,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82619.895634144,
+            "rcode": 0,
+            "reply_at": 82619.91425306,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q52.drain-gate.example",
+            "sequence": 52,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82619.995427185,
+            "rcode": 0,
+            "reply_at": 82620.016840935,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q53.drain-gate.example",
+            "sequence": 53,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82620.096463102,
+            "rcode": 0,
+            "reply_at": 82620.110750519,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q54.drain-gate.example",
+            "sequence": 54,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82620.195584602,
+            "rcode": 0,
+            "reply_at": 82620.215347811,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q55.drain-gate.example",
+            "sequence": 55,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82620.295171436,
+            "rcode": 0,
+            "reply_at": 82620.316154186,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q56.drain-gate.example",
+            "sequence": 56,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82620.402495769,
+            "rcode": 0,
+            "reply_at": 82620.423048061,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q57.drain-gate.example",
+            "sequence": 57,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82620.498788602,
+            "rcode": 0,
+            "reply_at": 82620.517919477,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q58.drain-gate.example",
+            "sequence": 58,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82620.597378394,
+            "rcode": 0,
+            "reply_at": 82620.613987852,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q59.drain-gate.example",
+            "sequence": 59,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82620.695714227,
+            "rcode": 0,
+            "reply_at": 82620.715803144,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q60.drain-gate.example",
+            "sequence": 60,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82620.801567644,
+            "rcode": 0,
+            "reply_at": 82620.821323561,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q61.drain-gate.example",
+            "sequence": 61,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82620.899543353,
+            "rcode": 0,
+            "reply_at": 82620.919420061,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q62.drain-gate.example",
+            "sequence": 62,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82620.995968186,
+            "rcode": 0,
+            "reply_at": 82621.016126853,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q63.drain-gate.example",
+            "sequence": 63,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82621.095465311,
+            "rcode": 0,
+            "reply_at": 82621.112190811,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q64.drain-gate.example",
+            "sequence": 64,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82621.199453353,
+            "rcode": 0,
+            "reply_at": 82621.214267019,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q65.drain-gate.example",
+            "sequence": 65,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82621.296264853,
+            "rcode": 0,
+            "reply_at": 82621.314105061,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q66.drain-gate.example",
+            "sequence": 66,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82621.399728769,
+            "rcode": 0,
+            "reply_at": 82621.421353561,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q67.drain-gate.example",
+            "sequence": 67,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82621.497803353,
+            "rcode": 0,
+            "reply_at": 82621.52139902,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q68.drain-gate.example",
+            "sequence": 68,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82621.596190311,
+            "rcode": 0,
+            "reply_at": 82621.611930103,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q69.drain-gate.example",
+            "sequence": 69,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82621.69584552,
+            "rcode": 0,
+            "reply_at": 82621.710342103,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q70.drain-gate.example",
+            "sequence": 70,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82621.795390436,
+            "rcode": 0,
+            "reply_at": 82621.813720895,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q71.drain-gate.example",
+            "sequence": 71,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82621.89736702,
+            "rcode": 0,
+            "reply_at": 82621.915856311,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q72.drain-gate.example",
+            "sequence": 72,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82621.995719395,
+            "rcode": 0,
+            "reply_at": 82622.018064145,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q73.drain-gate.example",
+            "sequence": 73,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82622.096812561,
+            "rcode": 0,
+            "reply_at": 82622.116416936,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q74.drain-gate.example",
+            "sequence": 74,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82622.19734777,
+            "rcode": 0,
+            "reply_at": 82622.216368937,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q75.drain-gate.example",
+            "sequence": 75,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82622.299626687,
+            "rcode": 0,
+            "reply_at": 82622.32179027,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q76.drain-gate.example",
+            "sequence": 76,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82622.401920937,
+            "rcode": 0,
+            "reply_at": 82622.424666687,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q77.drain-gate.example",
+            "sequence": 77,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82622.495651895,
+            "rcode": 0,
+            "reply_at": 82622.518730353,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q78.drain-gate.example",
+            "sequence": 78,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82622.595582437,
+            "rcode": 0,
+            "reply_at": 82622.614777812,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q79.drain-gate.example",
+            "sequence": 79,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82622.696350353,
+            "rcode": 0,
+            "reply_at": 82622.716492478,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q80.drain-gate.example",
+            "sequence": 80,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82622.795751062,
+            "rcode": 0,
+            "reply_at": 82622.818081562,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q81.drain-gate.example",
+            "sequence": 81,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82622.895675395,
+            "rcode": 0,
+            "reply_at": 82622.91432877,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q82.drain-gate.example",
+            "sequence": 82,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82622.997316561,
+            "rcode": 0,
+            "reply_at": 82623.015240395,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q83.drain-gate.example",
+            "sequence": 83,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82623.096039311,
+            "rcode": 0,
+            "reply_at": 82623.115609728,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q84.drain-gate.example",
+            "sequence": 84,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82623.195694103,
+            "rcode": 0,
+            "reply_at": 82623.21248902,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q85.drain-gate.example",
+            "sequence": 85,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82623.296171186,
+            "rcode": 0,
+            "reply_at": 82623.31527627,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q86.drain-gate.example",
+            "sequence": 86,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82623.396327645,
+            "rcode": 0,
+            "reply_at": 82623.419664853,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q87.drain-gate.example",
+            "sequence": 87,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82623.495905978,
+            "rcode": 0,
+            "reply_at": 82623.51817727,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q88.drain-gate.example",
+            "sequence": 88,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82623.59804477,
+            "rcode": 0,
+            "reply_at": 82623.623512812,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q89.drain-gate.example",
+            "sequence": 89,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82623.697350562,
+            "rcode": 0,
+            "reply_at": 82623.722102103,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q90.drain-gate.example",
+            "sequence": 90,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82623.797314145,
+            "rcode": 0,
+            "reply_at": 82623.815816145,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q91.drain-gate.example",
+            "sequence": 91,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82623.897094937,
+            "rcode": 0,
+            "reply_at": 82623.918252645,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q92.drain-gate.example",
+            "sequence": 92,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82623.99711827,
+            "rcode": 0,
+            "reply_at": 82624.015122353,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q93.drain-gate.example",
+            "sequence": 93,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82624.09877827,
+            "rcode": 0,
+            "reply_at": 82624.11710602,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q94.drain-gate.example",
+            "sequence": 94,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82624.195717895,
+            "rcode": 0,
+            "reply_at": 82624.21535927,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q95.drain-gate.example",
+            "sequence": 95,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82624.298663687,
+            "rcode": 0,
+            "reply_at": 82624.31647327,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q96.drain-gate.example",
+            "sequence": 96,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82624.396554979,
+            "rcode": 0,
+            "reply_at": 82624.419199312,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q97.drain-gate.example",
+            "sequence": 97,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82624.497458145,
+            "rcode": 0,
+            "reply_at": 82624.516147104,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q98.drain-gate.example",
+            "sequence": 98,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82624.601594312,
+            "rcode": 0,
+            "reply_at": 82624.619501354,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q99.drain-gate.example",
+            "sequence": 99,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82624.695648104,
+            "rcode": 0,
+            "reply_at": 82624.719966062,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q100.drain-gate.example",
+            "sequence": 100,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82624.799494312,
+            "rcode": 0,
+            "reply_at": 82624.82018977,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q101.drain-gate.example",
+            "sequence": 101,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82624.89671377,
+            "rcode": 0,
+            "reply_at": 82624.91764102,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q102.drain-gate.example",
+            "sequence": 102,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82624.996954021,
+            "rcode": 0,
+            "reply_at": 82625.020742271,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          },
+          {
+            "domain": "q103.drain-gate.example",
+            "sequence": 103,
+            "gate": "PASS",
+            "sends": 1,
+            "sent_at": 82625.097645854,
+            "rcode": 0,
+            "reply_at": 82625.119623437,
+            "reply_peer": [
+              "127.0.0.1",
+              15353
+            ]
+          }
+        ],
+        "generator_retries": 0
+      },
+      "server_drain_notice": [
+        "2026-10-16T04:43:29.598918Z  INFO candy_carrier_runtime::dataplane: Proxy worker drain announced code=\"proxy_drain_notified\" module=\"proxy_worker_drain\" remaining_ms=5963 owner=Some(TransportOwner { role: Proxy, transport_id: 1, connection_id: 1, worker_id: 1, owner_epoch: 1 }) action=\"replace_connection_for_new_opens\""
+      ],
+      "client_drain_notice": [
+        "2026-10-16T04:43:29.605469Z  INFO candy_carrier_client: Proxy connection drain announced code=\"proxy_drain_received\" module=\"proxy_connection\" remaining_ms=5963 action=\"withdraw_new_opens_preserve_existing\""
+      ],
+      "replacement_ready_events": [
+        "2026-10-16T04:43:29.595962Z  INFO candy_carrier_runtime::worker_process_manager: code=\"worker_replacement_ready\" module=\"worker_manager\" worker_id=2 pid=57259 epoch=1 old_worker_id=1 old_epoch=1 action=\"admit_new_work_preserve_old_until_original_deadline\""
+      ],
+      "replacement_published_events": [
+        "2026-10-16T04:43:29.653412Z  INFO candy_carrier_client: authenticated replacement admitted new sessions code=\"proxy_drain_replacement_published\" module=\"proxy_connection\" node=gate connection_id=281472896635104"
+      ],
+      "session_open_rejections": [
+        "2026-10-16T04:43:29.598985Z  WARN candy_proxy_session: Proxy worker is quiescing new sessions event=\"session_open_rejected\" code=5 code_name=\"resource_exhausted\" module=\"proxy_worker_drain\" reason=\"worker_draining\" detail=\"worker drain has closed new session admission; established sessions remain owned until the original drain deadline\" action=\"retry_on_another_connection\" retryable=true owner=Some(TransportOwner { role: Proxy, transport_id: 1, connection_id: 1, worker_id: 1, owner_epoch: 1 }) session_id=12 network=Tcp"
+      ],
+      "local_tcp_errors": [],
+      "negotiated_notice_gate": "PASS",
+      "retention_after_notice_gate": "PASS",
+      "dns_target_observations": [
+        {
+          "domain": "q999.drain-gate.example",
+          "at": 82614.870464183,
+          "owner": {
+            "pid": 57116,
+            "worker_id": 1,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              56300
+            ],
+            "inode": [
+              "7181014"
+            ]
+          }
+        },
+        {
+          "domain": "q0.drain-gate.example",
+          "at": 82616.979238101,
+          "owner": {
+            "pid": 57116,
+            "worker_id": 1,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              52517
+            ],
+            "inode": [
+              "7181024"
+            ]
+          }
+        },
+        {
+          "domain": "q2.drain-gate.example",
+          "at": 82616.991752017,
+          "owner": {
+            "pid": 57116,
+            "worker_id": 1,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              45167
+            ],
+            "inode": [
+              "7181025"
+            ]
+          }
+        },
+        {
+          "domain": "q1.drain-gate.example",
+          "at": 82616.993818226,
+          "owner": {
+            "pid": 57116,
+            "worker_id": 1,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              53105
+            ],
+            "inode": [
+              "7181028"
+            ]
+          }
+        },
+        {
+          "domain": "q3.drain-gate.example",
+          "at": 82616.994057934,
+          "owner": {
+            "pid": 57116,
+            "worker_id": 1,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              56300
+            ],
+            "inode": [
+              "7181014"
+            ]
+          }
+        },
+        {
+          "domain": "q4.drain-gate.example",
+          "at": 82617.001429601,
+          "owner": {
+            "pid": 57116,
+            "worker_id": 1,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              52517
+            ],
+            "inode": [
+              "7181024"
+            ]
+          }
+        },
+        {
+          "domain": "q9.drain-gate.example",
+          "at": 82617.068459892,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q7.drain-gate.example",
+          "at": 82617.069120934,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q8.drain-gate.example",
+          "at": 82617.069570142,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q6.drain-gate.example",
+          "at": 82617.073312017,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q5.drain-gate.example",
+          "at": 82617.073539184,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q4.drain-gate.example",
+          "at": 82617.073762601,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q1.drain-gate.example",
+          "at": 82617.077565559,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q3.drain-gate.example",
+          "at": 82617.078478476,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q2.drain-gate.example",
+          "at": 82617.088634684,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q10.drain-gate.example",
+          "at": 82617.093072351,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q11.drain-gate.example",
+          "at": 82617.098380767,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q12.drain-gate.example",
+          "at": 82617.164349892,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q13.drain-gate.example",
+          "at": 82617.165391309,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q14.drain-gate.example",
+          "at": 82617.187176184,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q15.drain-gate.example",
+          "at": 82617.190884434,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q16.drain-gate.example",
+          "at": 82617.191159559,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q17.drain-gate.example",
+          "at": 82617.191649767,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q18.drain-gate.example",
+          "at": 82617.191859267,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q19.drain-gate.example",
+          "at": 82617.192135017,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q20.drain-gate.example",
+          "at": 82617.192346476,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q21.drain-gate.example",
+          "at": 82617.192575226,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q22.drain-gate.example",
+          "at": 82617.192779351,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q23.drain-gate.example",
+          "at": 82617.192990267,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q24.drain-gate.example",
+          "at": 82617.201285434,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q25.drain-gate.example",
+          "at": 82617.301530101,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q26.drain-gate.example",
+          "at": 82617.401498351,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q27.drain-gate.example",
+          "at": 82617.502468934,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q28.drain-gate.example",
+          "at": 82617.601137393,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q29.drain-gate.example",
+          "at": 82617.703226934,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q30.drain-gate.example",
+          "at": 82617.804083476,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q31.drain-gate.example",
+          "at": 82617.901513059,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q32.drain-gate.example",
+          "at": 82618.002976851,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q33.drain-gate.example",
+          "at": 82618.104769935,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q34.drain-gate.example",
+          "at": 82618.205799351,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q35.drain-gate.example",
+          "at": 82618.304091018,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q36.drain-gate.example",
+          "at": 82618.40256281,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q37.drain-gate.example",
+          "at": 82618.507512726,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q38.drain-gate.example",
+          "at": 82618.607776435,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q39.drain-gate.example",
+          "at": 82618.704026727,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q40.drain-gate.example",
+          "at": 82618.807971393,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q41.drain-gate.example",
+          "at": 82618.904113935,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q42.drain-gate.example",
+          "at": 82619.004680643,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q43.drain-gate.example",
+          "at": 82619.103824393,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q44.drain-gate.example",
+          "at": 82619.202575143,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q45.drain-gate.example",
+          "at": 82619.30392731,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q46.drain-gate.example",
+          "at": 82619.40367006,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q47.drain-gate.example",
+          "at": 82619.501558227,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q48.drain-gate.example",
+          "at": 82619.607549144,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q49.drain-gate.example",
+          "at": 82619.712759269,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q50.drain-gate.example",
+          "at": 82619.80880731,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q51.drain-gate.example",
+          "at": 82619.904809102,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q52.drain-gate.example",
+          "at": 82620.005789227,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q53.drain-gate.example",
+          "at": 82620.104029894,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q54.drain-gate.example",
+          "at": 82620.205648477,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q55.drain-gate.example",
+          "at": 82620.305273644,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q56.drain-gate.example",
+          "at": 82620.411869019,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q57.drain-gate.example",
+          "at": 82620.508417644,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q58.drain-gate.example",
+          "at": 82620.604759769,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q59.drain-gate.example",
+          "at": 82620.705711977,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q60.drain-gate.example",
+          "at": 82620.810892394,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q61.drain-gate.example",
+          "at": 82620.907435853,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q62.drain-gate.example",
+          "at": 82621.005251436,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q63.drain-gate.example",
+          "at": 82621.103404353,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q64.drain-gate.example",
+          "at": 82621.206072019,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q65.drain-gate.example",
+          "at": 82621.305108769,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q66.drain-gate.example",
+          "at": 82621.411310186,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q67.drain-gate.example",
+          "at": 82621.509775311,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q68.drain-gate.example",
+          "at": 82621.603892561,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q69.drain-gate.example",
+          "at": 82621.703189728,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q70.drain-gate.example",
+          "at": 82621.804915936,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q71.drain-gate.example",
+          "at": 82621.906928061,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q72.drain-gate.example",
+          "at": 82622.007181436,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q73.drain-gate.example",
+          "at": 82622.106529603,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q74.drain-gate.example",
+          "at": 82622.20607452,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q75.drain-gate.example",
+          "at": 82622.309860145,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q76.drain-gate.example",
+          "at": 82622.414203437,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q77.drain-gate.example",
+          "at": 82622.507371478,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q78.drain-gate.example",
+          "at": 82622.606774562,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q79.drain-gate.example",
+          "at": 82622.706300603,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q80.drain-gate.example",
+          "at": 82622.808608353,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q81.drain-gate.example",
+          "at": 82622.904966311,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q82.drain-gate.example",
+          "at": 82623.005179353,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q83.drain-gate.example",
+          "at": 82623.10419302,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q84.drain-gate.example",
+          "at": 82623.20428977,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q85.drain-gate.example",
+          "at": 82623.306215145,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q86.drain-gate.example",
+          "at": 82623.406517936,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q87.drain-gate.example",
+          "at": 82623.508424395,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q88.drain-gate.example",
+          "at": 82623.611057312,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q89.drain-gate.example",
+          "at": 82623.709441645,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q90.drain-gate.example",
+          "at": 82623.806607187,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q91.drain-gate.example",
+          "at": 82623.907514103,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q92.drain-gate.example",
+          "at": 82624.00496277,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q93.drain-gate.example",
+          "at": 82624.107726103,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q94.drain-gate.example",
+          "at": 82624.204678728,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q95.drain-gate.example",
+          "at": 82624.306430312,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q96.drain-gate.example",
+          "at": 82624.407583979,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q97.drain-gate.example",
+          "at": 82624.506824437,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q98.drain-gate.example",
+          "at": 82624.609416145,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q99.drain-gate.example",
+          "at": 82624.707280229,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        },
+        {
+          "domain": "q100.drain-gate.example",
+          "at": 82624.810143145,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              39052
+            ],
+            "inode": [
+              "7181147"
+            ]
+          }
+        },
+        {
+          "domain": "q101.drain-gate.example",
+          "at": 82624.907122354,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              51382
+            ],
+            "inode": [
+              "7181111"
+            ]
+          }
+        },
+        {
+          "domain": "q102.drain-gate.example",
+          "at": 82625.009163354,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48093
+            ],
+            "inode": [
+              "7181141"
+            ]
+          }
+        },
+        {
+          "domain": "q103.drain-gate.example",
+          "at": 82625.109247854,
+          "owner": {
+            "pid": 57259,
+            "worker_id": 2,
+            "owner_epoch": 1,
+            "peer": [
+              "10.202.0.2",
+              48747
+            ],
+            "inode": [
+              "7181146"
+            ]
+          }
+        }
+      ],
+      "dns_queries_gate": "PASS",
+      "dns_replacement_after_retirement_gate": "PASS",
+      "dns_replacement_overlap_gate": "PASS",
+      "exact_drain_receipt_gate": "PASS",
+      "replacement_admission_gate": "PASS",
+      "new_admission_no_error_gate": "PASS",
+      "new_udp_first_packet_gate": "PASS",
+      "new_tcp_burst_gate": "PASS",
+      "new_udp_replacement_overlap_gate": "PASS",
+      "overlap_admission_gate": "PASS",
+      "original_deadline_gate": "PASS",
+      "listener_preserved_gate": "PASS",
+      "service_before": {
+        "monotonic": 82614.455174183,
+        "clock_ticks": 100,
+        "processes": [
+          {
+            "pid": 57093,
+            "start_ticks": 8261392,
+            "cpu_ticks": 7,
+            "rss_bytes": 26611712,
+            "fd_count": 18,
+            "threads": 5,
+            "allowed_cpus": "0-7",
+            "command": [
+              "/gate/candy-core",
+              "server",
+              "proxy-master",
+              "--config",
+              "/gate/recommended/server.toml",
+              "--directory",
+              "/gate/recommended/master",
+              "--workers",
+              "1",
+              "--drain-control",
+              "/control/drain.sock",
+              "--drain-control-token-file",
+              "/gate/recommended/drain.token"
+            ]
+          },
+          {
+            "pid": 57116,
+            "start_ticks": 8261404,
+            "cpu_ticks": 3,
+            "rss_bytes": 31043584,
+            "fd_count": 15,
+            "threads": 2,
+            "allowed_cpus": "0-7",
+            "command": [
+              "/gate/candy-core",
+              "server",
+              "proxy-worker",
+              "--config",
+              "/gate/recommended/master/m-57093-78f6065801e3/proxy-config-57093-1792125806636111635.toml",
+              "--directory",
+              "/gate/recommended/master/m-57093-78f6065801e3"
+            ]
+          }
+        ],
+        "cgroup": {
+          "cpu.stat": "usage_usec 785389\nuser_usec 576357\nsystem_usec 209031\nnice_usec 0\nnr_periods 23\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+          "cpu.max": "300000 100000\n",
+          "memory.current": "58814464\n",
+          "memory.peak": "58818560\n",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n"
+        },
+        "qdisc": "qdisc noqueue 0: dev lo root refcnt 2 \n Sent 0 bytes 0 pkt (dropped 0, overlimits 0 requeues 0) \n backlog 0b 0p requeues 0\nqdisc netem 8062: dev cpg-s root refcnt 9 limit 4096 delay 5ms rate 1Gbit\n Sent 287193 bytes 231 pkt (dropped 0, overlimits 0 requeues 0) \n backlog 0b 0p requeues 0\n",
+        "network_namespace_counters": {
+          "snmp": "Ip: Forwarding DefaultTTL InReceives InHdrErrors InAddrErrors ForwDatagrams InUnknownProtos InDiscards InDelivers OutRequests OutDiscards OutNoRoutes ReasmTimeout ReasmReqds ReasmOKs ReasmFails FragOKs FragFails FragCreates OutTransmits\nIp: 1 64 323 0 0 0 0 0 323 186 0 0 0 0 0 0 0 0 0 186\nIcmp: InMsgs InErrors InCsumErrors InDestUnreachs InTimeExcds InParmProbs InSrcQuenchs InRedirects InEchos InEchoReps InTimestamps InTimestampReps InAddrMasks InAddrMaskReps OutMsgs OutErrors OutRateLimitGlobal OutRateLimitHost OutDestUnreachs OutTimeExcds OutParmProbs OutSrcQuenchs OutRedirects OutEchos OutEchoReps OutTimestamps OutTimestampReps OutAddrMasks OutAddrMaskReps\nIcmp: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\nTcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens AttemptFails EstabResets CurrEstab InSegs OutSegs RetransSegs InErrs OutRsts InCsumErrors\nTcp: 1 200 120000 -1 1 1 0 0 0 114 114 0 0 0 0\nUdp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors\nUdp: 209 0 0 72 0 0 0 0 0\nUdpLite: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors\nUdpLite: 0 0 0 0 0 0 0 0 0\n",
+          "netstat": "TcpExt: SyncookiesSent SyncookiesRecv SyncookiesFailed EmbryonicRsts PruneCalled RcvPruned OfoPruned OutOfWindowIcmps LockDroppedIcmps ArpFilter TW TWRecycled TWKilled PAWSActive PAWSEstab DelayedACKs DelayedACKLocked DelayedACKLost ListenOverflows ListenDrops TCPHPHits TCPPureAcks TCPHPAcks TCPRenoRecovery TCPSackRecovery TCPSACKReneging TCPSACKReorder TCPRenoReorder TCPTSReorder TCPFullUndo TCPPartialUndo TCPDSACKUndo TCPLossUndo TCPLostRetransmit TCPRenoFailures TCPSackFailures TCPLossFailures TCPFastRetrans TCPSlowStartRetrans TCPTimeouts TCPLossProbes TCPLossProbeRecovery TCPRenoRecoveryFail TCPSackRecoveryFail TCPRcvCollapsed TCPBacklogCoalesce TCPDSACKOldSent TCPDSACKOfoSent TCPDSACKRecv TCPDSACKOfoRecv TCPAbortOnData TCPAbortOnClose TCPAbortOnMemory TCPAbortOnTimeout TCPAbortOnLinger TCPAbortFailed TCPMemoryPressures TCPMemoryPressuresChrono TCPSACKDiscard TCPDSACKIgnoredOld TCPDSACKIgnoredNoUndo TCPSpuriousRTOs TCPMD5NotFound TCPMD5Unexpected TCPMD5Failure TCPSackShifted TCPSackMerged TCPSackShiftFallback TCPBacklogDrop PFMemallocDrop TCPMinTTLDrop TCPDeferAcceptDrop IPReversePathFilter TCPTimeWaitOverflow TCPReqQFullDoCookies TCPReqQFullDrop TCPRetransFail TCPRcvCoalesce TCPOFOQueue TCPOFODrop TCPOFOMerge TCPChallengeACK TCPSYNChallenge TCPFastOpenActive TCPFastOpenActiveFail TCPFastOpenPassive TCPFastOpenPassiveFail TCPFastOpenListenOverflow TCPFastOpenCookieReqd TCPFastOpenBlackhole TCPSpuriousRtxHostQueues BusyPollRxPackets TCPAutoCorking TCPFromZeroWindowAdv TCPToZeroWindowAdv TCPWantZeroWindowAdv TCPSynRetrans TCPOrigDataSent TCPHystartTrainDetect TCPHystartTrainCwnd TCPHystartDelayDetect TCPHystartDelayCwnd TCPACKSkippedSynRecv TCPACKSkippedPAWS TCPACKSkippedSeq TCPACKSkippedFinWait2 TCPACKSkippedTimeWait TCPACKSkippedChallenge TCPWinProbe TCPKeepAlive TCPMTUPFail TCPMTUPSuccess TCPDelivered TCPDeliveredCE TCPAckCompressed TCPZeroWindowDrop TCPRcvQDrop TCPWqueueTooBig TCPFastOpenPassiveAltKey TcpTimeoutRehash TcpDuplicateDataRehash TCPDSACKRecvSegs TCPDSACKIgnoredDubious TCPMigrateReqSuccess TCPMigrateReqFailure TCPPLBRehash TCPAORequired TCPAOBad TCPAOKeyNotFound TCPAOGood TCPAODroppedIcmps\nTcpExt: 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 5 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 19 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 106 0 0 0 0 0 0 0 0 0 0 0 0 0 0 107 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\nIpExt: InNoRoutes InTruncatedPkts InMcastPkts OutMcastPkts InBcastPkts OutBcastPkts InOctets OutOctets InMcastOctets OutMcastOctets InBcastOctets OutBcastOctets InCsumErrors InNoECTPkts InECT1Pkts InECT0Pkts InCEPkts ReasmOverlaps\nIpExt: 0 0 0 0 0 0 813561 809615 0 0 0 0 0 114 0 209 0 0\n",
+          "udp": "   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops            \n 1561: 0200CA0A:480B 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 7179928 2 000000007c7f5d6f 0       \n 2119: 0200CA0A:4A39 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 7179904 2 00000000416cd9b3 0       \n",
+          "udp6": "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n"
+        }
+      },
+      "service_after": {
+        "monotonic": 82625.313239479,
+        "clock_ticks": 100,
+        "processes": [
+          {
+            "pid": 57093,
+            "start_ticks": 8261392,
+            "cpu_ticks": 63,
+            "rss_bytes": 27791360,
+            "fd_count": 22,
+            "threads": 5,
+            "allowed_cpus": "0-7",
+            "command": [
+              "/gate/candy-core",
+              "server",
+              "proxy-master",
+              "--config",
+              "/gate/recommended/server.toml",
+              "--directory",
+              "/gate/recommended/master",
+              "--workers",
+              "1",
+              "--drain-control",
+              "/control/drain.sock",
+              "--drain-control-token-file",
+              "/gate/recommended/drain.token"
+            ]
+          },
+          {
+            "pid": 57259,
+            "start_ticks": 8261695,
+            "cpu_ticks": 26,
+            "rss_bytes": 35053568,
+            "fd_count": 46,
+            "threads": 2,
+            "allowed_cpus": "0-7",
+            "command": [
+              "/gate/candy-core",
+              "server",
+              "proxy-worker",
+              "--config",
+              "/gate/recommended/master/m-57093-78f6065801e3/proxy-config-57093-1792125806636111635.toml",
+              "--directory",
+              "/gate/recommended/master/m-57093-78f6065801e3"
+            ]
+          }
+        ],
+        "cgroup": {
+          "cpu.stat": "usage_usec 2456559\nuser_usec 1759592\nsystem_usec 696967\nnice_usec 0\nnr_periods 131\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+          "cpu.max": "300000 100000\n",
+          "memory.current": "78499840\n",
+          "memory.peak": "78508032\n",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n"
+        },
+        "qdisc": "qdisc noqueue 0: dev lo root refcnt 2 \n Sent 0 bytes 0 pkt (dropped 0, overlimits 0 requeues 0) \n backlog 0b 0p requeues 0\nqdisc netem 8062: dev cpg-s root refcnt 9 limit 4096 delay 5ms rate 1Gbit\n Sent 641019 bytes 976 pkt (dropped 0, overlimits 0 requeues 0) \n backlog 0b 0p requeues 0\n",
+        "network_namespace_counters": {
+          "snmp": "Ip: Forwarding DefaultTTL InReceives InHdrErrors InAddrErrors ForwDatagrams InUnknownProtos InDiscards InDelivers OutRequests OutDiscards OutNoRoutes ReasmTimeout ReasmReqds ReasmOKs ReasmFails FragOKs FragFails FragCreates OutTransmits\nIp: 1 64 1939 0 0 0 0 0 1939 1657 0 0 0 0 0 0 0 0 0 1657\nIcmp: InMsgs InErrors InCsumErrors InDestUnreachs InTimeExcds InParmProbs InSrcQuenchs InRedirects InEchos InEchoReps InTimestamps InTimestampReps InAddrMasks InAddrMaskReps OutMsgs OutErrors OutRateLimitGlobal OutRateLimitHost OutDestUnreachs OutTimeExcds OutParmProbs OutSrcQuenchs OutRedirects OutEchos OutEchoReps OutTimestamps OutTimestampReps OutAddrMasks OutAddrMaskReps\nIcmp: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\nTcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens AttemptFails EstabResets CurrEstab InSegs OutSegs RetransSegs InErrs OutRsts InCsumErrors\nTcp: 1 200 120000 -1 29 29 0 0 0 627 627 0 0 0 0\nUdp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors\nUdp: 1312 0 0 1030 0 0 0 0 0\nUdpLite: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors\nUdpLite: 0 0 0 0 0 0 0 0 0\n",
+          "netstat": "TcpExt: SyncookiesSent SyncookiesRecv SyncookiesFailed EmbryonicRsts PruneCalled RcvPruned OfoPruned OutOfWindowIcmps LockDroppedIcmps ArpFilter TW TWRecycled TWKilled PAWSActive PAWSEstab DelayedACKs DelayedACKLocked DelayedACKLost ListenOverflows ListenDrops TCPHPHits TCPPureAcks TCPHPAcks TCPRenoRecovery TCPSackRecovery TCPSACKReneging TCPSACKReorder TCPRenoReorder TCPTSReorder TCPFullUndo TCPPartialUndo TCPDSACKUndo TCPLossUndo TCPLostRetransmit TCPRenoFailures TCPSackFailures TCPLossFailures TCPFastRetrans TCPSlowStartRetrans TCPTimeouts TCPLossProbes TCPLossProbeRecovery TCPRenoRecoveryFail TCPSackRecoveryFail TCPRcvCollapsed TCPBacklogCoalesce TCPDSACKOldSent TCPDSACKOfoSent TCPDSACKRecv TCPDSACKOfoRecv TCPAbortOnData TCPAbortOnClose TCPAbortOnMemory TCPAbortOnTimeout TCPAbortOnLinger TCPAbortFailed TCPMemoryPressures TCPMemoryPressuresChrono TCPSACKDiscard TCPDSACKIgnoredOld TCPDSACKIgnoredNoUndo TCPSpuriousRTOs TCPMD5NotFound TCPMD5Unexpected TCPMD5Failure TCPSackShifted TCPSackMerged TCPSackShiftFallback TCPBacklogDrop PFMemallocDrop TCPMinTTLDrop TCPDeferAcceptDrop IPReversePathFilter TCPTimeWaitOverflow TCPReqQFullDoCookies TCPReqQFullDrop TCPRetransFail TCPRcvCoalesce TCPOFOQueue TCPOFODrop TCPOFOMerge TCPChallengeACK TCPSYNChallenge TCPFastOpenActive TCPFastOpenActiveFail TCPFastOpenPassive TCPFastOpenPassiveFail TCPFastOpenListenOverflow TCPFastOpenCookieReqd TCPFastOpenBlackhole TCPSpuriousRtxHostQueues BusyPollRxPackets TCPAutoCorking TCPFromZeroWindowAdv TCPToZeroWindowAdv TCPWantZeroWindowAdv TCPSynRetrans TCPOrigDataSent TCPHystartTrainDetect TCPHystartTrainCwnd TCPHystartDelayDetect TCPHystartDelayCwnd TCPACKSkippedSynRecv TCPACKSkippedPAWS TCPACKSkippedSeq TCPACKSkippedFinWait2 TCPACKSkippedTimeWait TCPACKSkippedChallenge TCPWinProbe TCPKeepAlive TCPMTUPFail TCPMTUPSuccess TCPDelivered TCPDeliveredCE TCPAckCompressed TCPZeroWindowDrop TCPRcvQDrop TCPWqueueTooBig TCPFastOpenPassiveAltKey TcpTimeoutRehash TcpDuplicateDataRehash TCPDSACKRecvSegs TCPDSACKIgnoredDubious TCPMigrateReqSuccess TCPMigrateReqFailure TCPPLBRehash TCPAORequired TCPAOBad TCPAOKeyNotFound TCPAOGood TCPAODroppedIcmps\nTcpExt: 0 0 0 0 0 0 0 0 0 0 29 0 0 0 0 25 0 0 0 0 1 152 54 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 43 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 364 0 0 0 0 0 0 0 0 0 0 0 0 0 0 393 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\nIpExt: InNoRoutes InTruncatedPkts InMcastPkts OutMcastPkts InBcastPkts OutBcastPkts InOctets OutOctets InMcastOctets OutMcastOctets InBcastOctets OutBcastOctets InCsumErrors InNoECTPkts InECT1Pkts InECT0Pkts InCEPkts ReasmOverlaps\nIpExt: 0 0 0 0 0 0 1733503 1732712 0 0 0 0 0 959 0 980 0 0\n",
+          "udp": "   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops            \n  169: 0200CA0A:829B 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7186053 2 000000005347f519 0       \n  430: 0200CA0A:E3A0 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7187595 2 000000005925a555 0       \n  532: 0200CA0A:8406 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7181216 2 000000006d544919 0       \n  904: 0200CA0A:857A 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7183126 2 0000000011fac8bf 0       \n 1075: 0200CA0A:B625 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7184963 2 00000000a447c0a7 0       \n 1106: 0200CA0A:8644 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7183991 2 0000000010942164 0       \n 1561: 0200CA0A:480B 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 7179928 2 000000007c7f5d6f 0       \n 1594: 0200CA0A:982C 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7185027 2 00000000b7cf07c6 0       \n 1610: 0200CA0A:883C 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7182185 2 00000000861a3f64 0       \n 1690: 0200CA0A:988C 0200CA0A:4A6D 01 00000000:00000000 00:00000000 00000000     0        0 7181147 2 000000007144af72 0       \n 1732: 0200CA0A:C8B6 0200CA0A:4A6D 01 00000000:00000000 00:00000000 00000000     0        0 7181111 2 0000000095a7a398 0       \n 1927: 0200CA0A:C979 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7186652 2 00000000a5a447ef 0       \n 1977: 0200CA0A:B9AB 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7184938 2 00000000f0bffc3b 0       \n 2119: 0200CA0A:4A39 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 7179904 2 00000000416cd9b3 0       \n 2123: 0200CA0A:4A3D 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 7186500 2 000000000e79a2d4 0       \n 2171: 0200CA0A:4A6D 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 7179241 2 0000000022be8769 0       \n 2199: 0200CA0A:EA89 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7186039 2 00000000e8d3dd90 0       \n 2281: 0200CA0A:BADB 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7181130 2 00000000117109b6 0       \n 2384: 0200CA0A:8B42 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7181140 2 00000000b95cc91f 0       \n 2539: 0200CA0A:BBDD 0200CA0A:4A6D 01 00000000:00000000 00:00000000 00000000     0        0 7181141 2 00000000f41c90a9 0       \n 2723: 0200CA0A:8C95 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7183094 2 000000007a2fc4bd 0       \n 2904: 0200CA0A:CD4A 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7187568 2 000000000662010d 0       \n 3010: 0200CA0A:8DB4 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7187623 2 00000000fa0a8128 0       \n 3193: 0200CA0A:BE6B 0200CA0A:4A6D 01 00000000:00000000 00:00000000 00000000     0        0 7181146 2 0000000040843ce7 0       \n 3394: 0200CA0A:AF34 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7187481 2 00000000d908a427 0       \n 3430: 0200CA0A:DF58 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7182179 2 00000000ca83050c 0       \n 3537: 0200CA0A:BFC3 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7186031 2 00000000d7b17fe5 0       \n 3562: 0200CA0A:DFDC 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7183199 2 00000000a75ea142 0       \n 3663: 0200CA0A:C041 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7185021 2 00000000537c0993 0       \n 3882: 0200CA0A:B11C 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7183207 2 000000006a670e35 0       \n 3953: 0200CA0A:A163 0200CA0A:4A3D 01 00000000:00000000 00:00000000 00000000     0        0 7183984 2 00000000be14e12c 0       \n",
+          "udp6": "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n"
+        }
+      },
+      "listener_inode_before": [
+        "7179928"
+      ],
+      "listener_inode_after": [
+        "7179928"
+      ],
+      "listener_socket_identity_gate": "PASS",
+      "master_incarnation_gate": "PASS"
+    }
+  ],
+  "performance": [],
+  "image_id": "sha256:bf8c5c3d893bc0c443d04170808179fe2383cbd8cf736fde168f57197bef151d",
+  "image_architecture": "arm64",
+  "compatibility_gate": "PASS",
+  "cleanup": [
+    {
+      "container": "candy-pgate-s-cefd21f08adf",
+      "exit_code": 0
+    },
+    {
+      "container": "candy-pgate-c-cefd21f08adf",
+      "exit_code": 0
+    },
+    {
+      "control_volume": "candy-pgate-control-cefd21f08adf",
+      "exit_code": 0
+    }
+  ],
+  "timing_observers": {
+    "timing-server": {
+      "scope": "independent process scheduling witness, not a packet latency measurement",
+      "cpu_affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "started_at": 82613.242772474,
+      "ended_at": 82625.845774521,
+      "samples": 1081,
+      "max_lag_ms": 15.265208998462185,
+      "late_intervals": 0,
+      "events": [],
+      "omitted_old_events": 0
+    },
+    "timing-client": {
+      "scope": "independent process scheduling witness, not a packet latency measurement",
+      "cpu_affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "started_at": 82613.118607724,
+      "ended_at": 82625.992014854,
+      "samples": 1095,
+      "max_lag_ms": 14.743875008425675,
+      "late_intervals": 0,
+      "events": [],
+      "omitted_old_events": 0
+    }
+  }
+}
