@@ -1,0 +1,15 @@
+{
+  "manifest_sha256": "b462baa96441a1c45974dcbe74a7ec42e254b284fae34f571421eafac87eb3cc",
+  "revisions": {
+    "candy-core": "0a9093aee0937759fd08531d36579c18f3d51123",
+    "candy-runtime": "672c0418e97b24bf786360f7edb108ab7f0591fa"
+  },
+  "binary_hashes": {
+    "candy-agent": "50689dac6fa1039eb5f272b4cf651c12a4f51e13f8385cc6b5c522225ef6d985",
+    "candy-core": "fd0e57fadd417d501c132671a806e7b9abac81e4dcba0139f6e30a092b8495a4",
+    "candy-netd": "09cbdf9dd6789f546386ad4613dfb0b8f6eb6c5f9754ccde53373a68209b0a2d",
+    "candy-tunio": "af7d517c74f2e1fb46be8af876dab3576ee19eb5b5ac132353e91019a1157e7f",
+    "sdwan_signed_cli_fixture": "a4090690a93a74fc535f489bb2ebfdcbb731e0cacc7c3ab1ee5a9c7eda73f366",
+    "signed_cli_helper": "857803e15eee61b81ae19522c1d765b30a0a3a26dbc6bcea038cd845bb70f7ed"
+  }
+}

@@ -1,0 +1,65 @@
+   Compiling unicode-ident v1.0.26
+   Compiling libc v0.2.190
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling syn v3.0.3
+   Compiling syn v2.0.119
+   Compiling serde_derive v1.0.229
+   Compiling nix v0.29.0
+   Compiling serde v1.0.229
+   Compiling tracing-attributes v0.1.31
+   Compiling thiserror-impl v1.0.69
+   Compiling errno v0.3.14
+   Compiling signal-hook-registry v1.4.8
+   Compiling tracing v0.1.44
+   Compiling thiserror v1.0.69
+   Compiling tokio-macros v2.7.2
+   Compiling mio v1.2.2
+   Compiling socket2 v0.6.5
+   Compiling clap_derive v4.6.4
+   Compiling tokio v1.53.1
+   Compiling candy-netd-proto v0.4.0 (/workspace/candy-runtime/linux/common/crates/candy-netd-proto)
+   Compiling getrandom v0.4.3
+   Compiling cpufeatures v0.2.17
+   Compiling smallvec v1.15.2
+   Compiling tracing-subscriber v0.3.23
+   Compiling tempfile v3.27.0
+   Compiling sha2 v0.10.9
+   Compiling candy-process-control v0.4.0 (/workspace/candy-runtime/linux/common/crates/candy-process-control)
+   Compiling candy-packet-port v0.3.63 (/workspace/candy-runtime/shared/vendor/candy-packet-port)
+   Compiling candy-netd-client v0.4.0 (/workspace/candy-runtime/linux/common/crates/candy-netd-client)
+   Compiling clap v4.6.5
+   Compiling candy-tunio v0.4.0 (/workspace/candy-runtime/linux/common/apps/candy-tunio)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 24.29s
+     Running unittests src/lib.rs (/build/debug/deps/candy_tunio-ca6d604cc0e9827f)
+
+running 26 tests
+test attach_control::protocol_tests::probe_allows_old_owner_identity_but_preserves_scope_and_original_deadline ... ok
+test attach_control::protocol_tests::protocol_is_explicit_and_rejects_unknown_authority_fields ... ok
+test attach_control::tests::actual_attach_keeps_physical_reader_and_revokes_old_owner_before_ack ... ok
+test attach_control::tests::authenticated_fences_and_original_authority_reject_changed_scope ... ok
+test attach_control::tests::missing_or_extra_descriptors_are_closed_and_later_attach_survives ... ok
+test attach_control::tests::wall_clock_shift_cannot_extend_original_monotonic_deadline ... ok
+test attach_control::tests::wrong_descriptor_type_and_expired_attach_preserve_live_infrastructure ... ok
+test authority_control::tests::bad_authority_and_wrong_fd_preserve_io_and_valid_later_attach ... ok
+test authority_control::tests::boot_clock_expiry_revokes_owner_with_unexpired_instant_and_keeps_io ... ok
+test authority_control::tests::committed_isolation_preserves_outcome_and_tun_and_allows_fresh_owner ... ok
+test authority_control::tests::delayed_clock_sampling_cannot_extend_authority_deadline ... ok
+test authority_control::tests::failed_retirement_is_explicit_and_never_becomes_successful_finish ... ok
+test authority_control::tests::fresh_authority_advances_policy_after_expiry_on_same_io ... ok
+test authority_control::tests::inherited_bootstrap_cap_cannot_be_extended_by_recomputed_wall_time ... ok
+test authority_control::tests::inherited_prepared_owner_commits_exact_authority_after_controller_takeover ... ok
+test authority_control::tests::owner_prepare_commit_and_lost_response_probe_report_exact_actual_state ... ok
+test authority_control::tests::owner_prepare_expiry_preserves_old_owner_and_rejects_late_commit ... ok
+test authority_control::tests::owner_schema3_active_and_pending_authorities_fit_bounded_response ... ok
+test authority_control::tests::owner_wrong_fd_changed_payload_and_old_controller_preserve_active_owner ... ok
+test authority_control::tests::precommit_recovery_fences_late_prepare_and_exact_lost_ack_retry ... ok
+test authority_control::tests::precommit_recovery_observes_real_prepare_commit_and_never_cancels_consumed_revision ... ok
+test authority_control::tests::precommit_recovery_rejects_wrong_owner_manager_failure_and_uncertain_publication ... ok
+test control::snapshot_tests::bridge_sidecar_is_private_atomic_bounded_and_has_process_identity ... ok
+test tests::authorization_expiry_cancels_inflight_output_before_it_can_reach_tun ... ok
+test tests::exited_worker_does_not_stop_the_infrastructure_process_loop ... ok
+test tests::expired_owner_stops_forwarding_but_keeps_tun_io_alive ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.88s
+

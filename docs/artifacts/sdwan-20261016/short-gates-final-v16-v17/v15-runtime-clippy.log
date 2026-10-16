@@ -1,0 +1,10 @@
+    Checking candy-netd-proto v0.4.0 (/workspace/candy-runtime/linux/common/crates/candy-netd-proto)
+    Checking candy-runtime-log v0.4.0 (/workspace/candy-runtime/linux/common/crates/candy-runtime-log)
+    Checking candy-packet-port v0.3.63 (/workspace/candy-runtime/shared/vendor/candy-packet-port)
+    Checking candy-process-control v0.4.0 (/workspace/candy-runtime/linux/common/crates/candy-process-control)
+    Checking candy-netd-client v0.4.0 (/workspace/candy-runtime/linux/common/crates/candy-netd-client)
+    Checking candy-netd v0.4.0 (/workspace/candy-runtime/linux/common/apps/candy-netd)
+    Checking candy-tunio v0.4.0 (/workspace/candy-runtime/linux/common/apps/candy-tunio)
+    Checking candy-cloud-sync v0.4.0 (/workspace/candy-runtime/linux/common/apps/candy-cloud-sync)
+    Checking candy-sdwan-agent v0.4.0 (/workspace/candy-runtime/linux/common/apps/candy-sdwan-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.79s

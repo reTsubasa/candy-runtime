@@ -1,0 +1,16 @@
+    Checking candy-proto v0.3.63 (/workspace/candy-core/crates/candy-proto)
+    Checking quinn-proto v0.11.15 (/workspace/candy-core/vendor/quinn-proto)
+    Checking btls v0.5.6 (/workspace/candy-core/vendor/btls)
+    Checking candy-carrier-crypto v0.3.63 (/workspace/candy-core/crates/candy-carrier-crypto)
+    Checking quinn v0.11.11
+   Compiling candy-core v0.3.63 (/workspace/candy-core/crates/candy-core)
+    Checking quinn-btls v0.1.0 (/workspace/candy-core/vendor/quinn-btls)
+    Checking candy-carrier-transport v0.3.63 (/workspace/candy-core/crates/candy-carrier-transport)
+    Checking candy-packet-port v0.3.63 (/workspace/candy-core/crates/candy-packet-port)
+    Checking candy-tun v0.3.63 (/workspace/candy-core/crates/candy-tun)
+    Checking candy-carrier-runtime v0.3.63 (/workspace/candy-core/crates/candy-carrier-runtime)
+    Checking candy-carrier-client v0.3.63 (/workspace/candy-core/crates/candy-carrier-client)
+    Checking candy-carrier-server v0.3.63 (/workspace/candy-core/crates/candy-carrier-server)
+    Checking client-cli v0.3.63 (/workspace/candy-core/apps/client-cli)
+    Checking candy-core-process v0.3.63 (/workspace/candy-core/apps/candy-core)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 48.65s

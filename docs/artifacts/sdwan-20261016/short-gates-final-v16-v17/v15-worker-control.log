@@ -1,0 +1,17 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.37s
+     Running unittests src/lib.rs (/build/debug/deps/candy_core_process-102b9c1d2fd574e3)
+
+running 10 tests
+test experimental_worker_control::tests::candidate_authority_requires_exact_snapshot_and_complete_identity ... ok
+test experimental_worker_control::tests::candidate_cancelled_status_publication_preserves_executed_result ... ok
+test experimental_worker_control::tests::candidate_dispatch_is_bounded_and_lost_receiver_does_not_replay ... ok
+test experimental_worker_control::tests::candidate_operations_require_the_exact_current_controller ... ok
+test experimental_worker_control::tests::candidate_publication_failure_retries_status_without_reissuing_install ... ok
+test experimental_worker_control::tests::endpoint_lock_prevents_live_takeover_and_allows_stale_socket_recovery ... ok
+test experimental_worker_control::tests::endpoint_recovery_preserves_regular_files_and_rejects_symlink_locks ... ok
+test experimental_worker_control::tests::expired_or_invalid_capability_cannot_takeover_or_stop_another_owner ... ok
+test experimental_worker_control::tests::original_boot_deadline_survives_wall_rollback_and_counts_suspended_time ... ok
+test experimental_worker_control::tests::takeover_requires_dead_previous_owner_and_durable_publication ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 134 filtered out; finished in 0.06s
+

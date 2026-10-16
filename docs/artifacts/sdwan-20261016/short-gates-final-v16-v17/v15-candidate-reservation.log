@@ -1,0 +1,28 @@
+   Compiling candy-proto v0.3.63 (/workspace/candy-core/crates/candy-proto)
+   Compiling quinn-proto v0.11.15 (/workspace/candy-core/vendor/quinn-proto)
+   Compiling btls v0.5.6 (/workspace/candy-core/vendor/btls)
+   Compiling candy-carrier-crypto v0.3.63 (/workspace/candy-core/crates/candy-carrier-crypto)
+   Compiling quinn v0.11.11
+   Compiling candy-core v0.3.63 (/workspace/candy-core/crates/candy-core)
+   Compiling quinn-btls v0.1.0 (/workspace/candy-core/vendor/quinn-btls)
+   Compiling candy-carrier-transport v0.3.63 (/workspace/candy-core/crates/candy-carrier-transport)
+   Compiling candy-packet-port v0.3.63 (/workspace/candy-core/crates/candy-packet-port)
+   Compiling candy-tun v0.3.63 (/workspace/candy-core/crates/candy-tun)
+   Compiling candy-carrier-runtime v0.3.63 (/workspace/candy-core/crates/candy-carrier-runtime)
+   Compiling candy-carrier-client v0.3.63 (/workspace/candy-core/crates/candy-carrier-client)
+   Compiling client-cli v0.3.63 (/workspace/candy-core/apps/client-cli)
+   Compiling candy-carrier-server v0.3.63 (/workspace/candy-core/crates/candy-carrier-server)
+   Compiling candy-core-process v0.3.63 (/workspace/candy-core/apps/candy-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 27s
+     Running unittests src/lib.rs (/build/debug/deps/candy_core_process-102b9c1d2fd574e3)
+
+running 6 tests
+test sdwan_candidate_reservation::tests::durable_intent_recovers_without_extending_deadline ... ok
+test sdwan_candidate_reservation::tests::exact_retry_recovers_original_fence_and_rejects_changed_policy ... ok
+test sdwan_candidate_reservation::tests::expired_or_untrusted_local_intent_is_not_recreated ... ok
+test sdwan_candidate_reservation::tests::lost_reservation_response_uses_exact_saved_selector_and_cap ... ok
+test sdwan_candidate_reservation::tests::recorded_peer_ack_is_immutable_bound_and_does_not_renew_expired_cap ... ok
+test sdwan_candidate_reservation::tests::transfer_preserves_original_witness_and_rejects_changed_receipt_before_adoption ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 138 filtered out; finished in 0.13s
+

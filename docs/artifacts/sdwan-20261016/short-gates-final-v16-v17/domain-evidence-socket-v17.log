@@ -1,0 +1,22 @@
+
+running 1 test
+2026-10-16T10:12:37.325827Z  INFO candy_core_process::process_limits: Core file descriptor budget is ready event="process_resource_limit_ready" module="process_limits" resource="RLIMIT_NOFILE" requested_soft=1048576 requested_hard=1048576 previous_soft=1048576 previous_hard=1048576 effective_soft=1048576 effective_hard=1048576
+2026-10-16T10:12:37.394142Z  INFO candy_carrier_transport: configured QUIC UDP socket buffers target_bytes=8388608 receive_bytes=16777216 send_bytes=16777216
+2026-10-16T10:12:37.432120Z  INFO candy_carrier_transport: configured QUIC UDP socket buffers target_bytes=8388608 receive_bytes=16777216 send_bytes=16777216
+2026-10-16T10:12:37.432159Z  WARN candy_core_process::shared_sdwan_host: code="shared_worker_request_rejected" module="sdwan_host" detail=code=domain_evidence_binding_conflict module=sdwan_host
+2026-10-16T10:12:37.432226Z  WARN candy_core_process::shared_sdwan_host: code="shared_worker_request_rejected" module="sdwan_host" detail=code=domain_evidence_binding_conflict module=sdwan_host
+2026-10-16T10:12:37.432262Z  WARN candy_core_process::shared_sdwan_host: code="shared_worker_request_rejected" module="sdwan_host" detail=code=domain_evidence_original_binding_missing module=sdwan_host
+2026-10-16T10:12:37.432365Z  WARN candy_core_process::shared_sdwan_host: code="shared_worker_request_rejected" module="sdwan_host" detail=code=domain_evidence_owner_rebound module=sdwan_host
+2026-10-16T10:12:37.432545Z  WARN candy_core_process::shared_sdwan_host: code="shared_worker_request_rejected" module="sdwan_host" detail=code=domain_evidence_incarnation_mismatch module=sdwan_host
+2026-10-16T10:12:37.435454Z  WARN candy_core_process::shared_sdwan_host: code="shared_worker_request_rejected" module="sdwan_host" detail=code=domain_evidence_controller_mismatch module=sdwan_host
+2026-10-16T10:12:37.445654Z  INFO candy_core_process::shared_sdwan_host: code="shared_domain_cancelled" module="sdwan_host" instance=/tmp/.tmpvmg8iH/domain-32/control.sock
+2026-10-16T10:12:37.454030Z  INFO candy_core_process::shared_sdwan_host: code="shared_domain_stopped" module="sdwan_host" instance=/tmp/.tmpvmg8iH/domain-32/control.sock
+2026-10-16T10:12:37.458417Z  WARN candy_core_process::shared_sdwan_host: code="shared_worker_request_rejected" module="sdwan_host" detail=code=domain_evidence_original_binding_missing module=sdwan_host
+2026-10-16T10:12:37.469113Z  INFO candy_core_process::shared_sdwan_host: code="shared_domain_cancelled" module="sdwan_host" instance=/tmp/.tmpvmg8iH/domain-33/control.sock
+2026-10-16T10:12:37.469311Z  INFO candy_core_process::shared_sdwan_host: code="shared_domain_stopped" module="sdwan_host" instance=/tmp/.tmpvmg8iH/domain-33/control.sock
+2026-10-16T10:12:37.482296Z  WARN candy_core_process::shared_sdwan_host: code="shared_worker_request_rejected" module="sdwan_host" detail=code=domain_evidence_task_absent module=sdwan_host action=preserve_unknown
+2026-10-16T10:12:37.551337Z  WARN candy_core_process::shared_sdwan_host: code="shared_worker_request_rejected" module="sdwan_host" detail=code=domain_evidence_incarnation_mismatch module=sdwan_host
+test signed_cli_shared_domain_evidence_socket_gate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.27s
+

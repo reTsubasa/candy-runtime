@@ -112,12 +112,13 @@ extension remains a separate issue until its fix and tests complete.
 - Vanished-actor UNKNOWN retirement: durable exact actor/domain completion,
   actual master revocation, authenticated bilateral confirmation, and a distinct
   durable terminal before any fresh transaction. Foundations do not close it.
-- True control progress with data credits occupied through real QUIC and Unix
-  IPC, including the separate shared QUIC connection-window boundary.
-- New reconciliation/domain-evidence changes require their own frozen Linux
-  regression and affected traffic gates; v14 cannot certify later source edits.
-- The latest completed strict scaling, activated-successor restart, mixed-role,
-  Proxy UDP and negotiated-drain results are in the v14 table below. Earlier
+- The real QUIC/Unix IPC control-pressure short gates pass on frozen v16,
+  including control-credit renewal and a genuine queue burst. This does not
+  establish maximum throughput or Go-client interoperability.
+- Reconciliation and domain-evidence Linux checks and affected traffic gates
+  pass as recorded below. Vanished-actor automatic retirement remains separate.
+- The latest strict scaling, activated-successor restart, mixed-role,
+  Proxy UDP and negotiated-drain results are in the v16 table below. Earlier
   failures remain retained; the passing subsets are not full release acceptance.
 - Two-hour renewal is deferred by the user's explicit choice. Performance and
   platform package acceptance are not claimed by short container gates.
@@ -270,3 +271,122 @@ Passing traffic assertions do not mean that every diagnostic line is error-free.
 The v14 UDP pass closes this frozen build's bounded load/recovery gate; it does
 not establish why every earlier invalid-load or lost-packet cohort failed.
 Two-hour renewal remains deferred by the user's explicit choice.
+
+## Frozen v15/v16 Short Gates And Fixture v17
+
+This completes the selected short-gate batch and the newly found blocking
+fixes. It does not complete every P0 or authorize a production rollout.
+All test containers were removed afterward; the six pre-existing Cloud
+containers remain running. No production node, release, signature or remote
+Git branch was changed in this batch.
+
+### Fixes Included
+
+| Commit | Correction |
+| --- | --- |
+| Core `bc66acf`, Runtime `c5d1348` | Query the original live actor and re-read the actual immutable historical peer CommitAck file; verify the original tuple and Reserve/Reserved hashes. Historical ACK is not current forwarding or permission for a new transaction. |
+| Core `e2f1566`, Runtime `00b724e` | Original task incarnation, actual joined completion and authenticated evidence client foundation. Controller-submitted owner/checksum association is not independent master attestation. |
+| Core `1a9939d`, `9b6d599` | Checked IPC owner shutdown retains the actual JoinHandle across cancellation and requires task/admission/endpoint cleanup. Receipt scope excludes separate pool admission, domain completion and bilateral retirement. |
+| Core `1e49b49` | Actually consumed reserved-control credit now renews QUIC MAX_DATA at the bounded reserve threshold. Before correction, stopped Data readers could stall a long control exchange around result 495. Existing windows and capacity remain unchanged. |
+| Core `43a17ca`, `9a78d8e` | A temporarily full required-message queue waits for its original bounded permit instead of closing the shared connection as ActorStopped. Real consumer closure remains connection-scoped; cancellation releases a pending frame. Adds true concurrent wire burst coverage. |
+| Core `0a9093a` | One 1.2-second evidence budget and shared 500-ms Probe budget replace N independent two-second actor waits. Retain at most one filesystem read per original session and four process-wide. Reconcile bypasses status writes and stale publication caching, preserves pending Install and revalidates controller/cap/plan before return. |
+| Core `e70d1e9`, Runtime `be0c2f4` | Equivalent conditional expressions satisfy strict Linux Clippy; no evidence semantics change. |
+| Runtime `72876b3`, `672c041`, `487e5d0` | Real Linux evidence socket fixture, authenticated worker registration, and a private routable endpoint configured inside its isolated namespace. |
+
+The diagnostic budget does not extend authorization. A first stalled peer can
+consume the shared Probe budget, leaving later local actor phases UNKNOWN for
+that query while their disk evidence is still checked. This is bounded latency,
+not full actor-query fairness. Uninterruptible filesystem reads may outlive a
+caller and consume the bounded four-read pool; no hard real-time scheduler or
+filesystem guarantee is claimed. See Core's
+`SDWAN_RECONCILIATION_BUDGET_20261016.md` for exact boundaries.
+
+### Build Provenance And Linux Regression
+
+Frozen v15 built six artifacts from Core `9a78d8e` and Runtime `be0c2f4`,
+manifest `a39e32dfc7587f021fb8d98fa9b05ab4a40410446947f293a49cce3148652c63`.
+Frozen v16 built six artifacts from Core
+`0a9093aee0937759fd08531d36579c18f3d51123` and Runtime
+`672c0418e97b24bf786360f7edb108ab7f0591fa`, manifest
+`b462baa96441a1c45974dcbe74a7ec42e254b284fae34f571421eafac87eb3cc`.
+The v16 Core ELF SHA-256 is
+`fd0e57fadd417d501c132671a806e7b9abac81e4dcba0139f6e30a092b8495a4`.
+Both freezes read committed blobs, excluding unrelated local edits.
+
+| Frozen Linux check | Result | Evidence |
+| --- | --- | --- |
+| v15 transport library | 217/217 PASS | `short-linux-regression-v15/transport.log` |
+| v15 carrier runtime library | 362/362 PASS | Includes eight reader-backpressure and six actual Linux control-transport tests. |
+| v15 candidate reservation / worker control / domain evidence | 6/6, 10/10, 5/5 PASS | These precede the later budget fix; v16 full application coverage below includes it. |
+| v15 standalone Quinn | 287/287 PASS | `quinn-standalone.log`; the first workspace command did not execute tests and is retained separately. |
+| v15 Runtime Agent / TUNIO library | 148/148, 26/26 PASS | Includes Linux ownership/reconciliation, MBB guard and shared-evidence validation. |
+| v15 Runtime Agent/netd and TUNIO strict Clippy | PASS | All targets, `-D warnings`, no lint exemption. |
+| v16 full Core application library | 150/150 PASS | Includes budgeted queries, actual persisted CommitAck validation and original publication retry. |
+| v16 Core application/runtime/transport/server strict Clippy | PASS | All targets, `-D warnings`; replaces the preserved v15 manual_map failure. |
+| v16 and v17 TUNIO strict Clippy | PASS | All targets, `-D warnings`, including the final evidence fixture. |
+
+v15's complete runtime/transport/vendor regression is applicable to unchanged
+files in v16. The v15→v16 source delta is confined to seven application files
+and one evidence fixture; the full affected Core application and strict checks
+were rerun. No component count is presented as a complete release matrix.
+
+### Serial Traffic Gates
+
+Traffic runs began only after all native and Docker compilation had ended.
+Shared/wire fixtures use three pinned VM CPUs without periodic CFS quota;
+Proxy fixtures use disjoint service and generator CPU sets. Original timeouts,
+missing-sequence, exact-identity and load-validity requirements remain intact.
+Proxy uses the frozen Runtime `candy-client` launcher and the actual Rust Core.
+
+| Evidence directory | Result | Measured boundary |
+| --- | --- | --- |
+| `control-reserve-wire-v16` | 4/4 PASS, 10.91 s runner | Actual authenticated/classified QUIC and Unix IPC. Two stopped downloads retain full 16,384-byte Data charge; lifetime and unpaced concurrent burst each return 8,192 exact results, same owner/connection, and a later fresh probe. Lifetime MAX_DATA delta is 65. Original 2-second per-result and 30-second total deadlines remain. Protocol fixture, not Runtime CLI or Go compatibility. |
+| `mixed-role-fault-v16` | PASS, 14.41 s runner | Quota rejection/release recovery; held TCP, 60 fresh requests and 61 exact 4-KiB UDP packets. Stopped reader accepts 9,109,504 bytes, with two actual write timeouts before healthy probes and six afterward. Both SD-WAN domains return 115/115; held UDP PID/start/inode/port remain exact. |
+| `shared-pool-negotiated-final-v16` | PASS, 59.07 s runner | Full `1→2→4→2→1→2→1`; four domains have zero missing ICMP at every scale stage. Original-cap expiry, exact bilateral receipts, TUN/IO identities, resource bounds and isolated crash/shutdown assertions pass. |
+| `successor-server-restart-v16` | PASS, 62.03 s runner | Activated successor restores after deliberately killing its server worker; infrastructure/unrelated owners and later Proxy remain healthy. Recovery probes on the killed domain may fail; this is not zero interruption under process death. |
+| `bilateral-mbb-final-v16` | PASS, 58.96 s runner | Two live policy rounds, exact original retries/receipts, 400/400 continuous ICMP per domain and preserved TUN/process identities; original-cap and later renewal/redial checks pass. |
+| `proxy-release-v16-active-drain-v1` | PASS | Held TCP tail/FIN, UDP/DNS, authenticated negotiated drain, exact receipt, original deadline, replacement overlap/admission, same listener/socket/master. Every detailed drain subgate passes. |
+| `proxy-release-v16-udp-v1` | PASS | Five original cohorts each return 300/300 with no missing/duplicate/corrupt/foreign packet; zero schedule violations/rebases. Includes recovery one second after 4,096×4,096-byte deliberate burst (0.01131 s). Later TCP returns 262,144 bytes and service identities remain exact. This is 100-PPS bounded recovery, not maximum PPS/throughput. |
+| `domain-evidence-socket-v17` | PASS, 1.58 s runner | Two real signed tasks, authenticated registration/control, actual packet sockets, original incarnation/controller checks, exact association conflicts, actual cancel/join, pinned-forget rejection, unrelated task preservation and same-path replacement. No forwarding/master-lease or candidate-retirement claim. |
+
+v17 is a fixture-only rebuild from Runtime `487e5d0`, manifest
+`87f7e6a5332c829c0961b380f4fe621a06abe4181837f3a6633e2da697a6bdc9`.
+The manifests prove the only changed source is
+`linux/common/apps/candy-tunio/tests/fixtures/shared_domain_evidence.rs`.
+The helper was rebuilt; the other five artifacts were inherited from v16 only
+after verifying every checksum. Core is unchanged. This is explicitly recorded
+in `registered-mbb-release-v17/build-provenance.json`; it is not described as
+six freshly compiled artifacts or a rerun of all v16 traffic.
+
+### Preserved Failures And Remaining P0
+
+- v15 first Quinn workspace invocation: NOT_RUN because the vendored package is
+  not a workspace member. The standalone manifest run passes 287/287.
+- v15 strict Core Clippy: FAIL on Linux-only `manual_map`. The equivalent
+  expression fix is committed and v16 strict checks pass.
+- `domain-evidence-socket-v16`: FAIL before task startup because loopback is
+  rejected by production endpoint validation. The isolated private bridge fixes
+  the fixture; production validation is unchanged. v17 passes. No failed
+  evidence directory was overwritten.
+- The original native control-lifetime stall and queue-burst disconnect remain
+  retained in Core's control-credit review alongside the corrected results.
+- Logs retain intentional rejection/fault events, overload drops and isolated
+  nft/iptables compatibility warnings. A passing short reliability gate does
+  not mean every log line is error-free or overload cannot drop UDP.
+
+**Vanished-actor UNKNOWN automatic retirement remains OPEN P0.** The current
+foundations still lack a durable original binding independently attested by the
+master, complete pool/transport revocation evidence, reboot/controller recovery,
+authenticated bilateral retirement confirmation, and a durable distinct
+terminal with evidence-consumption/reclamation. Do not wire every Prepare into
+the in-memory pinned evidence API until consumption and persistence exist;
+otherwise evidence grows to its bound and prevents host retirement.
+
+Next implementation order is durable original binding → independently verified
+master revocation → authenticated original-participant reconciliation → distinct
+terminal and evidence consumption → actual crash/persistence fault gates. Keep
+legacy/incomplete cases UNKNOWN and preserve other domains, Proxy and TUN.
+Core's `sdwan-unknown-owner-retirement-design-20261016.md` remains the acceptance
+contract. Two-hour renewal is explicitly deferred. Performance optimization,
+800-Mbps acceptance, Go interoperability, physical OpenWrt/Android packaging,
+release signing and production rollout are not certified by this batch.

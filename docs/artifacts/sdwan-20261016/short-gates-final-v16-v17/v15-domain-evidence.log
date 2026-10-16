@@ -1,0 +1,12 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.89s
+     Running unittests src/lib.rs (/build/debug/deps/candy_core_process-102b9c1d2fd574e3)
+
+running 5 tests
+test shared_sdwan_host::evidence::tests::changed_checksum_owner_controller_and_reused_instance_cannot_adopt_binding ... ok
+test shared_sdwan_host::evidence::tests::completion_cannot_be_bound_retroactively_and_capacity_keeps_old_evidence ... ok
+test shared_sdwan_host::evidence::tests::exact_binding_query_is_idempotent_and_finished_without_join_is_not_completion ... ok
+test shared_sdwan_host::evidence::tests::invalid_owner_and_zero_candidate_are_rejected_without_binding ... ok
+test shared_sdwan_host::evidence::tests::running_and_unjoined_finished_handles_never_publish_completion ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 139 filtered out; finished in 0.06s
+

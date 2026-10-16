@@ -1,0 +1,184 @@
+   Compiling candy-proto v0.3.63 (/workspace/candy-core/crates/candy-proto)
+   Compiling quinn-proto v0.11.15 (/workspace/candy-core/vendor/quinn-proto)
+   Compiling btls v0.5.6 (/workspace/candy-core/vendor/btls)
+   Compiling candy-carrier-crypto v0.3.63 (/workspace/candy-core/crates/candy-carrier-crypto)
+   Compiling quinn v0.11.11
+   Compiling candy-core v0.3.63 (/workspace/candy-core/crates/candy-core)
+   Compiling quinn-btls v0.1.0 (/workspace/candy-core/vendor/quinn-btls)
+   Compiling candy-packet-port v0.3.63 (/workspace/candy-core/crates/candy-packet-port)
+   Compiling candy-carrier-transport v0.3.63 (/workspace/candy-core/crates/candy-carrier-transport)
+   Compiling candy-tun v0.3.63 (/workspace/candy-core/crates/candy-tun)
+   Compiling candy-carrier-runtime v0.3.63 (/workspace/candy-core/crates/candy-carrier-runtime)
+   Compiling candy-carrier-client v0.3.63 (/workspace/candy-core/crates/candy-carrier-client)
+   Compiling candy-carrier-server v0.3.63 (/workspace/candy-core/crates/candy-carrier-server)
+   Compiling client-cli v0.3.63 (/workspace/candy-core/apps/client-cli)
+   Compiling candy-core-process v0.3.63 (/workspace/candy-core/apps/candy-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 13s
+     Running unittests src/lib.rs (/build/debug/deps/candy_core_process-102b9c1d2fd574e3)
+
+running 150 tests
+test experimental_worker_control::tests::candidate_authority_requires_exact_snapshot_and_complete_identity ... ok
+test experimental_worker_control::tests::candidate_cancelled_status_publication_preserves_executed_result ... ok
+test experimental_worker_control::tests::candidate_dispatch_is_bounded_and_lost_receiver_does_not_replay ... ok
+test experimental_worker_control::tests::candidate_operations_require_the_exact_current_controller ... ok
+test experimental_worker_control::tests::candidate_publication_failure_retries_status_without_reissuing_install ... ok
+test experimental_worker_control::tests::endpoint_lock_prevents_live_takeover_and_allows_stale_socket_recovery ... ok
+test experimental_worker_control::tests::endpoint_recovery_preserves_regular_files_and_rejects_symlink_locks ... ok
+test experimental_worker_control::tests::expired_or_invalid_capability_cannot_takeover_or_stop_another_owner ... ok
+test experimental_worker_control::tests::original_boot_deadline_survives_wall_rollback_and_counts_suspended_time ... ok
+test experimental_worker_control::tests::read_only_reconciliation_never_publishes_or_consumes_pending_install ... ok
+test experimental_worker_control::tests::takeover_requires_dead_previous_owner_and_durable_publication ... ok
+test peer_commit_barrier::tests::abort_requires_original_authenticated_context_and_reports_reason ... ok
+test peer_commit_barrier::tests::commit_send_failure_is_uncertain_and_forged_ack_never_advances ... ok
+test peer_commit_barrier::tests::exact_authenticated_participant_and_context_are_required ... ok
+test peer_commit_barrier::tests::local_actor_rejection_is_retained_instead_of_resubmitted ... ok
+test peer_commit_barrier::tests::local_commit_timeout_retains_original_ack_and_drain_receivers ... ok
+test peer_commit_barrier::tests::lost_ack_retries_same_commit_without_prepare_abort_or_new_token ... ok
+test peer_commit_barrier::tests::partially_acknowledged_commit_retries_only_unconfirmed_participant ... ok
+test peer_commit_barrier::tests::peer_commit_journal_rejects_symlink_and_unsafe_permissions ... ok
+test peer_commit_barrier::tests::peer_commit_journal_restart_fences_unknown_and_allows_exact_retry ... ok
+test peer_commit_barrier::tests::reload_commit_retains_owner_after_expiry_and_blocks_abort_and_replacement ... ok
+test process_limits::tests::low_hard_limit_uses_maximum_permitted_capacity_in_child ... 
+running 1 test
+test process_limits::tests::low_hard_limit_uses_maximum_permitted_capacity_in_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 0.01s
+
+ok
+test process_limits::tests::preserves_higher_inherited_limits ... ok
+test process_limits::tests::raises_low_soft_limit_in_isolated_process ... 
+running 1 test
+test process_limits::tests::raises_low_soft_limit_in_isolated_process ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 0.00s
+
+ok
+test sdwan_candidate_initiator::reconcile::tests::actor_budget_expiry_does_not_discard_independent_disk_history ... ok
+test sdwan_candidate_initiator::reconcile::tests::blocked_reads_across_sessions_remain_globally_bounded_across_retries ... ok
+test sdwan_candidate_initiator::reconcile::tests::timed_out_reads_retain_one_real_task_and_later_reads_revalidate_disk ... ok
+test sdwan_candidate_initiator::reconcile::tests::total_budget_is_absolute_and_is_not_candidate_authority ... ok
+test sdwan_candidate_initiator::reconcile::tests::unresponsive_peers_share_one_absolute_budget_and_later_query_still_works ... ok
+test sdwan_candidate_initiator::tests::distinct_domains_reuse_attachments_without_registry_collision ... ok
+test sdwan_candidate_initiator::tests::missing_ready_retains_receiver_for_exact_reply_retry ... ok
+test sdwan_candidate_initiator::tests::overlapping_owners_keep_exact_connection_registrations ... ok
+test sdwan_candidate_initiator::tests::registration_drop_fences_pending_requests_without_replacing_live_owner ... ok
+test sdwan_candidate_reservation::tests::durable_intent_recovers_without_extending_deadline ... ok
+test sdwan_candidate_reservation::tests::exact_retry_recovers_original_fence_and_rejects_changed_policy ... ok
+test sdwan_candidate_reservation::tests::expired_or_untrusted_local_intent_is_not_recreated ... ok
+test sdwan_candidate_reservation::tests::lost_reservation_response_uses_exact_saved_selector_and_cap ... ok
+test sdwan_candidate_reservation::tests::recorded_peer_ack_is_immutable_bound_and_does_not_renew_expired_cap ... ok
+test sdwan_candidate_reservation::tests::transfer_preserves_original_witness_and_rejects_changed_receipt_before_adoption ... ok
+test sdwan_worker_candidate::failure_retirement_tests::finalization_requires_exact_committed_retirement_and_stable_retry_evidence ... ok
+test shared_listener_registry::tests::active_actor_candidate_cannot_substitute_worker_identity ... ok
+test shared_listener_registry::tests::active_actor_candidate_expiry_or_removal_never_drains_active_owner ... ok
+test shared_listener_registry::tests::candidate_deadline_uses_precise_original_clock_sample ... ok
+test shared_listener_registry::tests::candidate_promotion_preserves_prepared_connection_and_fences_replay ... ok
+test shared_listener_registry::tests::candidate_selector_cannot_steal_active_domain_or_change_transaction ... ok
+test shared_listener_registry::tests::deadline_reaper_revokes_held_lease_without_disk_reconciliation ... ok
+test shared_listener_registry::tests::generation_publish_is_atomic_bounded_and_drains_exact_old_owner ... ok
+test shared_listener_registry::tests::graceful_shutdown_drains_other_pools_when_one_is_already_revoked ... ok
+test shared_listener_registry::tests::graceful_shutdown_rejects_new_work_and_keeps_original_lease_deadline ... ok
+test shared_listener_registry::tests::prepared_ingress_bootstraps_without_stealing_live_committed_owner ... ok
+test shared_listener_registry::tests::private_proof_rejects_fifo_without_waiting_for_writer ... ok
+test shared_listener_registry::tests::reconnect_admission_is_independent_of_failed_packet_paths ... ok
+test shared_listener_registry::tests::registration_validation_and_hint_selection_preserve_unrelated_domains ... ok
+test shared_listener_reservation::tests::expired_successor_context_releases_memory_slot_but_keeps_evidence ... ok
+test shared_listener_reservation::tests::remote_fences_are_principal_scoped_durable_and_exact_on_equal_tokens ... ok
+test shared_listener_reservation::tests::reservation_ack_requires_exact_receipt_from_current_live_master ... ok
+test shared_listener_reservation::tests::reservation_prepare_cannot_change_transaction_fence_generation_or_hash ... ok
+test shared_listener_reservation::tests::reservation_publication_is_private_atomic_and_immutable ... ok
+test shared_listener_reservation::tests::reservation_retry_binds_request_actor_predecessor_owner_and_original_deadline ... ok
+test shared_listener_reservation::tests::successor_evidence_blocks_static_rollback_only_in_its_original_scope ... ok
+test shared_listener_reservation::tests::successor_requires_exact_activation_and_revalidates_current_authenticated_grant ... ok
+test shared_listener_reservation::tests::successor_restart_keeps_original_cap_and_corrupt_scope_is_isolated ... ok
+test shared_listener_reservation::tests::successor_restart_rejects_changed_boot_elapsed_cap_and_revoked_route_trust ... ok
+test shared_listener_reservation::tests::successor_scan_exhaustion_preserves_known_context_without_authority_fallback ... ok
+test shared_listener_staged::tests::activated_partial_receipts_do_not_expire_active_lane_or_fabricate_drain ... ok
+test shared_listener_staged::tests::blocked_reply_is_bounded_and_an_exact_retry_can_succeed ... ok
+test shared_listener_staged::tests::blocked_reply_stops_on_shutdown_channel_loss_and_transport_close ... ok
+test shared_listener_staged::tests::commit_requires_original_tuple_and_ready_before_intent_write ... ok
+test shared_listener_staged::tests::completed_lane_replays_exact_receipts_only_until_original_cap ... ok
+test shared_listener_staged::tests::participant_validation_rejects_substitution_duplicate_and_reordering ... ok
+test shared_listener_staged::tests::reply_never_extends_original_authorization ... ok
+test shared_listener_staged::tests::uncertain_commit_intent_never_regresses_or_allows_abort ... ok
+test shared_sdwan_host::evidence::tests::changed_checksum_owner_controller_and_reused_instance_cannot_adopt_binding ... ok
+test shared_sdwan_host::evidence::tests::completion_cannot_be_bound_retroactively_and_capacity_keeps_old_evidence ... ok
+test shared_sdwan_host::evidence::tests::exact_binding_query_is_idempotent_and_finished_without_join_is_not_completion ... ok
+test shared_sdwan_host::evidence::tests::invalid_owner_and_zero_candidate_are_rejected_without_binding ... ok
+test shared_sdwan_host::evidence::tests::running_and_unjoined_finished_handles_never_publish_completion ... ok
+test structured_logging::tests::blocked_sink_preserves_business_executor_and_bounded_shutdown ... ok
+test structured_logging::tests::healthy_shutdown_drains_fifo_and_empty_writers_emit_nothing ... ok
+test structured_logging::tests::openwrt_log_priorities_match_tracing_levels ... ok
+test structured_logging::tests::oversized_record_is_bounded_marked_and_counted ... ok
+test structured_logging::tests::sink_failure_is_counted_reported_and_later_records_survive ... ok
+test tests::aborting_peer_supervisor_drops_owned_attempt ... ok
+test tests::authorization_closure_hash_ignores_credential_paths_but_binds_loaded_contents_and_settings ... ok
+test tests::authorization_policy_refresh_does_not_change_transport_identity ... ok
+test tests::bound_listener_readiness_is_a_distinct_pre_peer_phase ... ok
+test tests::bounded_wan_profile_survives_formal_parser_and_clamps_admission ... ok
+test tests::client_role_enters_the_existing_multinode_engine ... ok
+test tests::commit_barrier_blocks_partitioned_peer_and_recovers_without_double_apply ... ok
+test tests::compatibility_transport_binding_allows_only_device_key_rotation ... ok
+test tests::credential_free_seed_is_inspectable_but_cannot_run_as_standard_server ... ok
+test tests::cross_node_commit_barrier_blocks_partition_and_is_idempotent ... ok
+test tests::cross_node_commit_barrier_rejects_wrong_generation_or_participant ... ok
+test tests::duplicate_commit_returns_cached_success_or_failure_without_reapplying ... ok
+test tests::experimental_packet_port_cli_requires_explicit_complete_handoff ... ok
+test tests::expired_or_superseded_preparation_releases_resources ... ok
+test tests::fencing_accepts_same_rollout_on_multiple_peer_connections ... ok
+test tests::fencing_token_file_is_private_and_atomically_written ... ok
+test tests::fencing_token_is_monotonic_across_restarts_and_observations ... ok
+test tests::hot_reload_route_coverage_accepts_configured_paths_before_authentication ... ok
+test tests::leaves_projection_trust_unset_when_no_keys_are_listed ... ok
+test tests::listener_readiness_is_rejected_without_an_inbound_cloud_grant_listener ... ok
+test tests::ordinary_peer_replacement_requires_staged_actor_protocol ... ok
+test tests::packet_loop_error_does_not_stop_real_proxy_listener ... ok
+test tests::packet_loop_panic_does_not_stop_real_proxy_listener ... ok
+test tests::parses_cloud_grant_server_without_static_users ... ok
+test tests::parses_minimal_server_config_into_real_engine_config ... ok
+test tests::parses_scoped_cloud_keyring_and_keeps_static_users ... ok
+test tests::parses_server_ech_key_pair ... ok
+test tests::parses_terminal_projection_verification_keys ... ok
+test tests::peer_barrier_commit_without_prepare_closes_then_redials_and_stops ... ok
+test tests::peer_barrier_stale_fence_closes_then_redials_and_stops ... ok
+test tests::peer_dialer_ordinary_remote_close_still_redials ... ok
+test tests::peer_dialer_shutdown_channel_closed_releases_owner_without_redial ... ok
+test tests::peer_dialer_superseded_lane_stops_when_shutdown_channel_closes ... ok
+test tests::peer_dialer_superseded_lane_yields_until_new_policy ... ok
+test tests::peer_preparation_isolates_slow_failed_and_healthy_peers_with_bounded_workers ... ok
+test tests::peer_preparation_panic_is_isolated_and_parent_cancellation_reaps_workers ... ok
+test tests::peer_supervisor_recovers_error_then_panic_without_duplicate_attempts ... ok
+test tests::policy_commit_requires_every_configured_outbound_peer_to_be_prepared ... ok
+test tests::policy_refresh_publishes_the_candidate_activation_status_path ... ok
+test tests::policy_refresh_requires_the_existing_outbound_dialer_set ... ok
+test tests::prepared_routes_require_ready_owners_but_allow_working_alternatives ... ok
+test tests::prepared_transaction_isolation_and_single_consumption ... ok
+test tests::proxy_probes_without_early_stream_keep_legacy_ordering_after_packet_failure ... ok
+test tests::rejects_duplicate_projection_key_ids ... ok
+test tests::rejects_duplicate_scoped_cloud_key_ids ... ok
+test tests::rejects_projection_keys_when_cloud_auth_is_disabled ... ok
+test tests::rejects_server_values_that_would_be_silently_clamped ... ok
+test tests::rejects_unknown_feature_instead_of_silently_ignoring_it ... ok
+test tests::reload_listener_survives_bad_request_and_failed_preparation ... ok
+test tests::runtime_ipc_handoff_opens_only_connected_socket_and_preserves_packets ... ok
+test tests::same_generation_grant_rotation_refreshes_future_dial_snapshot ... ok
+test tests::sdwan_grant_verifier_rejects_scope_time_and_permission_mismatches ... ok
+test tests::sdwan_server_supervision_is_optional_but_requires_cloud_auth ... ok
+test tests::sdwan_status_is_atomically_replaced_with_private_permissions ... ok
+test tests::server_preflight_rejects_live_listener_owner_with_structured_reason ... ok
+test tests::server_role_enters_the_existing_server_engine ... ok
+test tests::signed_closure_reads_reject_symlinks_nonregular_files_and_size_overflow ... ok
+test tests::silent_primary_candidate_does_not_starve_a_working_alternative ... ok
+test tests::stable_peer_activation_fingerprint_is_order_independent_and_credential_free ... ok
+test tests::stale_sdwan_generation_is_rejected_before_candidate_dialing ... ok
+test tests::status_publisher_failed_snapshot_stops_when_supervisor_releases_channels ... ok
+test tests::status_publisher_recovers_filesystem_and_coalesces_latest_state_and_path ... ok
+test tests::status_publisher_terminal_filesystem_failure_is_reported_without_retry_loop ... ok
+test tests::status_publisher_watch_closure_publishes_latest_and_stops ... ok
+test tests::unified_proxy_requires_valid_endpoints_and_authentication ... ok
+test tests::verified_control_report_includes_signed_validity_windows ... ok
+test worker_placement::tests::inherited_slot_lease_is_exclusive_and_releases_on_worker_retirement ... ok
+test worker_placement::tests::slot_identity_cannot_use_another_worker_file_or_zero_revision ... ok
+
+test result: ok. 150 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.34s
+

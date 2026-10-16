@@ -1,0 +1,119 @@
+
+running 1 test
+level=info component=candy-netd event=service_started protocol=2 domain_routing=namespace infrastructure=preserved
+level=info component=candy-netd event=service_started protocol=2 domain_routing=namespace infrastructure=preserved
+level=info component=candy-netd event=service_started protocol=2 domain_routing=namespace infrastructure=preserved
+level=info component=candy-netd event=service_started protocol=2 domain_routing=namespace infrastructure=preserved
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=12
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=12
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=13
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=12
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=2 fencing_token=2 action=retain_exact_kernel_policy
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=2 fencing_token=2 action=retain_exact_kernel_policy
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=2 fencing_token=2 action=retain_exact_kernel_policy
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=2 fencing_token=2 action=retain_exact_kernel_policy
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=3 fencing_token=4 action=retain_exact_kernel_policy
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=3 fencing_token=4 action=retain_exact_kernel_policy
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=3 fencing_token=4 action=retain_exact_kernel_policy
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=3 fencing_token=4 action=retain_exact_kernel_policy
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=4 fencing_token=6 action=retain_exact_kernel_policy
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=4 fencing_token=6 action=retain_exact_kernel_policy
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=4 fencing_token=6 action=retain_exact_kernel_policy
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=4 fencing_token=6 action=retain_exact_kernel_policy
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=5 fencing_token=8 action=retain_exact_kernel_policy
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=5 fencing_token=8 action=retain_exact_kernel_policy
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=5 fencing_token=8 action=retain_exact_kernel_policy
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=5 fencing_token=8 action=retain_exact_kernel_policy
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=6 fencing_token=10 action=retain_exact_kernel_policy
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=6 fencing_token=10 action=retain_exact_kernel_policy
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=6 fencing_token=10 action=retain_exact_kernel_policy
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=6 fencing_token=10 action=retain_exact_kernel_policy
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=7 fencing_token=12 action=retain_exact_kernel_policy
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=7 fencing_token=12 action=retain_exact_kernel_policy
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=7 fencing_token=12 action=retain_exact_kernel_policy
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=7 fencing_token=12 action=retain_exact_kernel_policy
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=8 fencing_token=14 action=retain_exact_kernel_policy
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=8 fencing_token=14 action=retain_exact_kernel_policy
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=8 fencing_token=15 action=retain_exact_kernel_policy
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation=1 worker_epoch=8 fencing_token=14 action=retain_exact_kernel_policy
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+test signed_cli_shared_pool_scales_and_isolates_four_domains ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 58.19s
+

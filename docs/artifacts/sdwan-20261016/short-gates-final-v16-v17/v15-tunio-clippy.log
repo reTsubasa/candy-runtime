@@ -1,0 +1,25 @@
+   Compiling libc v0.2.190
+    Checking memchr v2.8.3
+    Checking serde_json v1.0.151
+    Checking serde v1.0.229
+    Checking tracing v0.1.44
+    Checking errno v0.3.14
+    Checking nix v0.29.0
+    Checking signal-hook-registry v1.4.8
+    Checking mio v1.2.2
+    Checking socket2 v0.6.5
+    Checking thiserror v1.0.69
+    Checking tokio v1.53.1
+    Checking candy-netd-proto v0.4.0 (/workspace/candy-runtime/linux/common/crates/candy-netd-proto)
+    Checking cpufeatures v0.2.17
+    Checking smallvec v1.15.2
+    Checking tracing-subscriber v0.3.23
+    Checking candy-process-control v0.4.0 (/workspace/candy-runtime/linux/common/crates/candy-process-control)
+    Checking sha2 v0.10.9
+    Checking candy-packet-port v0.3.63 (/workspace/candy-runtime/shared/vendor/candy-packet-port)
+    Checking candy-netd-client v0.4.0 (/workspace/candy-runtime/linux/common/crates/candy-netd-client)
+    Checking clap v4.6.5
+    Checking getrandom v0.4.3
+    Checking tempfile v3.27.0
+    Checking candy-tunio v0.4.0 (/workspace/candy-runtime/linux/common/apps/candy-tunio)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.75s

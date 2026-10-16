@@ -1,0 +1,18 @@
+
+running 1 test
+2026-10-16T10:06:12.152570Z  INFO candy_core_process::process_limits: Core file descriptor budget is ready event="process_resource_limit_ready" module="process_limits" resource="RLIMIT_NOFILE" requested_soft=1048576 requested_hard=1048576 previous_soft=1048576 previous_hard=1048576 effective_soft=1048576 effective_hard=1048576
+
+thread 'signed_cli_shared_domain_evidence_socket_gate' panicked at tests/fixtures/shared_domain_evidence.rs:130:5:
+2026-10-16T10:06:12.174908Z  INFO candy_core_process::process_limits: Core file descriptor budget is ready event="process_resource_limit_ready" module="process_limits" resource="RLIMIT_NOFILE" requested_soft=1048576 requested_hard=1048576 previous_soft=1048576 previous_hard=1048576 effective_soft=1048576 effective_hard=1048576
+Error: server uses a non-routable placeholder endpoint
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test signed_cli_shared_domain_evidence_socket_gate ... FAILED
+
+failures:
+
+failures:
+    signed_cli_shared_domain_evidence_socket_gate
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.05s
+

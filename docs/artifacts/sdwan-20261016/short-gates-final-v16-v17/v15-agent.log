@@ -1,0 +1,272 @@
+   Compiling candy-netd-proto v0.4.0 (/workspace/candy-runtime/linux/common/crates/candy-netd-proto)
+   Compiling candy-process-control v0.4.0 (/workspace/candy-runtime/linux/common/crates/candy-process-control)
+   Compiling candy-netd-client v0.4.0 (/workspace/candy-runtime/linux/common/crates/candy-netd-client)
+   Compiling candy-packet-port v0.3.63 (/workspace/candy-runtime/shared/vendor/candy-packet-port)
+   Compiling candy-runtime-log v0.4.0 (/workspace/candy-runtime/linux/common/crates/candy-runtime-log)
+   Compiling candy-cloud-sync v0.4.0 (/workspace/candy-runtime/linux/common/apps/candy-cloud-sync)
+   Compiling candy-tunio v0.4.0 (/workspace/candy-runtime/linux/common/apps/candy-tunio)
+   Compiling candy-sdwan-agent v0.4.0 (/workspace/candy-runtime/linux/common/apps/candy-sdwan-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.70s
+     Running unittests src/lib.rs (/build/debug/deps/candy_sdwan_agent-369a77d1c03f9783)
+
+running 148 tests
+test cloud_plan_bridge::tests::candidate_cannot_escape_activation_directory ... ok
+test cloud_plan_bridge::tests::candidate_generation_cannot_be_a_symlink ... ok
+test cloud_plan_bridge::tests::rejected_candidate_preserves_existing_plan ... ok
+test experimental_tunio::activation_proof_tests::bounded_unknown_preserves_recorded_core_io_but_never_expired_owner ... ok
+test experimental_tunio::activation_proof_tests::initial_proof_retries_same_owner_and_recovers_without_cleanup ... ok
+test experimental_tunio::activation_proof_tests::rejected_proof_and_confirmed_exit_do_not_become_unknown ... ok
+test experimental_tunio::candidate_core_control::tests::candidate_reply_requires_exact_process_controller_epoch_and_challenge ... ok
+test experimental_tunio::candidate_ownership::tests::committed_failure_keeps_actual_outcome_and_requires_durable_exact_isolation ... ok
+test experimental_tunio::candidate_ownership::tests::expired_commit_retirement_preserves_intent_and_exact_receipt_across_restart ... ok
+test experimental_tunio::candidate_ownership::tests::expired_commit_retirement_rejects_unknown_or_changed_evidence ... ok
+test experimental_tunio::candidate_ownership::tests::failed_finalization_requires_exact_io_new_owner_and_original_cap ... ok
+test experimental_tunio::candidate_ownership::tests::failed_intent_persistence_preserves_unknown_fence_without_sending_commit ... ok
+test experimental_tunio::candidate_ownership::tests::failed_retirement_is_exact_and_never_installation_or_successful_drain ... ok
+test experimental_tunio::candidate_ownership::tests::historical_peer_reconciliation_binds_original_tuple_and_reservation ... ok
+test experimental_tunio::candidate_ownership::tests::local_installed_without_authenticated_peer_ack_remains_unknown ... ok
+test experimental_tunio::candidate_ownership::tests::lost_commit_reply_probes_original_transaction_after_durable_intent ... ok
+test experimental_tunio::candidate_ownership::tests::lost_prepare_reply_keeps_original_fd_and_queries_exact_receipt ... ok
+test experimental_tunio::candidate_ownership::tests::missing_or_changed_actor_proof_never_promotes_candidate ... ok
+test experimental_tunio::candidate_ownership::tests::partial_failed_retirement_preserves_each_peers_original_outcome ... ok
+test experimental_tunio::candidate_ownership::tests::pending_owner_queue_retries_original_commit_without_replacing_candidate ... ok
+test experimental_tunio::candidate_ownership::tests::precommit_recovery_preserves_prepared_committed_and_uncertain_outcomes ... ok
+test experimental_tunio::candidate_ownership::tests::precommit_recovery_rejects_weak_absence_forged_scope_and_lost_persistence ... ok
+test experimental_tunio::candidate_ownership::tests::precommit_recovery_requires_durable_exact_cancellation_and_original_owner ... ok
+test experimental_tunio::candidate_ownership::tests::prepared_owner_keeps_old_binding_and_rejects_changed_receipts ... ok
+test experimental_tunio::candidate_ownership::tests::retirement_requires_every_peer_drain_receipt ... ok
+test experimental_tunio::candidate_ownership::tests::stale_or_missing_status_never_substitutes_for_actor_installation ... ok
+test experimental_tunio::candidate_ownership::tests::uncertain_commit_cannot_abort_or_prepare_another_owner ... ok
+test experimental_tunio::compile_tests::plan_accepts_eight_mib_and_rejects_excess_before_replacing_active_plan ... ok
+test experimental_tunio::compile_tests::signed_preflight_accepts_large_output_through_eight_mib ... ok
+test experimental_tunio::compile_tests::signed_preflight_collects_output_and_exit_status ... ok
+test experimental_tunio::compile_tests::signed_preflight_rejects_unbounded_output_without_blocking ... ok
+test experimental_tunio::compile_tests::signed_preflight_timeout_stops_the_compiler_process ... ok
+test experimental_tunio::listener_registration::tests::activation_ack_requires_exact_master_owner_authority_and_phase ... ok
+test experimental_tunio::listener_registration::tests::failed_packet_lane_preserves_only_an_explicitly_live_listener ... ok
+test experimental_tunio::signed_renewal::epoch_tests::mbb_expired_lease_repairs_with_new_fence_without_extending_authority ... ok
+test experimental_tunio::signed_renewal::epoch_tests::mbb_replay_rejects_changed_owner_consumed_fence_and_expired_authority ... ok
+test experimental_tunio::signed_renewal::epoch_tests::mbb_replays_exact_owner_after_prepare_authorize_and_commit_reply_loss ... ok
+test experimental_tunio::signed_renewal::epoch_tests::signed_renewal_advances_all_consumed_identity_receipts ... ok
+test experimental_tunio::signed_renewal::epoch_tests::signed_renewal_clock_sample_survives_stop_spawn_crossing_wall_seconds ... ok
+test experimental_tunio::signed_renewal::linux::mbb_tests::original_cap_requires_same_boot_and_persisted_monotonic_witness ... ok
+test experimental_tunio::signed_renewal::linux::mbb_tests::predecessor_drain_requires_exact_peers_transaction_and_both_markers ... ok
+test experimental_tunio::signed_renewal::linux::mbb_tests::unresolved_precommit_retains_original_reservation_and_epoch_across_restart ... ok
+test experimental_tunio::snapshot_tests::fresh_authoritative_snapshot_restores_routes_in_the_same_policy_generation ... ok
+test experimental_tunio::snapshot_tests::io_death_takes_priority_even_when_new_authority_is_waiting ... ok
+test experimental_tunio::snapshot_tests::local_placement_rotation_is_independent_monotonic_and_cannot_downgrade ... ok
+test experimental_tunio::snapshot_tests::recovery_epoch_advances_all_consumed_receipts_and_never_wraps ... ok
+test experimental_tunio::snapshot_tests::stale_replayed_and_conflicting_snapshots_cannot_restore_routes ... ok
+test experimental_tunio::tests::failed_pair_start_retains_consumed_worker_epoch_and_fence_for_next_attempt ... ok
+test experimental_tunio::tests::invalid_unrecorded_endpoint_is_never_treated_as_absent ... ok
+test experimental_tunio::tests::retired_core_control_is_removed_only_after_kernel_proves_no_live_endpoint ... ok
+test experimental_tunio::tests::ungated_experimental_launch_performs_no_plan_or_netd_access ... ok
+test experimental_tunio::tests::unrecorded_live_endpoint_blocks_replacement_without_granting_adoption ... ok
+test experimental_tunio::tests::worker_inherits_only_its_ipc_socket ... ok
+test process_record::optional_record_tests::only_absence_is_optional_corrupt_unsafe_and_symlink_records_remain_unknown ... ok
+test process_record::tests::exited_managed_process_is_never_rebound_by_pid_alone ... ok
+test process_record::tests::expired_business_authority_does_not_invalidate_live_infrastructure_identity ... ok
+test process_record::tests::managed_record_rejects_epoch_token_generation_and_executable_mismatch ... ok
+test runtime_agent::tests::admission_counts_cloud_and_domains_before_spawning ... ok
+test runtime_agent::tests::agent_owner_lock_rejects_duplicate_owner_and_can_be_reacquired ... ok
+test runtime_agent::tests::context_wrapped_recovery_signals_keep_the_existing_bounded_retry ... ok
+test runtime_agent::tests::contextual_business_control_errors_retain_typed_retry_classification ... ok
+test runtime_agent::tests::full_notification_queue_retains_latest_terminal_state ... ok
+test runtime_agent::tests::only_transient_io_errors_retry_without_new_policy ... ok
+test runtime_agent::tests::typed_nested_io_errors_keep_retry_classification ... ok
+test runtime_agent::tests::ungated_runtime_agent_does_not_read_config ... ok
+test shared_pool::tests::aggregate_handoff_credits_reject_before_any_host_is_started ... ok
+test shared_worker::domain_evidence::tests::exact_host_task_controller_and_checksum_owner_must_match_original ... ok
+test shared_worker::domain_evidence::tests::failed_authenticated_exchange_remains_error_instead_of_completion ... ok
+test shared_worker::domain_evidence::tests::missing_domain_old_schema_or_unknown_reply_cannot_create_completion ... ok
+test shared_worker::tests::domain_cleanup_requires_confirmed_host_exit_or_successful_exchange ... ok
+test shared_worker::tests::failed_or_unknown_domain_completion_cannot_be_reported_as_success ... ok
+test shared_worker::tests::shared_completion_timeout_preserves_retryable_io_cause ... ok
+test signed_snapshot::tests::closure_reader_rejects_file_before_reading_beyond_remaining_budget ... ok
+test signed_snapshot::tests::fingerprint_enforces_reference_budget_before_loading_peer_files ... ok
+test signed_snapshot::tests::fingerprint_limits_total_bytes_across_repeated_credential_references ... ok
+test signed_snapshot::tests::oversized_candidate_snapshot_preserves_existing_active_snapshot ... ok
+test signed_snapshot::tests::retirement_preserves_nonempty_transaction_evidence_and_original_manifest ... ok
+test signed_snapshot::tests::signed_closure_keeps_sixteen_mib_total_budget_for_multiple_large_files ... ok
+test signed_snapshot::tests::signed_file_limit_accepts_large_geo_inputs_and_rejects_over_limit_without_mutation ... ok
+test signed_snapshot::tests::snapshot_copies_referenced_credentials_and_detects_mutation ... ok
+test signed_snapshot::tests::snapshot_rejects_symlink_input_and_cleans_partial_directory ... ok
+test signed_snapshot::tests::unjournaled_snapshot_guard_retires_only_owned_generated_resources ... ok
+test signed_snapshot::tests::verified_owned_snapshot_can_be_retired_without_removing_source_files ... ok
+test tests::activation_descriptor_is_bound_to_immutable_candidate_target ... ok
+test tests::activation_pointer_replacement_is_detected_after_launch ... ok
+test tests::broken_netd_ipc_is_classified_as_retryable_peer_closed ... ok
+test tests::committed_core_exit_rolls_back_before_becoming_retryable ... level=info event=sdwan_prepare generation=7 pid=1247
+level=info event=sdwan_rlimit_memlock_inherited soft=18446744073709551615 hard=18446744073709551615
+level=info event=core_spawn stage=process_start error_code=none generation=7 role=ClientSdwan status=/tmp/.tmpiJzdj4/core-status.json activation=activations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+level=info event=core_spawned stage=process_start error_code=none pid=1347 generation=7
+level=error event=managed_process_record_deferred stage=managed_process_record_write error_code=managed_process_record_write cause_code=unclassified retryable=false error=managed executable identity differs from configured Core
+level=info event=sdwan_commit generation=7
+level=warn event=route_reconcile_skipped generation=7 reason=core_failed_prefixes_unreported configured_peers=1 active_peers=1 required_routes=1 ready_routes=1 error_code=core_failed_prefixes_unreported
+level=error event=sdwan_runtime_interrupted stage=core_exit error_code=core_exit cause_code=unclassified retryable=false error=Candy Core SD-WAN exited with status 17
+level=info event=core_readiness_cleanup stage=pre_spawn error_code=stale_status_removed status=/tmp/.tmpiJzdj4/core-status.json
+ok
+test tests::committed_partial_route_loss_preserves_healthy_owners ... ok
+test tests::committed_receipt_failure_preserves_core_until_explicit_shutdown ... level=info event=sdwan_prepare generation=7 pid=1247
+level=info event=sdwan_rlimit_memlock_inherited soft=18446744073709551615 hard=18446744073709551615
+level=info event=core_spawn stage=process_start error_code=none generation=7 role=Server status=/tmp/.tmpXqEThI/status.json activation=activations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+level=info event=core_spawned stage=process_start error_code=none pid=1354 generation=7
+level=error event=managed_process_record_deferred stage=managed_process_record_write error_code=managed_process_record_write cause_code=io_not_found retryable=true error=No such file or directory (os error 2)
+level=error event=sdwan_receipt_publication_deferred stage=activation_receipt_write error_code=activation_receipt_write cause_code=io_unclassified retryable=false error=inspect activation receipt directory: Not a directory (os error 20)
+level=info event=sdwan_commit generation=7
+level=warn event=route_reconcile_skipped generation=7 reason=core_failed_prefixes_unreported configured_peers=1 active_peers=1 required_routes=1 ready_routes=1 error_code=core_failed_prefixes_unreported
+level=error event=sdwan_receipt_publication_deferred stage=activation_receipt_write error_code=activation_receipt_write cause_code=io_unclassified retryable=false error=inspect activation receipt directory: Not a directory (os error 20)
+level=error event=sdwan_receipt_cleanup_deferred stage=activation_receipt_remove error_code=activation_receipt_remove cause_code=io_unclassified retryable=false error=inspect activation receipt: Not a directory (os error 20)
+level=info event=sdwan_stopped generation=7 rollback_ok=true
+ok
+test tests::committed_server_waits_for_recoverable_peer_loss_without_restarting_core ... level=info event=sdwan_prepare generation=7 pid=1247
+level=info event=sdwan_rlimit_memlock_inherited soft=18446744073709551615 hard=18446744073709551615
+level=info event=core_spawn stage=process_start error_code=none generation=7 role=Server status=/tmp/.tmp820VrK/status.json activation=activations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+level=info event=core_spawned stage=process_start error_code=none pid=1361 generation=7
+level=error event=managed_process_record_deferred stage=managed_process_record_write error_code=managed_process_record_write cause_code=io_not_found retryable=true error=No such file or directory (os error 2)
+level=info event=sdwan_commit generation=7
+level=warn event=route_reconcile_skipped generation=7 reason=core_failed_prefixes_unreported configured_peers=1 active_peers=1 required_routes=1 ready_routes=1 error_code=core_failed_prefixes_unreported
+level=info event=sdwan_stopped generation=7 rollback_ok=true
+ok
+test tests::core_fencing_token_is_scoped_to_the_writable_sdwan_state_directory ... ok
+test tests::core_reply_wait_keeps_progress_alive_across_partial_reads ... ok
+test tests::declaration_formatting_does_not_replace_the_tunnel ... ok
+test tests::declaration_semantic_change_requires_tunnel_replacement ... ok
+test tests::documented_run_first_cli_accepts_global_runtime_arguments ... ok
+test tests::failed_opening_stream_waits_or_recovers_without_rejecting_policy ... ok
+test tests::failed_preparation_preserves_live_steering ... level=info event=sdwan_policy_preparing generation=7 transaction_id=06135ee0c855333a6d7a90db575c97b8bcd0c66d57ddf6b00fe6786a45069a89 steering=unchanged
+level=error event=sdwan_policy_prepare_failed generation=7 transaction_id=06135ee0c855333a6d7a90db575c97b8bcd0c66d57ddf6b00fe6786a45069a89 error_code=core_policy_prepare_failed steering=unchanged error=Candy Core rejected hot reload: injected failure
+ok
+test tests::incomplete_netd_rollback_retries_desired_activation_instead_of_stalling ... level=info event=sdwan_policy_preparing generation=7 transaction_id=dd84267f0b243e04f04f7213e900191c444fd9fb96b0228a01c09b89c5149359 steering=unchanged
+level=error event=sdwan_runtime_interrupted stage=core_policy_commit_unresolved error_code=core_policy_commit_unresolved cause_code=unclassified retryable=false error=injected missing acknowledgement
+ok
+test tests::initial_peer_loss_waits_without_permanent_rejection ... ok
+test tests::invalid_policy_candidate_keeps_live_child_and_never_contacts_netd ... ok
+test tests::invalid_policy_resource_limits_are_rejected_without_retrying_same_candidate ... level=error event=sdwan_activation_rejected stage=core_readiness error_code=core_readiness_failed cause_code=engine_resource_limits_invalid retryable=false error=Core reported failed readiness: lifecycle=failed code=engine_resource_limits_invalid detail=engine resource limits are invalid; temporary memory pressure
+level=error event=sdwan_activation_rejected stage=core_readiness error_code=core_readiness_failed cause_code=sdwan_platform_incompatible retryable=false error=Core reported failed readiness: lifecycle=failed code=sdwan_platform_incompatible detail=engine resource limits are invalid; temporary memory pressure
+level=error event=sdwan_activation_rejected stage=core_readiness error_code=core_readiness_failed cause_code=sdwan_rlimit_nofile_failed retryable=false error=Core reported failed readiness: lifecycle=failed code=sdwan_rlimit_nofile_failed detail=engine resource limits are invalid; temporary memory pressure
+level=error event=sdwan_activation_rejected stage=core_readiness error_code=core_readiness_failed cause_code=unclassified retryable=false error=Core reported failed readiness: lifecycle=failed code=unclassified detail=engine resource limits are invalid; temporary memory pressure
+level=error event=sdwan_activation_retry stage=core_readiness error_code=core_readiness_failed cause_code=engine_resource_exhausted retryable=true error=Core reported failed readiness: lifecycle=failed code=engine_resource_exhausted detail=temporary OS resources exhausted
+level=error event=sdwan_activation_retry stage=core_readiness error_code=core_readiness_failed cause_code=os_resource_temporarily_unavailable retryable=true error=Core reported failed readiness: lifecycle=failed code=os_resource_temporarily_unavailable detail=temporary OS resources exhausted
+ok
+test tests::killing_agent_cannot_leave_a_live_core_child ... 
+running 1 test
+ok
+test tests::legacy_core_never_guesses_an_empty_failed_prefix_set ... ok
+test tests::listener_readiness_is_distinct_from_route_readiness ... ok
+test tests::lost_commit_reply_retries_same_transaction_before_resuming ... level=info event=sdwan_policy_preparing generation=7 transaction_id=1884e8593d98a0d254d9f3d021e83078d23bf0fe139a37bd54ef8b866a6171f4 steering=unchanged
+level=info event=sdwan_hot_reload_committed previous_generation=6 generation=7 core_pid=1399 fallback=candy_proxy
+ok
+test tests::lost_policy_reply_does_not_restore_old_netd_policy_or_stop_core ... level=warn event=sdwan_policy_hot_update_pending code=policy_update_commit_unresolved module=sdwan_activation action=query_or_retry_same_policy error=Core reload socket closed before response: unexpected end of file
+ok
+test tests::non_expiring_server_activation_remains_retry_eligible ... ok
+test tests::opening_packet_stream_preserves_listener_without_admitting_routes ... ok
+test tests::operational_errors_retry_but_security_errors_do_not ... ok
+test tests::parent_lifetime_helper ... ok
+test tests::parses_instance_id ... ok
+test tests::peer_control_and_missing_lane_errors_preserve_committed_recovery ... ok
+test tests::policy_activation_adoption_preserves_tunnel_generation_and_uses_candidate_status_path ... ok
+test tests::policy_update_calls_core_without_starting_a_netd_tunnel_transaction ... level=info event=sdwan_policy_hot_updated tunnel_generation=7 policy_source_generation=8 core_pid=1416 netd=unchanged
+ok
+test tests::readiness_binding_errors_are_distinct_and_never_expose_tokens ... level=warn event=core_readiness_mismatch stage=readiness_binding error_code=readiness_schema_mismatch expected_pid=42 actual_pid=42 expected_schema=3 actual_schema=2 actual_token_match=true expected_generation=9 actual_generation=9 status=/tmp/.tmpCYXAFi/status.json
+level=warn event=core_readiness_mismatch stage=readiness_binding error_code=readiness_pid_mismatch expected_pid=42 actual_pid=123 expected_schema=3 actual_schema=3 actual_token_match=true expected_generation=9 actual_generation=9 status=/tmp/.tmpCYXAFi/status.json
+level=warn event=core_readiness_mismatch stage=readiness_binding error_code=readiness_token_mismatch expected_pid=42 actual_pid=42 expected_schema=3 actual_schema=3 actual_token_match=false expected_generation=9 actual_generation=9 status=/tmp/.tmpCYXAFi/status.json
+ok
+test tests::readiness_requires_matching_generation_and_an_active_authorized_peer ... level=warn event=core_readiness_mismatch stage=readiness_binding error_code=readiness_pid_mismatch expected_pid=43 actual_pid=42 expected_schema=3 actual_schema=3 actual_token_match=true expected_generation=9 actual_generation=9 status=/tmp/.tmpcHyEjg/status.json
+level=warn event=core_readiness_mismatch stage=readiness_binding error_code=readiness_token_mismatch expected_pid=42 actual_pid=42 expected_schema=3 actual_schema=3 actual_token_match=false expected_generation=9 actual_generation=9 status=/tmp/.tmpcHyEjg/status.json
+ok
+test tests::readiness_token_is_random_bounded_hex ... ok
+test tests::receipt_cleanup_error_preserves_retryable_failure_and_original_cause ... level=error event=sdwan_receipt_cleanup_deferred stage=activation_receipt_remove error_code=activation_receipt_remove cause_code=unclassified retryable=false error=activation receipt path must be a regular file
+ok
+test tests::receipt_publication_retries_exact_committed_generation_after_fs_recovers ... level=error event=managed_process_record_deferred stage=managed_process_record_write error_code=managed_process_record_write cause_code=io_not_found retryable=true error=No such file or directory (os error 2)
+level=error event=sdwan_receipt_publication_deferred stage=activation_receipt_write error_code=activation_receipt_write cause_code=io_unclassified retryable=false error=publish activation receipt: Is a directory (os error 21)
+ok
+test tests::rejects_noncanonical_prefix ... ok
+test tests::rejects_short_instance_id ... ok
+test tests::retry_backoff_is_exponential_capped_and_resets_after_stability ... ok
+test tests::retry_wait_is_cancelled_by_activation_content_change ... level=info event=sdwan_retry_cancelled generation=7 reason=candidate_invalid_or_expired
+ok
+test tests::retry_wait_is_cancelled_by_candidate_withdrawal ... level=info event=sdwan_retry_cancelled generation=7 reason=candidate_changed
+ok
+test tests::retry_wait_is_cancelled_by_descriptor_change ... level=info event=sdwan_retry_cancelled generation=7 reason=candidate_invalid_or_expired
+ok
+test tests::retry_wait_is_interrupted_by_shutdown ... ok
+test tests::route_diagnostics_keep_snapshot_drift_visible ... ok
+test tests::route_diagnostics_persist_real_reconcile_outcomes_without_inventing_probes ... ok
+test tests::route_diagnostics_preserve_repair_evidence_after_snapshot_recovers ... ok
+test tests::route_diagnostics_report_only_generation_bound_packet_probes ... ok
+test tests::route_snapshot_issues_classify_recoverable_and_unknown_routes ... ok
+test tests::runtime_diagnostics_preserve_typed_causes_through_context ... ok
+test tests::server_activation_does_not_require_standalone_config ... ok
+test tests::server_commit_failure_rolls_back_then_retries ... level=info event=sdwan_prepare generation=7 pid=1247
+level=info event=sdwan_rlimit_memlock_inherited soft=18446744073709551615 hard=18446744073709551615
+level=info event=core_spawn stage=process_start error_code=none generation=7 role=Server status=/tmp/.tmpCDWkCr/status.json activation=activations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+level=info event=core_spawned stage=process_start error_code=none pid=1438 generation=7
+level=error event=sdwan_activation_failed stage=netd_commit error_code=netd_commit_failed cause_code=netd_system_failure retryable=true error=netd rejected the request: SystemFailure
+level=error event=sdwan_runtime_interrupted stage=netd_commit error_code=netd_commit_failed cause_code=netd_system_failure retryable=true error=netd rejected the request: SystemFailure
+level=info event=core_readiness_cleanup stage=pre_spawn error_code=stale_status_removed status=/tmp/.tmpCDWkCr/status.json
+ok
+test tests::server_core_spawn_failure_rolls_back_then_retries ... level=info event=sdwan_prepare generation=7 pid=1247
+level=info event=sdwan_rlimit_memlock_inherited soft=18446744073709551615 hard=18446744073709551615
+level=info event=core_spawn stage=process_start error_code=none generation=7 role=Server status=/tmp/.tmpLqaYzI/status.json activation=activations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+level=error event=sdwan_activation_failed stage=core_start error_code=core_start_failed cause_code=io_not_found retryable=true error=start Candy Core: /tmp/.tmpLqaYzI/missing-core: No such file or directory (os error 2)
+ok
+test tests::server_hard_readiness_failure_rolls_back_and_fails_closed ... level=info event=sdwan_prepare generation=7 pid=1247
+level=info event=sdwan_rlimit_memlock_inherited soft=18446744073709551615 hard=18446744073709551615
+level=info event=core_spawn stage=process_start error_code=none generation=7 role=Server status=/tmp/.tmpAbe2W0/status.json activation=activations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+level=info event=core_spawned stage=process_start error_code=none pid=1447 generation=7
+level=error event=sdwan_activation_failed stage=core_readiness error_code=core_readiness_failed cause_code=core_readiness_reason_missing retryable=false error=Core reported failed readiness: lifecycle=failed code=core_readiness_reason_missing
+ok
+test tests::server_invalid_declaration_fails_closed ... level=error event=sdwan_activation_rejected stage=declaration_invalid error_code=declaration_invalid cause_code=unclassified retryable=false error=parse SD-WAN declaration: missing field `table_id` at line 1 column 2
+ok
+test tests::server_netd_prepare_failure_retries_without_rejection ... level=info event=sdwan_prepare generation=7 pid=1247
+level=error event=sdwan_activation_retry stage=netd_prepare error_code=netd_prepare_failed cause_code=io_not_found retryable=true error=netd prepare: netd IPC I/O failed: No such file or directory (os error 2)
+ok
+test tests::server_partial_route_readiness_commits_when_listener_is_ready ... level=info event=sdwan_prepare generation=7 pid=1247
+level=info event=sdwan_rlimit_memlock_inherited soft=18446744073709551615 hard=18446744073709551615
+level=info event=core_spawn stage=process_start error_code=none generation=7 role=Server status=/tmp/.tmpG2HiKJ/status.json activation=activations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+level=info event=core_spawned stage=process_start error_code=none pid=1455 generation=7
+level=error event=managed_process_record_deferred stage=managed_process_record_write error_code=managed_process_record_write cause_code=io_not_found retryable=true error=No such file or directory (os error 2)
+level=info event=sdwan_commit generation=7
+level=warn event=route_reconcile_skipped generation=7 reason=core_failed_prefixes_unreported configured_peers=2 active_peers=1 required_routes=2 ready_routes=1 error_code=core_failed_prefixes_unreported
+level=info event=sdwan_stopped generation=7 rollback_ok=true
+ok
+test tests::server_shutdown_during_failure_rollback_never_starts_ordinary_core ... level=info event=sdwan_prepare generation=7 pid=1247
+level=info event=sdwan_rlimit_memlock_inherited soft=18446744073709551615 hard=18446744073709551615
+level=info event=core_spawn stage=process_start error_code=none generation=7 role=Server status=/tmp/.tmpBNNC3c/status.json activation=activations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+level=info event=core_spawned stage=process_start error_code=none pid=1462 generation=7
+level=error event=sdwan_activation_failed stage=netd_commit error_code=netd_commit_failed cause_code=netd_system_failure retryable=true error=netd rejected the request: SystemFailure
+level=error event=sdwan_runtime_interrupted stage=netd_commit error_code=netd_commit_failed cause_code=netd_system_failure retryable=true error=netd rejected the request: SystemFailure
+level=info event=core_readiness_cleanup stage=pre_spawn error_code=stale_status_removed status=/tmp/.tmpBNNC3c/status.json
+level=info event=sdwan_stopped generation=7 phase=runtime_failure rollback_ok=true
+ok
+test tests::server_shutdown_during_readiness_rolls_back_without_rejection_or_fallback ... level=info event=sdwan_prepare generation=7 pid=1247
+level=info event=sdwan_rlimit_memlock_inherited soft=18446744073709551615 hard=18446744073709551615
+level=info event=core_spawn stage=process_start error_code=none generation=7 role=Server status=/tmp/.tmpaz1Hr6/status.json activation=activations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+level=info event=core_spawned stage=process_start error_code=none pid=1468 generation=7
+level=info event=sdwan_stopped generation=7 phase=readiness rollback_ok=true
+ok
+test tests::stale_status_is_removed_before_candidate_start ... level=info event=core_readiness_cleanup stage=pre_spawn error_code=stale_status_removed status=/tmp/.tmpYRkTrV/status.json
+ok
+test tests::superseded_activation_statuses_are_reclaimed_without_touching_other_files ... level=warn event=sdwan_status_cleanup_skipped path=/tmp/.tmpZgcNpX/sdwan-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.status.json reason=not_regular_file
+ok
+test tests::superseded_preparation_aborts_before_netd_mutation ... level=info event=sdwan_policy_preparing generation=7 transaction_id=5afff36078e0c9c8ce6d99ea2ec5d82e19173857321364d5d63421fd26280c62 steering=unchanged
+level=error event=sdwan_policy_prepare_failed generation=7 transaction_id=5afff36078e0c9c8ce6d99ea2ec5d82e19173857321364d5d63421fd26280c62 error_code=core_policy_prepare_failed steering=unchanged error=candidate withdrawn or changed during preparation
+ok
+test tests::transient_readiness_exit_remains_retryable_without_rejection ... level=info event=sdwan_prepare generation=7 pid=1247
+level=info event=sdwan_rlimit_memlock_inherited soft=18446744073709551615 hard=18446744073709551615
+level=info event=core_spawn stage=process_start error_code=none generation=7 role=ClientSdwan status=/tmp/.tmpSrP8v5/recovery-status.json activation=activations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+level=info event=core_spawned stage=process_start error_code=none pid=1480 generation=7
+level=error event=sdwan_runtime_interrupted stage=core_readiness error_code=core_readiness_failed cause_code=unclassified retryable=true error=Candy Core exited before SD-WAN readiness with status 17
+ok
+test tests::unavailable_prepared_route_is_retryable_without_mutating_live_steering ... level=info event=sdwan_policy_preparing generation=7 transaction_id=0108483675a80cb1b1f5e03c95f1aea8af988df6a2675b55ef802e2208eac6ea steering=unchanged
+level=warn event=sdwan_policy_prepare_retry generation=7 transaction_id=0108483675a80cb1b1f5e03c95f1aea8af988df6a2675b55ef802e2208eac6ea error_code=peer_preparation_pending steering=unchanged error=candidate preparation pending: required route owner is unreachable
+ok
+test tests::unresolved_commit_preserves_candidate_for_recovery ... level=info event=sdwan_policy_preparing generation=7 transaction_id=04502d4fb4e22ea9af976797d7c55ef54204fb893a2c60ec712d6e4286815246 steering=unchanged
+level=error event=sdwan_policy_commit_unresolved generation=7 transaction_id=04502d4fb4e22ea9af976797d7c55ef54204fb893a2c60ec712d6e4286815246 error_code=core_policy_commit_unresolved fallback=candy_proxy error=Candy Core rejected hot reload: injected failure
+level=error event=sdwan_runtime_interrupted stage=core_policy_commit_unresolved error_code=core_policy_commit_unresolved cause_code=unclassified retryable=false error=injected missing acknowledgement
+ok
+test tests::withdrawn_activation_receipt_cleanup_is_idempotent ... ok
+
+test result: ok. 148 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.69s
+
