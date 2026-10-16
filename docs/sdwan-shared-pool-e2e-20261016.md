@@ -121,6 +121,23 @@ old stop/spawn path. Runtime must recognize authenticated outbound candidate
 support independently of inbound registration. The strict test assertion is
 retained, and the raw failed journal and Agent log identify this gap.
 
+Runtime `52a9a15` admits outbound shared placement to the negotiated path.
+`shared-pool-negotiated-final-v2` accidentally built Agent without
+`experimental-tunio-rebind`; initial placement was correctly rejected with
+`worker_placement_invalid`. That run certifies neither the fix nor scaling.
+
+`shared-pool-negotiated-final-v3` rebuilt that exact committed Agent with the
+required feature. Initial placement converged and each changed domain obtained
+a real reservation. The first `1 -> 2` transition then stopped in
+`mbb_registered`: TUNIO `ProbeTransaction` rejected the new transaction with
+`owner_transaction_unknown`, `manager_has_no_matching_pending_or_terminal_receipt`.
+The immutable original owner stayed alive while Runtime retried. The test
+failed convergence after 60 seconds; the bounded harness completed in 72.801
+seconds. This is a real candidate transaction registration/prepare ordering
+gap, and remains a failed gate until repaired. Agent SHA256 was
+`2a84647476b31f778c1cb64cb40cd16779b99289fc46e487cf31409349fd9166`;
+the other five binaries match `bilateral-mbb-final-v1`.
+
 `shared-pool-strict-continuity-v1` failed before its initial one-worker placement
 converged. It used Core `052cc392a811c190358109feb93efb8d3423c74b5050481172871636120a6b13`
 and the v19 Agent. No scale-step or zero-loss acceptance follows from this run.
