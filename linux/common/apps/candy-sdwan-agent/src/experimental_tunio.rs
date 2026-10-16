@@ -693,7 +693,11 @@ fn retry_initial_proof<T>(
         }
         match probe() {
             Ok(value) => return Ok(value),
-            Err(error) if crate::runtime_agent::transient_error(&error) => {
+            Err(error)
+                if !error.is::<CoreRecoveryRequired>()
+                    && !error.is::<PairRecoveryRequired>()
+                    && crate::runtime_agent::transient_error(&error) =>
+            {
                 if !warned {
                     eprintln!("level=warn code=initial_proof_pending module=sdwan_activation stage={stage} detail={error:#} action=retry_original_owner_within_original_deadline");
                     warned = true;
@@ -1852,13 +1856,15 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
                     "worker_readiness_status",
                     readiness_deadline,
                     plan.auth_deadline_unix,
-                    || read_core_readiness_with_policy(
-                        &plan.core_status,
-                        plan.signed_generation,
-                        worker.id(),
-                        &token,
-                        ReadinessPolicy::Strict,
-                    ),
+                    || {
+                        read_core_readiness_with_policy(
+                            &plan.core_status,
+                            plan.signed_generation,
+                            worker.id(),
+                            &token,
+                            ReadinessPolicy::Strict,
+                        )
+                    },
                 )?;
                 if matches!(state, Some(ReadinessState::Ready)) {
                     break;
@@ -3298,7 +3304,13 @@ mod activation_proof_tests {
         );
         assert_eq!(attempts, 1);
         assert!(!preserve_activation_proof(&rejected, true, true));
-        let exited: Result<()> = Err(CoreRecoveryRequired.into());
+        let exited: Result<()> = retry_initial_proof(
+            "fixture_exited",
+            Instant::now() + Duration::from_secs(1),
+            u64::MAX,
+            || Err(CoreRecoveryRequired.into()),
+        );
+        assert!(exited.as_ref().unwrap_err().is::<CoreRecoveryRequired>());
         assert!(!preserve_activation_proof(&exited, true, true));
         let expired: Result<()> = retry_initial_proof(
             "fixture_expired",
