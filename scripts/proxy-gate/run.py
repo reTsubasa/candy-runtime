@@ -39,9 +39,13 @@ def main():
                         help='run the opt-in local Unix per-worker negotiated drain smoke gate')
     parser.add_argument('--active-drain-only', action='store_true',
                         help='only run held TCP/UDP negotiated drain and replacement admission gate')
+    parser.add_argument('--udp-only', action='store_true',
+                        help='only run bounded UDP rate, overload and recovery diagnostics')
     parser.add_argument('--active-drain-dns-burst', action='store_true',
                         help='use dense DNS contention stress in the focused drain gate')
     args = parser.parse_args()
+    if args.udp_only and (args.active_drain_only or args.performance):
+        parser.error('--udp-only cannot be combined with drain-only or performance')
     if not 1 <= args.seconds <= 120 or not 1 <= args.rounds <= 10 or not 1 <= args.warmup <= 30:
         parser.error('seconds must be 1..120 and rounds 1..10')
     root = args.evidence.resolve()
@@ -321,6 +325,43 @@ print(json.dumps(sorted(bound & owned)))
             "import subprocess; f=open('/gate/targets.log','ab'); "
             "subprocess.Popen(['python3','/gate/guest.py','targets'],stdout=f,stderr=f,start_new_session=True)")
         dex(server, 'iperf3', '-s', '-D', '-p', '5201', '--logfile', '/gate/iperf-server.log')
+        if args.udp_only:
+            start('recommended', 2)
+            write('recommended-verified-status.json', status('recommended'))
+            def udp_kernel_snapshot(name):
+                return {'udp': dex(name, 'cat', '/proc/net/snmp').stdout,
+                        'sockets': dex(name, 'ss', '-u', '-a', '-n', '-m').stdout,
+                        'qdisc': dex(name, 'tc', '-s', 'qdisc', 'show').stdout,
+                        'links': dex(name, 'ip', '-s', 'link').stdout}
+            before = {side: udp_kernel_snapshot(name)
+                      for side, name in [('client', client), ('server', server)]}
+            identities = {side: json.loads(guest(name, 'snapshot', label=label).stdout)
+                          for side, name, label in [('client', client, 'client'),
+                                                    ('server', server, 'master')]}
+            measured = dex(client, 'python3', '/gate/udp.py', timeout=40, check=False)
+            udp = json.loads(measured.stdout)
+            udp['kernel_before'] = before
+            udp['kernel_after'] = {side: udp_kernel_snapshot(name)
+                                   for side, name in [('client', client), ('server', server)]}
+            udp['client_status_after'] = status('recommended')
+            udp['target_socket'] = json.loads((root / 'udp-target-socket.json').read_text())
+            udp['service_before'] = identities
+            udp['service_after'] = {side: json.loads(guest(name, 'snapshot', label=label).stdout)
+                                    for side, name, label in [('client', client, 'client'),
+                                                              ('server', server, 'master')]}
+            identity = lambda snapshot: {(p['pid'], p['start_ticks']) for p in snapshot['processes']}
+            udp['service_incarnation_gate'] = ('PASS' if all(
+                identity(identities[side]) == identity(udp['service_after'][side])
+                for side in identities) else 'FAIL')
+            if udp['service_incarnation_gate'] != 'PASS':
+                udp['gate'] = 'FAIL'
+            write('udp-rate-overload-recovery.json', udp)
+            rows.append({'case': 'udp_rate_overload_recovery', 'gate': udp['gate']})
+            result['compatibility_gate'] = udp['gate']
+            result['gate'] = udp['gate']
+            result['scope'] = 'isolated Linux UDP short diagnostic only; no full compatibility or release acceptance'
+            stop()
+            raise ActiveDrainComplete()
         if args.active_drain_only:
             start('recommended', 1)
             before_drain = json.loads(guest(server, 'snapshot', label='master').stdout)
