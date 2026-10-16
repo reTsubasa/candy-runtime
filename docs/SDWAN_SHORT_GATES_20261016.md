@@ -227,6 +227,7 @@ are unchanged.
 | --- | --- | --- |
 | `shared-pool-negotiated-final-v13` | PASS, 61.61 s runner | All `1→2→4→2→1→2→1` stages have zero missing ICMP in four domains, including original transaction cap expiry; exact bilateral handoff receipts, infrastructure identities, host resource bounds, isolated host crash and shutdown tests complete. Does not prove vanished-actor UNKNOWN retirement. |
 | `mixed-role-fault-v13` | PASS, 13.25 s fixture | Real quota rejection and release recovery; 60 fresh TCP requests, held TCP, 61 exact 4-KiB UDP packets; 10,420,224 bytes accepted into a never-read flow and at least two actual socket write timeouts before healthy traffic checks. Both SD-WAN domains have zero loss (114/114 and 115/115), and held UDP process/socket/source port remain exact. |
+| `successor-server-restart-v13` | PASS, 63.59 s runner | Activated successor authorization restored after the deliberately killed server worker; preserved TUNIO, unrelated domain identities, exact receipts and subsequent Proxy probes. Injected worker death may cause failed recovery probes; this is not a zero-interruption claim for that domain. |
 
 These passes do not erase v12's failures or establish that the v12 Proxy
 timeout was caused by CFS throttling. Its original packet budget/age and precise
