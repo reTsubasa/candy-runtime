@@ -185,7 +185,12 @@ fn signed_server_helper() {
         .unwrap();
     assert!(matches!(body, Body::IoFd { .. }), "{body:?}");
     let fd = fd.unwrap();
-    ip(&["route", "replace", "10.251.1.0/24", "dev", "candy0"]);
+    let segment: usize = std::env::var("CANDY_SIGNED_SERVER_SEGMENT")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let prefix = format!("10.251.{}.0/24", 1 + segment * 2);
+    ip(&["route", "replace", &prefix, "dev", "candy0"]);
     nix::fcntl::fcntl(
         fd.as_raw_fd(),
         nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),

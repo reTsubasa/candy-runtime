@@ -2,6 +2,7 @@
 
 use super::*;
 use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -241,7 +242,7 @@ fn in_namespace(namespace: &str, program: &str, arguments: &[&str]) -> Command {
     command
 }
 
-fn server(root: &Path, namespace: &str, epoch: u64) -> Process {
+fn server(root: &Path, namespace: &str, epoch: u64, segment: usize) -> Process {
     let log = fs::File::create(root.join(format!("server-{epoch}.log"))).unwrap();
     Process(
         in_namespace(
@@ -256,6 +257,7 @@ fn server(root: &Path, namespace: &str, epoch: u64) -> Process {
         )
         .env("CANDY_SIGNED_TEST_ROOT", root)
         .env("CANDY_SIGNED_SERVER_EPOCH", epoch.to_string())
+        .env("CANDY_SIGNED_SERVER_SEGMENT", segment.to_string())
         .stdout(log.try_clone().unwrap())
         .stderr(log)
         .spawn()
@@ -264,19 +266,13 @@ fn server(root: &Path, namespace: &str, epoch: u64) -> Process {
 }
 
 fn ping(domain: &Domain) -> bool {
+    let segment = usize::from(domain.domain[0].saturating_sub(32));
+    let local = format!("10.251.{}.10", 1 + segment * 2);
+    let remote = format!("10.251.{}.10", 2 + segment * 2);
     in_namespace(
         &domain.client.0,
         "ping",
-        &[
-            "-q",
-            "-I",
-            "10.251.1.10",
-            "-c",
-            "1",
-            "-W",
-            "1",
-            "10.251.2.10",
-        ],
+        &["-q", "-I", &local, "-c", "1", "-W", "1", &remote],
     )
     .output()
     .unwrap()
@@ -389,8 +385,18 @@ pub(super) fn verify_domains() {
         ip(&["link", "set", &a, "netns", &client.0]);
         ip(&["link", "set", &b, "netns", &remote.0]);
         for (namespace, interface, address, lan) in [
-            (&client.0, a.as_str(), "10.200.0.1/24", "10.251.1.10/24"),
-            (&remote.0, b.as_str(), "10.200.0.2/24", "10.251.2.10/24"),
+            (
+                &client.0,
+                a.as_str(),
+                "10.200.0.1/24",
+                &format!("10.251.{}.10/24", 1 + index * 2),
+            ),
+            (
+                &remote.0,
+                b.as_str(),
+                "10.200.0.2/24",
+                &format!("10.251.{}.10/24", 2 + index * 2),
+            ),
         ] {
             ip(&["-n", namespace, "addr", "add", address, "dev", interface]);
             ip(&["-n", namespace, "link", "set", interface, "up"]);
@@ -402,6 +408,7 @@ pub(super) fn verify_domains() {
         let output = Command::new(std::env::var("CANDY_SIGNED_FIXTURE_BINARY").unwrap())
             .arg(path.join("fixture"))
             .env("CANDY_SIGNED_FIXTURE_DOMAIN_SEED", seed.to_string())
+            .env("CANDY_SIGNED_FIXTURE_UNIQUE_PREFIXES", "1")
             .env("CANDY_SIGNED_FIXTURE_ENDPOINT", "10.200.0.2:18443")
             .env("CANDY_SIGNED_FIXTURE_GRANT_TTL_SECS", "600")
             .output()
@@ -471,7 +478,7 @@ pub(super) fn verify_domains() {
         ));
         wait_socket(&path.join("netd.sock"));
         wait_socket(&path.join("server-netd.sock"));
-        let server_process = server(&path, &remote.0, 1);
+        let server_process = server(&path, &remote.0, 1, index);
         let prefix = |address, len| Ipv4Prefix::new(address, len).unwrap();
         let declaration = PrepareDeclaration {
             table_id: table as u32,
@@ -479,11 +486,11 @@ pub(super) fn verify_domains() {
             effective_mtu: 1180,
             routes: vec![
                 RouteDeclaration {
-                    prefix: prefix([10, 251, 1, 0], 24),
+                    prefix: prefix([10, 251, (1 + index * 2) as u8, 0], 24),
                     kind: RouteKind::Local,
                 },
                 RouteDeclaration {
-                    prefix: prefix([10, 251, 2, 0], 24),
+                    prefix: prefix([10, 251, (2 + index * 2) as u8, 0], 24),
                     kind: RouteKind::Remote,
                 },
             ],
@@ -514,6 +521,24 @@ pub(super) fn verify_domains() {
             server_process,
         });
     }
+    // Prefix and peer ownership is keyed by the infrastructure namespace, not
+    // by the shared host process. Prove that every generated prefix has one
+    // namespace owner and that every peer has a distinct domain/infra pair.
+    let mut prefix_owners = BTreeSet::new();
+    let mut peer_owners = BTreeSet::new();
+    for domain in &domains {
+        let namespace = fs::metadata(format!("/var/run/netns/{}", domain.client.0)).unwrap();
+        assert!(peer_owners.insert((domain.domain, domain.infra)));
+        let segment = usize::from(domain.domain[0].saturating_sub(32));
+        for prefix in [
+            [10, 251, (1 + segment * 2) as u8, 0],
+            [10, 251, (2 + segment * 2) as u8, 0],
+        ] {
+            assert!(prefix_owners.insert((namespace.dev(), namespace.ino(), prefix)));
+        }
+    }
+    assert_eq!(peer_owners.len(), domains.len());
+    assert_eq!(prefix_owners.len(), domains.len() * 2);
     fs::create_dir(root.join("cloud")).unwrap();
     fs::set_permissions(root.join("cloud"), fs::Permissions::from_mode(0o700)).unwrap();
     let config = root.join("agent.json");
@@ -540,21 +565,14 @@ pub(super) fn verify_domains() {
         .iter()
         .map(|domain| {
             let output = fs::File::create(domain.root.join("continuous-ping.log")).unwrap();
+            let segment = usize::from(domain.domain[0].saturating_sub(32));
+            let local = format!("10.251.{}.10", 1 + segment * 2);
+            let remote = format!("10.251.{}.10", 2 + segment * 2);
             Process(
                 in_namespace(
                     &domain.client.0,
                     "ping",
-                    &[
-                        "-n",
-                        "-D",
-                        "-I",
-                        "10.251.1.10",
-                        "-i",
-                        "0.05",
-                        "-W",
-                        "1",
-                        "10.251.2.10",
-                    ],
+                    &["-n", "-D", "-I", &local, "-i", "0.05", "-W", "1", &remote],
                 )
                 .stdout(output.try_clone().unwrap())
                 .stderr(output)
@@ -655,7 +673,7 @@ pub(super) fn verify_domains() {
     for domain in &domains[1..] {
         assert!(ping(domain), "single-domain peer failure propagated");
     }
-    domains[0].server_process = server(&domains[0].root, &domains[0].server.0, 2);
+    domains[0].server_process = server(&domains[0].root, &domains[0].server.0, 2, 0);
     wait_all(&mut domains, 1);
     private_json(
         &desired,
