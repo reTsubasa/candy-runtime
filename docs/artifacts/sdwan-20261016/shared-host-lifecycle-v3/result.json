@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "test": "signed_cli_shared_host_lifecycle_scale_gate",
+  "gate": "PASS",
+  "scope": "isolated immutable binary snapshot; no source, release or platform acceptance",
+  "container": "candy-shared-gate-e81637da48d5",
+  "host_deadline_seconds": 300,
+  "binary_hashes": {
+    "candy-core": "de7e11c8d457593e82544518479974182cd83a4c40afbe9287ce5e3828a2f324",
+    "candy-netd": "d4cc67d5ddb4941fb30ffbb433a567b0d4c8c58003b86de07724596b75ce4b18",
+    "candy-agent": "f1fc5eca7dc66f0ea84670dc776ba3c7fd49e5ac670156d87516ce7f58bc0054",
+    "candy-tunio": "1f75e0d44dc6602b2e6e77d7b81067a8131ff8c0885183af6fb3716f7ec73bd3",
+    "sdwan_signed_cli_fixture": "3f9d9f37b852fd87a82e22112b449f3a85f3b14d4b352037dce3bba30bc62618",
+    "signed_cli_helper": "6452d7ea22b5ead6b130ae793fe5ce54e56524ca4570002eb22757a063834e79"
+  },
+  "test_exit_code": 0,
+  "code": "selected_test_passed",
+  "test_executed": true,
+  "exact_one_test_passed": true,
+  "cleanup_exit_code": 0,
+  "elapsed_seconds": 9.75
+}

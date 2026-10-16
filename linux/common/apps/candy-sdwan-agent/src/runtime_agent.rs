@@ -461,6 +461,7 @@ fn domain_loop(
     notifications: SyncSender<()>,
     retry_initial_ms: u64,
     retry_max_ms: u64,
+    shutdown_timeout_ms: u64,
 ) {
     let mut backoff = retry_initial_ms;
     while !crate::shutdown_requested() {
@@ -557,6 +558,23 @@ fn domain_loop(
             backoff = retry_initial_ms;
         }
     }
+    let deadline = Instant::now() + Duration::from_millis(shutdown_timeout_ms);
+    loop {
+        match crate::experimental_tunio::shutdown_recorded_domain(&plan) {
+            Ok(()) => break,
+            Err(error) => {
+                eprintln!("level=warn code=domain_shutdown_pending module=runtime_agent slot={slot} detail={error:#} action=retry_authenticated_cleanup");
+                if Instant::now() >= deadline {
+                    update(&states, slot, &notifications, |state| {
+                        state.phase = "shutdown_failed";
+                        state.code = Some("domain_shutdown_failed");
+                    });
+                    return;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
     update(&states, slot, &notifications, |state| {
         state.phase = "stopped"
     });
@@ -598,6 +616,7 @@ pub(super) fn run(path: &Path, gate: bool) -> Result<()> {
     let invocation = Arc::new(Mutex::new(None));
     let retry_initial_ms = config.cloud.retry_initial_ms;
     let retry_max_ms = config.cloud.retry_max_ms;
+    let shutdown_timeout_ms = config.budgets.shutdown_timeout_ms;
     let mut workers = Vec::new();
     workers.push((
         0,
@@ -638,6 +657,7 @@ pub(super) fn run(path: &Path, gate: bool) -> Result<()> {
                     notifications,
                     retry_initial_ms,
                     retry_max_ms,
+                    shutdown_timeout_ms,
                 )
             },
         ) {
@@ -723,6 +743,9 @@ pub(super) fn run(path: &Path, gate: bool) -> Result<()> {
             .join()
             .map_err(|_| anyhow::anyhow!("runtime Agent managed task panicked"))?;
     }
+    anyhow::ensure!(!states.lock().unwrap_or_else(|poison| poison.into_inner()).iter()
+        .any(|state| state.code == Some("domain_shutdown_failed")),
+        "code=runtime_agent_shutdown_incomplete module=runtime_agent detail=recorded domain cleanup remains unconfirmed");
     if let Some(pool) = &mut shared_pool {
         pool.retire_empty()?;
     }

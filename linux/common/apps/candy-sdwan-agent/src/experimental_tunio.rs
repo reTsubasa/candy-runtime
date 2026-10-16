@@ -1997,6 +1997,118 @@ pub fn adopt_worker(path: &Path, gate: bool) -> Result<()> {
     adopt_worker_with_io(path, gate, false)
 }
 
+fn stop_recorded_process(plan: &Plan, record_path: &Path, worker: bool) -> Result<()> {
+    use candy_process_control::{
+        exchange, ControlOperation, ControlRequest, ProcessIdentity,
+    };
+    let Some(record) = crate::process_record::read_optional(record_path)? else {
+        return Ok(());
+    };
+    let recorded_plan = record
+        .effective_plan_file
+        .as_ref()
+        .map(|path| read_plan(path))
+        .transpose()?;
+    let current = recorded_plan.as_ref().unwrap_or(plan);
+    anyhow::ensure!(
+        current.domain_id == plan.domain_id && current.infrastructure == plan.infrastructure,
+        "code=shutdown_record_scope_mismatch module=process_supervisor"
+    );
+    let identity = ProcessIdentity {
+        pid: record.pid,
+        start_ticks: record.process_start_ticks,
+    };
+    if record.business_is_current()? {
+        record.validate_infrastructure_identity(if worker {
+            &current.core
+        } else {
+            &current.tunio
+        })?;
+        let socket = if worker {
+            current
+                .independent_worker
+                .as_ref()
+                .context("recorded worker control absent")?
+                .control_socket
+                .clone()
+        } else {
+            current
+                .independent_supervision
+                .as_ref()
+                .context("recorded I/O control absent")?
+                .control_socket
+                .clone()
+        };
+        for operation in [ControlOperation::Takeover, ControlOperation::Stop] {
+            exchange(
+                &socket,
+                identity,
+                &ControlRequest {
+                    schema_version: 1,
+                    operation,
+                    token_sha256: record.readiness_token_sha256.clone(),
+                    nonce: uuid::Uuid::new_v4().simple().to_string(),
+                },
+            )?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while record.business_is_current()? && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        anyhow::ensure!(
+            !record.business_is_current()?,
+            "code=recorded_process_stop_pending module=process_supervisor"
+        );
+    }
+    #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+    if let (Some(host), Some(instance)) = (&record.shared_worker, &record.shared_domain_instance) {
+        crate::shared_worker::forget_domain(host, instance)?;
+    }
+    Ok(())
+}
+
+pub(super) fn shutdown_recorded_domain(path: &Path) -> Result<()> {
+    let plan = read_plan(path)?;
+    let mut failures = Vec::new();
+    // Shutdown must also cover supervisors in retry/backoff, whose recorded
+    // owner has never reached the normal adoption-loop cleanup path.
+    let mut netd = NetdControl::new(&plan);
+    let revoke = (|| -> Result<()> {
+        let (body, fd) = netd.exchange(Operation::ForwardStatus)?;
+        anyhow::ensure!(fd.is_none(), "unexpected shutdown packet descriptor");
+        if let Body::ForwardStatus {
+            owner: Some(owner), ..
+        } = body
+        {
+            anyhow::ensure!(
+                owner.domain_id == plan.domain_id,
+                "shutdown forwarding owner differs"
+            );
+            expect_ack(&mut netd, Operation::ForwardRevoke { owner })?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = revoke {
+        failures.push(format!("forwarding: {error:#}"));
+    }
+    if let Some(worker) = &plan.independent_worker {
+        if let Err(error) = stop_recorded_process(&plan, &worker.process_record, true) {
+            failures.push(format!("business: {error:#}"));
+        }
+    }
+    if let Some(io) = &plan.independent_supervision {
+        if let Err(error) = stop_recorded_process(&plan, &io.process_record, false) {
+            failures.push(format!("infrastructure I/O: {error:#}"));
+        }
+    }
+    anyhow::ensure!(
+        failures.is_empty(),
+        "code=recorded_domain_shutdown_pending module=runtime_agent detail={}",
+        failures.join("; ")
+    );
+    Ok(())
+}
+
 pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) -> Result<()> {
     use candy_process_control::{
         exchange, process_identity, process_is_current_confirmed, ControlOperation, ControlRequest,
@@ -2341,9 +2453,7 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
         bail!("code=adopted_business_stop_pending module=process_supervisor detail=authenticated stop has not retired the adopted domain; preserve shared host receipts");
     }
     #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
-    if let (Some(host), Some(instance)) =
-        (&record.shared_worker, &record.shared_domain_instance)
-    {
+    if let (Some(host), Some(instance)) = (&record.shared_worker, &record.shared_domain_instance) {
         crate::shared_worker::forget_domain(host, instance)?;
     }
     if shutdown_requested() {

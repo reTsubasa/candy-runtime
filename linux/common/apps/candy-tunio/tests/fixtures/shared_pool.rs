@@ -738,6 +738,30 @@ pub(super) fn verify_domains() {
         )
         .unwrap();
     }
+    // A shutdown arriving during proof retry must clean the original recorded
+    // owner even though the normal adoption loop was never entered.
+    let log_offset = fs::metadata(root.join("agent.log")).unwrap().len() as usize;
+    let mut unavailable = status(&domains[0].root.join("worker-process.json")).unwrap();
+    unavailable["status_path"] = serde_json::json!(domains[0].root.join("unavailable-status.json"));
+    private_json(&domains[0].root.join("worker-process.json"), &unavailable);
+    // Reinspect the unchanged desired authority instead of starting a renewal.
+    OpenOptions::new()
+        .append(true)
+        .open(domains[0].root.join("plan.json"))
+        .unwrap()
+        .write_all(b"\n")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let log = fs::read(root.join("agent.log")).unwrap();
+        if String::from_utf8_lossy(&log[log_offset..]).contains("managed_process_proof_pending") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "proof-retry shutdown fault was not exercised");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    evidence.push(serde_json::json!({"fault":"shutdown_during_unavailable_bound_proof","pid":unavailable["pid"]}));
+    publish_scale_evidence(&evidence);
     unsafe {
         nix::libc::kill(agent.0.id() as i32, nix::libc::SIGTERM);
     }

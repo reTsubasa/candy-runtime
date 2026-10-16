@@ -38,6 +38,16 @@ acceptance or the deferred throughput target.
    `Stop` but did not wait for business completion or forget shared receipts.
    Adoption now waits at most two seconds, rejects an unconfirmed stop, and
    explicitly forgets a confirmed stopped domain before host retirement.
+6. `shared-pool-e2e-v14` exposed shutdown arriving while a domain supervisor
+   was in proof retry/backoff. That path had never entered adoption cleanup,
+   leaving shared business domains alive. Every domain loop now performs a
+   bounded authenticated cleanup sweep using immutable process records. It
+   revokes the actual recorded forwarding owner, independently stops business
+   and infrastructure I/O, verifies process epochs, forgets shared completion
+   receipts, and reports unconfirmed cleanup as a failed shutdown. Missing
+   readiness proof cannot prevent stopping an authenticated recorded owner.
+   The fixture deterministically injects this missing-proof state before
+   shutdown and requires the cleanup to complete.
 
 Scale evidence is published after every successful step so a later fault cannot
 erase the record of earlier steps. Failed runs are retained and do not count as
@@ -53,6 +63,12 @@ overall gate acceptance.
 | shared-pool-e2e-v11 | FAIL | All five scale steps complete; killed-host recovery exposes fencing defect. |
 | shared-pool-e2e-v12 | FAIL | All scale and fault steps complete; adopted-domain shutdown omits completion acknowledgement. |
 | shared-pool-e2e-v13 | PASS | All scale, isolation, killed-host recovery and graceful-shutdown checks pass; 25.867 seconds. |
+| shared-pool-e2e-v14 | FAIL | Integrated Core completes scale/fault checks; shutdown during proof retry leaves business domains alive. |
+| shared-pool-e2e-v15 | FAIL | Fault injection changes placement revision and triggers legitimate renewal; missing-proof assertion is not exercised. |
+| shared-pool-e2e-v16 | PASS | Corrected missing-proof injection and authenticated cleanup sweep; 49.163 seconds. |
+| shared-pool-e2e-v17/v18 | PASS | Final cleanup without unnecessary PID wait; worktree binary evidence only. |
+| shared-pool-e2e-v19 | PASS | Immutable snapshot of all six Linux binaries; full scale, fault isolation, recovery and missing-proof shutdown; 31.256 seconds. |
+| shared-host-lifecycle-v3 | PASS | Same six immutable binaries; retirement remains rejected until completed domains are forgotten; 9.750 seconds. |
 
 Runs v9-v11 and lifecycle-v2 used Core binary SHA256
 `1c75719891551ddb88378916cbfdad6c091a5e8012588c5e02399d4874cf12ee`.
@@ -67,8 +83,14 @@ and netd SHA256
 `d4cc67d5ddb4941fb30ffbb433a567b0d4c8c58003b86de07724596b75ce4b18`.
 It includes the high-water fencing fix and adopted-domain completion cleanup.
 
-## Remaining Gate
+## Immutable Binary Boundary
 
-The intermediate functional gate is closed by v13. Rebuild the integrated final
-Core, Agent and netd, then repeat the selected lifecycle and four-domain scaling
-gates with recorded hashes to establish final exact-source acceptance.
+Run v19 tests copied immutable Linux binaries mounted read-only. The harness
+checks source, copied and source-after-copy SHA256 equality and records all six
+hashes in `shared-pool-e2e-v19/binary-hashes.json`. Its Core is
+`de7e11c8d457593e82544518479974182cd83a4c40afbe9287ce5e3828a2f324`,
+Agent is `f1fc5eca7dc66f0ea84670dc776ba3c7fd49e5ac670156d87516ce7f58bc0054`,
+and netd is `d4cc67d5ddb4941fb30ffbb433a567b0d4c8c58003b86de07724596b75ce4b18`.
+This closes the functional gate for those binary bytes. Concurrent changes
+continue in other modules; this evidence does not certify a later source tree,
+signed release, production deployment, OpenWrt or throughput acceptance.

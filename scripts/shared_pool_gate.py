@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -66,6 +67,8 @@ def main() -> int:
     parser.add_argument("test", choices=TESTS, nargs="?", default=TESTS[0])
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--build", type=Path, help="run verified frozen release artifacts directly")
+    parser.add_argument("--snapshot-helper", type=Path,
+                        help="copy current Linux binaries and this test helper, then test immutable copies")
     args = parser.parse_args()
     if args.self_check:
         self_check()
@@ -121,6 +124,46 @@ def main() -> int:
                        "-v", f"{build / 'binaries'}:/build/release:ro", "-v", f"{evidence}:/evidence",
                        "-e", "CANDY_NETD_ISOLATED_KERNEL_TEST=1", "-e", "CANDY_SIGNED_EVIDENCE_DIR=/evidence"]
             for variable, label in paths.items():
+                command.extend(["-e", f"{variable}=/binaries/{label}"])
+            command.extend(["candy-sdwan-perf-runner:20261013", "timeout", "240",
+                            "/binaries/signed_cli_helper", "--exact", args.test, "--ignored", "--nocapture"])
+        if args.snapshot_helper:
+            if args.build:
+                raise ValueError("choose frozen release or local binary snapshot")
+            binaries = evidence / "binaries"
+            binaries.mkdir()
+            sources = {
+                "candy-core": CORE / "target-linux-shared/debug/candy-core",
+                "candy-netd": RUNTIME / "target-linux-netd-v2/debug/candy-netd",
+                "candy-agent": RUNTIME / "target-linux-netd-v2/debug/candy-sdwan-agent",
+                "candy-tunio": RUNTIME / "target-linux-tunio/debug/candy-tunio",
+                "sdwan_signed_cli_fixture": CORE / "target-linux-shared/debug/examples/sdwan_signed_cli_fixture",
+                "signed_cli_helper": args.snapshot_helper.resolve(),
+            }
+            hashes = {}
+            for label, source in sources.items():
+                before = hashlib.sha256(source.read_bytes()).hexdigest()
+                shutil.copy2(source, binaries / label)
+                copied = hashlib.sha256((binaries / label).read_bytes()).hexdigest()
+                after = hashlib.sha256(source.read_bytes()).hexdigest()
+                if not before == copied == after:
+                    raise ValueError(f"binary changed during snapshot: {label}")
+                hashes[label] = copied
+            (evidence / "binary-hashes.json").write_text(json.dumps(hashes, indent=2) + "\n")
+            result.update(scope="isolated immutable binary snapshot; no source, release or platform acceptance",
+                          binary_hashes=hashes)
+            command = ["docker", "run", "--name", name, "--rm", "--network", "none", "--privileged",
+                       "-v", f"{binaries}:/binaries:ro",
+                       "-v", f"{binaries}:/workspace/target-linux-tunio/debug:ro",
+                       "-v", f"{evidence}:/evidence",
+                       "-e", "CANDY_NETD_ISOLATED_KERNEL_TEST=1",
+                       "-e", "CANDY_SIGNED_EVIDENCE_DIR=/evidence"]
+            for variable, label in {
+                "CANDY_CORE_TEST_BINARY": "candy-core",
+                "CANDY_NETD_TEST_BINARY": "candy-netd",
+                "CANDY_AGENT_TEST_BINARY": "candy-agent",
+                "CANDY_SIGNED_FIXTURE_BINARY": "sdwan_signed_cli_fixture",
+            }.items():
                 command.extend(["-e", f"{variable}=/binaries/{label}"])
             command.extend(["candy-sdwan-perf-runner:20261013", "timeout", "240",
                             "/binaries/signed_cli_helper", "--exact", args.test, "--ignored", "--nocapture"])
