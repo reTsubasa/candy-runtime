@@ -3488,7 +3488,30 @@ fn hot_replace_activation(
     }
     // Recheck after netd work as well; Cloud may have withdrawn/superseded
     // the candidate while the kernel transaction was running.
-    if !activation_binding_unchanged(replacement).unwrap_or(false) || shutdown_requested() {
+    let binding_unchanged = match activation_binding_unchanged(replacement) {
+        Ok(value) => value,
+        Err(error) => {
+            abort_core_preparation(replacement, child, &transaction_id);
+            if already_suspended {
+                restore_uncommitted_netd_activation(
+                    current,
+                    child,
+                    netd,
+                    previous_declaration,
+                    transition,
+                    true,
+                )
+                .map_err(|error| anyhow::Error::new(HotReloadRecoveryRequired(error)))?;
+            } else {
+                netd.rollback()
+                    .context("discard prepared netd replacement")?;
+            }
+            return Err(anyhow::Error::new(CorePreparationPending(format!(
+                "candidate activation binding could not be verified: {error:#}"
+            ))));
+        }
+    };
+    if !binding_unchanged || shutdown_requested() {
         abort_core_preparation(replacement, child, &transaction_id);
         if already_suspended {
             restore_uncommitted_netd_activation(
@@ -3630,7 +3653,15 @@ fn hot_replace_activation(
         );
         return Err(anyhow::Error::new(AppliedHotReloadPending(error)));
     }
-    if !activation_binding_unchanged(replacement).unwrap_or(false) || shutdown_requested() {
+    let binding_unchanged = match activation_binding_unchanged(replacement) {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(anyhow::Error::new(AppliedHotReloadPending(
+                error.context("verify candidate activation binding after Core commit"),
+            )));
+        }
+    };
+    if !binding_unchanged || shutdown_requested() {
         if !already_suspended {
             if let Err(drain_error) = drain_old_bounded(netd) {
                 return Err(anyhow::Error::new(AppliedHotReloadPending(

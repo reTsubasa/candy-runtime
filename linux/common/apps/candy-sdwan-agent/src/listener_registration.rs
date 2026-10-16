@@ -212,7 +212,7 @@ fn publish_registration(plan: &Plan, owner_path: &Path, prepared_ingress: bool) 
         }
         Err(error) => match fs::symlink_metadata(&destination) {
             Ok(_) => {
-                return Err(anyhow::Error::from(error).context(
+                return Err(error.context(
                     "code=listener_registration_unconfirmed module=listener_registry action=preserve_active_owner_and_retry",
                 ));
             }
