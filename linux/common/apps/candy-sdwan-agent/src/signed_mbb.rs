@@ -677,6 +677,19 @@ fn mbb_finalize(
         .as_ref()
         .context("MBB predecessor absent")?
         .clone();
+    let outcome = if drain_failed {
+        "failed_drain_preserved"
+    } else {
+        "drained"
+    };
+    anyhow::ensure!(
+        journal
+            .mbb_outcome
+            .as_deref()
+            .is_none_or(|previous| previous == outcome),
+        "code=mbb_terminal_outcome_changed module=sdwan_handoff action=preserve_original_evidence"
+    );
+    journal.mbb_outcome = Some(outcome.into());
     // A future worker restart uses the committed signed configuration. Its
     // short-lived reservation is solely for this handoff, never a boot target.
     plan.worker_candidate_plan = None;

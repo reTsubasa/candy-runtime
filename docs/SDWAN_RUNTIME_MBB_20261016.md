@@ -54,6 +54,9 @@ retired. Core can then retain a compact explicit failure tombstone and admit the
 next transaction. Runtime publishes committed process records only after the
 finalization acknowledgement; crashes before that point replay the same failure
 transaction and cannot bypass its retirement evidence.
+The persistent `mbb_outcome` distinguishes `drained` from
+`failed_drain_preserved` even after ownership records reach committed; recovery
+cannot rewrite an existing terminal outcome.
 
 ## Local verification
 

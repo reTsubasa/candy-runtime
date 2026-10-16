@@ -71,6 +71,8 @@ mod linux {
         mbb_reservation: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mbb_failed_retirement: Option<super::super::candidate_ownership::CandidateProof>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mbb_outcome: Option<String>,
     }
 
     fn publish<T: Serialize>(path: &Path, object: &T) -> Result<()> {
@@ -1046,6 +1048,7 @@ mod linux {
             candidate_owner: None,
             mbb_reservation: None,
             mbb_failed_retirement: None,
+            mbb_outcome: None,
         };
         if let Err(error) = publish(&journal_path, &journal) {
             if read_private::<Journal>(&journal_path).is_ok_and(|persisted| {
