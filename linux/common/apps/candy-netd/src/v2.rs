@@ -932,6 +932,25 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
                         &previous.declaration,
                         &candidate.declaration,
                     )?;
+                    if previous.phase == Phase::Active
+                        && candidate.declaration == previous.declaration
+                        && candidate.failed_prefixes == previous.failed_prefixes
+                        && previous.pending_failed_prefixes.is_none()
+                        && candidate.pending_failed_prefixes.is_none()
+                    {
+                        // Infra identity, owner authority and exact declaration
+                        // were validated above. An owner-only handoff changes
+                        // no kernel policy: installing reject routes here would
+                        // drop healthy traffic between two identical policies.
+                        // Persist only the final state, with no Preparing intent
+                        // whose crash recovery could fence the retained routes.
+                        candidate.phase = Phase::Active;
+                        next.forward = Some(candidate);
+                        next.candidate = None;
+                        self.persist(next)?;
+                        crate::eprintln!("level=info code=forward_owner_committed_policy_preserved module=netd_v2 signed_generation={} worker_epoch={} fencing_token={} action=retain_exact_kernel_policy", owner.signed_generation, owner.worker_epoch, owner.fencing_token);
+                        return Ok((Body::Ack, None));
+                    }
                     // Persist commit intent so a crash repairs the previous policy, never TUN.
                     self.persist(next.clone())?;
                     let result = self.install_replacement(&previous, &candidate, &next.sysctls);
