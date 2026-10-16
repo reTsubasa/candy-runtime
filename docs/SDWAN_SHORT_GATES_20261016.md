@@ -38,6 +38,24 @@ manifest is `dd45daca428c0bf0328c040e625bb2a7e6d54668700f5c6b9f2c3463c4ffb2e5`.
 Its release build and integration result must be read separately from v10's
 debug/test artifacts.
 
+### Frozen Release v10b Results
+
+The six release artifacts built successfully. The Core ELF SHA-256 is
+`02ca0009e2397c690c102552b8a892bba169c51b5b1b8387e9be2d463a78d249`.
+These results use that immutable set, not subsequent source edits:
+
+| Evidence directory | Result | Interpretation |
+| --- | --- | --- |
+| `shared-pool-negotiated-final-v10` | FAIL, 62.49 s | Scale to two workers does not converge. Candidate journals show installed/probed/drained, but repeated netd finalize calls can change the same owner's deadline and replay consumed fences. Fix and fresh gate required. |
+| `successor-server-restart-v10` | FAIL, 60.91 s | Test compared the retained IO record against the pre-injection worker epoch. Exact PID/start time/inode/binding/authorization/IO epoch are unchanged; the deliberately killed Core recovered once and updated IO's worker epoch. Runtime `13f8c35` corrects the baseline and adds full Core-record stability assertions. Fresh gate required. |
+| `shared-host-lifecycle-v10` | PASS, 2.64 s | Selected frozen shared-host lifecycle fixture only. |
+| `mixed-listener-two-domain-v10` | PASS, 17.60 s | Two domains, real ICMP and Proxy HTTP, exact activation ACK, worker recovery, two master restarts, preserved TUNIO/domain workers, and no live orphan workers. |
+| `proxy-release-v10-active-drain-v1` | PASS | Runtime Rust client held TCP tail/FIN, UDP/DNS, negotiated active-session drain and replacement admission. No full release acceptance implied. |
+
+The restart failure does not prove a production TUNIO replacement. Ordinary
+redials rejected while an existing attachment remains authoritative retain
+the active-owner fence. No bypass of that fence is included in the test fix.
+
 ## Proxy UDP Findings
 
 `proxy-frozen-v6-reliability-v1` remains FAIL. It uses the Runtime Rust client
@@ -64,6 +82,30 @@ pauses. Root cause and a valid complete UDP recovery pass remain open.
 `f1afaac` retains the unchanged one-second recovery criterion and adds a later
 health observation only after a failure. A later pass cannot overwrite the
 original recovery failure. No packet-loss or scheduling threshold is relaxed.
+
+`proxy-release-v10-udp-v3` retains FAIL: all six cohorts returned 300/300,
+but the first pacer correction accumulated ordinary sleep jitter and made
+every cohort's nominal schedule invalid. Runtime `f46b97b` and `54f1afb`
+correct and test this harness defect. A long pause or oversleep rebases once,
+short jitter permits at most twice the nominal pacing rate, and original
+nominal lateness and rebases still fail the load-validity gate. The receiver
+observes one second after actual sender completion within a bounded total
+window. Idle target logging flushes without waiting for another packet.
+
+`proxy-release-v10-udp-v4` also retains FAIL. All five cohorts returned exactly
+300/300 with no loss. Ordinary 512/1200/4096-byte and one-second-after-overload
+1200-byte recovery cohorts have valid schedules and pass. Ordinary 64-byte
+load had one schedule rebase and remains invalid, so the complete gate fails.
+This supports recovery of this frozen build in that measured cohort, not a
+claim that all earlier packet loss was environmental or that UDP is accepted.
+
+Core `44b8838` separately repairs demonstrated IPC coupling: ACK and Data
+queues are independently bounded; ACK has writer priority and bounded enqueue;
+QUIC receive does not wait for byte credits. Full queues and unavailable credit
+now emit rate-limited structured drop summaries. Native IPC tests 14/14 and
+strict transport Clippy pass. Finite UDP dropping remains intentional. This
+commit is not in frozen v10b and needs fresh Linux regression. Relative-deadline
+extension remains a separate issue until its fix and tests complete.
 
 ## Remaining Acceptance
 
