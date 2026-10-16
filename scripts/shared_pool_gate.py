@@ -70,9 +70,13 @@ def main() -> int:
     parser.add_argument("test", choices=TESTS, nargs="?", default=TESTS[0])
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--build", type=Path, help="run verified frozen artifacts directly")
+    parser.add_argument("--pin-cpus", action="store_true",
+                        help="bound frozen gate to three VM CPUs without a periodic CFS quota")
     parser.add_argument("--snapshot-helper", type=Path,
                         help="copy current Linux binaries and this test helper, then test immutable copies")
     args = parser.parse_args()
+    if args.pin_cpus and not args.build:
+        parser.error("--pin-cpus requires --build")
     if args.self_check:
         self_check()
         return 0
@@ -108,6 +112,16 @@ def main() -> int:
                    "timeout", "240", "cargo", "test", "--test", "signed_cli", args.test,
                    "--offline", "--", "--exact", "--ignored", "--nocapture"]
         if args.build:
+            resources = ["--cpus", "3"]
+            result["cpu_isolation"] = {"cfs_quota_cpus": 3}
+            if args.pin_cpus:
+                available = subprocess.run(
+                    ["docker", "info", "--format", "{{.NCPU}}"], check=True,
+                    text=True, capture_output=True, timeout=10)
+                if int(available.stdout.strip()) < 3:
+                    raise ValueError("--pin-cpus requires at least three Docker VM CPUs")
+                resources = ["--cpuset-cpus", "0-2"]
+                result["cpu_isolation"] = {"cpuset": "0-2", "cfs_quota": "none"}
             build = args.build.resolve()
             if json.loads((build / "result.json").read_text())["gate"] != "BUILD_PASS":
                 raise ValueError("frozen artifact build has not passed")
@@ -127,7 +141,7 @@ def main() -> int:
                 result["build_provenance_sha256"] = hashlib.sha256(provenance.read_bytes()).hexdigest()
                 result["build_provenance"] = json.loads(provenance.read_text())
             command = ["docker", "run", "--name", name, "--rm", "--network", "none", "--privileged",
-                       "--cpus", "3", "--memory", "3g", "--pids-limit", "512",
+                       *resources, "--memory", "3g", "--pids-limit", "512",
                        "-v", f"{build / 'binaries'}:/binaries:ro",
                        # Cargo embeds this path in debug signed_cli fixtures.
                        "-v", f"{build / 'binaries'}:/build/debug:ro",
@@ -140,7 +154,13 @@ def main() -> int:
                             '/binaries/candy-agent /binaries/signed_cli_helper '
                             '/build/debug/candy-tunio /build/release/candy-tunio; do '
                             'test -x "$binary" || { echo "code=frozen_binary_unavailable '
-                            'module=shared_pool_gate path=$binary" >&2; exit 70; }; done; exec "$@"',
+                            'module=shared_pool_gate path=$binary" >&2; exit 70; }; done; '
+                            'cpu_stat() { for cpu_file in /sys/fs/cgroup/cpu.stat '
+                            '/sys/fs/cgroup/cpu/cpu.stat; do if test -r "$cpu_file"; then '
+                            'cat "$cpu_file"; return; fi; done; echo unavailable; }; '
+                            'cpu_stat > /evidence/cpu-stat-before.txt; '
+                            'if "$@"; then gate_status=0; else gate_status=$?; fi; '
+                            'cpu_stat > /evidence/cpu-stat-after.txt; exit "$gate_status"',
                             "frozen-gate", "timeout", "240",
                             "/binaries/signed_cli_helper", "--exact", args.test, "--ignored", "--nocapture"])
         if args.snapshot_helper:
