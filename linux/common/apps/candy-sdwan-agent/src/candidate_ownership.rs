@@ -415,6 +415,23 @@ impl CandidateOwner {
         self.commit_request(base, proof)
     }
 
+    pub(super) fn require_failed_retirement_receipt(
+        &self,
+        reply: &AuthorityControlResponse,
+        io_identity: candy_process_control::ProcessIdentity,
+        now_mono_ms: u64,
+    ) -> Result<()> {
+        ensure!(self.observe(reply)? == OwnerState::Committed
+            && reply.process == io_identity && reply.current_binding == self.envelope.binding
+            && reply.forced_retirement && !reply.old_owner_drained
+            && reply.retained_owner_binding.is_none() && reply.pending.is_none()
+            && now_mono_ms >= self.prepare_deadline_mono_ms
+            && reply.actual_deadline_mono_ms.is_some_and(|cap|
+                now_mono_ms < cap && cap <= self.envelope.effective_deadline_mono_ms),
+            "code=mbb_failed_retirement_receipt_mismatch module=sdwan_handoff action=preserve_current_owner");
+        Ok(())
+    }
+
     pub(super) fn commit_is_uncertain(&self) -> bool {
         self.commit_intent
     }
@@ -894,5 +911,46 @@ mod tests {
         assert!(exact
             .require_failed_retirement(&owner.envelope, &owner.expected_peers)
             .is_err());
+    }
+
+    #[test]
+    fn failed_finalization_requires_exact_io_new_owner_and_original_cap() {
+        let owner = candidate();
+        let io = candy_process_control::ProcessIdentity {
+            pid: 7,
+            start_ticks: 8,
+        };
+        let mut exact = reply(&owner, "committed");
+        exact.process = io;
+        exact.forced_retirement = true;
+        exact.old_owner_drained = false;
+        exact.retained_owner_binding = None;
+        exact.pending = None;
+        owner
+            .require_failed_retirement_receipt(&exact, io, 20_001)
+            .unwrap();
+        assert!(owner
+            .require_failed_retirement_receipt(&exact, io, 19_999)
+            .is_err());
+        assert!(owner
+            .require_failed_retirement_receipt(&exact, io, 50_000)
+            .is_err());
+        for field in 0..8 {
+            let mut changed: AuthorityControlResponse =
+                serde_json::from_value(serde_json::to_value(&exact).unwrap()).unwrap();
+            match field {
+                0 => changed.process.start_ticks += 1,
+                1 => changed.current_binding.owner_epoch += 1,
+                2 => changed.forced_retirement = false,
+                3 => changed.old_owner_drained = true,
+                4 => changed.retained_owner_binding = owner.expected_active,
+                5 => changed.pending = Some(owner.envelope.clone()),
+                6 => changed.actual_deadline_mono_ms = Some(50_001),
+                _ => changed.active.as_mut().unwrap().transaction_id.push('f'),
+            }
+            assert!(owner
+                .require_failed_retirement_receipt(&changed, io, 20_001)
+                .is_err());
+        }
     }
 }

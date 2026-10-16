@@ -55,6 +55,7 @@ pub(super) fn exchange_candidate(
                 | "candidate_status"
                 | "candidate_retire_old"
                 | "candidate_retire_after_failure"
+                | "candidate_finalize_failure"
         ),
         "code=candidate_control_operation_invalid module=sdwan_handoff"
     );

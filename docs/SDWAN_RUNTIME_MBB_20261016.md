@@ -46,6 +46,15 @@ Finish. A crash after successful Finish resumes successful finalization even
 after the original handoff deadline. Failed convergence logs
 `code=mbb_failed_drain_preserved`, never the successful-drain event.
 
+After fresh Netd forwarding commit, Runtime confirms predecessor business
+retirement and submits the exact forced-retirement TUNIO receipt to Core's
+authenticated `candidate_finalize_failure` operation. A shared worker host may
+remain alive: its exact predecessor domain instance, not the host PID, must be
+retired. Core can then retain a compact explicit failure tombstone and admit the
+next transaction. Runtime publishes committed process records only after the
+finalization acknowledgement; crashes before that point replay the same failure
+transaction and cannot bypass its retirement evidence.
+
 ## Local verification
 
 - Core packet-port tests: 60/60; strict all-target Clippy passed.

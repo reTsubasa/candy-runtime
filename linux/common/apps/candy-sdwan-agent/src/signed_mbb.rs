@@ -638,10 +638,7 @@ fn mbb_retire_failed(
         ),
         None,
     )?;
-    anyhow::ensure!(candidate.observe(&actual)? == OwnerState::Committed
-        && actual.forced_retirement && !actual.old_owner_drained
-        && actual.retained_owner_binding.is_none(),
-        "code=mbb_failed_retirement_receipt_mismatch module=sdwan_handoff action=preserve_current_owner");
+    candidate.require_failed_retirement_receipt(&actual, context.io_identity, monotonic_ms()?)?;
     journal.phase = "mbb_failed_drain_preserved".into();
     publish(journal_path, journal)?;
     mbb_finalize(context, plan, journal, journal_path, record, &actual, true)
@@ -753,6 +750,37 @@ fn mbb_finalize(
         thread::sleep(Duration::from_millis(50));
     }
     commit_authorized(plan, record, &owner, &mut netd)?;
+    if drain_failed {
+        journal
+            .candidate_owner
+            .as_ref()
+            .context("MBB candidate owner absent")?
+            .require_failed_retirement_receipt(actual, context.io_identity, monotonic_ms()?)?;
+        retire_old_worker(journal, context.desired, parent)?;
+        anyhow::ensure!(
+            !old.business_is_current().context(ManagedProofPending)?,
+            "code=mbb_failed_predecessor_still_active module=sdwan_handoff"
+        );
+        let finalized = mbb_core_exchange(
+            plan,
+            record,
+            "candidate_finalize_failure",
+            &serde_json::json!({"transaction_id":envelope.transaction_id,
+                "retirement_evidence":actual,
+                "predecessor_retired":true,
+                "predecessor_process":{"pid":old.pid,"start_ticks":old.process_start_ticks},
+                "predecessor_domain_instance":old.shared_domain_instance}),
+        )?;
+        anyhow::ensure!(
+            finalized["transaction_id"] == envelope.transaction_id
+                && finalized["phase"] == "failed_retirement_finalized"
+                && finalized["forced_retirement"] == true
+                && finalized["old_owner_drained"] == false,
+            "code=mbb_failed_finalization_unconfirmed module=sdwan_handoff"
+        );
+        journal.phase = "mbb_failed_retirement_finalized".into();
+        publish(journal_path, journal)?;
+    }
     finish_records(
         plan,
         journal,
@@ -761,7 +789,9 @@ fn mbb_finalize(
         &io.process_record,
         context.io_record,
     )?;
-    retire_old_worker(journal, context.desired, parent)?;
+    if !drain_failed {
+        retire_old_worker(journal, context.desired, parent)?;
+    }
     if drain_failed {
         eprintln!("level=warn code=mbb_failed_drain_preserved module=sdwan_handoff transaction_id={} old_pid={} new_pid={} old_owner_drained=false forced_retirement=true action=preserve_healthy_candidate_and_original_tun", envelope.transaction_id, old.pid, record.pid);
     } else {
