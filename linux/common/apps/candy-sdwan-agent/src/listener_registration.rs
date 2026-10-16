@@ -117,7 +117,9 @@ fn publish_registration(plan: &Plan, owner_path: &Path, prepared_ingress: bool) 
     if master.schema_version != 1
         || master.transport_id == 0
         || master.uid != metadata.uid()
-        || !candy_process_control::process_is_current(master.process)
+        || !candy_process_control::process_is_current_confirmed(master.process).context(
+            "code=listener_master_liveness_unconfirmed module=listener_registry action=retry_preserve_domain",
+        )?
     {
         bail!("code=listener_master_unavailable module=listener_registry action=retry_preserve_domain");
     }
@@ -208,8 +210,19 @@ fn publish_registration(plan: &Plan, owner_path: &Path, prepared_ingress: bool) 
                 bail!("code=listener_epoch_stale module=listener_registry action=preserve_newer_owner");
             }
         }
-        Err(error) if destination.exists() => return Err(error),
-        Err(_) => (),
+        Err(error) => match fs::symlink_metadata(&destination) {
+            Ok(_) => {
+                return Err(anyhow::Error::from(error).context(
+                    "code=listener_registration_unconfirmed module=listener_registry action=preserve_active_owner_and_retry",
+                ));
+            }
+            Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(metadata_error) => {
+                return Err(anyhow::Error::from(metadata_error).context(
+                    "code=listener_registration_unconfirmed module=listener_registry action=preserve_active_owner_and_retry",
+                ));
+            }
+        },
     }
     let temporary = listener
         .directory
@@ -249,7 +262,9 @@ fn verify_activation(listener: &ListenerPlan, expected: &Registration) -> Result
             && master.instance == expected.master_instance
             && master.transport_id != 0
             && master.uid == expected.uid
-            && candy_process_control::process_is_current(master.process),
+            && candy_process_control::process_is_current_confirmed(master.process).context(
+                "code=listener_master_liveness_unconfirmed module=listener_registry action=retry_preserve_active_owner",
+            )?,
         "code=listener_master_stale module=listener_registry action=retry_preserve_active_owner"
     );
     let domain = expected
@@ -265,7 +280,10 @@ fn verify_activation(listener: &ListenerPlan, expected: &Registration) -> Result
     let current: Master = private_json(&master_path)
         .context("code=listener_master_unavailable module=listener_registry action=retry_preserve_active_owner")?;
     anyhow::ensure!(
-        current == master && candy_process_control::process_is_current(current.process),
+        current == master
+            && candy_process_control::process_is_current_confirmed(current.process).context(
+                "code=listener_master_liveness_unconfirmed module=listener_registry action=retry_preserve_active_owner",
+            )?,
         "code=listener_master_changed module=listener_registry action=retry_preserve_active_owner"
     );
     Ok(())

@@ -154,7 +154,10 @@ impl Manager {
         if let Some(host) = self.hosts.get_mut(&id) {
             let exited = match &mut host.child {
                 Some(child) => child.try_wait()?.is_some(),
-                None => !candy_process_control::process_is_current(host.receipt.host.identity),
+                None => !candy_process_control::process_is_current_confirmed(
+                    host.receipt.host.identity,
+                )
+                .context("code=shared_host_liveness_unconfirmed module=runtime_agent action=preserve_live_host_retry")?,
             };
             anyhow::ensure!(exited, "code=shared_host_probe_pending module=runtime_agent action=preserve_live_host_retry");
         }
@@ -168,25 +171,40 @@ impl Manager {
         }
         let path = self.config.directory.join(format!("host-{id}.json"));
         let expected = fs::metadata(&self.config.core)?;
-        if let Ok(receipt) = private::<Receipt>(&path) {
-            if candy_process_control::process_is_current(receipt.host.identity) {
-                let actual = fs::metadata(format!("/proc/{}/exe", receipt.host.identity.pid))?;
-                anyhow::ensure!(
-                    (receipt.executable_device, receipt.executable_inode)
-                        == (expected.dev(), expected.ino())
-                        && (actual.dev(), actual.ino()) == (expected.dev(), expected.ino()),
-                    "shared host executable identity differs"
-                );
-                crate::shared_worker::probe_host(&receipt.host)?;
-                self.hosts.insert(
-                    id,
-                    Host {
-                        receipt,
-                        child: None,
-                    },
-                );
-                return Ok(());
+        match private::<Receipt>(&path) {
+            Ok(receipt) => {
+                let owner_current = candy_process_control::process_is_current_confirmed(
+                    receipt.host.identity,
+                )
+                .context("code=shared_host_liveness_unconfirmed module=runtime_agent action=preserve_record_and_retry")?;
+                if owner_current {
+                    let actual = fs::metadata(format!("/proc/{}/exe", receipt.host.identity.pid))?;
+                    anyhow::ensure!(
+                        (receipt.executable_device, receipt.executable_inode)
+                            == (expected.dev(), expected.ino())
+                            && (actual.dev(), actual.ino()) == (expected.dev(), expected.ino()),
+                        "shared host executable identity differs"
+                    );
+                    crate::shared_worker::probe_host(&receipt.host)?;
+                    self.hosts.insert(
+                        id,
+                        Host {
+                            receipt,
+                            child: None,
+                        },
+                    );
+                    return Ok(());
+                }
             }
+            Err(error) => match fs::symlink_metadata(&path) {
+                Ok(_) => {
+                    return Err(error.context(
+                        "code=shared_host_record_unconfirmed module=runtime_agent action=preserve_owner_and_retry",
+                    ));
+                }
+                Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(metadata_error) => return Err(metadata_error.into()),
+            },
         }
         let slot_path = self.config.directory.join(format!("worker-{id}.lock"));
         let slot = OpenOptions::new()
@@ -336,11 +354,18 @@ impl Manager {
     pub fn retire_empty(&mut self) -> Result<()> {
         let mut pending = 0;
         for host in self.hosts.values_mut() {
-            if candy_process_control::process_is_current(host.receipt.host.identity)
-                && crate::shared_worker::retire_host(&host.receipt.host).is_err()
-            {
-                pending += 1;
-                continue;
+            match candy_process_control::process_is_current_confirmed(host.receipt.host.identity) {
+                Ok(true) if crate::shared_worker::retire_host(&host.receipt.host).is_err() => {
+                    pending += 1;
+                    continue;
+                }
+                Err(_) => {
+                    // An unreadable / malformed proc entry is not proof of
+                    // exit. Keep the host and let the next reconciliation retry.
+                    pending += 1;
+                    continue;
+                }
+                Ok(_) => {}
             }
             if let Some(child) = &mut host.child {
                 let _ = child.wait();

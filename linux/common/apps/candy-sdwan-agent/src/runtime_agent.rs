@@ -442,23 +442,16 @@ fn transient_error(error: &anyhow::Error) -> bool {
     })
 }
 
-fn inputs(path: &Path) -> Option<Vec<u8>> {
-    crate::experimental_tunio::recovery_inputs(path)
-        .ok()
-        .or_else(|| {
-            let file = OpenOptions::new()
-                .read(true)
-                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-                .open(path)
-                .ok()?;
-            let metadata = file.metadata().ok()?;
-            if !metadata.is_file() || metadata.len() > 1024 * 1024 {
-                return None;
-            }
-            let mut bytes = Vec::new();
-            file.take(1024 * 1024 + 1).read_to_end(&mut bytes).ok()?;
-            Some(bytes)
-        })
+fn inputs(path: &Path) -> Result<Vec<u8>> {
+    // A transient read/permission/format error must not become an
+    // indistinguishable "unchanged" fingerprint. The supervisor treats this
+    // error as unknown, keeps the current owner, and retries the same plan.
+    crate::experimental_tunio::recovery_inputs(path).with_context(|| {
+        format!(
+            "code=recovery_inputs_unconfirmed module=runtime_agent path={} action=preserve_owner_and_retry",
+            path.display()
+        )
+    })
 }
 
 fn domain_loop(
@@ -471,7 +464,19 @@ fn domain_loop(
 ) {
     let mut backoff = retry_initial_ms;
     while !crate::shutdown_requested() {
-        let fingerprint = inputs(&plan);
+        let fingerprint = match inputs(&plan) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                eprintln!(
+                    "level=warn code=recovery_inputs_unconfirmed module=runtime_agent slot={} detail={} action=preserve_owner_and_retry",
+                    slot,
+                    crate::sanitize_log_value(&format!("{error:#}")),
+                );
+                interruptible_wait(Duration::from_millis(backoff));
+                backoff = backoff.saturating_mul(2).min(retry_max_ms);
+                continue;
+            }
+        };
         update(&states, slot, &notifications, |state| {
             state.phase = "running";
             state.iterations += 1;
@@ -530,8 +535,24 @@ fn domain_loop(
             interruptible_wait(Duration::from_millis(backoff));
             backoff = backoff.saturating_mul(2).min(retry_max_ms);
         } else {
-            while !crate::shutdown_requested() && inputs(&plan) == fingerprint {
-                interruptible_wait(Duration::from_millis(250));
+            loop {
+                if crate::shutdown_requested() {
+                    break;
+                }
+                match inputs(&plan) {
+                    Ok(current) if current == fingerprint => {
+                        interruptible_wait(Duration::from_millis(250));
+                    }
+                    Ok(_) => break,
+                    Err(error) => {
+                        eprintln!(
+                            "level=warn code=recovery_inputs_unconfirmed module=runtime_agent slot={} detail={} action=preserve_owner_and_retry",
+                            slot,
+                            crate::sanitize_log_value(&format!("{error:#}")),
+                        );
+                        break;
+                    }
+                }
             }
             backoff = retry_initial_ms;
         }
