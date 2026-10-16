@@ -65,6 +65,8 @@ pub(crate) struct AuthorityState {
     owner_candidate: Option<OwnerAuthority>,
     #[serde(skip)]
     owner_terminal: Option<(OwnerAuthority, OwnerTransactionPhase)>,
+    retained_owner_binding: Option<PacketPortBinding>,
+    old_owner_drained: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +122,7 @@ pub enum AuthorityOperation {
         prepare_deadline_mono_ms: u64,
     },
     CommitOwner,
+    FinishOwnerDrain,
     AbortOwner,
 }
 
@@ -165,12 +168,20 @@ pub struct AuthorityControlResponse {
     pub actual_owner_binding: Option<PacketPortBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_highest_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_owner_binding: Option<PacketPortBinding>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub old_owner_drained: bool,
 }
 
 pub fn authority_control_path(supervision: &Path) -> PathBuf {
     let mut path = supervision.as_os_str().to_os_string();
     path.push(".authority");
     PathBuf::from(path)
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn hex(value: &str, length: usize) -> bool {
@@ -475,6 +486,8 @@ fn manager_outcome(
 fn reconcile_owner(state: &mut AuthorityState, actual: &PacketPortReceipt) {
     state.actual_owner_binding = actual.binding;
     state.owner_highest_revision = actual.highest_transaction_revision;
+    state.retained_owner_binding = actual.retained_owner_binding;
+    state.old_owner_drained = actual.old_owner_drained;
     if let Some(mut record) = state.owner_candidate.take() {
         if actual
             .pending
@@ -726,6 +739,7 @@ fn apply_request(
             request.operation,
             AuthorityOperation::PrepareOwner { .. }
                 | AuthorityOperation::CommitOwner
+                | AuthorityOperation::FinishOwnerDrain
                 | AuthorityOperation::AbortOwner
         )
     {
@@ -837,7 +851,7 @@ fn apply_request(
                 deadline,
             )?;
         }
-        AuthorityOperation::CommitOwner => {
+        AuthorityOperation::CommitOwner | AuthorityOperation::FinishOwnerDrain => {
             let record = owner_record(&state.authority, &request.transaction_id)
                 .cloned().context("code=owner_transaction_unknown module=tunio_authority reason=no_exact_prepared_or_terminal_transaction")?;
             if request.envelope.as_ref() != Some(&record.envelope) {
@@ -857,8 +871,14 @@ fn apply_request(
             apply_owner_change(
                 state,
                 updates,
-                PacketPortOwnerChange::CommitOwner {
-                    transaction: record.transaction,
+                if matches!(request.operation, AuthorityOperation::FinishOwnerDrain) {
+                    PacketPortOwnerChange::FinishOwnerDrain {
+                        transaction: record.transaction,
+                    }
+                } else {
+                    PacketPortOwnerChange::CommitOwner {
+                        transaction: record.transaction,
+                    }
                 },
                 deadline,
             )?;
@@ -1177,6 +1197,11 @@ pub(crate) fn start(
                             },
                             owner_highest_revision: (request.schema_version == 3)
                                 .then_some(state.authority.owner_highest_revision),
+                            retained_owner_binding: (request.schema_version == 3)
+                                .then_some(state.authority.retained_owner_binding)
+                                .flatten(),
+                            old_owner_drained: request.schema_version == 3
+                                && state.authority.old_owner_drained,
                         };
                         drop(state);
                         let bytes = serde_json::to_vec(&reply)?;
@@ -1620,6 +1645,16 @@ mod tests {
             .unwrap()
             .transaction
             .clone();
+        worker.send_packet(&[0x60; 64]).await.unwrap();
+        let mut candidate_packet = [0; 128];
+        let length = tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.kernel.recv(&mut candidate_packet),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&candidate_packet[..length], &[0x60; 64]);
         harness.old_still_works().await;
         let (fd, _unused) = ports(2, 2);
         let duplicate = harness
@@ -1698,6 +1733,8 @@ mod tests {
         assert!(committed.pending.is_none());
         assert_eq!(committed.actual_owner_binding, Some(binding(2, 2)));
         assert!(committed.owner_active);
+        assert_eq!(committed.retained_owner_binding, Some(binding(1, 1)));
+        assert!(!committed.old_owner_drained);
         assert!(committed.actual_deadline_mono_ms.unwrap() <= envelope.effective_deadline_mono_ms);
         assert_eq!(
             committed
@@ -1723,6 +1760,53 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(&packet[..len], &[0x48; 64]);
+        harness.old_worker.send_packet(&[0x61; 64]).await.unwrap();
+        let length = tokio::time::timeout(Duration::from_secs(1), harness.kernel.recv(&mut packet))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&packet[..length], &[0x61; 64]);
+        let finished = harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::FinishOwnerDrain,
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(finished.old_owner_drained);
+        assert!(finished.retained_owner_binding.is_none());
+        assert_eq!(finished.owner_transaction, committed.owner_transaction);
+        let probed = harness
+            .exchange(
+                harness.owner_request(AuthorityOperation::ProbeTransaction, None, &transaction),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(probed.old_owner_drained);
+        assert!(probed.retained_owner_binding.is_none());
+        let repeated_finish = harness
+            .exchange(
+                harness.owner_request(
+                    AuthorityOperation::FinishOwnerDrain,
+                    Some(envelope.clone()),
+                    &transaction,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(repeated_finish.old_owner_drained);
+        let _ = harness.old_worker.send_packet(&[0x62; 64]).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), harness.kernel.recv(&mut packet))
+                .await
+                .is_err()
+        );
         let cannot_abort = harness
             .outcome(
                 harness.owner_request(AuthorityOperation::AbortOwner, None, &transaction),

@@ -118,6 +118,282 @@ fn prepare(transaction: OwnerTransaction, port: UnixPacketPort) -> PacketPortOwn
     }
 }
 
+async fn kernel_packet(kernel: &UnixDatagram, value: u8) {
+    let mut packet = [0; 128];
+    let length = tokio::time::timeout(Duration::from_secs(1), kernel.recv(&mut packet))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&packet[..length], &[value; 64]);
+}
+
+#[tokio::test]
+async fn dual_inbound_handoff_has_one_outbound_and_exact_finish_receipt() {
+    let f = Fixture::new().await;
+    let tx = transaction(1, 2, Some(1));
+    let (io, next) = ports(2);
+    change(&f.tx, prepare(tx.clone(), io)).await.0.unwrap();
+    next.send_packet(&[0x61; 64]).await.unwrap();
+    kernel_packet(&f.kernel, 0x61).await;
+    f.old_still_works().await;
+    change(
+        &f.tx,
+        PacketPortOwnerChange::CommitOwner {
+            transaction: tx.clone(),
+        },
+    )
+    .await
+    .0
+    .unwrap();
+    let receipt = change(&f.tx, PacketPortOwnerChange::Probe).await.1;
+    assert_eq!(receipt.retained_owner_binding, Some(binding(1)));
+    assert!(!receipt.old_owner_drained);
+    f.kernel.send(&[0x62; 64]).await.unwrap();
+    assert_eq!(next.recv_packet().await.unwrap(), vec![0x62; 64]);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), f.worker.recv_packet())
+            .await
+            .is_err()
+    );
+    f.worker.send_packet(&[0x63; 64]).await.unwrap();
+    kernel_packet(&f.kernel, 0x63).await;
+    next.send_packet(&[0x64; 64]).await.unwrap();
+    kernel_packet(&f.kernel, 0x64).await;
+    let mut forged = tx.clone();
+    forged.auth_deadline += Duration::from_secs(1);
+    assert!(change(
+        &f.tx,
+        PacketPortOwnerChange::FinishOwnerDrain {
+            transaction: forged
+        }
+    )
+    .await
+    .0
+    .is_err());
+    let (_, actual) = change(
+        &f.tx,
+        PacketPortOwnerChange::FinishOwnerDrain {
+            transaction: tx.clone(),
+        },
+    )
+    .await;
+    assert!(actual.old_owner_drained);
+    assert!(actual.retained_owner_binding.is_none());
+    let (_, replay) = change(
+        &f.tx,
+        PacketPortOwnerChange::FinishOwnerDrain {
+            transaction: tx.clone(),
+        },
+    )
+    .await;
+    assert_eq!(actual, replay);
+    assert_eq!(
+        actual,
+        change(
+            &f.tx,
+            PacketPortOwnerChange::ProbeTransaction {
+                transaction_id: tx.transaction_id,
+                revision: tx.revision
+            }
+        )
+        .await
+        .1
+    );
+    let _ = f.worker.send_packet(&[0x65; 64]).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), f.kernel.recv(&mut [0; 128]))
+            .await
+            .is_err()
+    );
+    next.send_packet(&[0x66; 64]).await.unwrap();
+    kernel_packet(&f.kernel, 0x66).await;
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn candidate_abort_and_expiry_fence_inbound_without_affecting_active_tun() {
+    let f = Fixture::new().await;
+    let (io, next) = ports(2);
+    let tx = transaction(1, 2, Some(1));
+    change(&f.tx, prepare(tx.clone(), io)).await.0.unwrap();
+    next.send_packet(&[0x67; 64]).await.unwrap();
+    kernel_packet(&f.kernel, 0x67).await;
+    change(&f.tx, PacketPortOwnerChange::AbortOwner { transaction: tx })
+        .await
+        .0
+        .unwrap();
+    let _ = next.send_packet(&[0x68; 64]).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), f.kernel.recv(&mut [0; 128]))
+            .await
+            .is_err()
+    );
+    f.old_still_works().await;
+    let (io, next) = ports(2);
+    let mut tx = transaction(2, 2, Some(1));
+    tx.prepare_deadline = Instant::now() + Duration::from_millis(25);
+    change(&f.tx, prepare(tx.clone(), io)).await.0.unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let _ = next.send_packet(&[0x69; 64]).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), f.kernel.recv(&mut [0; 128]))
+            .await
+            .is_err()
+    );
+    let actual = change(&f.tx, PacketPortOwnerChange::Probe).await.1;
+    assert_eq!(
+        actual.last_transaction.unwrap().phase,
+        OwnerTransactionPhase::Expired
+    );
+    f.old_still_works().await;
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn predecessor_expiry_is_not_a_successful_drain_and_new_owner_continues() {
+    let f = Fixture::new().await;
+    let (io, _old) = ports(2);
+    change(
+        &f.tx,
+        PacketPortOwnerChange::Attach {
+            port: io,
+            auth_deadline: Instant::now() + Duration::from_millis(80),
+        },
+    )
+    .await
+    .0
+    .unwrap();
+    let tx = transaction(1, 3, Some(2));
+    let (io, next) = ports(3);
+    change(&f.tx, prepare(tx.clone(), io)).await.0.unwrap();
+    change(
+        &f.tx,
+        PacketPortOwnerChange::CommitOwner {
+            transaction: tx.clone(),
+        },
+    )
+    .await
+    .0
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (result, actual) = change(
+        &f.tx,
+        PacketPortOwnerChange::FinishOwnerDrain { transaction: tx },
+    )
+    .await;
+    assert!(result
+        .unwrap_err()
+        .contains("owner_drain_forced_retirement"));
+    assert!(!actual.old_owner_drained);
+    assert!(actual.retained_owner_binding.is_none());
+    next.send_packet(&[0x70; 64]).await.unwrap();
+    kernel_packet(&f.kernel, 0x70).await;
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn finish_preserves_queued_predecessor_packets_and_lost_ack_is_probeable() {
+    struct BlockedTun {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Semaphore>,
+        sent: mpsc::Sender<Vec<u8>>,
+    }
+    impl PacketPort for BlockedTun {
+        async fn recv_packet(&self) -> io::Result<Vec<u8>> {
+            std::future::pending().await
+        }
+        async fn send_packet(&self, packet: &[u8]) -> io::Result<()> {
+            self.entered.notify_one();
+            let permit = self.release.acquire().await.unwrap();
+            permit.forget();
+            self.sent.send(packet.to_vec()).await.unwrap();
+            Ok(())
+        }
+    }
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let (sent, mut received) = mpsc::channel(4);
+    let (updates, receiver) = mpsc::channel(8);
+    let (stop, shutdown) = watch::channel(false);
+    let bridge = tokio::spawn(run_managed_packet_port_bridge(
+        BlockedTun {
+            entered: entered.clone(),
+            release: release.clone(),
+            sent,
+        },
+        binding(1),
+        receiver,
+        shutdown,
+    ));
+    let (io, old) = ports(1);
+    change(
+        &updates,
+        PacketPortOwnerChange::Attach {
+            port: io,
+            auth_deadline: Instant::now() + Duration::from_secs(10),
+        },
+    )
+    .await
+    .0
+    .unwrap();
+    old.send_packet(&[0x71; 64]).await.unwrap();
+    entered.notified().await;
+    let tx = transaction(1, 2, Some(1));
+    let (io, _next) = ports(2);
+    change(&updates, prepare(tx.clone(), io)).await.0.unwrap();
+    change(
+        &updates,
+        PacketPortOwnerChange::CommitOwner {
+            transaction: tx.clone(),
+        },
+    )
+    .await
+    .0
+    .unwrap();
+    let (result, actual) = change(
+        &updates,
+        PacketPortOwnerChange::FinishOwnerDrain {
+            transaction: tx.clone(),
+        },
+    )
+    .await;
+    assert!(result.unwrap_err().contains("owner_drain_queue_pending"));
+    assert_eq!(actual.retained_owner_binding, Some(binding(1)));
+    assert!(!actual.old_owner_drained);
+    release.add_permits(1);
+    assert_eq!(received.recv().await.unwrap(), vec![0x71; 64]);
+    tokio::task::yield_now().await;
+    let (acknowledgement, ack) = oneshot::channel();
+    let (receipt, actual) = oneshot::channel();
+    updates
+        .send(PacketPortOwnerUpdate {
+            change: PacketPortOwnerChange::FinishOwnerDrain {
+                transaction: tx.clone(),
+            },
+            acknowledgement,
+            receipt: Some(receipt),
+        })
+        .await
+        .unwrap();
+    let actual = actual.await.unwrap();
+    drop(ack);
+    assert!(actual.old_owner_drained);
+    assert!(actual.retained_owner_binding.is_none());
+    let (_, probed) = change(
+        &updates,
+        PacketPortOwnerChange::ProbeTransaction {
+            transaction_id: tx.transaction_id,
+            revision: tx.revision,
+        },
+    )
+    .await;
+    assert_eq!(actual, probed);
+    stop.send_replace(true);
+    let counters = bridge.await.unwrap().unwrap();
+    assert_eq!(counters.to_tun_packets, 1);
+    assert_eq!(counters.stale_drops, 0);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retired_pending_writer_cannot_send_after_readiness_or_deadline_changes() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -191,6 +467,12 @@ async fn prepare_keeps_real_fd_active_and_commit_is_exact_and_idempotent() {
         OwnerTransactionPhase::Prepared
     );
     next.send_packet(&[0x49; 64]).await.unwrap();
+    let mut packet = [0; 128];
+    let len = tokio::time::timeout(Duration::from_secs(1), f.kernel.recv(&mut packet))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&packet[..len], &[0x49; 64]);
     f.old_still_works().await;
     let (duplicate, _unused) = ports(2);
     change(&f.tx, prepare(tx.clone(), duplicate))
@@ -267,11 +549,6 @@ async fn prepare_keeps_real_fd_active_and_commit_is_exact_and_idempotent() {
         vec![0x47; 64]
     );
     let mut packet = [0; 128];
-    let len = tokio::time::timeout(Duration::from_secs(1), f.kernel.recv(&mut packet))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(&packet[..len], &[0x49; 64]);
     next.send_packet(&[0x48; 64]).await.unwrap();
     let len = tokio::time::timeout(Duration::from_secs(1), f.kernel.recv(&mut packet))
         .await

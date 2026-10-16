@@ -1,9 +1,10 @@
 //! Packet boundary between routing workers and network I/O infrastructure.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
@@ -33,6 +34,7 @@ const OUTPUT_WRITE_TIMEOUT: Duration = Duration::from_millis(100);
 // Ready writes bypass reactor futures, so explicitly yield between bounded
 // batches. Epoch and deadline checks still run before every packet.
 const OUTPUT_DRAIN_BATCH: usize = 64;
+const OUTPUT_FAILURE_HISTORY: usize = 64;
 
 #[derive(Default)]
 struct OutputMetrics {
@@ -85,12 +87,50 @@ struct QueuedPacket {
     outstanding: Arc<AtomicUsize>,
     queue_depth: Arc<AtomicUsize>,
     failure: Option<io::Error>,
+    serial: u64,
+    delivered: bool,
+    progress: Arc<OutputProgress>,
 }
 
 impl Drop for QueuedPacket {
     fn drop(&mut self) {
+        self.progress.complete(self.serial, self.delivered);
         self.outstanding.fetch_sub(1, Ordering::Release);
         self.queue_depth.fetch_sub(1, Ordering::Release);
+    }
+}
+
+#[derive(Default)]
+struct OutputProgress {
+    accepted: AtomicU64,
+    completed: AtomicU64,
+    failures: Mutex<OutputFailures>,
+}
+
+#[derive(Default)]
+struct OutputFailures {
+    serials: VecDeque<u64>,
+    evicted_through: u64,
+}
+
+impl OutputProgress {
+    fn accept(&self) -> u64 {
+        self.accepted.fetch_add(1, Ordering::Relaxed) + 1
+    }
+    fn complete(&self, serial: u64, delivered: bool) {
+        if !delivered {
+            let mut failures = self
+                .failures
+                .lock()
+                .expect("output failure history poisoned");
+            if failures.serials.len() == OUTPUT_FAILURE_HISTORY {
+                let evicted = failures.serials.pop_front().expect("full failure history");
+                failures.evicted_through = failures.evicted_through.max(evicted);
+            }
+            failures.serials.push_back(serial);
+        } else {
+            self.completed.fetch_max(serial, Ordering::Release);
+        }
     }
 }
 
@@ -117,6 +157,7 @@ pub struct PacketOutput {
     queue_depth: Arc<AtomicUsize>,
     try_send: Box<NonblockingPacketWrite>,
     max_packet_size: usize,
+    progress: Arc<OutputProgress>,
 }
 
 /// Direction-local ingress backpressure. The single producer waits before
@@ -139,6 +180,57 @@ impl OutputAdmission {
 }
 
 impl PacketOutput {
+    pub fn checkpoint(&self) -> u64 {
+        self.progress.accepted.load(Ordering::Acquire)
+    }
+
+    /// Delivered FIFO frontier, so a new interval also covers earlier packets
+    /// still queued when its transaction starts.
+    pub fn completed_checkpoint(&self) -> u64 {
+        self.progress.completed.load(Ordering::Acquire)
+    }
+
+    /// Poll an immutable FIFO watermark without waiting for later traffic.
+    /// Dropped, expired or cancelled output is never a successful flush.
+    pub fn drained_through(&self, checkpoint: u64) -> io::Result<bool> {
+        self.drained_between(0, checkpoint)
+    }
+
+    /// Verify only the immutable interval `(start, checkpoint]`. Capture start
+    /// before the transaction produces packets, never when its marker arrives.
+    /// Failure evidence is bounded; expired evidence returns an explicit error.
+    pub fn drained_between(&self, start: u64, checkpoint: u64) -> io::Result<bool> {
+        if start > checkpoint || checkpoint > self.checkpoint() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid output checkpoint interval",
+            ));
+        }
+        let completed = self.progress.completed.load(Ordering::Acquire);
+        let failures = self
+            .progress
+            .failures
+            .lock()
+            .map_err(|_| io::Error::other("output failure history poisoned"))?;
+        if start < failures.evicted_through {
+            return Err(io::Error::other("output drain failure evidence expired"));
+        }
+        if let Some(failure) = failures
+            .serials
+            .iter()
+            .find(|&&serial| serial > start && serial <= checkpoint)
+        {
+            return Err(io::Error::other(format!(
+                "output packet {failure} failed in checkpoint interval ({start}, {checkpoint}]"
+            )));
+        }
+        Ok(completed >= checkpoint)
+    }
+    /// Queued and in-flight packets, including the currently polled write.
+    pub fn pending_packets(&self) -> usize {
+        self.outstanding.load(Ordering::Acquire)
+    }
+
     pub fn admission(&self) -> OutputAdmission {
         OutputAdmission {
             slots: self.slot_credit.clone(),
@@ -228,6 +320,7 @@ impl PacketOutput {
                         );
                         match result {
                             Ok(Ok(())) => {
+                                packet.delivered = true;
                                 task_metrics.sent_packets.fetch_add(1, Ordering::Relaxed);
                                 task_metrics
                                     .sent_bytes
@@ -302,6 +395,7 @@ impl PacketOutput {
                 )
             }),
             max_packet_size,
+            progress: Arc::new(OutputProgress::default()),
         }
     }
 
@@ -315,6 +409,8 @@ impl PacketOutput {
         if self.outstanding.load(Ordering::Acquire) == 0 {
             match (self.try_send)(&packet) {
                 Ok(true) => {
+                    let serial = self.progress.accept();
+                    self.progress.complete(serial, true);
                     self.metrics.sent_packets.fetch_add(1, Ordering::Relaxed);
                     self.metrics
                         .sent_bytes
@@ -327,6 +423,8 @@ impl PacketOutput {
                         .fetch_add(1, Ordering::Relaxed);
                 }
                 Err(error) if is_packet_scoped_write_error(&error) => {
+                    let serial = self.progress.accept();
+                    self.progress.complete(serial, false);
                     self.metrics
                         .backpressure_drops
                         .fetch_add(1, Ordering::Relaxed);
@@ -383,6 +481,9 @@ impl PacketOutput {
                 outstanding: self.outstanding.clone(),
                 queue_depth: self.queue_depth.clone(),
                 failure,
+                serial: self.progress.accept(),
+                delivered: false,
+                progress: self.progress.clone(),
             })
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => {
@@ -778,6 +879,96 @@ mod tests {
             attempts: AtomicUsize::new(0),
             packets: Mutex::new(Vec::new()),
         })
+    }
+
+    #[test]
+    fn later_cancelled_packet_cannot_complete_an_earlier_pending_checkpoint() {
+        let progress = OutputProgress::default();
+        let earlier = progress.accept();
+        let later = progress.accept();
+        progress.complete(later, false);
+        assert!(progress.completed.load(Ordering::Acquire) < earlier);
+        assert_eq!(progress.failures.lock().unwrap().serials[0], later);
+        progress.complete(earlier, true);
+        assert_eq!(progress.completed.load(Ordering::Acquire), earlier);
+    }
+
+    #[tokio::test]
+    async fn immutable_checkpoint_completes_before_later_packets_and_rejects_cancellation() {
+        let port = ready_drain_port();
+        let mut output = PacketOutput::new(port.clone());
+        output.enqueue(vec![1; 100]).unwrap();
+        let checkpoint = output.checkpoint();
+        assert!(!output.drained_through(checkpoint).unwrap());
+        assert!(output.drained_through(checkpoint + 1).is_err());
+        port.ready.store(1, Ordering::Release);
+        while !output.drained_through(checkpoint).unwrap() {
+            tokio::task::yield_now().await;
+        }
+        port.ready.store(0, Ordering::Release);
+        output.enqueue(vec![2; 100]).unwrap();
+        assert!(output.drained_through(checkpoint).unwrap());
+        let later = output.checkpoint();
+        assert!(!output.drained_through(later).unwrap());
+        output.stop().await;
+        assert!(output.drained_through(later).is_err());
+        assert!(output.drained_through(checkpoint).unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_output_cannot_report_a_successful_checkpoint() {
+        let port = TestPort::new(false, None);
+        let mut output = PacketOutput::new(port);
+        output.enqueue(vec![1; 100]).unwrap();
+        let checkpoint = output.checkpoint();
+        tokio::time::advance(OUTPUT_WRITE_TIMEOUT + Duration::from_millis(1)).await;
+        while output.pending_packets() != 0 {
+            tokio::task::yield_now().await;
+        }
+        assert!(output.drained_through(checkpoint).is_err());
+        output.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_drain_interval_does_not_poison_later_healthy_transaction() {
+        let port = ready_drain_port();
+        let mut output = PacketOutput::new(port.clone());
+        let failed_start = output.checkpoint();
+        output.enqueue(vec![1; 100]).unwrap();
+        let failed_end = output.checkpoint();
+        tokio::time::advance(OUTPUT_WRITE_TIMEOUT + Duration::from_millis(1)).await;
+        while output.pending_packets() != 0 {
+            tokio::task::yield_now().await;
+        }
+        assert!(output.drained_between(failed_start, failed_end).is_err());
+        let healthy_start = output.checkpoint();
+        port.ready.store(1, Ordering::Release);
+        output.enqueue(vec![2; 100]).unwrap();
+        let healthy_end = output.checkpoint();
+        while !output.drained_between(healthy_start, healthy_end).unwrap() {
+            tokio::task::yield_now().await;
+        }
+        assert!(output.drained_between(failed_start, failed_end).is_err());
+        assert_eq!(*port.packets.lock().unwrap(), vec![vec![2; 100]]);
+        output.stop().await;
+    }
+
+    #[tokio::test]
+    async fn bounded_failure_history_expiry_never_fabricates_drain_success() {
+        let port = ready_drain_port();
+        let mut output = PacketOutput::new(port.clone());
+        for _ in 0..=OUTPUT_FAILURE_HISTORY {
+            let serial = output.progress.accept();
+            output.progress.complete(serial, false);
+        }
+        let error = output.drained_through(1).unwrap_err();
+        assert!(error.to_string().contains("evidence expired"));
+        let start = output.checkpoint();
+        port.ready.store(1, Ordering::Release);
+        output.enqueue(vec![2; 100]).unwrap();
+        assert!(output.drained_between(start, output.checkpoint()).unwrap());
+        assert!(output.drained_through(1).is_err());
+        output.stop().await;
     }
 
     #[tokio::test]
