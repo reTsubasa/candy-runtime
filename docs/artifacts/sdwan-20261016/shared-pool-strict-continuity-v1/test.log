@@ -1,0 +1,43 @@
+
+running 1 test
+level=info component=candy-netd event=service_started protocol=2 independent_infrastructure=true multi_domain=false
+level=info component=candy-netd event=service_started protocol=2 domain_routing=namespace infrastructure=preserved
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=13
+level=info component=candy-netd event=service_started protocol=2 independent_infrastructure=true multi_domain=false
+level=info component=candy-netd event=service_started protocol=2 domain_routing=namespace infrastructure=preserved
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=12
+level=info component=candy-netd event=service_started protocol=2 independent_infrastructure=true multi_domain=false
+level=info component=candy-netd event=service_started protocol=2 domain_routing=namespace infrastructure=preserved
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=12
+level=info component=candy-netd event=service_started protocol=2 independent_infrastructure=true multi_domain=false
+level=info component=candy-netd event=service_started protocol=2 domain_routing=namespace infrastructure=preserved
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=12
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=12
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=12
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=13
+level=info code=infra_creation_completed module=netd_v2 infra_generation=1 ifindex=12
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+iptables v1.8.9 (nf_tables): chain `DOCKER-USER' in table `filter' is incompatible, use 'nft' tool.
+test signed_cli_shared_pool_scales_and_isolates_four_domains has been running for over 60 seconds
+
+thread 'signed_cli_shared_pool_scales_and_isolates_four_domains' panicked at tests/fixtures/shared_pool.rs:387:9:
+shared domains failed convergence workers=1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test signed_cli_shared_pool_scales_and_isolates_four_domains ... FAILED
+
+failures:
+
+failures:
+    signed_cli_shared_pool_scales_and_isolates_four_domains
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 60.71s
+

@@ -67,7 +67,7 @@ fn prefix(value: &str) -> Ipv4Prefix {
     .unwrap()
 }
 
-fn declaration(report: &serde_json::Value) -> PrepareDeclaration {
+pub(super) fn declaration(report: &serde_json::Value) -> PrepareDeclaration {
     let netd = &report["netd"];
     let mut routes = netd["local_prefixes"]
         .as_array()

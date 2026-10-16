@@ -206,11 +206,18 @@ pub(super) fn verify() {
 struct Domain {
     root: PathBuf,
     client: Namespace,
-    server: Namespace,
+    _server: Namespace,
     netd: InfrastructureClient,
     domain: [u8; 16],
     infra: [u8; 16],
-    server_process: Process,
+    server_plan: PathBuf,
+}
+
+struct Bridge(String);
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        let _ = Command::new("ip").args(["link", "del", &self.0]).status();
+    }
 }
 
 struct SharedEvidence(PathBuf);
@@ -306,26 +313,14 @@ fn in_namespace(namespace: &str, program: &str, arguments: &[&str]) -> Command {
     command
 }
 
-fn server(root: &Path, namespace: &str, epoch: u64, segment: usize) -> Process {
-    let log = fs::File::create(root.join(format!("server-{epoch}.log"))).unwrap();
+fn logged(command: &mut Command, path: &Path) -> Process {
+    let log = fs::File::create(path).unwrap();
     Process(
-        in_namespace(
-            namespace,
-            std::env::current_exe().unwrap().to_str().unwrap(),
-            &[
-                "--exact",
-                "signed_server_helper",
-                "--ignored",
-                "--nocapture",
-            ],
-        )
-        .env("CANDY_SIGNED_TEST_ROOT", root)
-        .env("CANDY_SIGNED_SERVER_EPOCH", epoch.to_string())
-        .env("CANDY_SIGNED_SERVER_SEGMENT", segment.to_string())
-        .stdout(log.try_clone().unwrap())
-        .stderr(log)
-        .spawn()
-        .unwrap(),
+        command
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
     )
 }
 
@@ -422,6 +417,16 @@ pub(super) fn verify_domains() {
     let root = temp.path();
     fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
     let _evidence = SharedEvidence(root.to_owned());
+    let bridge = Bridge(format!("csb{}", std::process::id()));
+    ip(&["link", "add", &bridge.0, "type", "bridge"]);
+    ip(&["addr", "add", "10.200.0.2/24", "dev", &bridge.0]);
+    ip(&["link", "set", &bridge.0, "up"]);
+    let registry = root.join("registry");
+    let master_directory = root.join("master");
+    for directory in [&registry, &master_directory] {
+        fs::create_dir(directory).unwrap();
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let pool = root.join("pool");
     fs::create_dir(&pool).unwrap();
     fs::set_permissions(&pool, fs::Permissions::from_mode(0o700)).unwrap();
@@ -433,6 +438,7 @@ pub(super) fn verify_domains() {
     let mut processes = Vec::new();
     let mut domains = Vec::new();
     let mut plans = Vec::new();
+    let mut server_plans = Vec::new();
     for index in 0..4usize {
         let path = root.join(format!("domain-{index}"));
         fs::create_dir(&path).unwrap();
@@ -446,42 +452,63 @@ pub(super) fn verify_domains() {
         let a = format!("cs{index}a");
         let b = format!("cs{index}b");
         ip(&["link", "add", &a, "type", "veth", "peer", "name", &b]);
-        ip(&["link", "set", &a, "netns", &client.0]);
-        ip(&["link", "set", &b, "netns", &remote.0]);
-        for (namespace, interface, address, lan) in [
-            (
-                &client.0,
-                a.as_str(),
-                "10.200.0.1/24",
-                &format!("10.251.{}.10/24", 1 + index * 2),
-            ),
-            (
-                &remote.0,
-                b.as_str(),
-                "10.200.0.2/24",
-                &format!("10.251.{}.10/24", 2 + index * 2),
-            ),
+        ip(&["link", "set", &a, "master", &bridge.0]);
+        ip(&["link", "set", &a, "up"]);
+        ip(&["link", "set", &b, "netns", &client.0]);
+        ip(&[
+            "-n",
+            &client.0,
+            "addr",
+            "add",
+            &format!("10.200.0.{}/24", 10 + index),
+            "dev",
+            &b,
+        ]);
+        ip(&["-n", &client.0, "link", "set", &b, "up"]);
+        for (namespace, lan) in [
+            (&client.0, &format!("10.251.{}.10/24", 1 + index * 2)),
+            (&remote.0, &format!("10.251.{}.10/24", 2 + index * 2)),
         ] {
-            ip(&["-n", namespace, "addr", "add", address, "dev", interface]);
-            ip(&["-n", namespace, "link", "set", interface, "up"]);
             ip(&["-n", namespace, "link", "add", "lan0", "type", "dummy"]);
             ip(&["-n", namespace, "addr", "add", lan, "dev", "lan0"]);
             ip(&["-n", namespace, "link", "set", "lan0", "up"]);
         }
         let seed = 32 + index as u8;
-        let output = Command::new(std::env::var("CANDY_SIGNED_FIXTURE_BINARY").unwrap())
+        let mut generator = Command::new(std::env::var("CANDY_SIGNED_FIXTURE_BINARY").unwrap());
+        generator
             .arg(path.join("fixture"))
             .env("CANDY_SIGNED_FIXTURE_DOMAIN_SEED", seed.to_string())
             .env("CANDY_SIGNED_FIXTURE_UNIQUE_PREFIXES", "1")
             .env("CANDY_SIGNED_FIXTURE_ENDPOINT", "10.200.0.2:18443")
             .env("CANDY_SIGNED_FIXTURE_GRANT_TTL_SECS", "600")
-            .output()
-            .unwrap();
+            .env("CANDY_SIGNED_FIXTURE_CONNECTION_LIMIT", "8");
+        if index != 0 {
+            generator.env(
+                "CANDY_SIGNED_FIXTURE_CERT_SOURCE",
+                root.join("domain-0/fixture"),
+            );
+        }
+        let output = generator.output().unwrap();
         assert!(
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let client_config = path.join("fixture/client.toml");
+        let text = fs::read_to_string(&client_config)
+            .unwrap()
+            .replace("[[peers]]", "[[peers]]\nshared_listener = true");
+        fs::write(&client_config, &text).unwrap();
+        let inbound = path.join("fixture/inbound.toml");
+        fs::write(
+            &inbound,
+            text.split("[[peers]]")
+                .next()
+                .unwrap()
+                .replace("site.projection", "server.projection"),
+        )
+        .unwrap();
+        fs::set_permissions(&inbound, fs::Permissions::from_mode(0o600)).unwrap();
         let output = Command::new(core())
             .args(["client", "sdwan", "compile-control", "--config"])
             .arg(path.join("fixture/client.toml"))
@@ -526,23 +553,58 @@ pub(super) fn verify_domains() {
                 .spawn()
                 .unwrap(),
         ));
-        processes.push(Process(
-            in_namespace(&remote.0, &netd, &["--protocol-v2", "--socket"])
-                .arg(path.join("server-netd.sock"))
+        let server_path = path.join("server");
+        fs::create_dir(&server_path).unwrap();
+        fs::set_permissions(&server_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let output = Command::new(core())
+            .args(["client", "sdwan", "compile-control", "--config"])
+            .arg(&inbound)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let server_compiled: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let server_declaration = super::shared_listener::declaration(&server_compiled);
+        let server_ns_path = PathBuf::from(format!("/var/run/netns/{}", remote.0));
+        let server_ns = fs::metadata(&server_ns_path).unwrap();
+        let server_infra = [96 + index as u8; 16];
+        let server_spec = InfraSpec {
+            infra_id: server_infra,
+            generation: 1,
+            netns_device: server_ns.dev(),
+            netns_inode: server_ns.ino(),
+            overlay_router_ipv4: server_declaration.overlay_router_ipv4,
+            mtu: server_declaration.effective_mtu,
+        };
+        private_json(
+            &server_path.join("domains.json"),
+            &serde_json::json!({"budgets":{"max_domains":1,"front_control_threads":2,"max_control_threads":3,"thread_stack_bytes":262144,"max_total_stack_bytes":786432,"max_pending_control_requests":4,"max_pending_control_bytes":16777216,"max_reserved_fds":128},"domains":[{"domain_id":domain,"infra_id":server_infra,"namespace_path":server_ns_path,"journal_path":server_path.join("domain.journal"),"table_id":server_declaration.table_id}]}),
+        );
+        processes.push(logged(
+            Command::new(&netd)
+                .args(["--protocol-v2", "--socket"])
+                .arg(server_path.join("netd.sock"))
                 .args([
                     "--allowed-uid",
                     "0",
                     "--allowed-gid",
                     "0",
-                    "--infrastructure-journal",
+                    "--domain-config",
                 ])
-                .arg(path.join("server-infra.journal"))
-                .spawn()
-                .unwrap(),
+                .arg(server_path.join("domains.json")),
+            &server_path.join("netd.log"),
         ));
         wait_socket(&path.join("netd.sock"));
-        wait_socket(&path.join("server-netd.sock"));
-        let server_process = server(&path, &remote.0, 1, index);
+        wait_socket(&server_path.join("netd.sock"));
+        let server_plan = server_path.join("plan.json");
+        private_json(
+            &server_plan,
+            &serde_json::json!({"schema_version":1,"netd_socket":server_path.join("netd.sock"),"tunio":env!("CARGO_BIN_EXE_candy-tunio"),"core":core(),"core_config":inbound,"core_status":server_path.join("core-status.json"),"binding_file":server_path.join("binding.json"),"instance_id":domain,"infrastructure":server_spec,"domain_id":domain,"io_epoch":1,"worker_epoch":1,"fencing_token":1,"signed_generation":1,"auth_deadline_unix":server_compiled["authorization_expires_at_unix"],"declaration":server_declaration,"routing_namespace":server_ns_path,"independent_supervision":{"control_socket":server_path.join("io.sock"),"status":server_path.join("io-status.json"),"process_record":server_path.join("io-process.json")},"independent_worker":{"control_socket":server_path.join("core.sock"),"process_record":server_path.join("process.json")},"shared_listener":{"directory":registry,"server_config":path.join("fixture/server.toml"),"worker_id":index+1}}),
+        );
+        server_plans.push(server_plan.clone());
         let prefix = |address, len| Ipv4Prefix::new(address, len).unwrap();
         let declaration = PrepareDeclaration {
             table_id: table as u32,
@@ -578,11 +640,11 @@ pub(super) fn verify_domains() {
         domains.push(Domain {
             root: path.clone(),
             client,
-            server: remote,
+            _server: remote,
             netd: InfrastructureClient::new(path.join("netd.sock"), [seed; 16]),
             domain,
             infra,
-            server_process,
+            server_plan,
         });
     }
     // Prefix and peer ownership is keyed by the infrastructure namespace, not
@@ -603,6 +665,39 @@ pub(super) fn verify_domains() {
     }
     assert_eq!(peer_owners.len(), domains.len());
     assert_eq!(prefix_owners.len(), domains.len() * 2);
+    let master = root.join("master.toml");
+    let fixture = root.join("domain-0/fixture");
+    fs::write(&master, format!("listen = \"10.200.0.2:18443\"\ncert_pem = {:?}\nkey_pem = {:?}\n[transport]\nkeep_alive_seconds = 1\nidle_timeout_seconds = 4\n[[users]]\nkey_id = \"alice\"\nsecret = \"shared-listener-test-secret-2026\"\n", fixture.join("server.cert.pem"), fixture.join("server.key.pem"))).unwrap();
+    fs::set_permissions(&master, fs::Permissions::from_mode(0o600)).unwrap();
+    processes.push(logged(
+        Command::new(core())
+            .args(["server", "proxy-master", "--config"])
+            .arg(&master)
+            .arg("--directory")
+            .arg(&master_directory)
+            .arg("--sdwan-registry-directory")
+            .arg(&registry),
+        &root.join("master.log"),
+    ));
+    wait_socket(&registry.join("listener-master.json"));
+    let server_cloud = root.join("server-cloud");
+    fs::create_dir(&server_cloud).unwrap();
+    fs::set_permissions(&server_cloud, fs::Permissions::from_mode(0o700)).unwrap();
+    let server_agent = root.join("server-agent.json");
+    private_json(
+        &server_agent,
+        &serde_json::json!({"schema_version":1,"status":root.join("server-agent-status.json"),"budgets":{"max_domain_supervisors":4,"max_managed_threads":5,"thread_stack_bytes":1048576,"max_managed_stack_bytes":5242880,"event_capacity":8,"cloud_iteration_deadline_ms":1000,"shutdown_timeout_ms":10000},"cloud":{"state_dir":server_cloud,"run_dir":root,"interval_ms":100,"retry_initial_ms":100,"retry_max_ms":1000},"domain_plans":server_plans}),
+    );
+    processes.push(logged(
+        Command::new(std::env::var("CANDY_AGENT_TEST_BINARY").unwrap())
+            .args([
+                "experimental-runtime-agent",
+                "--experimental-packet-port-ipc",
+                "--config",
+            ])
+            .arg(&server_agent),
+        &root.join("server-agent.log"),
+    ));
     fs::create_dir(root.join("cloud")).unwrap();
     fs::set_permissions(root.join("cloud"), fs::Permissions::from_mode(0o700)).unwrap();
     let config = root.join("agent.json");
@@ -651,7 +746,20 @@ pub(super) fn verify_domains() {
         .collect::<Vec<_>>();
     let links = domains.iter().map(link).collect::<Vec<_>>();
     let mut evidence = Vec::new();
-    for (revision, workers) in [1usize, 2, 4, 2, 1].into_iter().enumerate() {
+    let mut previous = original.clone();
+    for (revision, workers) in [1usize, 2, 4, 2, 1, 2, 1].into_iter().enumerate() {
+        if revision == 5 {
+            // The previous handoffs' bounded receipts expire independently of
+            // their active lanes. Exercise real traffic and another reservation.
+            std::thread::sleep(Duration::from_secs(31));
+            let after_cap = wait_all(&mut domains, 1);
+            for (actual, previous) in after_cap.iter().zip(&previous) {
+                assert_eq!(
+                    actual["worker_epoch"], previous["worker_epoch"],
+                    "original transaction expiry restarted active worker"
+                );
+            }
+        }
         private_json(
             &desired,
             &serde_json::json!({"schema_version":1,"revision":revision+1,"workers":workers}),
@@ -738,10 +846,64 @@ pub(super) fn verify_domains() {
                 )
             })
             .collect();
+        let mut handoffs = Vec::new();
+        for (index, domain) in domains.iter().enumerate() {
+            if records[index]["worker_epoch"] == previous[index]["worker_epoch"] {
+                continue;
+            }
+            let journal = status(&domain.root.join("worker-process.renewal.json")).unwrap();
+            assert_eq!(
+                journal["phase"], "committed",
+                "MBB journal not committed: {journal}"
+            );
+            let reservation = &journal["mbb_reservation"];
+            assert!(
+                reservation.is_object(),
+                "scale skipped negotiated reservation"
+            );
+            let expected = reservation["expected_peers"].as_array().unwrap();
+            assert!(!expected.is_empty(), "candidate has no authenticated peers");
+            let proof = status(Path::new(records[index]["status_path"].as_str().unwrap())).unwrap();
+            let proof = &proof["worker_candidate_transaction"];
+            assert_eq!(
+                proof["transaction_id"],
+                journal["envelope"]["transaction_id"]
+            );
+            assert_eq!(proof["phase"], "installed");
+            assert_eq!(
+                proof["local"]["packet_slot"],
+                journal["envelope"]["binding"]
+            );
+            let peers = proof["peers"].as_array().unwrap();
+            assert_eq!(peers.len(), expected.len());
+            for expected in expected {
+                let peers: Vec<_> = peers
+                    .iter()
+                    .filter(|peer| peer["attachment_id"] == expected["attachment_id"])
+                    .collect();
+                assert_eq!(peers.len(), 1);
+                let peer = peers[0];
+                assert_eq!(peer["selector"], expected["selector"]);
+                assert_eq!(peer["barrier"], expected["barrier"]);
+                for field in [
+                    "prepared",
+                    "installed",
+                    "probe_sent",
+                    "probe_received",
+                    "drain_complete",
+                ] {
+                    assert_eq!(peer[field], true, "scale lacks bilateral {field}: {peer}");
+                }
+            }
+            handoffs
+                .push(serde_json::json!({"domain":domain.domain,"journal":journal,"proof":proof}));
+        }
         evidence.push(
             serde_json::json!({"workers":workers,"records":records,"hosts":host_metrics,
-            "icmp_continuity":continuity}),
+            "icmp_continuity":continuity,"negotiated_handoffs":handoffs,
+            "after_original_transaction_cap":revision >= 5}),
         );
+        previous = records.clone();
         publish_scale_evidence(&evidence);
         for (domain, continuity) in continuity.iter().enumerate() {
             assert!(
@@ -752,13 +914,26 @@ pub(super) fn verify_domains() {
         }
     }
     // One unavailable peer must not kill its shared host or affect other domains.
-    domains[0].server_process.0.kill().unwrap();
-    domains[0].server_process.0.wait().unwrap();
+    let server_record_path = domains[0].server_plan.with_file_name("process.json");
+    let server_before = status(&server_record_path).unwrap();
+    unsafe {
+        nix::libc::kill(
+            server_before["pid"].as_u64().unwrap() as i32,
+            nix::libc::SIGKILL,
+        );
+    }
     std::thread::sleep(Duration::from_secs(2));
     for domain in &domains[1..] {
         assert!(ping(domain), "single-domain peer failure propagated");
     }
-    domains[0].server_process = server(&domains[0].root, &domains[0].server.0, 2, 0);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while status(&server_record_path).is_none_or(|value| value["pid"] == server_before["pid"]) {
+        assert!(
+            Instant::now() < deadline,
+            "remote Runtime failed isolated worker recovery"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     wait_all(&mut domains, 1);
     private_json(
         &desired,

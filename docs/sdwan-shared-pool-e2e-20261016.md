@@ -101,3 +101,32 @@ and netd is `d4cc67d5ddb4941fb30ffbb433a567b0d4c8c58003b86de07724596b75ce4b18`.
 This closes the functional gate for those binary bytes. Concurrent changes
 continue in other modules; this evidence does not certify a later source tree,
 signed release, production deployment, OpenWrt or throughput acceptance.
+
+## Negotiated Continuity Gate
+
+`shared-pool-strict-continuity-v1` failed before its initial one-worker placement
+converged. It used Core `052cc392a811c190358109feb93efb8d3423c74b5050481172871636120a6b13`
+and the v19 Agent. No scale-step or zero-loss acceptance follows from this run.
+The actual failure was `candidate_old_lane_ambiguous`: four valid domains reused
+the same peer attachment identifier, while the new outbound registration index
+treated that peer identifier as globally unique. The implementation must scope
+it to the signed tenant and segment as well as both attachment identities.
+
+The tightened fixture now uses four real remote Runtime-managed domains and
+one shared listener/master, with separate netd namespaces and TUNIO processes.
+Its signed node/pool connection budgets explicitly include four active lanes
+plus bounded replacement overlap. It does not disable negotiated capabilities
+or bypass reservation admission.
+
+Every changed worker epoch must have a committed renewal journal containing
+the real reservation and an exact candidate proof: matching transaction, local
+PacketPort binding, remote selector/barrier, bidirectional probe, installation
+and drain completion. ICMP counts distinct sequence numbers and rejects any
+missing sequence during all scaling steps. After `1/2/4/2/1`, the gate waits
+31 seconds, verifies the same active epochs, then performs another `2/1`
+transition. This explicitly checks that original transaction receipt expiry
+does not close active traffic or prevent the next real reservation.
+
+These final negotiated checks remain pending until the coherent integration
+binaries pass this revised fixture. Earlier v19 acceptance covers its recorded
+binary boundary and the narrower observations described above.
