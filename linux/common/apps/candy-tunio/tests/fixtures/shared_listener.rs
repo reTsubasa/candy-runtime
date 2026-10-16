@@ -816,12 +816,16 @@ fn verify_scenario_mode(mbb: bool, restart_successor_server: bool, fault_isolati
     let master = root.join("master.toml");
     // SIGKILL is a QUIC blackhole: negotiate an explicit bounded idle timeout
     // so the fault gate measures recovery rather than the Linux 120s default.
-    let admission = fault_isolation
-        .then_some("[admission]\nmax_connections = 6\nmax_connections_per_user = 2\n")
-        .unwrap_or("");
-    let features = fault_isolation
-        .then_some("features = [\"recommended\"]\n")
-        .unwrap_or("");
+    let admission = if fault_isolation {
+        "[admission]\nmax_connections = 6\nmax_connections_per_user = 2\n"
+    } else {
+        ""
+    };
+    let features = if fault_isolation {
+        "features = [\"recommended\"]\n"
+    } else {
+        ""
+    };
     fs::write(&master, format!("listen = \"10.200.0.2:18443\"\ncert_pem = {:?}\nkey_pem = {:?}\n[transport]\nkeep_alive_seconds = 1\nidle_timeout_seconds = 4\n{}[[users]]\nkey_id = \"alice\"\nsecret = \"shared-listener-test-secret-2026\"\n{}", fixture.join("server.cert.pem"), fixture.join("server.key.pem"), admission, features)).unwrap();
     fs::set_permissions(&master, fs::Permissions::from_mode(0o600)).unwrap();
     let mut master_index = processes.len();
