@@ -37,11 +37,20 @@ mode `0600` and removes only its own containers and volume.
   worker. ID and PID must distinguish the incarnations.
 - No new admission attempt may fail. Retrying in the generator is diagnostic;
   it cannot turn a TCP reset into a passing strict gate.
+- A separate burst opens 24 TCP connections at 25 ms intervals. Each has one
+  connection attempt, verified response bytes, and no generator retry.
 - Twenty-four new UDP flows use distinct source ports and send their first
   packet exactly once during drain. Every complete payload and original source
   port must echo correctly from the forwarding listener. At least one flow must
   reach the replacement before the held old flows finish. Generator
   retransmissions are forbidden.
+- The Runtime production DNS listener on `127.0.0.1:15353` routes unique domain
+  queries through foreign egress to the isolated responder. DNS caching is
+  disabled and no direct resolver supplies the answers. The responder records
+  the kernel-proven worker owner for each query. A dense 24-query burst followed
+  by 80 queries at 100 ms intervals must preserve every response ID, question,
+  successful rcode and exact A answer with one generator send per query. Both
+  overlap replacement and replacement egress after old retirement are required.
 - Drain, OS reap and replacement readiness receipts are exact. The original
   deadline completes within the fixture's 2 s collection tolerance. Master PID,
   start time and public QUIC listener inode remain unchanged.
@@ -108,6 +117,38 @@ requests drain after the worker has already exited. The parent is fixing that
 retirement logging/coordination path separately. The exact final ELF must be
 retested after that fix; the two passing data-plane runs do not certify later
 source changes.
+
+## TCP Burst And Production DNS Progress
+
+`proxy-active-drain-v8-dns-baseline` uses immutable candidate SHA-256 `de7e11...`
+above. It passes 24/24 TCP single-attempt requests, 24/24 UDP first packets and
+90/90 unique production DNS queries. The isolated DNS responder records 91
+queries including warmup, owned by old `(1,1,83227)` and replacement
+`(2,1,83353)`. New worker DNS egress continues after the old retirement receipt.
+This confirms a normal DNS handoff; it does not reproduce every route-selection
+or tunnel-refill race identified below. The later burst version increases
+initial query density and separately requires replacement overlap.
+
+The first DNS fixture attempt (`v7`) used a reserved documentation A answer and
+correctly received SERVFAIL under production answer validation. The responder
+now encodes `8.8.4.4` in its isolated reply; the fixture never connects to that
+address. This was a fixture correction, not a product fix.
+
+`proxy-active-drain-v9-dns-burst` then exposed a transition failure while the
+same strict TCP and UDP flows were active: four DNS requests (`q27` through
+`q30`) received SERVFAIL with one send each, and the held UDP flow also timed
+out. Its replacement DNS observations begin after publication, so this run
+does not prove a clean overlapping DNS handoff. The fixture's per-query
+`/proc` owner scan also added measurable contention; this result is retained as
+a negative stress baseline, not release evidence.
+
+`proxy-active-drain-v10-dns-burst` caches the kernel owner lookup per long-lived
+DNS egress peer. Under the same dense burst it still shows broad timeouts and
+held-flow timeout, so it is classified as a contention stress result. The
+controlled v8 run remains the positive normal-handoff baseline. The parent
+implementation now adds immediate DNS reselect on drain notice with one
+absolute query deadline; that code requires a new immutable ELF and fresh
+isolated reruns before this report can claim the DNS transition gate passes.
 
 This report does not claim physical-platform, production, complete compatibility
 matrix, performance, or long-duration acceptance.

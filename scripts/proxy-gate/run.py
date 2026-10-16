@@ -39,6 +39,8 @@ def main():
                         help='run the opt-in local Unix per-worker negotiated drain smoke gate')
     parser.add_argument('--active-drain-only', action='store_true',
                         help='only run held TCP/UDP negotiated drain and replacement admission gate')
+    parser.add_argument('--active-drain-dns-burst', action='store_true',
+                        help='use dense DNS contention stress in the focused drain gate')
     args = parser.parse_args()
     if not 1 <= args.seconds <= 120 or not 1 <= args.rounds <= 10 or not 1 <= args.warmup <= 30:
         parser.error('seconds must be 1..120 and rounds 1..10')
@@ -145,6 +147,12 @@ def main():
                 {'network': network, 'local': f'127.0.0.1:{port}',
                  'target': f'10.202.0.2:{port + 4000}'}
                 for network, port in [('tcp', 15004), ('udp', 15005)]])
+            config['forwards'].append({'network': 'udp', 'local': '127.0.0.1:15353',
+                                       'target': '10.202.0.2:53'})
+            config['dns'] = {'cache': {'enabled': False}, 'split': {
+                'answer_geo_validate': False, 'egress_resolver': '10.202.0.2:19053',
+                'rules': [{'type': 'domain-suffix', 'domain': 'drain-gate.example',
+                           'target': {'node': 'gate'}}]}}
             config_path.write_text(json.dumps(config))
         server_action = 'server-log-blocked' if blocked_stderr else 'server'
         server_kwargs = {'profile': profile, 'workers': workers}
@@ -321,6 +329,7 @@ print(json.dumps(sorted(bound & owned)))
                 "import sys; sys.path.insert(0,'/gate'); import guest; guest.start('active-drain-target', "
                 "['python3','/gate/active_drain.py','target'])")
             measured = dex(client, 'python3', '/gate/active_drain.py', 'check',
+                           *(['--dns-burst'] if args.active_drain_dns_burst else []),
                            timeout=50, check=False)
             active = json.loads(measured.stdout)
             after_drain = json.loads(guest(server, 'snapshot', label='master').stdout)

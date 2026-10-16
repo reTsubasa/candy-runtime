@@ -17,6 +17,10 @@ import time
 ROOT = Path('/gate')
 CONTROL = Path('/control/drain.sock')
 TAIL = b'active-drain-tail-after-client-fin'
+# Production rejects reserved documentation IP answers even with geo checks off.
+# This value is only encoded in our isolated resolver response; no traffic goes to it.
+DNS_ANSWER = socket.inet_aton('8.8.4.4')
+DNS_OBSERVATIONS = ROOT / 'active-drain-dns-target.jsonl'
 
 
 def receive(conn, length):
@@ -81,6 +85,34 @@ def owner(peer, protocol):
 
 def target():
     tcp_ready = threading.Event()
+    dns_ready = threading.Event()
+    def dns():
+        owners = {}
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as resolver:
+            resolver.bind(('10.202.0.2', 19053))
+            dns_ready.set()
+            while True:
+                packet, peer = resolver.recvfrom(65535)
+                offset, labels = 12, []
+                while packet[offset]:
+                    length = packet[offset]
+                    labels.append(packet[offset + 1:offset + 1 + length].decode('ascii'))
+                    offset += length + 1
+                question_end = offset + 5
+                # DNS multiplexes many queries over a few long-lived egress
+                # sockets. Resolve each peer once to avoid /proc scanning on
+                # every query perturbing the measured handoff window.
+                if peer not in owners:
+                    owners[peer] = owner(peer, 'udp')
+                identity = owners[peer]
+                row = {'domain': '.'.join(labels), 'at': time.monotonic(), 'owner': identity}
+                with DNS_OBSERVATIONS.open('a') as evidence:
+                    evidence.write(json.dumps(row) + '\n')
+                response = (packet[:2] + struct.pack('!HHHHH', 0x8180, 1, 1, 0, 0) +
+                            packet[12:question_end] + b'\xc0\x0c' +
+                            struct.pack('!HHIH', 1, 1, 1, 4) + DNS_ANSWER)
+                resolver.sendto(response, peer)
+    threading.Thread(target=dns, daemon=True).start()
     def tcp():
         def echo(conn, peer):
             with conn:
@@ -105,17 +137,18 @@ def target():
     threading.Thread(target=tcp, daemon=True).start()
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
         udp.bind(('10.202.0.2', 19005))
-        if not tcp_ready.wait(timeout=5):
-            raise RuntimeError('TCP target listener failed to become ready')
+        if not tcp_ready.wait(timeout=5) or not dns_ready.wait(timeout=5):
+            raise RuntimeError('TCP/DNS target listener failed to become ready')
         (ROOT / 'active-drain-target.ready').write_text('ready\n')
         while True:
             payload, peer = udp.recvfrom(65535)
             udp.sendto(encode(owner(peer, 'udp')) + payload, peer)
 
 
-def check():
+def check(dns_burst=False):
     rows = {'gate': 'FAIL', 'scope': 'active TCP/UDP wire retention, deadline and replacement admission',
-            'requested_remaining_ms': 6000, 'tcp_exchanges': [], 'udp_exchanges': []}
+            'requested_remaining_ms': 6000, 'tcp_exchanges': [], 'udp_exchanges': [],
+            'dns_profile': 'dense_burst' if dns_burst else 'controlled_100ms'}
     drain_sent = threading.Event()
     deadline = time.monotonic() + 10
     while not (ROOT / 'active-drain-target.ready').exists():
@@ -245,6 +278,70 @@ def check():
         return {'gate': 'PASS' if all(row['gate'] == 'PASS' for row in flows) else 'FAIL',
                 'flows': flows, 'generator_retransmissions': 0}
 
+    def new_tcp_admissions():
+        def request(sequence):
+            row = {'sequence': sequence, 'gate': 'FAIL', 'attempts': 1,
+                   'started_at': time.monotonic()}
+            try:
+                conn, identity = connect()
+                with conn:
+                    payload = hashlib.shake_256(f'new-tcp-{sequence}'.encode()).digest(4096)
+                    conn.sendall(payload)
+                    if receive(conn, len(payload)) != payload:
+                        raise RuntimeError('new TCP payload mismatch')
+                row.update(gate='PASS', completed_at=time.monotonic(), owner=identity)
+            except (OSError, RuntimeError, ValueError) as error:
+                row['error'] = f'{type(error).__name__}: {error}'
+            return row
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            pending = []
+            for sequence in range(24):
+                pending.append(executor.submit(request, sequence))
+                time.sleep(.025)
+            requests = [future.result(timeout=5) for future in pending]
+        return {'gate': 'PASS' if all(row['gate'] == 'PASS' for row in requests) else 'FAIL',
+                'requests': requests, 'generator_retries': 0}
+
+    def dns_query(sequence):
+        domain = f'q{sequence}.drain-gate.example'
+        query_id = (sequence + 1000) & 0xffff
+        qname = b''.join(bytes([len(label)]) + label.encode() for label in domain.split('.')) + b'\0'
+        question = qname + struct.pack('!HH', 1, 1)
+        packet = struct.pack('!HHHHHH', query_id, 0x0100, 1, 0, 0, 0) + question
+        row = {'domain': domain, 'sequence': sequence, 'gate': 'FAIL', 'sends': 1,
+               'sent_at': time.monotonic()}
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as request:
+                request.settimeout(2.5)
+                request.sendto(packet, ('127.0.0.1', 15353))
+                response, peer = request.recvfrom(65535)
+            reply_id, flags, questions, answers, _, _ = struct.unpack('!HHHHHH', response[:12])
+            row.update(rcode=flags & 15, reply_at=time.monotonic(), reply_peer=list(peer))
+            if (reply_id != query_id or not flags & 0x8000 or flags & 15 or
+                    questions != 1 or answers != 1 or
+                    response[12:12 + len(question)] != question or
+                    response[-4:] != DNS_ANSWER or peer != ('127.0.0.1', 15353)):
+                raise RuntimeError('DNS response ID/question/rcode/answer mismatch')
+            row['gate'] = 'PASS'
+        except (OSError, RuntimeError, ValueError, struct.error) as error:
+            row['error'] = f'{type(error).__name__}: {error}'
+        return row
+
+    def dns_admissions():
+        started = time.monotonic()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+            pending = []
+            count = 104 if dns_burst else 90
+            for sequence in range(count):
+                pending.append(executor.submit(dns_query, sequence))
+                scheduled = (((sequence + 1) * .01 if sequence < 24 else
+                              .24 + (sequence - 23) * .1) if dns_burst else
+                             (sequence + 1) * .1)
+                time.sleep(max(0, started + scheduled - time.monotonic()))
+            queries = [future.result(timeout=3) for future in pending]
+        return {'gate': 'PASS' if all(row['gate'] == 'PASS' for row in queries) else 'FAIL',
+                'queries': queries, 'generator_retries': 0}
+
     conn = udp = None
     try:
         conn, rows['old_tcp_owner'] = connect()
@@ -252,6 +349,9 @@ def check():
         udp.settimeout(2)
         tcp_exchange(conn, 0)
         rows['old_udp_owner'] = udp_exchange(udp, 0)
+        rows['dns_warmup'] = dns_query(999)
+        if rows['dns_warmup']['gate'] != 'PASS':
+            raise RuntimeError(f'DNS warmup failed: {rows["dns_warmup"]}')
         if rows['old_tcp_owner']['worker_id'] != 1 or rows['old_udp_owner']['worker_id'] != 1:
             raise RuntimeError('held flows do not belong to the selected worker')
         ready = re.findall(r'code="worker_ready".*?worker_id=1\b.*?epoch=Some\((\d+)\)',
@@ -301,12 +401,14 @@ def check():
         rows['passive_proxy_drain_before'] = capability
         rows['negotiated_capability_gate'] = ('PASS' if capability and
             capability.get('supported') and capability.get('authorized') else 'FAIL')
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             drain_future = executor.submit(drain, epoch)
             if not drain_sent.wait(timeout=3):
                 raise RuntimeError('drain control request was not sent')
             new_future = executor.submit(new_admission)
             new_udp_future = executor.submit(new_udp_admissions)
+            new_tcp_future = executor.submit(new_tcp_admissions)
+            dns_future = executor.submit(dns_admissions)
             try:
                 for sequence in range(1, 31):
                     if ('client_notice_observed_at' not in rows and
@@ -332,6 +434,8 @@ def check():
             rows['drain_receipt'] = drain_future.result(timeout=40)
             rows['new_admission'] = new_future.result(timeout=15)
             rows['new_udp_admissions'] = new_udp_future.result(timeout=8)
+            rows['new_tcp_admissions'] = new_tcp_future.result(timeout=8)
+            rows['dns_admissions'] = dns_future.result(timeout=15)
         server_log = (ROOT / 'master.log').read_text()
         client_log = (ROOT / 'client.log').read_text()
         rows['server_drain_notice'] = [line for line in server_log.splitlines()
@@ -360,6 +464,21 @@ def check():
             rows.get('tcp_tail_fin_gate') == 'PASS' and
             rows.get('udp_owner_retention_gate') == 'PASS' else 'FAIL')
         receipt = rows['drain_receipt']
+        rows['dns_target_observations'] = [json.loads(line) for line in
+                                          DNS_OBSERVATIONS.read_text().splitlines()]
+        rows['dns_queries_gate'] = rows['dns_admissions']['gate']
+        rows['dns_replacement_after_retirement_gate'] = ('PASS' if any(
+            item['owner']['worker_id'] == receipt['new_worker_id'] and
+            item['owner']['owner_epoch'] == receipt['new_owner_epoch'] and
+            item['owner']['pid'] == receipt['new_pid'] and
+            item['at'] > rows['drain_receipt_at']
+            for item in rows['dns_target_observations']) else 'FAIL')
+        rows['dns_replacement_overlap_gate'] = ('PASS' if any(
+            item['owner']['worker_id'] == receipt['new_worker_id'] and
+            item['owner']['owner_epoch'] == receipt['new_owner_epoch'] and
+            item['owner']['pid'] == receipt['new_pid'] and
+            item['at'] < rows.get('held_completed_at', 0)
+            for item in rows['dns_target_observations']) else 'FAIL')
         fresh = rows['new_admission']
         rows['exact_drain_receipt_gate'] = ('PASS' if
             (receipt['worker_id'], receipt['old_owner_epoch'], receipt['old_pid']) ==
@@ -375,6 +494,7 @@ def check():
         rows['new_admission_no_error_gate'] = ('PASS' if fresh['gate'] == 'PASS' and
             not any('error' in attempt for attempt in fresh['attempts']) else 'FAIL')
         rows['new_udp_first_packet_gate'] = rows['new_udp_admissions']['gate']
+        rows['new_tcp_burst_gate'] = rows['new_tcp_admissions']['gate']
         rows['new_udp_replacement_overlap_gate'] = ('PASS' if any(
             row['gate'] == 'PASS' and row['owner']['worker_id'] == receipt['new_worker_id'] and
             row['owner']['owner_epoch'] == receipt['new_owner_epoch'] and
@@ -394,6 +514,9 @@ def check():
                  'exact_drain_receipt_gate', 'retention_after_notice_gate',
                  'tcp_tail_fin_gate', 'udp_owner_retention_gate',
                  'replacement_admission_gate', 'new_admission_no_error_gate',
+                 'new_tcp_burst_gate',
+                 'dns_queries_gate', 'dns_replacement_after_retirement_gate',
+                 'dns_replacement_overlap_gate',
                  'new_udp_first_packet_gate', 'new_udp_replacement_overlap_gate',
                  'overlap_admission_gate',
                  'original_deadline_gate', 'listener_preserved_gate']
@@ -412,5 +535,7 @@ def check():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['target', 'check'])
+    parser.add_argument('--dns-burst', action='store_true',
+                        help='dense DNS contention stress instead of controlled 100ms queries')
     args = parser.parse_args()
-    raise SystemExit(target() if args.action == 'target' else check())
+    raise SystemExit(target() if args.action == 'target' else check(dns_burst=args.dns_burst))
