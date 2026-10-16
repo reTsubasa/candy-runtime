@@ -39,8 +39,8 @@ this scope; strict Runtime Clippy is not claimed.
 `signed_cli_shared_domain_evidence_socket_gate` creates an actual shared Core
 host and two signed SD-WAN tasks over Unix sockets and SCM_RIGHTS. The fixture
 compiles each signed configuration and takes the routing domain and policy
-generation from the compiled control report. Transport retry targets are private
-loopback endpoints; this gate makes no forwarding or performance claim.
+generation from the compiled control report. Transport retry targets use the
+isolated namespace's private address; this gate makes no forwarding or performance claim.
 Each task also completes the actual authenticated per-domain management Probe
 registration before readiness is accepted. Its reply must match the host's
 current PID/start ticks, the original controller identity, epoch 1 and nonce;
@@ -79,3 +79,11 @@ Registration follow-up source validation passed the Linux-target check and
 Clippy with `-D warnings -A clippy::obfuscated-if-else`; the allowance isolates
 the already documented unrelated fixture lint and is not a strict whole-target
 Clippy pass. Real Linux execution remains pending the frozen artifact gate.
+
+The first v16 Linux execution failed before task startup: production transport
+validation correctly rejected the fixture's loopback placeholder endpoint.
+The fixture now configures `10.200.0.2/24` on its own bridge inside the runner's
+disconnected Linux network namespace and signs `10.200.0.2:18443`, following
+the existing shared-pool fixture. Its RAII guard removes only that test link.
+No production validation is weakened. The v16 failure remains evidence; the
+corrected fixture awaits a newly frozen helper and actual Linux rerun.

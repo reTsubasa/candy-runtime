@@ -108,7 +108,7 @@ fn start_domain(host: &Host, root: &Path, index: u8) -> RunningDomain {
         .arg(&fixture)
         .env("CANDY_SIGNED_FIXTURE_DOMAIN_SEED", index.to_string())
         .env("CANDY_SIGNED_FIXTURE_GRANT_TTL_SECS", "600")
-        .env("CANDY_SIGNED_FIXTURE_ENDPOINT", "127.0.0.1:18443")
+        .env("CANDY_SIGNED_FIXTURE_ENDPOINT", "10.200.0.2:18443")
         .output()
         .unwrap();
     assert!(
@@ -116,8 +116,9 @@ fn start_domain(host: &Host, root: &Path, index: u8) -> RunningDomain {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // A valid signed domain dials only a private loopback test endpoint. This
-    // gate verifies actual local task lifecycle/IPC and does not claim forwarding.
+    // A valid signed domain dials only the private endpoint configured on the
+    // isolated test namespace's bridge. There is deliberately no server: this
+    // gate verifies actual task lifecycle/IPC and does not claim forwarding.
     let inbound = directory.join("inbound.toml");
     let config = fs::read_to_string(fixture.join("client.toml")).unwrap();
     fs::write(&inbound, config).unwrap();
@@ -246,6 +247,13 @@ pub(super) fn verify() {
     );
     let root = tempfile::tempdir().unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    // shared_pool_gate runs with --network none in a disposable Linux network
+    // namespace. Use a real private address just like its forwarding fixture;
+    // production transport validation correctly rejects loopback placeholders.
+    let endpoint_link = Bridge(format!("cse{}", std::process::id()));
+    ip(&["link", "add", &endpoint_link.0, "type", "bridge"]);
+    ip(&["addr", "add", "10.200.0.2/24", "dev", &endpoint_link.0]);
+    ip(&["link", "set", &endpoint_link.0, "up"]);
     let mut host = start(root.path(), 1);
     let first = start_domain(&host, root.path(), 32);
     let second = start_domain(&host, root.path(), 33);
