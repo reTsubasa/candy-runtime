@@ -3,13 +3,13 @@ use super::*;
 #[cfg(any(test, all(feature = "experimental-tunio-rebind", target_os = "linux")))]
 fn renewal_requires_negotiated_mbb(
     owner_active: bool,
-    old_worker_current: bool,
+    old_worker_current: Option<bool>,
     pristine_bootstrap: bool,
 ) -> Result<bool> {
-    if owner_active && !old_worker_current && !pristine_bootstrap {
+    if owner_active && old_worker_current.is_none() && !pristine_bootstrap {
         bail!("code=renewal_active_owner_unconfirmed module=sdwan_activation action=preserve_live_owner_retry_reconciliation");
     }
-    Ok(owner_active && !pristine_bootstrap)
+    Ok(owner_active && old_worker_current == Some(true))
 }
 
 #[cfg(test)]
@@ -18,14 +18,19 @@ mod overlap_tests {
 
     #[test]
     fn every_live_owner_replacement_uses_negotiated_make_before_break() {
-        assert!(renewal_requires_negotiated_mbb(true, true, false).unwrap());
-        assert!(!renewal_requires_negotiated_mbb(false, false, false).unwrap());
-        assert!(renewal_requires_negotiated_mbb(true, false, false).is_err());
+        assert!(renewal_requires_negotiated_mbb(true, Some(true), false).unwrap());
+        assert!(!renewal_requires_negotiated_mbb(false, None, false).unwrap());
+        assert!(renewal_requires_negotiated_mbb(true, None, false).is_err());
+    }
+
+    #[test]
+    fn confirmed_dead_worker_allows_recovery_on_retained_io() {
+        assert!(!renewal_requires_negotiated_mbb(true, Some(false), false).unwrap());
     }
 
     #[test]
     fn pristine_io_socket_is_not_a_committed_business_owner() {
-        assert!(!renewal_requires_negotiated_mbb(true, false, true).unwrap());
+        assert!(!renewal_requires_negotiated_mbb(true, None, true).unwrap());
     }
 }
 
@@ -1118,8 +1123,7 @@ mod linux {
             .as_ref()
             .map(|record| record.business_is_current())
             .transpose()
-            .context(ManagedProofPending)?
-            .unwrap_or(false);
+            .context(ManagedProofPending)?;
         let negotiated_mbb = renewal_requires_negotiated_mbb(
             actual.owner_active,
             old_worker_current,
