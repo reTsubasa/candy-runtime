@@ -239,6 +239,8 @@ docker run --rm --platform linux/amd64 \
       --exclude .git \
       --exclude .openwrt-sdk-cache \
       --exclude target \
+      --exclude 'target-*' \
+      --exclude .toolchains \
       --exclude dist \
       /workspace/ /tmp/workspace/
     rsync -a --delete /openwrt-sdk/ /tmp/openwrt-sdk/
