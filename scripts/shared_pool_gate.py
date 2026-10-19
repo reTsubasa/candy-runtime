@@ -192,6 +192,12 @@ def main() -> int:
             command = ["docker", "run", "--name", name, "--rm", "--network", "none", "--privileged",
                        "-v", f"{binaries}:/binaries:ro",
                        "-v", f"{binaries}:/workspace/target-linux-tunio/debug:ro",
+                       # The helper's embedded CARGO_BIN_EXE path comes from
+                       # the Linux build target used by the runner image.
+                       "-v", f"{binaries}:/runtime/target-linux-netd-v2/debug:ro",
+                       # Cargo embeds this path in signed_cli helpers built inside
+                       # the Linux workspace container.
+                       "-v", f"{binaries}:/build/debug:ro",
                        "-v", f"{evidence}:/evidence",
                        "-e", "CANDY_NETD_ISOLATED_KERNEL_TEST=1",
                        "-e", "CANDY_SIGNED_EVIDENCE_DIR=/evidence"]
