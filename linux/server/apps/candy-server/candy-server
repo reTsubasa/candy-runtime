@@ -169,6 +169,7 @@ node_usage() {
 	cat <<'EOF'
 usage:
   candy-server bootstrap FILE
+  candy-server repair FILE
   candy-server sdwan status
   candy-server sdwan reconnect
   candy-server sdwan prune-history
@@ -183,14 +184,15 @@ case "${1:-}" in
 		node_usage >&2
 		fail 64 "node enrollment uses a short-lived Bootstrap file: candy-server bootstrap FILE"
 		;;
-	bootstrap)
+	bootstrap|repair)
+		identity_action=$1
 		shift
 		[ "$#" -eq 1 ] || fail 64 "bootstrap requires one bootstrap file"
 		[ "$(id -u)" = 0 ] || fail 77 "bootstrap requires root privileges"
 		[ -f "$1" ] && [ ! -L "$1" ] || fail 66 "bootstrap input must be a regular file"
 		chmod 0600 "$1" || fail 77 "could not protect the bootstrap file"
 		require_sdwan_runtime
-		"$sdwan_runtime" bootstrap "$1"
+		"$sdwan_runtime" "$identity_action" "$1"
 		printf '%s\n' "This server has joined Candy Cloud. Its existing Candy service remains unchanged until an authorized SD-WAN configuration is available."
 		exit 0
 		;;

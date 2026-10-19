@@ -206,7 +206,7 @@ grep -F 'action_sdwan_leave' "$controller" >/dev/null || fail "LuCI leave action
 grep -F 'MAX_SDWAN_BOOTSTRAP_BYTES = 16 * 1024' "$controller" >/dev/null || fail "node bootstrap upload is unbounded"
 grep -F 'fs.chmod(temporary, "0600")' "$controller" >/dev/null || fail "node bootstrap upload is not private"
 grep -F 'fs.unlink(temporary)' "$controller" >/dev/null || fail "temporary node bootstrap input is not removed"
-grep -F '{ SDWAN_RUNTIME, "bootstrap", temporary }' "$controller" >/dev/null || fail "node bootstrap file is not passed to Runtime"
+grep -F '{ SDWAN_RUNTIME, repair and "repair" or "bootstrap", temporary }' "$controller" >/dev/null || fail "node bootstrap file is not passed to Runtime"
 if grep -E 'join_code|Node join code|name="cloud"' "$controller" "$sdwan" >/dev/null; then
 	fail "ordinary OpenWrt enrollment still exposes raw bootstrap credentials"
 fi

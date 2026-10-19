@@ -422,12 +422,125 @@ EOF
 	delegate_state
 }
 
+# Enrollment performs cryptographic validation in an isolated directory. Keep the
+# completed stage until publication succeeds: Cloud may already have revoked the
+# old identity when an SSH session or the local process is interrupted.
+repair_identity() (
+	require_root
+	[ "$#" -eq 1 ] || fail "repair requires one administrator recovery file"
+	validate_bootstrap_file "$1"
+	ensure_directories
+	[ -x "$enrollment_client" ] || fail "Cloud enrollment client is not installed"
+	cloud=$(sed -n 's/^.*"cloud_address"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*$/\1/p' "$1")
+	validate_cloud_address "$cloud"
+	[ "$cloud" = "$(read_cloud)" ] || fail "code=identity_repair_cloud_mismatch module=identity_repair recovery file must use the existing Cloud"
+	stage=$enrollment_dir.repair-pending
+	previous=$enrollment_dir.repair-previous
+	lock=$run_dir/identity-repair.lock
+	lock_kind=directory
+	if command -v flock >/dev/null 2>&1; then
+		lock_kind=file
+		[ ! -L "$lock" ] || fail "identity repair lock must not be a symbolic link"
+		exec 9>"$lock"
+		flock -n 9 || fail "code=identity_repair_busy module=identity_repair another repair is running"
+	else
+		mkdir "$lock" 2>/dev/null || fail "code=identity_repair_busy module=identity_repair another repair is running; check $lock before retrying"
+		printf '%s\n' "$$" >"$lock/pid"
+	fi
+	sync_paused=0
+	finish_repair() {
+		result=$?
+		trap - EXIT HUP INT TERM
+		if [ ! -e "$enrollment_dir" ] && [ -d "$previous" ]; then
+			mv "$previous" "$enrollment_dir" || true
+		fi
+		if [ "$sync_paused" = 1 ]; then
+			if [ -x "$cloud_sync_init" ]; then
+				"$cloud_sync_init" start >/dev/null 2>&1 || true
+			elif command -v systemctl >/dev/null 2>&1; then
+				systemctl start candy-cloud-sync.timer >/dev/null 2>&1 || true
+				systemctl start --no-block candy-cloud-sync.service >/dev/null 2>&1 || true
+			fi
+		fi
+		if [ "$lock_kind" = directory ]; then
+			rm -f "$lock/pid"
+			rmdir "$lock" 2>/dev/null || true
+		fi
+		exit "$result"
+	}
+	trap finish_repair EXIT
+	trap 'exit 130' HUP INT TERM
+	for directory in "$enrollment_dir" "$stage" "$previous"; do
+		[ ! -L "$directory" ] || fail "identity repair directory must not be a symbolic link"
+	done
+	# Recover the two-rename publication gap on an explicit retry.
+	if [ ! -e "$enrollment_dir" ] && [ -d "$previous" ]; then
+		mv "$previous" "$enrollment_dir"
+	fi
+	[ -d "$enrollment_dir" ] || fail "repair requires an existing identity"
+	[ "$(current_registration_state)" = registered ] || fail "repair requires a registered node"
+	# Only the control-plane sync is paused. Data-plane processes and TUN remain.
+	sync_paused=1
+	if [ -x "$cloud_sync_init" ]; then
+		"$cloud_sync_init" stop || fail "could not pause Cloud synchronization"
+	elif command -v systemctl >/dev/null 2>&1; then
+		systemctl stop candy-cloud-sync.timer candy-cloud-sync.service || fail "could not pause Cloud synchronization"
+	fi
+	# A crash after publication but before cache commit resumes locally.
+	if [ -f "$enrollment_dir/.repair-ready" ]; then
+		(write_config "$cloud" registered)
+		delegate_state
+		rm -f "$enrollment_dir/.repair-ready"
+		audit_event identity-repair completed "Interrupted publication completed; synchronization resumed"
+		printf '%s\n' "Identity repair publication resumed. Verify Cloud synchronization and SD-WAN status."
+		exit 0
+	fi
+	umask 077
+	mkdir -p "$stage"
+	chmod 0700 "$stage"
+	if [ ! -f "$stage/installation-instance-id" ] && [ -f "$enrollment_dir/installation-instance-id" ]; then
+		cp "$enrollment_dir/installation-instance-id" "$stage/installation-instance-id"
+	fi
+	audit_event identity-repair started "Isolated identity recovery started"
+	if [ ! -s "$stage/device-identity-v1.json" ]; then
+		set -- "$enrollment_client" --state-dir "$stage" --bootstrap-file "$1" --expected-platform "$enrollment_platform"
+		[ -z "$enrollment_architecture" ] || set -- "$@" --expected-architecture "$enrollment_architecture"
+		[ -z "${CANDY_CLOUD_CA_CERTIFICATE:-}" ] || set -- "$@" --ca-certificate "$CANDY_CLOUD_CA_CERTIFICATE"
+		if ! "$@"; then
+			audit_event identity-repair failed "Enrollment failed; pending transaction retained for retry"
+			fail "code=identity_repair_enrollment_failed module=identity_repair existing local identity and network configuration preserved; retry with a recovery file"
+		fi
+	fi
+	for file in device-identity-v1.json root-key.pem operational-key.pem device-cert.der device-cert.pem device-chain.pem device-mtls.pem installation-instance-id; do
+		[ -s "$stage/$file" ] && [ ! -L "$stage/$file" ] || fail "code=identity_repair_incomplete module=identity_repair missing validated enrollment output: $file"
+	done
+	# Retain the last known identity as a private backup, never mix key bundles.
+	if [ -e "$previous" ]; then
+		mv "$previous" "$previous.$(date +%s).$$"
+	fi
+	printf '%s\n' ready >"$stage/.repair-ready"
+	sync
+	mv "$enrollment_dir" "$previous"
+	if ! mv "$stage" "$enrollment_dir"; then
+		mv "$previous" "$enrollment_dir"
+		fail "code=identity_repair_publish_failed module=identity_repair old bundle restored; retry publication"
+	fi
+	sync
+	# atomic_from_stdin has its own trap; run in a subshell to retain ours.
+	(write_config "$cloud" registered)
+	delegate_state
+	rm -f "$enrollment_dir/.repair-ready"
+	audit_event identity-repair completed "Identity installed; Cloud synchronization will verify configuration and data-plane readiness"
+	printf '%s\n' "Identity repaired. Existing Profile, network and Proxy preserved; verify Cloud synchronization and SD-WAN status."
+)
+
 usage() {
 	cat <<'EOF'
 usage: candy-sdwan-runtime ACTION [arguments]
 
 Runtime internal actions:
   bootstrap BOOTSTRAP_FILE
+  repair RECOVERY_FILE
   reconnect
   leave
   fail-open [REASON]
@@ -442,6 +555,9 @@ EOF
 action=${1:-}
 [ "$#" -eq 0 ] || shift
 case "$action" in
+	repair)
+		repair_identity "$@"
+		;;
 	bootstrap)
 		require_root
 		[ "$#" -eq 1 ] || fail "bootstrap requires one bootstrap file"
