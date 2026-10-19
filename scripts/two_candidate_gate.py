@@ -35,6 +35,7 @@ runid = hashlib.sha256(str(evidence).encode()).hexdigest()[:12]
 container = "candy-candidate-gate-" + runid
 build_container = container + "-build"
 volume = os.environ.get("CANDY_CANDIDATE_BUILD_VOLUME", "candy-candidate-build-" + runid)
+builder_image = os.environ.get("CANDY_CANDIDATE_BUILDER_IMAGE", "candy-sdwan-perf-runner:20261013")
 if not volume.startswith("candy-candidate-build-"):
     raise SystemExit("build cache must belong to the isolated candidate gate")
 manifest = {}
@@ -83,7 +84,7 @@ mounts = ["-v", str(evidence/"frozen")+":/workspace:ro", "-v", str(evidence)+":/
 # Core and runtime builds need CMake (btls-sys); the test image intentionally
 # remains the networking image because it supplies ip/nft for namespace tests.
 common_env = ["-e", "CARGO_TARGET_DIR=/build", "-e", "CARGO_BUILD_JOBS=2", "-e", "CANDY_NETD_ISOLATED_KERNEL_TEST=1", "-e", "CANDY_CORE_TEST_BINARY=/build/debug/candy-core", "-e", "CANDY_NETD_TEST_BINARY=/build/debug/candy-netd", "-e", "CANDY_AGENT_TEST_BINARY=/build/debug/candy-sdwan-agent", "-e", "CANDY_SIGNED_FIXTURE_BINARY=/build/debug/examples/sdwan_signed_cli_fixture", "-e", "CANDY_SIGNED_EVIDENCE_DIR=/evidence"]
-docker(["run", "-d", "--name", build_container, "--label", "candy.candidate.gate="+str(evidence), "--network", "none", "--privileged", "--cpus", "2", "--memory", "4g", *mounts, *common_env, "candy-core-diag-builder:rust-1.88.0", "sleep", "infinity"])
+docker(["run", "-d", "--name", build_container, "--label", "candy.candidate.gate="+str(evidence), "--network", "none", "--privileged", "--cpus", "2", "--memory", "4g", *mounts, *common_env, builder_image, "sleep", "infinity"])
 docker(["run", "-d", "--name", container, "--label", "candy.candidate.gate="+str(evidence), "--network", "none", "--privileged", "--cpus", "2", "--memory", "4g", *mounts, *common_env, "candy-sdwan-perf-runner:20261013", "sleep", "infinity"])
 results = []
 def step(label, args, target=container, correctness=False):

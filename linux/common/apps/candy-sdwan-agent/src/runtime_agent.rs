@@ -400,6 +400,14 @@ pub(super) fn transient_error(error: &anyhow::Error) -> bool {
     // the identical plan cannot make progress. The supervisor will wait for a
     // changed plan fingerprint and leave the current owner serving meanwhile.
     let chain = format!("{error:#}");
+    // The forwarding authority reports an active owner, but Runtime could not
+    // confirm the exact predecessor process identity. This is an uncertain
+    // local proof outcome, not a stable signed-contract mismatch: retain the
+    // owner and retry reconciliation until the process record and authority
+    // agree (or the supervisor's bounded retry/recovery policy intervenes).
+    if chain.contains("code=renewal_active_owner_unconfirmed") {
+        return true;
+    }
     if [
         "code=candidate_shared_listener_required",
         "code=candidate_grant_policy_mismatch",
@@ -873,6 +881,11 @@ mod tests {
                 .context(crate::experimental_tunio::ManagedProofPending)
                 .context("signed renewal recovery");
         assert!(!transient_error(&unsupported_listener));
+        let unconfirmed_owner = anyhow::anyhow!(
+            "code=renewal_active_owner_unconfirmed module=sdwan_activation"
+        )
+        .context("signed renewal recovery");
+        assert!(transient_error(&unconfirmed_owner));
     }
     #[test]
     fn typed_nested_io_errors_keep_retry_classification() {
