@@ -2201,10 +2201,15 @@ fn sync_once_with_retry(
             if state.etag.as_deref() != Some(etag.as_str()) {
                 bail!("Cloud returned 304 with an unexpected ETag")
             }
-            if state.activation_required
-                && state.activation_rejected_etag.as_deref() != Some(etag.as_str())
-                && (!candidate_matches_delivery(&args.state_dir, &etag)?
-                    || candidate_grant_refresh_due(&args.state_dir)?)
+            // A PREPARE candidate is intentionally marked activation_required=false,
+            // but it can still contain expired Grants/projections. Do not let a
+            // conditional 304 preserve an expired candidate: Core must never be
+            // forced to discover this only after process startup.
+            let candidate_needs_revalidation = candidate_grant_refresh_due(&args.state_dir)?;
+            if state.activation_rejected_etag.as_deref() != Some(etag.as_str())
+                && ((!candidate_matches_delivery(&args.state_dir, &etag)?
+                    || candidate_needs_revalidation)
+                    && (state.activation_required || candidate_needs_revalidation))
             {
                 if !allow_unconditional_retry {
                     bail!("Cloud returned 304 but the local activation needs revalidation")
