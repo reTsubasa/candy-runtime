@@ -1,6 +1,35 @@
 use super::*;
 
 #[cfg(any(test, all(feature = "experimental-tunio-rebind", target_os = "linux")))]
+fn renewal_requires_negotiated_mbb(
+    owner_active: bool,
+    old_worker_current: bool,
+    pristine_bootstrap: bool,
+) -> Result<bool> {
+    if owner_active && !old_worker_current && !pristine_bootstrap {
+        bail!("code=renewal_active_owner_unconfirmed module=sdwan_activation action=preserve_live_owner_retry_reconciliation");
+    }
+    Ok(owner_active && !pristine_bootstrap)
+}
+
+#[cfg(test)]
+mod overlap_tests {
+    use super::renewal_requires_negotiated_mbb;
+
+    #[test]
+    fn every_live_owner_replacement_uses_negotiated_make_before_break() {
+        assert!(renewal_requires_negotiated_mbb(true, true, false).unwrap());
+        assert!(!renewal_requires_negotiated_mbb(false, false, false).unwrap());
+        assert!(renewal_requires_negotiated_mbb(true, false, false).is_err());
+    }
+
+    #[test]
+    fn pristine_io_socket_is_not_a_committed_business_owner() {
+        assert!(!renewal_requires_negotiated_mbb(true, false, true).unwrap());
+    }
+}
+
+#[cfg(any(test, all(feature = "experimental-tunio-rebind", target_os = "linux")))]
 #[derive(Debug, PartialEq, Eq)]
 enum ForwardReplay {
     Prepare,
@@ -1007,7 +1036,10 @@ mod linux {
                 previous_journal.phase = "retiring".into();
                 previous_journal.candidate_plan_snapshot = Some(previous_plan.clone());
                 publish(&journal_path, &previous_journal)?;
-                previous_journal.snapshot.retire().context(ManagedProofPending)?;
+                previous_journal
+                    .snapshot
+                    .retire()
+                    .context(ManagedProofPending)?;
                 for generated in [
                     &previous_plan.binding_file,
                     &previous_plan.core_status,
@@ -1074,6 +1106,26 @@ mod linux {
         }) {
             bail!("new signed authority cannot downgrade existing owner");
         }
+        // The newly spawned IO owns its inherited socket before any business
+        // worker exists. Only this exact empty history permits first attach;
+        // an absent worker record alone never proves an existing owner is gone.
+        let pristine_bootstrap = old_worker.is_none()
+            && previous.is_none()
+            && actual.active.is_none()
+            && actual.highest_revision == 0
+            && last_fencing_token == 0;
+        let old_worker_current = old_worker
+            .as_ref()
+            .map(|record| record.business_is_current())
+            .transpose()
+            .context(ManagedProofPending)?
+            .unwrap_or(false);
+        let negotiated_mbb = renewal_requires_negotiated_mbb(
+            actual.owner_active,
+            old_worker_current,
+            pristine_bootstrap,
+        )
+        .context(ManagedProofPending)?;
         let (epoch, fence) = next_authority_epochs(
             binding.owner_epoch,
             &[
@@ -1187,23 +1239,13 @@ mod linux {
             return Err(error);
         }
         snapshot_cleanup.transfer();
-        let old_worker_current = old_worker
-            .as_ref()
-            .map(|record| record.business_is_current())
-            .transpose()
-            .context(ManagedProofPending)?
-            .unwrap_or(false);
-        // Outbound shared domains have no local listener registration. Their
-        // shared placement still permits a second domain incarnation, and must
-        // use the authenticated remote reservation instead of stopping the old.
-        let shared_placement = plan
-            .placement
-            .as_ref()
-            .is_some_and(|placement| placement.shared.is_some());
-        if (plan.shared_listener.is_some() || shared_placement)
-            && actual.owner_active
-            && old_worker_current
-        {
+        // Any live owner replacement must use the authenticated MBB transaction.
+        // For outbound dedicated workers the reservation is negotiated with the
+        // remote peer over the existing authenticated lane; local shared-listener
+        // placement is only one way to provide overlap, not a prerequisite. This
+        // keeps the old owner and TUNIO active until the successor lane is
+        // installed, committed, and activated, then drains the predecessor.
+        if negotiated_mbb {
             journal.phase = "mbb_reserving".into();
             publish(&journal_path, &journal)?;
             let context = MbbContext::new(
@@ -1239,15 +1281,9 @@ mod linux {
         } else {
             reserve_worker_slot(&plan)?
         };
-        // A candidate must be running before the old worker is retired whenever
-        // its placement can overlap safely. This is the local half of
-        // make-before-break: the old owner remains authenticated and the TUN/
-        // PacketPort infrastructure stays intact while the candidate performs
-        // its listener registration, authority attach and reciprocal probe.
-        // Only the shared listener has an authenticated ingress handoff that
-        // can accept both generations concurrently. Dedicated workers retain
-        // an exclusive slot (and ordinary workers may bind the same endpoint),
-        // so those paths use the bounded stop-then-spawn compatibility barrier.
+        // With no active predecessor (first activation or confirmed owner loss),
+        // the ordinary authorized attach path is safe. Every active predecessor
+        // was routed through run_mbb_transaction above.
         let overlap_candidate = plan.shared_listener.is_some();
         let token = uuid::Uuid::new_v4().simple().to_string();
         let mut child = if overlap_candidate {
@@ -1256,7 +1292,7 @@ mod linux {
                 &plan,
                 &worker_socket,
                 &token,
-                slot,
+                slot.take(),
             )?)
         } else {
             None
@@ -1288,25 +1324,15 @@ mod linux {
                 publish(&journal_path, &journal)?;
             }
         }
-        // A non-shared worker cannot be spawned while its endpoint or slot is
-        // owned by the old process. Retire that worker only after the guard has
-        // succeeded; shared-listener domains already have a live candidate.
+        // A first-time dedicated worker has no predecessor to overlap. Any
+        // replacement was rejected above until the negotiated shared-listener
+        // transaction is available.
         if !overlap_candidate {
-            eprintln!("level=info code=mbb_slot_overlap_unavailable module=sdwan_activation transaction_id={transaction} detail=dedicated_worker_slot_is_exclusive action=bounded_stop_spawn_fallback");
-            if let Some(old) = &old_worker {
-                if let Err(error) = stop_record(old, old_plan.as_ref().unwrap()) {
-                    eprintln!("level=warn code=renewal_old_worker_barrier_pending module=sdwan_activation old_pid={} detail={error:#} action=retry_authenticated_stop_preserve_infrastructure", old.pid);
-                    return Err(error.context(ManagedProofPending));
-                }
-            }
-            journal.phase = "old_worker_retired".into();
-            publish(&journal_path, &journal)?;
-            slot = reserve_worker_slot(&plan)?;
             child = Some(spawn_business_worker_with_slot(
                 &plan,
                 &worker_socket,
                 &token,
-                slot,
+                slot.take(),
             )?);
         }
         let mut child = child.context("candidate worker was not spawned")?;

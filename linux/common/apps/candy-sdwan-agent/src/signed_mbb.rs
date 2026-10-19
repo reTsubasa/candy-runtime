@@ -705,10 +705,14 @@ fn run_mbb_transaction(
             &record,
         );
     }
+    // Make the successor the live outbound lane before asking the predecessor
+    // to drain. Promotion proves that the new owner is committed, while
+    // candidate_activate switches new traffic onto the installed peer. Only
+    // after that switch may the old worker begin draining established flows.
+    mbb_core_exchange(plan, &record, "candidate_activate", &payload)?;
     let retire = serde_json::json!({"transaction_id": envelope.transaction_id,
         "plan": reservation["plan"], "complete": false});
     mbb_core_exchange(&old_plan, &old, "candidate_retire_old", &retire)?;
-    mbb_core_exchange(plan, &record, "candidate_activate", &payload)?;
     let old_receipt = loop {
         if monotonic_ms()? >= candidate_owner.prepare_deadline_mono_ms {
             return mbb_retire_failed(

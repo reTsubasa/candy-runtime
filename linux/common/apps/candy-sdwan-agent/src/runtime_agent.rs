@@ -881,10 +881,9 @@ mod tests {
                 .context(crate::experimental_tunio::ManagedProofPending)
                 .context("signed renewal recovery");
         assert!(!transient_error(&unsupported_listener));
-        let unconfirmed_owner = anyhow::anyhow!(
-            "code=renewal_active_owner_unconfirmed module=sdwan_activation"
-        )
-        .context("signed renewal recovery");
+        let unconfirmed_owner =
+            anyhow::anyhow!("code=renewal_active_owner_unconfirmed module=sdwan_activation")
+                .context("signed renewal recovery");
         assert!(transient_error(&unconfirmed_owner));
     }
     #[test]
