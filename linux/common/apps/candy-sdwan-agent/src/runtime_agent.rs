@@ -395,6 +395,22 @@ fn cloud_loop(
 }
 
 pub(super) fn transient_error(error: &anyhow::Error) -> bool {
+    // These failures describe a signed/deployment contract mismatch. Wrapping
+    // them in ManagedProofPending must preserve the active owner, but retrying
+    // the identical plan cannot make progress. The supervisor will wait for a
+    // changed plan fingerprint and leave the current owner serving meanwhile.
+    let chain = format!("{error:#}");
+    if [
+        "code=candidate_shared_listener_required",
+        "code=candidate_grant_policy_mismatch",
+        "code=listener_activation_ack_mismatch",
+        "code=listener_master_stale",
+    ]
+    .iter()
+    .any(|code| chain.contains(code))
+    {
+        return false;
+    }
     // anyhow context values participate in Error::is/downcast_ref, but are
     // not exposed as their original type by std::error::Error::source.
     if error.is::<crate::experimental_tunio::NetdUnavailable>()
@@ -852,6 +868,11 @@ mod tests {
         let permanent =
             anyhow::anyhow!("invalid signed authorization").context("shared domain completion");
         assert!(!transient_error(&permanent));
+        let unsupported_listener =
+            anyhow::anyhow!("code=candidate_shared_listener_required module=sdwan_initiator")
+                .context(crate::experimental_tunio::ManagedProofPending)
+                .context("signed renewal recovery");
+        assert!(!transient_error(&unsupported_listener));
     }
     #[test]
     fn typed_nested_io_errors_keep_retry_classification() {
