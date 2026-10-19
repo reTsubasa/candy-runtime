@@ -1440,6 +1440,9 @@ write_node_status() {
 	local node_id="$1"
 	local enabled name server state="unused" groups passive_expr passive_state passive_updated now_ms
 	local active_tcp active_udp reconnects last_error url_status url_latency url_checked url_error passive
+	# Keep the telemetry branch deterministic under ash -u when no fresh
+	# snapshot exists for this node.
+	passive_state=
 	config_get_bool enabled "$node_id" enabled 1
 	config_get name "$node_id" name "$node_id"
 	config_get server "$node_id" server

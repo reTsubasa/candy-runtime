@@ -1095,7 +1095,7 @@ mod linux {
         // owned by the old process. Retire that worker only after the guard has
         // succeeded; shared-listener domains already have a live candidate.
         if !overlap_candidate {
-            eprintln!("level=info code=mbb_slot_overlap_unavailable module=sdwan_activation transaction_id={} detail=dedicated_worker_slot_is_exclusive action=bounded_stop_spawn_fallback", transaction);
+            eprintln!("level=info code=mbb_slot_overlap_unavailable module=sdwan_activation transaction_id={transaction} detail=dedicated_worker_slot_is_exclusive action=bounded_stop_spawn_fallback");
             if let Some(old) = &old_worker {
                 if let Err(error) = stop_record(old, old_plan.as_ref().unwrap()) {
                     eprintln!("level=warn code=renewal_old_worker_barrier_pending module=sdwan_activation old_pid={} detail={error:#} action=retry_authenticated_stop_preserve_infrastructure", old.pid);
