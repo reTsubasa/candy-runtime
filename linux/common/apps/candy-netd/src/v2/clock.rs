@@ -11,11 +11,13 @@ pub fn now_ms() -> std::io::Result<u64> {
     if unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_BOOTTIME, &mut value) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    timespec_ms(value.tv_sec as i64, value.tv_nsec as i64)
+    timespec_ms(value.tv_sec, value.tv_nsec)
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn timespec_ms(seconds: i64, nanos: i64) -> std::io::Result<u64> {
+fn timespec_ms(seconds: impl Into<i64>, nanos: impl Into<i64>) -> std::io::Result<u64> {
+    let seconds = seconds.into();
+    let nanos = nanos.into();
     let invalid = || std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid BOOTTIME value");
     if !(0..1_000_000_000).contains(&nanos) {
         return Err(invalid());
