@@ -11,7 +11,7 @@ pub fn now_ms() -> std::io::Result<u64> {
     if unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_BOOTTIME, &mut value) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    timespec_ms(value.tv_sec, value.tv_nsec)
+    timespec_ms(value.tv_sec as i64, value.tv_nsec as i64)
 }
 
 #[cfg(any(target_os = "linux", test))]
