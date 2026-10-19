@@ -14,6 +14,10 @@ HERE = Path(__file__).resolve().parent
 RUNTIME = HERE.parents[1]
 
 
+class ActiveDrainComplete(Exception):
+    """Exit the full matrix after a focused gate while retaining cleanup gates."""
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', required=True, type=Path)
@@ -33,7 +37,15 @@ def main():
                         help='require 8 VM CPUs; reserve 3 per service and 1 per namespace generator')
     parser.add_argument('--drain-wire', action='store_true',
                         help='run the opt-in local Unix per-worker negotiated drain smoke gate')
+    parser.add_argument('--active-drain-only', action='store_true',
+                        help='only run held TCP/UDP negotiated drain and replacement admission gate')
+    parser.add_argument('--udp-only', action='store_true',
+                        help='only run bounded UDP rate, overload and recovery diagnostics')
+    parser.add_argument('--active-drain-dns-burst', action='store_true',
+                        help='use dense DNS contention stress in the focused drain gate')
     args = parser.parse_args()
+    if args.udp_only and (args.active_drain_only or args.performance):
+        parser.error('--udp-only cannot be combined with drain-only or performance')
     if not 1 <= args.seconds <= 120 or not 1 <= args.rounds <= 10 or not 1 <= args.warmup <= 30:
         parser.error('seconds must be 1..120 and rounds 1..10')
     root = args.evidence.resolve()
@@ -49,12 +61,14 @@ def main():
     shutil.copy2(HERE / 'timing.py', root / 'timing.py')
     shutil.copy2(HERE / 'log_fault.py', root / 'log_fault.py')
     shutil.copy2(HERE / 'scaling.py', root / 'scaling.py')
+    shutil.copy2(HERE / 'active_drain.py', root / 'active_drain.py')
     shutil.copy2(Path(__file__), root / 'run.py')
     wrapper = RUNTIME / 'openwrt/client/packages/candy-client/candy-client'
     shutil.copy2(wrapper, root / 'candy-client')
     suffix = hashlib.sha256(str(root).encode()).hexdigest()[:12]
     client, server = f'candy-pgate-c-{suffix}', f'candy-pgate-s-{suffix}'
     owned = []
+    control_volume = None
     observers = []
     baseline_owned = False
     extra_clients = []
@@ -85,6 +99,7 @@ def main():
               'timing_sha256': hashlib.sha256((HERE / 'timing.py').read_bytes()).hexdigest(),
               'log_fault_sha256': hashlib.sha256((HERE / 'log_fault.py').read_bytes()).hexdigest(),
               'scaling_sha256': hashlib.sha256((HERE / 'scaling.py').read_bytes()).hexdigest(),
+              'active_drain_sha256': hashlib.sha256((HERE / 'active_drain.py').read_bytes()).hexdigest(),
               'runner_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'compatibility': rows, 'performance': perf}
 
@@ -126,14 +141,30 @@ def main():
         raise RuntimeError(f'{label}: actual TCP data-plane readiness deadline')
 
     def start(profile, workers, blocked_stderr=False):
-        guest(server, 'configure', profile=profile, workers=workers)
+        guest(server, 'configure', profile=profile, workers=workers,
+              proxy_drain=int(profile == 'recommended' and
+                              (args.drain_wire or args.active_drain_only)))
+        if args.active_drain_only:
+            config_path = root / profile / 'client.json'
+            config = json.loads(config_path.read_text())
+            config['forwards'].extend([
+                {'network': network, 'local': f'127.0.0.1:{port}',
+                 'target': f'10.202.0.2:{port + 4000}'}
+                for network, port in [('tcp', 15004), ('udp', 15005)]])
+            config['forwards'].append({'network': 'udp', 'local': '127.0.0.1:15353',
+                                       'target': '10.202.0.2:53'})
+            config['dns'] = {'cache': {'enabled': False}, 'split': {
+                'answer_geo_validate': False, 'egress_resolver': '10.202.0.2:19053',
+                'rules': [{'type': 'domain-suffix', 'domain': 'drain-gate.example',
+                           'target': {'node': 'gate'}}]}}
+            config_path.write_text(json.dumps(config))
         server_action = 'server-log-blocked' if blocked_stderr else 'server'
         server_kwargs = {'profile': profile, 'workers': workers}
-        if args.drain_wire and profile == 'recommended' and not blocked_stderr:
+        if (args.drain_wire or args.active_drain_only) and profile == 'recommended' and not blocked_stderr:
             token_path = root / profile / 'drain.token'
             token_path.write_text('isolated-drain-wire-token-v1\n')
             token_path.chmod(0o600)
-            server_kwargs.update(drain_control=f'/gate/{profile}/drain.sock',
+            server_kwargs.update(drain_control='/control/drain.sock',
                                  drain_token=f'/gate/{profile}/drain.token')
         guest(server, server_action, **server_kwargs)
         guest(client, 'client', profile=profile)
@@ -228,12 +259,36 @@ def main():
                 return int(match.group(1))
         raise RuntimeError(f'worker {worker_id} has no current ready epoch')
 
+    def listener_socket_identity():
+        code = """import json, os
+from pathlib import Path
+pid = json.loads(Path('/gate/master.process.json').read_text())['pid']
+bound = {line.split()[9] for line in Path('/proc/net/udp').read_text().splitlines()[1:]
+         if line.split()[1].split(':')[1] == '480B'}
+owned = set()
+for fd in Path(f'/proc/{pid}/fd').iterdir():
+    try:
+        link = os.readlink(fd)
+        if link.startswith('socket:['):
+            owned.add(link[8:-1])
+    except OSError:
+        continue
+print(json.dumps(sorted(bound & owned)))
+"""
+        identity = json.loads(dex(server, 'python3', '-c', code).stdout)
+        if len(identity) != 1:
+            raise RuntimeError(f'expected one master-owned listener inode: {identity}')
+        return identity
+
     try:
         image = json.loads(run(['docker', 'image', 'inspect', args.image]).stdout)[0]
         result['image_id'] = image['Id']
         result['image_architecture'] = image['Architecture']
         if args.pin_cpus and int(run(['docker', 'info', '--format', '{{.NCPU}}']).stdout) < 8:
             raise RuntimeError('--pin-cpus requires at least eight Docker VM CPUs')
+        if args.drain_wire or args.active_drain_only:
+            control_volume = f'candy-pgate-control-{suffix}'
+            run(['docker', 'volume', 'create', '--label', f'candy.proxy.gate={root}', control_volume])
         for name in (client, server):
             resources = (['--cpuset-cpus', '0-2,6' if name == client else '3-5,7',
                           '-e', 'CANDY_GATE_SERVICE_CPUS=' + ('0-2' if name == client else '3-5')]
@@ -242,8 +297,11 @@ def main():
                  '--network', 'none', '--privileged', *resources, '--memory', '3g',
                  '--add-host', 'www.gstatic.com:10.202.0.2',
                  '--pids-limit', '256', *(['--pid', 'host'] if name == server else []),
+                 *(['--mount', f'type=volume,src={control_volume},dst=/control'] if control_volume else []),
                  '-v', f'{root}:/gate', args.image, 'sleep', 'infinity'])
             owned.append(name)
+        if control_volume:
+            dex(server, 'chmod', '700', '/control')
         client_pid = run(['docker', 'inspect', '-f', '{{.State.Pid}}', client]).stdout.strip()
         dex(server, 'ip', 'link', 'add', 'cpg-s', 'type', 'veth', 'peer', 'name', 'cpg-c')
         dex(server, 'ip', 'link', 'set', 'cpg-c', 'netns', client_pid)
@@ -267,6 +325,77 @@ def main():
             "import subprocess; f=open('/gate/targets.log','ab'); "
             "subprocess.Popen(['python3','/gate/guest.py','targets'],stdout=f,stderr=f,start_new_session=True)")
         dex(server, 'iperf3', '-s', '-D', '-p', '5201', '--logfile', '/gate/iperf-server.log')
+        if args.udp_only:
+            start('recommended', 2)
+            write('recommended-verified-status.json', status('recommended'))
+            def udp_kernel_snapshot(name):
+                return {'udp': dex(name, 'cat', '/proc/net/snmp').stdout,
+                        'sockets': dex(name, 'ss', '-u', '-a', '-n', '-m').stdout,
+                        'qdisc': dex(name, 'tc', '-s', 'qdisc', 'show').stdout,
+                        'links': dex(name, 'ip', '-s', 'link').stdout}
+            before = {side: udp_kernel_snapshot(name)
+                      for side, name in [('client', client), ('server', server)]}
+            identities = {side: json.loads(guest(name, 'snapshot', label=label).stdout)
+                          for side, name, label in [('client', client, 'client'),
+                                                    ('server', server, 'master')]}
+            measured = dex(client, 'python3', '/gate/udp.py', timeout=40, check=False)
+            udp = json.loads(measured.stdout)
+            udp['kernel_before'] = before
+            udp['kernel_after'] = {side: udp_kernel_snapshot(name)
+                                   for side, name in [('client', client), ('server', server)]}
+            udp['client_status_after'] = status('recommended')
+            udp['target_socket'] = json.loads((root / 'udp-target-socket.json').read_text())
+            udp['service_before'] = identities
+            udp['service_after'] = {side: json.loads(guest(name, 'snapshot', label=label).stdout)
+                                    for side, name, label in [('client', client, 'client'),
+                                                              ('server', server, 'master')]}
+            identity = lambda snapshot: {(p['pid'], p['start_ticks']) for p in snapshot['processes']}
+            udp['service_incarnation_gate'] = ('PASS' if all(
+                identity(identities[side]) == identity(udp['service_after'][side])
+                for side in identities) else 'FAIL')
+            if udp['service_incarnation_gate'] != 'PASS':
+                udp['gate'] = 'FAIL'
+            write('udp-rate-overload-recovery.json', udp)
+            rows.append({'case': 'udp_rate_overload_recovery', 'gate': udp['gate']})
+            result['compatibility_gate'] = udp['gate']
+            result['gate'] = udp['gate']
+            result['scope'] = 'isolated Linux UDP short diagnostic only; no full compatibility or release acceptance'
+            stop()
+            raise ActiveDrainComplete()
+        if args.active_drain_only:
+            start('recommended', 1)
+            before_drain = json.loads(guest(server, 'snapshot', label='master').stdout)
+            listener_before = listener_socket_identity()
+            dex(server, 'python3', '-c',
+                "import sys; sys.path.insert(0,'/gate'); import guest; guest.start('active-drain-target', "
+                "['python3','/gate/active_drain.py','target'])")
+            measured = dex(client, 'python3', '/gate/active_drain.py', 'check',
+                           *(['--dns-burst'] if args.active_drain_dns_burst else []),
+                           timeout=50, check=False)
+            active = json.loads(measured.stdout)
+            after_drain = json.loads(guest(server, 'snapshot', label='master').stdout)
+            active['service_before'] = before_drain
+            active['service_after'] = after_drain
+            active['listener_inode_before'] = listener_before
+            active['listener_inode_after'] = listener_socket_identity()
+            active['listener_socket_identity_gate'] = ('PASS' if
+                active['listener_inode_before'] == active['listener_inode_after'] else 'FAIL')
+            master_before = before_drain['processes'][0]
+            master_after = after_drain['processes'][0]
+            active['master_incarnation_gate'] = ('PASS' if all(
+                master_before[key] == master_after[key]
+                for key in ('pid', 'start_ticks')) else 'FAIL')
+            if (active['master_incarnation_gate'] != 'PASS' or
+                    active['listener_socket_identity_gate'] != 'PASS'):
+                active['gate'] = 'FAIL'
+            write('active-session-drain.json', active)
+            rows.append({'case': 'active_session_negotiated_proxy_drain', **active})
+            result['compatibility_gate'] = active['gate']
+            result['gate'] = active['gate']
+            result['scope'] = 'isolated Linux active-session drain only; no full release acceptance'
+            guest(server, 'stop', label='active-drain-target')
+            stop()
+            raise ActiveDrainComplete()
         for profile in ('recommended', 'stream_udp_fallback'):
             try:
                 recovery = start(profile, 2)
@@ -316,7 +445,7 @@ def main():
                     receipt = dex(
                         client,
                         'python3', '/gate/guest.py', 'drain-control',
-                        '--drain-control', f'/gate/{profile}/drain.sock',
+                        '--drain-control', '/control/drain.sock',
                         '--drain-token', 'isolated-drain-wire-token-v1',
                         '--worker-id', '1', '--owner-epoch', str(owner_epoch),
                         '--remaining-ms', '1200', timeout=45, check=False,
@@ -533,6 +662,8 @@ def main():
         else:
             result['performance_gate'] = 'NOT_RUN'
         result['gate'] = 'PASS' if (result['compatibility_gate'] == 'PASS' and result['performance_gate'] in ('PASS', 'NOT_RUN')) else 'FAIL'
+    except ActiveDrainComplete:
+        pass
     except Exception as error:
         result['error'] = str(error)
         if performance_started:
@@ -555,6 +686,11 @@ def main():
                     result['gate'] = 'FAIL'
             except Exception as error:
                 result['cleanup'].append({'container': name, 'error': str(error)})
+                result['gate'] = 'FAIL'
+        if control_volume:
+            done = run(['docker', 'volume', 'rm', control_volume], check=False, timeout=15)
+            result['cleanup'].append({'control_volume': control_volume, 'exit_code': done.returncode})
+            if done.returncode:
                 result['gate'] = 'FAIL'
         write('result.json', result)
         print(json.dumps(result, indent=2))

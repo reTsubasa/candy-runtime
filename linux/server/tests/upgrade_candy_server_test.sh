@@ -97,6 +97,7 @@ managed_files='usr/local/bin/candy-core-manager
 usr/local/libexec/serverd-linux
 usr/local/libexec/candy-sdwan-runtime
 usr/local/libexec/candy-sdwan-agent
+usr/local/libexec/candy-tunio
 usr/local/libexec/candy-netd
 usr/local/libexec/candy-cloud-enroll
 usr/local/libexec/candy-cloud-sync

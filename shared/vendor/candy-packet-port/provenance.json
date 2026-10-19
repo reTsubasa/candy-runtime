@@ -1,30 +1,30 @@
 {
   "files": {
-    "Cargo.toml": "ce65fe9046d4e4868c7213874319a6b2bfd2d007ae4e3bc78a9ffba238ff2206",
+    "Cargo.toml": "1b48c889534b34e5b5314a77bb57264c0db1a613a1080ff133d29365f99da046",
     "src/executor_diagnostics.rs": "b568fbedcc9029cb9a53fb70906214ae6fdef921c07069c004aa9d329b6d0a54",
     "src/fd.rs": "88004a466a58adb1be9b1620dc57b5421f2fa35787fc9c5cf5929925abc3daee",
     "src/lib.rs": "b3f0f9bbcfaa45cca9209144f253cf29dc452e421eaf91b94c5d483bcd16c555",
-    "src/packet_port.rs": "8ce8e8c77b5c24cc7855b861e3583826408cffffd3dc99b42f1427106b6410e3",
-    "src/packet_port_ipc.rs": "4a6401c1781417e23479f4ee30e6a73d299c098b6f1b089249a037813ff77e9b",
-    "src/packet_port_manager.rs": "d42733a0f73029fdac60e485d263e744c64b3653bf3f8b050a23a6379faa7bbd",
-    "src/packet_port_transaction_tests.rs": "4ea141f059ddb13a0369176b0f79c01175ee61836e97967bbcb2f83e12821144"
+    "src/packet_port.rs": "33a13881f306d6ee87c6876fb2704513590c129ea5dfdb1e2e426c22aa6c62da",
+    "src/packet_port_ipc.rs": "f10ae83ef24cfd8fc00c7a3d22555d03a3bd3711cc83f5c0473359f9fb98ed85",
+    "src/packet_port_manager.rs": "01dfa93914868e4bbb7b9d94b2ef7c4fd0a6605f88c7f81f2dd59ccf3ec85d25",
+    "src/packet_port_transaction_tests.rs": "01b4f6d255f6547886f72823417781b3bac7bb9f638302398dabe33cf5aacc80"
   },
   "note": "Fixed public source package from a development worktree; base commit alone is not its content identity.",
   "origin": "https://github.com/reTsubasa/candy-core",
-  "origin_base_commit": "0c1e1a8ac6234b088c8e9dc0570a194a3dd22c32",
+  "origin_base_commit": "9a5f368abf1417a38033ce45ea36a1693f990be0",
   "origin_path": "crates/candy-packet-port",
-  "origin_worktree_content_sha256": "e2ad4f7a088b6725e72b33f6fb75983dfbc2fa7170313192fad1da5408f44483",
+  "origin_worktree_content_sha256": "29d2b2e10f3e6cecbe94d6dea046a18c259b668c5fa5c21f944d9a03a98f8da7",
   "package": "candy-packet-port",
-  "package_content_sha256": "918e3cc9665a5b08bcd3a81034d3e2c17854ae4da67b5f15f1653f9394ebbb2f",
+  "package_content_sha256": "76590d4e6e5702b6401f43d0817ad48afedbdf0946259e96e8d96b073f92d361",
   "schema_version": 1,
   "source_files": {
     "Cargo.toml": "515d8fd53b652607579c4030669f71110390d69b057950ac929db7bbc0efd421",
     "src/executor_diagnostics.rs": "b568fbedcc9029cb9a53fb70906214ae6fdef921c07069c004aa9d329b6d0a54",
     "src/fd.rs": "88004a466a58adb1be9b1620dc57b5421f2fa35787fc9c5cf5929925abc3daee",
     "src/lib.rs": "b3f0f9bbcfaa45cca9209144f253cf29dc452e421eaf91b94c5d483bcd16c555",
-    "src/packet_port.rs": "8ce8e8c77b5c24cc7855b861e3583826408cffffd3dc99b42f1427106b6410e3",
-    "src/packet_port_ipc.rs": "4a6401c1781417e23479f4ee30e6a73d299c098b6f1b089249a037813ff77e9b",
-    "src/packet_port_manager.rs": "d42733a0f73029fdac60e485d263e744c64b3653bf3f8b050a23a6379faa7bbd",
-    "src/packet_port_transaction_tests.rs": "4ea141f059ddb13a0369176b0f79c01175ee61836e97967bbcb2f83e12821144"
+    "src/packet_port.rs": "33a13881f306d6ee87c6876fb2704513590c129ea5dfdb1e2e426c22aa6c62da",
+    "src/packet_port_ipc.rs": "f10ae83ef24cfd8fc00c7a3d22555d03a3bd3711cc83f5c0473359f9fb98ed85",
+    "src/packet_port_manager.rs": "01dfa93914868e4bbb7b9d94b2ef7c4fd0a6605f88c7f81f2dd59ccf3ec85d25",
+    "src/packet_port_transaction_tests.rs": "01b4f6d255f6547886f72823417781b3bac7bb9f638302398dabe33cf5aacc80"
   }
 }

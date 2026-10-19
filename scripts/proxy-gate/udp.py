@@ -6,11 +6,42 @@ import hashlib
 import json
 import socket
 import struct
+import threading
 import time
 
 
+class RatePacer:
+    """Preserve nominal timing evidence without catch-up bursts after pauses."""
+
+    def __init__(self, start, pps, clock=time.monotonic, sleep=time.sleep):
+        self.start = start
+        self.origin = start
+        self.period = 1 / pps
+        self.clock, self.sleep = clock, sleep
+        self.last_sent = None
+
+    def wait(self, sequence):
+        nominal = self.start + sequence * self.period
+        now = self.clock()
+        target = self.origin + sequence * self.period
+        rebased = now - target > .02
+        if rebased:
+            self.origin = now - sequence * self.period
+            target = now
+        if self.last_sent is not None:
+            target = max(target, self.last_sent + self.period / 2)
+        if target > now:
+            self.sleep(target - now)
+        now = self.clock()
+        if now - target > .02:
+            self.origin = now - sequence * self.period
+            rebased = True
+        self.last_sent = now
+        return nominal, target, now, rebased
+
+
 def rate(size, pps, seconds, case, direct=False):
-    sent, received = {}, {}
+    sent, received, planned, paced = {}, {}, {}, {}
     duplicates, corrupt, foreign = [], [], []
     prefix = hashlib.sha256(case.encode()).digest()[:8]
     body = hashlib.shake_256(prefix).digest(size - 16)
@@ -27,10 +58,17 @@ def rate(size, pps, seconds, case, direct=False):
             raise RuntimeError('UDP warmup payload mismatch')
         conn.settimeout(.05)
         start = time.monotonic() + .1
+        pacer = RatePacer(start, pps)
+        schedule_rebases = []
         end = start + seconds
+        sender_done = threading.Event()
+        sender_finished = [None]
+        hard_deadline = end + 6
 
         def receive():
-            while time.monotonic() < end + 1:
+            while time.monotonic() < hard_deadline:
+                if sender_done.is_set() and time.monotonic() >= sender_finished[0] + 1:
+                    break
                 try:
                     payload, _ = conn.recvfrom(65535)
                 except socket.timeout:
@@ -51,31 +89,42 @@ def rate(size, pps, seconds, case, direct=False):
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             receiver = executor.submit(receive)
-            for sequence in range(count):
-                delay = start + sequence / pps - time.monotonic()
-                if delay > 0:
-                    time.sleep(delay)
-                payload = prefix + struct.pack('!Q', sequence) + body
-                sent[sequence] = time.monotonic()
-                conn.sendto(payload, destination)
-            receiver.result(timeout=seconds + 5)
+            try:
+                for sequence in range(count):
+                    nominal, target, now, rebased = pacer.wait(sequence)
+                    if now >= end + 5:
+                        raise TimeoutError('UDP generator exceeded bounded send window')
+                    if rebased:
+                        schedule_rebases.append({'sequence': sequence,
+                                                 'lag_ms': (now - nominal) * 1000})
+                    payload = prefix + struct.pack('!Q', sequence) + body
+                    planned[sequence], paced[sequence] = nominal, target
+                    sent[sequence] = now
+                    conn.sendto(payload, destination)
+            finally:
+                sender_finished[0] = time.monotonic()
+                sender_done.set()
+            receiver.result(timeout=2)
         missing = sorted(set(sent) - set(received))
         late = [sequence for sequence, at in sent.items()
-                if at > start + sequence / pps + .02]
+                if at > planned[sequence] + .02]
         return {'payload_bytes': size, 'offered_pps': pps, 'seconds': seconds,
                 'sent': len(sent), 'unique_received': len(received),
                 'missing': missing, 'duplicates': duplicates, 'corrupt': corrupt,
                 'foreign': foreign, 'generator_late_over_20ms': late,
-                'load_validity_gate': 'FAIL' if late else 'PASS',
+                'schedule_rebases': schedule_rebases,
+                'load_validity_gate': 'FAIL' if late or schedule_rebases else 'PASS',
                 'network_integrity_gate': 'FAIL' if missing or duplicates or corrupt or foreign else 'PASS',
-                'transmissions': [{'sequence': sequence, 'scheduled_at': start + sequence / pps,
+                'transmissions': [{'sequence': sequence, 'scheduled_at': planned[sequence],
+                                   'paced_at': paced[sequence],
                                    'sent_at': at, 'reply_at': received.get(sequence),
-                                   'generator_lag_ms': (at - start - sequence / pps) * 1000}
+                                   'generator_lag_ms': (at - planned[sequence]) * 1000}
                                   for sequence, at in sent.items()],
                 'start': start, 'end': end, 'last_sent_at': max(sent.values()),
+                'receiver_drain_until': min(hard_deadline, sender_finished[0] + 1),
                 'receiver_payload_mbps': sum(start <= at <= end for at in received.values())
                     * size * 8 / seconds / 1e6,
-                'gate': 'PASS' if not (missing or duplicates or corrupt or foreign or late) else 'FAIL'}
+                'gate': 'PASS' if not (missing or duplicates or corrupt or foreign or late or schedule_rebases) else 'FAIL'}
 
 
 def main():
@@ -103,6 +152,12 @@ def main():
                                   'elapsed_seconds': time.monotonic() - before}
         time.sleep(1)
         rows.append(rate(1200, 100, args.seconds, 'after-overload', args.direct))
+        if rows[-1]['gate'] != 'PASS':
+            # Retain the original recovery failure; a later observation only
+            # identifies whether it remains stuck or recovers without restart.
+            time.sleep(2)
+            result['late_recovery'] = rate(1200, 100, args.seconds,
+                                           'late-after-overload', args.direct)
         if not args.direct:
             import guest
             result['later_tcp_payload_bytes'] = guest.tcp_probe(617)

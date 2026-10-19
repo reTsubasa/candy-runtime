@@ -59,6 +59,8 @@ struct Plan {
     placement: Option<WorkerPlacement>,
     #[serde(default)]
     shared_listener: Option<listener_registration::ListenerPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worker_candidate_plan: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -138,6 +140,12 @@ struct AuthorityProof {
     transaction_id: String,
 }
 
+#[cfg(any(test, all(feature = "experimental-tunio-rebind", target_os = "linux")))]
+#[path = "candidate_core_control.rs"]
+mod candidate_core_control;
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+#[path = "candidate_ownership.rs"]
+mod candidate_ownership;
 #[path = "listener_registration.rs"]
 mod listener_registration;
 #[path = "signed_renewal.rs"]
@@ -672,6 +680,55 @@ impl std::fmt::Display for ManagedProofPending {
 }
 impl std::error::Error for ManagedProofPending {}
 
+fn retry_initial_proof<T>(
+    stage: &'static str,
+    deadline: Instant,
+    auth_deadline_unix: u64,
+    mut probe: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    let mut warned = false;
+    loop {
+        if shutdown_requested() || unix_time()? >= auth_deadline_unix {
+            bail!("code=initial_proof_cancelled module=sdwan_activation stage={stage} detail=shutdown or original authorization expired");
+        }
+        match probe() {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if !error.is::<CoreRecoveryRequired>()
+                    && !error.is::<PairRecoveryRequired>()
+                    && crate::runtime_agent::transient_error(&error) =>
+            {
+                if !warned {
+                    eprintln!("level=warn code=initial_proof_pending module=sdwan_activation stage={stage} detail={error:#} action=retry_original_owner_within_original_deadline");
+                    warned = true;
+                }
+                if Instant::now() >= deadline {
+                    return Err(error.context(format!("code=initial_proof_deadline module=sdwan_activation stage={stage} action=preserve_recorded_owner_retry_reconciliation")).context(ManagedProofPending));
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => {
+                return Err(error.context(format!(
+                    "code=initial_proof_rejected module=sdwan_activation stage={stage}"
+                )))
+            }
+        }
+    }
+}
+
+fn preserve_activation_proof<T>(
+    result: &Result<T>,
+    independently_recorded: bool,
+    authorization_valid: bool,
+) -> bool {
+    independently_recorded
+        && authorization_valid
+        && result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.is::<ManagedProofPending>())
+}
+
 #[derive(Debug)]
 pub(super) struct DesiredStateChanged;
 impl std::fmt::Display for DesiredStateChanged {
@@ -683,6 +740,16 @@ impl std::error::Error for DesiredStateChanged {}
 
 #[cfg(target_os = "linux")]
 fn publish_worker_record(plan: &Plan, pid: u32, token: &str) -> Result<()> {
+    publish_worker_record_until(plan, pid, token, None)
+}
+
+#[cfg(target_os = "linux")]
+fn publish_worker_record_until(
+    plan: &Plan,
+    pid: u32,
+    token: &str,
+    deadline: Option<Instant>,
+) -> Result<()> {
     let Some(worker) = &plan.independent_worker else {
         return Ok(());
     };
@@ -702,7 +769,22 @@ fn publish_worker_record(plan: &Plan, pid: u32, token: &str) -> Result<()> {
     record.authorization_snapshot_sha256 = plan.authorization_snapshot_sha256.clone();
     bind_shared_record(plan, &mut record);
     crate::process_record::publish(&worker.process_record, &record)?;
-    confirm_registration(&record, &worker.control_socket, plan.auth_deadline_unix)?;
+    match deadline {
+        Some(deadline) => retry_initial_proof(
+            "worker_registration",
+            deadline,
+            plan.auth_deadline_unix,
+            || {
+                confirm_registration_until(
+                    &record,
+                    &worker.control_socket,
+                    plan.auth_deadline_unix,
+                    deadline,
+                )
+            },
+        )?,
+        None => confirm_registration(&record, &worker.control_socket, plan.auth_deadline_unix)?,
+    }
     if plan.placement.is_some() {
         validate_worker_placement(plan, &record, &record.private_status()?)?;
     }
@@ -762,12 +844,26 @@ fn confirm_registration(
     socket: &Path,
     auth_deadline_unix: u64,
 ) -> Result<()> {
+    confirm_registration_until(
+        record,
+        socket,
+        auth_deadline_unix,
+        Instant::now() + Duration::from_secs(5),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn confirm_registration_until(
+    record: &crate::process_record::ManagedProcessRecord,
+    socket: &Path,
+    auth_deadline_unix: u64,
+    deadline: Instant,
+) -> Result<()> {
     let managed = candy_process_control::ProcessIdentity {
         pid: record.pid,
         start_ticks: record.process_start_ticks,
     };
     let controller = candy_process_control::process_identity(std::process::id())?;
-    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if shutdown_requested() || unix_time()? >= auth_deadline_unix {
             bail!("managed process registration cancelled or authorization expired");
@@ -925,6 +1021,12 @@ fn spawn_business_worker_with_slot(
                     authority.transaction_id.clone(),
                 ]);
             }
+            if let Some(candidate) = &plan.worker_candidate_plan {
+                arguments.extend([
+                    "--worker-candidate-plan".to_owned(),
+                    candidate.display().to_string(),
+                ]);
+            }
             arguments.extend(listener_registration::arguments(plan)?);
             let namespace = plan
                 .routing_namespace
@@ -980,6 +1082,9 @@ fn spawn_business_worker_with_slot(
                 .arg(&authority.sha256)
                 .arg("--worker-transaction-id")
                 .arg(&authority.transaction_id);
+        }
+        if let Some(candidate) = &plan.worker_candidate_plan {
+            command.arg("--worker-candidate-plan").arg(candidate);
         }
     }
     if let Some(placement) = &plan.placement {
@@ -1445,6 +1550,7 @@ pub(super) fn cloud_activation_plan(
         if plan.independent_worker.is_none()
             || plan.independent_supervision.is_none()
             || plan.authority.is_some()
+            || plan.worker_candidate_plan.is_some()
             || plan.pair_recovery.is_some()
             || plan.effective_plan_file.is_some()
             || plan.authorization_snapshot_sha256.is_some()
@@ -1722,9 +1828,9 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
         drop(worker_socket);
         let result = (|| {
             let worker_identity = candy_process_control::process_identity(worker.id())?;
-            #[cfg(target_os = "linux")]
-            publish_worker_record(&plan, worker.id(), &token)?;
             let readiness_deadline = Instant::now() + Duration::from_secs(20);
+            #[cfg(target_os = "linux")]
+            publish_worker_record_until(&plan, worker.id(), &token, Some(readiness_deadline))?;
             loop {
                 listener_registration::publish_prepared_pending(&plan);
                 if shutdown_requested() {
@@ -1733,18 +1839,32 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
                 if io_child.try_wait()?.is_some() {
                     return Err(PairRecoveryRequired.into());
                 }
-                if worker.try_wait()?.is_some() {
+                if retry_initial_proof(
+                    "worker_readiness_liveness",
+                    readiness_deadline,
+                    plan.auth_deadline_unix,
+                    || worker.try_wait(),
+                )?
+                .is_some()
+                {
                     return Err(CoreRecoveryRequired.into());
                 }
                 if Instant::now() >= readiness_deadline {
-                    bail!("experimental worker readiness deadline");
+                    return Err(anyhow::anyhow!("code=worker_readiness_deadline module=sdwan_activation detail=recorded owner has no terminal proof").context(ManagedProofPending));
                 }
-                let state = read_core_readiness_with_policy(
-                    &plan.core_status,
-                    plan.signed_generation,
-                    worker.id(),
-                    &token,
-                    ReadinessPolicy::Strict,
+                let state = retry_initial_proof(
+                    "worker_readiness_status",
+                    readiness_deadline,
+                    plan.auth_deadline_unix,
+                    || {
+                        read_core_readiness_with_policy(
+                            &plan.core_status,
+                            plan.signed_generation,
+                            worker.id(),
+                            &token,
+                            ReadinessPolicy::Strict,
+                        )
+                    },
                 )?;
                 if matches!(state, Some(ReadinessState::Ready)) {
                     break;
@@ -1785,10 +1905,17 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
                         token_sha256: record.readiness_token_sha256.clone(),
                         nonce: uuid::Uuid::new_v4().simple().to_string(),
                     };
-                    let reply = candy_process_control::exchange(
-                        &worker.control_socket,
-                        worker_identity,
-                        &request,
+                    let reply = retry_initial_proof(
+                        "worker_initial_controller",
+                        readiness_deadline,
+                        plan.auth_deadline_unix,
+                        || {
+                            candy_process_control::exchange(
+                                &worker.control_socket,
+                                worker_identity,
+                                &request,
+                            )
+                        },
                     )?;
                     if reply.controller
                         != candy_process_control::process_identity(std::process::id())?
@@ -1842,7 +1969,13 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
                     }
                 }
                 let expired = monotonic_ms()? >= owner.auth_deadline_mono_ms;
-                let worker_dead = worker.try_wait()?.is_some();
+                let worker_dead = retry_initial_proof(
+                    "worker_active_liveness",
+                    Instant::now() + Duration::from_secs(2),
+                    plan.auth_deadline_unix,
+                    || worker.try_wait(),
+                )?
+                .is_some();
                 if active && (expired || worker_dead) {
                     active = false;
                     revoke_pending = true;
@@ -1908,6 +2041,15 @@ fn run_plan(path: &Path, plan: Plan) -> Result<()> {
             }
             Ok(())
         })();
+        if preserve_activation_proof(
+            &result,
+            plan.independent_worker.is_some(),
+            monotonic_ms().is_ok_and(|now| now < owner.auth_deadline_mono_ms),
+        ) {
+            preserve_worker = true;
+            preserve_io = true;
+            eprintln!("level=warn code=activation_proof_unconfirmed module=sdwan_activation worker_pid={} tunio_pid={} detail=bounded control proof unavailable action=preserve_recorded_core_io_and_original_authorization", worker.id(), io_child.id());
+        }
         if !preserve_worker {
             stop_business(&mut worker);
         }
@@ -1997,6 +2139,116 @@ pub fn adopt_worker(path: &Path, gate: bool) -> Result<()> {
     adopt_worker_with_io(path, gate, false)
 }
 
+fn stop_recorded_process(plan: &Plan, record_path: &Path, worker: bool) -> Result<()> {
+    use candy_process_control::{exchange, ControlOperation, ControlRequest, ProcessIdentity};
+    let Some(record) = crate::process_record::read_optional(record_path)? else {
+        return Ok(());
+    };
+    let recorded_plan = record
+        .effective_plan_file
+        .as_ref()
+        .map(|path| read_plan(path))
+        .transpose()?;
+    let current = recorded_plan.as_ref().unwrap_or(plan);
+    anyhow::ensure!(
+        current.domain_id == plan.domain_id && current.infrastructure == plan.infrastructure,
+        "code=shutdown_record_scope_mismatch module=process_supervisor"
+    );
+    let identity = ProcessIdentity {
+        pid: record.pid,
+        start_ticks: record.process_start_ticks,
+    };
+    if record.business_is_current()? {
+        record.validate_infrastructure_identity(if worker {
+            &current.core
+        } else {
+            &current.tunio
+        })?;
+        let socket = if worker {
+            current
+                .independent_worker
+                .as_ref()
+                .context("recorded worker control absent")?
+                .control_socket
+                .clone()
+        } else {
+            current
+                .independent_supervision
+                .as_ref()
+                .context("recorded I/O control absent")?
+                .control_socket
+                .clone()
+        };
+        for operation in [ControlOperation::Takeover, ControlOperation::Stop] {
+            exchange(
+                &socket,
+                identity,
+                &ControlRequest {
+                    schema_version: 1,
+                    operation,
+                    token_sha256: record.readiness_token_sha256.clone(),
+                    nonce: uuid::Uuid::new_v4().simple().to_string(),
+                },
+            )?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while record.business_is_current()? && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        anyhow::ensure!(
+            !record.business_is_current()?,
+            "code=recorded_process_stop_pending module=process_supervisor"
+        );
+    }
+    #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+    if let (Some(host), Some(instance)) = (&record.shared_worker, &record.shared_domain_instance) {
+        crate::shared_worker::forget_domain(host, instance)?;
+    }
+    Ok(())
+}
+
+pub(super) fn shutdown_recorded_domain(path: &Path) -> Result<()> {
+    let plan = read_plan(path)?;
+    let mut failures = Vec::new();
+    // Shutdown must also cover supervisors in retry/backoff, whose recorded
+    // owner has never reached the normal adoption-loop cleanup path.
+    let mut netd = NetdControl::new(&plan);
+    let revoke = (|| -> Result<()> {
+        let (body, fd) = netd.exchange(Operation::ForwardStatus)?;
+        anyhow::ensure!(fd.is_none(), "unexpected shutdown packet descriptor");
+        if let Body::ForwardStatus {
+            owner: Some(owner), ..
+        } = body
+        {
+            anyhow::ensure!(
+                owner.domain_id == plan.domain_id,
+                "shutdown forwarding owner differs"
+            );
+            expect_ack(&mut netd, Operation::ForwardRevoke { owner })?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = revoke {
+        failures.push(format!("forwarding: {error:#}"));
+    }
+    if let Some(worker) = &plan.independent_worker {
+        if let Err(error) = stop_recorded_process(&plan, &worker.process_record, true) {
+            failures.push(format!("business: {error:#}"));
+        }
+    }
+    if let Some(io) = &plan.independent_supervision {
+        if let Err(error) = stop_recorded_process(&plan, &io.process_record, false) {
+            failures.push(format!("infrastructure I/O: {error:#}"));
+        }
+    }
+    anyhow::ensure!(
+        failures.is_empty(),
+        "code=recorded_domain_shutdown_pending module=runtime_agent detail={}",
+        failures.join("; ")
+    );
+    Ok(())
+}
+
 pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) -> Result<()> {
     use candy_process_control::{
         exchange, process_identity, process_is_current_confirmed, ControlOperation, ControlRequest,
@@ -2017,8 +2269,17 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
         .independent_worker
         .as_ref()
         .context("effective independent Core plan absent")?;
-    record.validate_current(&plan.core, unix_time()?)?;
-    let status = record.private_status()?;
+    let status = record.validate_bound_status(&plan.core, unix_time()?)?;
+    // A lost master revokes only its transport owner. The independently owned
+    // listener remains able to authenticate replacement traffic even while the
+    // packet supervisor reports failed readiness for the previous connection.
+    // Re-register that exact process before waiting on reciprocal packet proof,
+    // otherwise registration and readiness wait on each other indefinitely.
+    if !(matches!(status["lifecycle"].as_str(), Some("active" | "starting"))
+        || plan.shared_listener.is_some() && listener_registration::listener_available(&status))
+    {
+        return Err(ManagedProofPending.into());
+    }
     validate_worker_placement(&plan, &record, &status)?;
     if record.status_path != plan.core_status
         || record.policy_generation != plan.signed_generation
@@ -2081,6 +2342,7 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
     if adopted.controller != controller || adopted.controller_epoch == 0 {
         bail!("independent Core takeover ownership mismatch");
     }
+    listener_registration::publish_pending(&plan, &supervision.process_record);
     let mut netd = NetdControl::new(&plan);
     let (body, fd) = netd.exchange(Operation::ForwardStatus)?;
     if fd.is_some() {
@@ -2090,6 +2352,7 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
         owner: Some(previous),
         candidate_owner,
         phase: previous_phase,
+        last_fencing_token,
         ..
     } = body
     else {
@@ -2131,6 +2394,7 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
     let mut owner = ForwardOwner {
         fencing_token: previous
             .fencing_token
+            .max(last_fencing_token)
             .checked_add(1)
             .context("owner fence exhausted")?,
         auth_deadline_mono_ms: previous.auth_deadline_mono_ms.min(auth_deadline),
@@ -2321,6 +2585,17 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
             &request(ControlOperation::Stop),
         )?;
     }
+    let business_deadline = Instant::now() + Duration::from_secs(2);
+    while record.business_is_current()? && Instant::now() < business_deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    if record.business_is_current()? {
+        bail!("code=adopted_business_stop_pending module=process_supervisor detail=authenticated stop has not retired the adopted domain; preserve shared host receipts");
+    }
+    #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+    if let (Some(host), Some(instance)) = (&record.shared_worker, &record.shared_domain_instance) {
+        crate::shared_worker::forget_domain(host, instance)?;
+    }
     if shutdown_requested() {
         if let Some((identity, token, _, socket)) = io {
             let stop = ControlRequest {
@@ -2443,6 +2718,7 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
     let Body::ForwardStatus {
         owner: Some(previous),
         candidate_owner,
+        last_fencing_token,
         ..
     } = status
     else {
@@ -2520,6 +2796,7 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
         plan.fencing_token,
         recovered.fencing_token,
         previous.fencing_token,
+        last_fencing_token,
         candidate_owner
             .as_ref()
             .map_or(0, |owner| owner.fencing_token),
@@ -2722,6 +2999,7 @@ pub(super) fn rebind_core(path: &Path) -> Result<()> {
     let Body::ForwardStatus {
         owner: Some(previous),
         candidate_owner,
+        last_fencing_token,
         ..
     } = status
     else {
@@ -2769,7 +3047,8 @@ pub(super) fn rebind_core(path: &Path) -> Result<()> {
         .as_ref()
         .map_or(previous.fencing_token, |candidate| {
             candidate.fencing_token.max(previous.fencing_token)
-        });
+        })
+        .max(last_fencing_token);
     plan.worker_epoch = greatest_epoch
         .checked_add(1)
         .context("worker epoch exhausted")?;
@@ -2968,6 +3247,81 @@ pub(super) fn rebind_core(path: &Path) -> Result<()> {
     result
 }
 
+#[cfg(test)]
+mod activation_proof_tests {
+    use super::*;
+
+    #[test]
+    fn initial_proof_retries_same_owner_and_recovers_without_cleanup() {
+        let owner = (17_u32, 23_u64, 31_u64);
+        let mut attempts = Vec::new();
+        let result = retry_initial_proof(
+            "fixture_liveness",
+            Instant::now() + Duration::from_secs(1),
+            u64::MAX,
+            || {
+                attempts.push(owner);
+                if attempts.len() == 1 {
+                    Err(std::io::Error::from(std::io::ErrorKind::WouldBlock).into())
+                } else {
+                    Ok(owner)
+                }
+            },
+        );
+        assert_eq!(result.unwrap(), owner);
+        assert_eq!(attempts, vec![owner, owner]);
+    }
+
+    #[test]
+    fn bounded_unknown_preserves_recorded_core_io_but_never_expired_owner() {
+        let mut attempts = 0;
+        let result: Result<()> =
+            retry_initial_proof("fixture_controller", Instant::now(), u64::MAX, || {
+                attempts += 1;
+                Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into())
+            });
+        assert_eq!(attempts, 1);
+        assert!(result.as_ref().unwrap_err().is::<ManagedProofPending>());
+        assert!(preserve_activation_proof(&result, true, true));
+        assert!(!preserve_activation_proof(&result, true, false));
+        assert!(!preserve_activation_proof(&result, false, true));
+        let detail = format!("{:#}", result.unwrap_err());
+        assert!(detail.contains("stage=fixture_controller"));
+        assert!(detail.contains("timed out"));
+    }
+
+    #[test]
+    fn rejected_proof_and_confirmed_exit_do_not_become_unknown() {
+        let mut attempts = 0;
+        let rejected: Result<()> = retry_initial_proof(
+            "fixture_rejection",
+            Instant::now() + Duration::from_secs(1),
+            u64::MAX,
+            || {
+                attempts += 1;
+                anyhow::bail!("authenticated controller mismatch")
+            },
+        );
+        assert_eq!(attempts, 1);
+        assert!(!preserve_activation_proof(&rejected, true, true));
+        let exited: Result<()> = retry_initial_proof(
+            "fixture_exited",
+            Instant::now() + Duration::from_secs(1),
+            u64::MAX,
+            || Err(CoreRecoveryRequired.into()),
+        );
+        assert!(exited.as_ref().unwrap_err().is::<CoreRecoveryRequired>());
+        assert!(!preserve_activation_proof(&exited, true, true));
+        let expired: Result<()> = retry_initial_proof(
+            "fixture_expired",
+            Instant::now() + Duration::from_secs(1),
+            0,
+            || panic!("expired authorization must not issue a probe"),
+        );
+        assert!(!preserve_activation_proof(&expired, true, true));
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
@@ -3032,13 +3386,60 @@ mod tests {
 
     #[test]
     fn unrecorded_live_endpoint_blocks_replacement_without_granting_adoption() {
+        const HELPER: &str = "CANDY_TEST_UNRECORDED_ENDPOINT_OWNER";
+        if let Some(path) = std::env::var_os(HELPER) {
+            let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            std::io::stdin().read_exact(&mut [0_u8]).unwrap();
+            drop(listener);
+            return;
+        }
+        struct EndpointOwner(Child);
+        impl Drop for EndpointOwner {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("worker.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        // The child creates the listener after exec. Parallel tests in this
+        // process cannot inherit its FD in their fork-to-exec window.
+        let mut owner = EndpointOwner(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "experimental_tunio::tests::unrecorded_live_endpoint_blocks_replacement_without_granting_adoption"])
+                .env(HELPER, &path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.mode() & 0o777 == 0o600) {
+            assert!(
+                owner.0.try_wait().unwrap().is_none(),
+                "endpoint helper exited before binding"
+            );
+            assert!(Instant::now() < deadline, "endpoint helper did not bind");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let identity = candy_process_control::process_identity(owner.0.id()).unwrap();
+        assert_eq!(
+            candy_process_control::inspect_endpoint_process(&path).unwrap(),
+            identity
+        );
         let error = preserve_unrecorded_endpoint(&path).unwrap_err();
         assert!(error.is::<ManagedProofPending>());
-        drop(listener);
+        owner.0.stdin.take().unwrap().write_all(b"x").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = owner.0.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(Instant::now() < deadline, "endpoint helper did not exit");
+            thread::sleep(Duration::from_millis(10));
+        }
         preserve_unrecorded_endpoint(&path).unwrap();
         fs::remove_file(&path).unwrap();
         preserve_unrecorded_endpoint(&path).unwrap();

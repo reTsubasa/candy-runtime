@@ -10,8 +10,8 @@ no_build=${OPENWRT_SDK_CONTAINER_NO_BUILD:-0}
 download_base=${OPENWRT_DOWNLOAD_BASE:-https://downloads.openwrt.org}
 official_download_base=https://downloads.openwrt.org
 
-[ -n "$runtime_bin_dir" ] && [ -x "$runtime_bin_dir/candy-netd" ] && [ -x "$runtime_bin_dir/candy-sdwan-agent" ] || {
-  printf '%s\n' "CANDY_RUNTIME_BIN_DIR must contain runtime-owned candy-netd and candy-sdwan-agent" >&2
+[ -n "$runtime_bin_dir" ] && [ -x "$runtime_bin_dir/candy-tunio" ] && [ -x "$runtime_bin_dir/candy-netd" ] && [ -x "$runtime_bin_dir/candy-sdwan-agent" ] || {
+  printf '%s\n' "CANDY_RUNTIME_BIN_DIR must contain runtime-owned candy-tunio, candy-netd and candy-sdwan-agent" >&2
   exit 2
 }
 
@@ -276,6 +276,7 @@ docker run --rm --platform linux/amd64 \
       for executable in \
         "$payload/client/etc/init.d/candy" \
         "$payload/client/etc/init.d/candy-cloud-sync" \
+        "$payload/client/usr/libexec/candy-tunio" \
         "$payload/client/usr/bin/candy-netd" \
         "$payload/client/usr/bin/candy-sdwan-agent" \
         "$payload/client/usr/libexec/candy-cloud-enroll" \

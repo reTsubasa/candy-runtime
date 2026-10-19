@@ -225,6 +225,65 @@ pub fn exchange(
     Ok(reply)
 }
 
+/// Exchange a bounded extension document over the same authenticated management
+/// endpoint. The caller validates its operation-specific challenge and receipt.
+pub fn exchange_document<Q: Serialize, A: serde::de::DeserializeOwned>(
+    path: &Path,
+    expected_process: ProcessIdentity,
+    request: &Q,
+    max_bytes: usize,
+    deadline: Instant,
+) -> Result<A> {
+    if max_bytes == 0 || max_bytes > 1024 * 1024 {
+        bail!("invalid management extension message budget");
+    }
+    validate_endpoint(path)?;
+    let mut stream = connect_bounded(path)?;
+    if peer_identity(&stream)? != expected_process {
+        bail!("control peer PID or epoch differs from managed process");
+    }
+    stream.set_nonblocking(false)?;
+    let remaining = || {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .context("management extension deadline exceeded")
+    };
+    let bytes = serde_json::to_vec(request)?;
+    if bytes.len() > max_bytes {
+        bail!("management extension request exceeds explicit budget");
+    }
+    let mut output = bytes.as_slice();
+    while !output.is_empty() {
+        stream.set_write_timeout(Some(remaining()?))?;
+        match stream.write(output) {
+            Ok(0) => bail!("management extension output closed"),
+            Ok(count) => output = &output[count..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error).context("write management extension"),
+        }
+    }
+    stream.shutdown(Shutdown::Write)?;
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 4096];
+    loop {
+        stream.set_read_timeout(Some(remaining()?))?;
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) if count <= max_bytes.saturating_sub(bytes.len()) => {
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+            Ok(_) => bail!("management extension response exceeds explicit budget"),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error).context("read management extension"),
+        }
+    }
+    if bytes.is_empty() {
+        bail!("management extension response is empty");
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
 /// Inspect the kernel-authenticated endpoint owner when a durable record is
 /// unavailable. This identifies a live process; it does not grant adoption.
 pub fn inspect_endpoint_process(path: &Path) -> Result<ProcessIdentity> {
@@ -360,6 +419,52 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(!process_is_current_confirmed(identity).unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn extension_exchange_authenticates_peer_and_enforces_response_budget() {
+        use std::os::unix::net::UnixListener;
+        let directory =
+            std::env::temp_dir().join(format!("candy-extension-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.join("control.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let server = std::thread::spawn(move || {
+            for payload in ["valid".to_owned(), "x".repeat(8192)] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _: serde_json::Value = read_message(&stream).unwrap();
+                stream
+                    .write_all(&serde_json::to_vec(&payload).unwrap())
+                    .unwrap();
+            }
+        });
+        let identity = process_identity(std::process::id()).unwrap();
+        let request = serde_json::json!({"operation":"candidate_status"});
+        let result: String = exchange_document(
+            &path,
+            identity,
+            &request,
+            4096,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(result, "valid");
+        assert!(exchange_document::<_, String>(
+            &path,
+            identity,
+            &request,
+            4096,
+            Instant::now() + Duration::from_secs(2)
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("budget"));
+        server.join().unwrap();
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

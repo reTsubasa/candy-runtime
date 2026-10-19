@@ -342,6 +342,14 @@ impl Snapshot {
             return Ok(());
         }
         self.verify_remaining(true)?;
+        for entry in fs::read_dir(&self.directory)? {
+            let name = entry?.file_name();
+            if name != "manifest.json" && !self.files.iter().any(|file| name == file.name.as_str())
+            {
+                eprintln!("level=info code=signed_snapshot_retained_evidence module=sdwan_activation directory={} action=preserve_signed_closure_and_transaction_evidence", self.directory.display());
+                return Ok(());
+            }
+        }
         for file in &self.files {
             remove_if_present(&self.directory.join(&file.name))?;
         }
@@ -362,6 +370,45 @@ fn remove_if_present(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retirement_preserves_nonempty_transaction_evidence_and_original_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        for name in ["segment", "projection"] {
+            fs::write(root.path().join(name), name).unwrap();
+        }
+        let config = root.path().join("config");
+        fs::write(
+            &config,
+            format!(
+                "segment_snapshot = {:?}\nsite_projection = {:?}\n",
+                root.path().join("segment"),
+                root.path().join("projection")
+            ),
+        )
+        .unwrap();
+        let snapshot = Snapshot::capture(&config, root.path()).unwrap();
+        let manifest = fs::read(snapshot.directory.join("manifest.json")).unwrap();
+        let evidence = snapshot.config.with_extension("candidate-journal");
+        fs::create_dir(&evidence).unwrap();
+        fs::write(evidence.join("unknown-commit"), b"preserve-original-tuple").unwrap();
+        snapshot.retire().unwrap();
+        snapshot.retire().unwrap();
+        snapshot.verify().unwrap();
+        assert_eq!(
+            fs::read(snapshot.directory.join("manifest.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read(evidence.join("unknown-commit")).unwrap(),
+            b"preserve-original-tuple"
+        );
+        fs::remove_file(evidence.join("unknown-commit")).unwrap();
+        fs::remove_dir(evidence).unwrap();
+        snapshot.retire().unwrap();
+        assert!(!snapshot.directory.exists());
+    }
 
     #[test]
     fn closure_reader_rejects_file_before_reading_beyond_remaining_budget() {

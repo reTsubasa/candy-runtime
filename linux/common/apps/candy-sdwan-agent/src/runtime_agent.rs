@@ -394,7 +394,31 @@ fn cloud_loop(
     update(&states, 0, &notifications, |state| state.phase = "stopped");
 }
 
-fn transient_error(error: &anyhow::Error) -> bool {
+pub(super) fn transient_error(error: &anyhow::Error) -> bool {
+    // These failures describe a signed/deployment contract mismatch. Wrapping
+    // them in ManagedProofPending must preserve the active owner, but retrying
+    // the identical plan cannot make progress. The supervisor will wait for a
+    // changed plan fingerprint and leave the current owner serving meanwhile.
+    let chain = format!("{error:#}");
+    // The forwarding authority reports an active owner, but Runtime could not
+    // confirm the exact predecessor process identity. This is an uncertain
+    // local proof outcome, not a stable signed-contract mismatch: retain the
+    // owner and retry reconciliation until the process record and authority
+    // agree (or the supervisor's bounded retry/recovery policy intervenes).
+    if chain.contains("code=renewal_active_owner_unconfirmed") {
+        return true;
+    }
+    if [
+        "code=candidate_shared_listener_required",
+        "code=candidate_grant_policy_mismatch",
+        "code=listener_activation_ack_mismatch",
+        "code=listener_master_stale",
+    ]
+    .iter()
+    .any(|code| chain.contains(code))
+    {
+        return false;
+    }
     // anyhow context values participate in Error::is/downcast_ref, but are
     // not exposed as their original type by std::error::Error::source.
     if error.is::<crate::experimental_tunio::NetdUnavailable>()
@@ -409,24 +433,27 @@ fn transient_error(error: &anyhow::Error) -> bool {
     {
         return true;
     }
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<nix::errno::Errno>()
-            .is_some_and(|error| {
-                matches!(
-                    *error,
-                    nix::errno::Errno::EINTR
-                        | nix::errno::Errno::EAGAIN
-                        | nix::errno::Errno::ENOMEM
-                        | nix::errno::Errno::EBUSY
-                        | nix::errno::Errno::ECONNRESET
-                        | nix::errno::Errno::ECONNREFUSED
-                        | nix::errno::Errno::EPIPE
-                        | nix::errno::Errno::ETIMEDOUT
-                )
-            })
-            || cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
-                matches!(
+    transient_cause(error.as_ref())
+}
+
+fn transient_cause(cause: &(dyn std::error::Error + 'static)) -> bool {
+    cause
+        .downcast_ref::<nix::errno::Errno>()
+        .is_some_and(|error| {
+            matches!(
+                *error,
+                nix::errno::Errno::EINTR
+                    | nix::errno::Errno::EAGAIN
+                    | nix::errno::Errno::ENOMEM
+                    | nix::errno::Errno::EBUSY
+                    | nix::errno::Errno::ECONNRESET
+                    | nix::errno::Errno::ECONNREFUSED
+                    | nix::errno::Errno::EPIPE
+                    | nix::errno::Errno::ETIMEDOUT
+            )
+        })
+        || cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
                     error.kind(),
                     std::io::ErrorKind::Interrupted
                         | std::io::ErrorKind::WouldBlock
@@ -438,8 +465,11 @@ fn transient_error(error: &anyhow::Error) -> bool {
                         | std::io::ErrorKind::NotConnected
                         | std::io::ErrorKind::OutOfMemory
                 ) || error.raw_os_error() == Some(nix::libc::EBUSY)
-            })
-    })
+                    // io::Error::source skips an inner error itself. Inspect
+                    // that typed value before following its source chain.
+                    || error.get_ref().is_some_and(|inner| transient_cause(inner))
+        })
+        || cause.source().is_some_and(transient_cause)
 }
 
 fn inputs(path: &Path) -> Result<Vec<u8>> {
@@ -461,6 +491,7 @@ fn domain_loop(
     notifications: SyncSender<()>,
     retry_initial_ms: u64,
     retry_max_ms: u64,
+    shutdown_timeout_ms: u64,
 ) {
     let mut backoff = retry_initial_ms;
     while !crate::shutdown_requested() {
@@ -557,6 +588,23 @@ fn domain_loop(
             backoff = retry_initial_ms;
         }
     }
+    let deadline = Instant::now() + Duration::from_millis(shutdown_timeout_ms);
+    loop {
+        match crate::experimental_tunio::shutdown_recorded_domain(&plan) {
+            Ok(()) => break,
+            Err(error) => {
+                eprintln!("level=warn code=domain_shutdown_pending module=runtime_agent slot={slot} detail={error:#} action=retry_authenticated_cleanup");
+                if Instant::now() >= deadline {
+                    update(&states, slot, &notifications, |state| {
+                        state.phase = "shutdown_failed";
+                        state.code = Some("domain_shutdown_failed");
+                    });
+                    return;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
     update(&states, slot, &notifications, |state| {
         state.phase = "stopped"
     });
@@ -598,6 +646,7 @@ pub(super) fn run(path: &Path, gate: bool) -> Result<()> {
     let invocation = Arc::new(Mutex::new(None));
     let retry_initial_ms = config.cloud.retry_initial_ms;
     let retry_max_ms = config.cloud.retry_max_ms;
+    let shutdown_timeout_ms = config.budgets.shutdown_timeout_ms;
     let mut workers = Vec::new();
     workers.push((
         0,
@@ -638,6 +687,7 @@ pub(super) fn run(path: &Path, gate: bool) -> Result<()> {
                     notifications,
                     retry_initial_ms,
                     retry_max_ms,
+                    shutdown_timeout_ms,
                 )
             },
         ) {
@@ -723,6 +773,9 @@ pub(super) fn run(path: &Path, gate: bool) -> Result<()> {
             .join()
             .map_err(|_| anyhow::anyhow!("runtime Agent managed task panicked"))?;
     }
+    anyhow::ensure!(!states.lock().unwrap_or_else(|poison| poison.into_inner()).iter()
+        .any(|state| state.code == Some("domain_shutdown_failed")),
+        "code=runtime_agent_shutdown_incomplete module=runtime_agent detail=recorded domain cleanup remains unconfirmed");
     if let Some(pool) = &mut shared_pool {
         pool.retire_empty()?;
     }
@@ -805,6 +858,45 @@ mod tests {
         assert!(!transient_error(
             &std::io::Error::from(std::io::ErrorKind::NotFound).into()
         ));
+    }
+    #[test]
+    fn contextual_business_control_errors_retain_typed_retry_classification() {
+        for errno in [
+            nix::libc::EAGAIN,
+            nix::libc::ECONNRESET,
+            nix::libc::ETIMEDOUT,
+        ] {
+            let wrapped = anyhow::Error::from(std::io::Error::from_raw_os_error(errno))
+                .context("shared domain completion");
+            assert!(
+                transient_error(&wrapped),
+                "errno {errno} lost its retry type"
+            );
+        }
+        let permanent =
+            anyhow::anyhow!("invalid signed authorization").context("shared domain completion");
+        assert!(!transient_error(&permanent));
+        let unsupported_listener =
+            anyhow::anyhow!("code=candidate_shared_listener_required module=sdwan_initiator")
+                .context(crate::experimental_tunio::ManagedProofPending)
+                .context("signed renewal recovery");
+        assert!(!transient_error(&unsupported_listener));
+        let unconfirmed_owner =
+            anyhow::anyhow!("code=renewal_active_owner_unconfirmed module=sdwan_activation")
+                .context("signed renewal recovery");
+        assert!(transient_error(&unconfirmed_owner));
+    }
+    #[test]
+    fn typed_nested_io_errors_keep_retry_classification() {
+        let temporary = anyhow::Error::from(std::io::Error::other(
+            std::io::Error::from_raw_os_error(nix::libc::EAGAIN),
+        ));
+        assert!(transient_error(&temporary));
+        let permanent = anyhow::Error::from(std::io::Error::other(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid signed authorization",
+        )));
+        assert!(!transient_error(&permanent));
     }
     #[test]
     fn context_wrapped_recovery_signals_keep_the_existing_bounded_retry() {

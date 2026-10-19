@@ -32,7 +32,8 @@ case "$target" in
 esac
 
 cargo build --manifest-path "$repo_root/Cargo.toml" --release --locked \
-	--package candy-netd --package candy-sdwan-agent --package candy-cloud-enroll --package candy-cloud-sync --target "$target"
+	--package candy-netd --package candy-sdwan-agent --package candy-cloud-enroll --package candy-cloud-sync \
+	--features candy-sdwan-agent/experimental-tunio-rebind --target "$target"
 
 command -v jq >/dev/null 2>&1 || {
 	printf '%s\n' "jq is required to locate the Cargo target directory" >&2
@@ -88,5 +89,11 @@ if command -v file >/dev/null 2>&1; then
 		armv7-unknown-linux-musleabihf) file "$stage/candy-cloud-sync" | grep -Eq 'ELF.*ARM' ;;
 	esac || { printf '%s\n' "candy-cloud-sync has the wrong ELF architecture for $target" >&2; exit 1; }
 fi
+
+cargo build --manifest-path "$repo_root/linux/common/apps/candy-tunio/Cargo.toml" \
+	--release --locked --target "$target"
+tunio_target_root=$(cargo metadata --format-version 1 --no-deps \
+	--manifest-path "$repo_root/linux/common/apps/candy-tunio/Cargo.toml" | jq -er '.target_directory')
+install -m 0755 "$tunio_target_root/$target/release/candy-tunio" "$stage/candy-tunio"
 
 printf '%s\n' "$stage"

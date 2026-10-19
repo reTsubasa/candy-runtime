@@ -98,3 +98,8 @@ if grep -Eiq 'catalog|stable[-_ ]+(release|index|metadata)' "$workflow"; then
 fi
 
 printf '%s\n' "Candy centralized Runtime release contract passed"
+
+# Release payloads must include the infrastructure used by the verified MBB gates.
+grep -Fq -- '--features candy-sdwan-agent/experimental-tunio-rebind' "$root/packaging/openwrt/build/build_runtime.sh" || fail "OpenWrt release omits negotiated renewal support"
+grep -Fq -- '--features candy-sdwan-agent/experimental-tunio-rebind' "$root/packaging/linux/build.sh" || fail "Linux release omits negotiated renewal support"
+grep -Fq '"$payload/client/usr/libexec/candy-tunio"' "$sdk_gate" || fail "SDK gate does not require TUN infrastructure"

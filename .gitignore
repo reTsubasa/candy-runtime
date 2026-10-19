@@ -5,3 +5,10 @@
 /target/
 *.apk
 *.ipk
+
+# Build and gate snapshots are reproducible, never release source.
+/.toolchains/
+/target-*/
+**/target/
+/docs/artifacts/**/binaries/
+/docs/artifacts/**/frozen/

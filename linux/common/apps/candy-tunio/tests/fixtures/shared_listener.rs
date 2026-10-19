@@ -2,6 +2,8 @@
 use super::*;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+#[path = "retained_io_record.rs"]
+mod retained_io_record;
 
 struct Link(String);
 impl Drop for Link {
@@ -24,7 +26,16 @@ impl Drop for Evidence {
                     copy(&entry.path(), &target.join(entry.file_name()))?;
                 } else if matches!(
                     entry.path().extension().and_then(|value| value.to_str()),
-                    Some("json" | "log" | "journal" | "domain" | "activation")
+                    Some(
+                        "json"
+                            | "log"
+                            | "journal"
+                            | "domain"
+                            | "activation"
+                            | "reservation"
+                            | "candidate"
+                            | "candidate-admission"
+                    )
                 ) {
                     fs::copy(entry.path(), target.join(entry.file_name()))?;
                 }
@@ -58,7 +69,7 @@ fn prefix(value: &str) -> Ipv4Prefix {
     .unwrap()
 }
 
-fn declaration(report: &serde_json::Value) -> PrepareDeclaration {
+pub(super) fn declaration(report: &serde_json::Value) -> PrepareDeclaration {
     let netd = &report["netd"];
     let mut routes = netd["local_prefixes"]
         .as_array()
@@ -108,10 +119,14 @@ fn declaration(report: &serde_json::Value) -> PrepareDeclaration {
     }
 }
 
+#[track_caller]
 fn probe_proxy() {
+    let started = Instant::now();
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut attempts = 0;
     loop {
-        let success = (|| -> std::io::Result<()> {
+        attempts += 1;
+        let result = (|| -> std::io::Result<()> {
             let mut stream = TcpStream::connect_timeout(
                 &"127.0.0.1:19002".parse().unwrap(),
                 Duration::from_millis(200),
@@ -124,14 +139,13 @@ fn probe_proxy() {
                 return Err(std::io::Error::other("proxy HTTP response mismatch"));
             }
             Ok(())
-        })()
-        .is_ok();
-        if success {
-            return;
-        }
+        })();
+        let Err(error) = result else { return };
         assert!(
             Instant::now() < deadline,
-            "Proxy failed through the shared listener"
+            "Proxy failed through the shared listener attempts={attempts} elapsed_ms={} error_kind={:?} detail={error}",
+            started.elapsed().as_millis(),
+            error.kind(),
         );
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -141,8 +155,11 @@ fn committed_ack(registry: &Path, seed: u8) -> bool {
     let name = format!("{seed:02x}").repeat(16);
     let receipt = status(&registry.join(format!("{name}.domain")));
     let acknowledgement = status(&registry.join(format!("{name}.activation")));
+    let master = status(&registry.join("listener-master.json"));
     receipt.is_some_and(|receipt| {
-        receipt["prepared_ingress"] == false && acknowledgement.as_ref() == Some(&receipt)
+        receipt["prepared_ingress"] == false
+            && master.is_some_and(|master| master["instance"] == receipt["master_instance"])
+            && acknowledgement.as_ref() == Some(&receipt)
     })
 }
 
@@ -165,7 +182,483 @@ fn master_workers(pid: u32) -> Vec<candy_process_control::ProcessIdentity> {
         .collect()
 }
 
+fn reload(socket: &Path, request: serde_json::Value) -> serde_json::Value {
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream
+        .write_all(&serde_json::to_vec(&request).unwrap())
+        .unwrap();
+    stream.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    serde_json::from_slice(&response).unwrap()
+}
+
+fn tun_identity(namespace: &str) -> serde_json::Value {
+    let output = Command::new("ip")
+        .args(["-n", namespace, "-j", "link", "show", "candy0"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "client infrastructure TUN missing");
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()[0]["ifindex"].clone()
+}
+
+fn verify_live_reload(
+    root: &Path,
+    clients: &[String],
+    server_plans: &[PathBuf],
+    client_pids: &[u32],
+    restart_successor_server: bool,
+) {
+    let server_before: Vec<_> = server_plans
+        .iter()
+        .map(|path| {
+            (
+                status(&path.with_file_name("process.json")).unwrap(),
+                status(&path.with_file_name("io-process.json")).unwrap(),
+            )
+        })
+        .collect();
+    let client_before: Vec<_> = client_pids
+        .iter()
+        .map(|pid| candy_process_control::process_identity(*pid).unwrap())
+        .collect();
+    let tuns_before: Vec<_> = clients.iter().map(|name| tun_identity(name)).collect();
+    let mut traffic = Vec::new();
+    for (domain, namespace) in clients.iter().enumerate() {
+        traffic.push(spawn(
+            Command::new("ip").args([
+                "netns",
+                "exec",
+                namespace,
+                "ping",
+                "-D",
+                "-O",
+                "-I",
+                "10.251.1.10",
+                "-i",
+                "0.05",
+                "-c",
+                "400",
+                "-W",
+                "1",
+                "10.251.2.10",
+            ]),
+            &root.join(format!("mbb-ping-{domain}.log")),
+        ));
+    }
+    let mut receipts = Vec::new();
+    for round in 1..=2 {
+        for domain in 0..clients.len() {
+            let fixture = root.join(format!("domain-{domain}/fixture"));
+            let generated = Command::new(std::env::var("CANDY_SIGNED_FIXTURE_BINARY").unwrap())
+                .env("CANDY_SIGNED_FIXTURE_ADVANCE_POLICY_ROOT", &fixture)
+                .env("CANDY_SIGNED_FIXTURE_POLICY_ROUND", round.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                generated.status.success(),
+                "{}",
+                String::from_utf8_lossy(&generated.stderr)
+            );
+            let socket = root.join(format!("domain-{domain}/client/reload.sock"));
+            let transaction = format!("{round:02x}{domain:02x}{}", "a".repeat(60));
+            let prepared = reload(
+                &socket,
+                serde_json::json!({"schema_version":1,"action":"prepare",
+                "transaction_id":transaction,"config":fixture.join(format!("client.next-{round}.toml")),
+                "status":root.join(format!("domain-{domain}/client/core-status.json"))}),
+            );
+            assert_eq!(
+                prepared["ok"], true,
+                "candidate preparation failed: {prepared}"
+            );
+            probe_proxy();
+            let committed = reload(
+                &socket,
+                serde_json::json!({"schema_version":1,"action":"commit","transaction_id":transaction}),
+            );
+            assert_eq!(
+                committed["ok"], true,
+                "bilateral candidate commit failed: {committed}"
+            );
+            let duplicate = reload(
+                &socket,
+                serde_json::json!({"schema_version":1,"action":"commit","transaction_id":transaction}),
+            );
+            assert_eq!(duplicate, committed, "exact commit retry changed outcome");
+            receipts.push(serde_json::json!({"round":round,"domain":domain,"prepared":prepared,"committed":committed,"duplicate":duplicate}));
+            probe_proxy();
+        }
+    }
+    for (domain, process) in traffic.iter_mut().enumerate() {
+        assert!(
+            process.0.wait().unwrap().success(),
+            "continuous ICMP failed domain={domain}"
+        );
+        let log = fs::read_to_string(root.join(format!("mbb-ping-{domain}.log"))).unwrap();
+        assert!(
+            log.contains("400 packets transmitted, 400 received, 0% packet loss"),
+            "ICMP loss during candidate MBB domain={domain}: {log}"
+        );
+    }
+    for ((pid, before), (name, tun)) in client_pids
+        .iter()
+        .zip(&client_before)
+        .zip(clients.iter().zip(&tuns_before))
+    {
+        assert_eq!(
+            candy_process_control::process_identity(*pid).unwrap(),
+            *before,
+            "client restarted during MBB"
+        );
+        assert_eq!(tun_identity(name), *tun, "MBB replaced client TUN");
+    }
+    for (plan, (worker, io)) in server_plans.iter().zip(&server_before) {
+        assert_eq!(
+            status(&plan.with_file_name("process.json")).unwrap(),
+            *worker,
+            "candidate MBB restarted server domain"
+        );
+        assert_eq!(
+            status(&plan.with_file_name("io-process.json")).unwrap(),
+            *io,
+            "candidate MBB replaced server TUNIO"
+        );
+    }
+    std::thread::sleep(Duration::from_secs(31));
+    probe_proxy();
+    let mut redial_server_before = server_before.clone();
+    let mut recovered_server = None;
+    if restart_successor_server {
+        let process_path = server_plans[0].with_file_name("process.json");
+        let before = status(&process_path).unwrap();
+        let victim = candy_process_control::ProcessIdentity {
+            pid: before["pid"].as_u64().unwrap() as u32,
+            start_ticks: before["process_start_ticks"].as_u64().unwrap(),
+        };
+        assert!(candy_process_control::process_is_current(victim));
+        assert_eq!(before["policy_generation"], 1);
+        assert_eq!(
+            unsafe { nix::libc::kill(victim.pid as i32, nix::libc::SIGKILL) },
+            0
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(fresh) = status(&process_path) {
+                if fresh["pid"] != before["pid"] && committed_ack(&root.join("registry"), 40) {
+                    assert_eq!(
+                        fresh["policy_generation"], 1,
+                        "Cloud static catalog advanced unexpectedly"
+                    );
+                    let fresh_io = status(&server_plans[0].with_file_name("io-process.json"));
+                    if !fresh_io.as_ref().is_some_and(|io| {
+                        retained_io_record::matches_worker_recovery(
+                            &server_before[0].1,
+                            io,
+                            fresh["worker_epoch"].as_u64().unwrap(),
+                        )
+                    }) {
+                        assert!(Instant::now() < deadline,
+                            "server recovery changed retained TUNIO beyond worker epoch: before={} after={fresh_io:?} worker={fresh}", server_before[0].1);
+                        std::thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                    redial_server_before[0] = (fresh.clone(), fresh_io.unwrap());
+                    recovered_server = Some(fresh);
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "successor server worker did not recover"
+            );
+            probe_proxy();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    unsafe {
+        nix::libc::kill(client_pids[0] as i32, nix::libc::SIGKILL);
+    }
+    unsafe {
+        nix::libc::waitpid(client_pids[0] as i32, std::ptr::null_mut(), 0);
+    }
+    let client_plan = root.join("domain-0/client/plan.json");
+    fs::remove_file(client_plan.with_file_name("reload.sock")).unwrap();
+    let _redial = spawn(
+        Command::new("ip")
+            .args(["netns", "exec", &clients[0]])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "signed_mbb_client_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CANDY_MBB_PLAN", &client_plan)
+            .env(
+                "CANDY_MBB_CONFIG",
+                root.join("domain-0/fixture/client.next-2.toml"),
+            )
+            .env("CANDY_MBB_IO_EPOCH", "2"),
+        &root.join("successor-ordinary-redial.log"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &clients[0],
+                "ping",
+                "-q",
+                "-I",
+                "10.251.1.10",
+                "-c",
+                "1",
+                "-W",
+                "1",
+                "10.251.2.10",
+            ])
+            .status()
+            .unwrap()
+            .success()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ordinary successor Grant redial failed after original reservation expiry"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(tun_identity(&clients[0]), tuns_before[0]);
+    for (plan, (worker, io)) in server_plans.iter().zip(&redial_server_before) {
+        assert_eq!(
+            status(&plan.with_file_name("process.json")).unwrap(),
+            *worker,
+            "ordinary successor redial replaced server Core"
+        );
+        assert_eq!(
+            status(&plan.with_file_name("io-process.json")).unwrap(),
+            *io,
+            "ordinary successor redial replaced server TUNIO"
+        );
+    }
+    probe_proxy();
+    let mut post_restart_renewal = None;
+    if restart_successor_server {
+        let fixture = root.join("domain-0/fixture");
+        let generated = Command::new(std::env::var("CANDY_SIGNED_FIXTURE_BINARY").unwrap())
+            .env("CANDY_SIGNED_FIXTURE_ADVANCE_POLICY_ROOT", &fixture)
+            .env("CANDY_SIGNED_FIXTURE_POLICY_ROUND", "3")
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let socket = client_plan.with_file_name("reload.sock");
+        let transaction = format!("0300{}", "a".repeat(60));
+        let prepared = reload(
+            &socket,
+            serde_json::json!({
+                "schema_version":1,"action":"prepare","transaction_id":transaction,
+                "config":fixture.join("client.next-3.toml"),
+                "status":client_plan.with_file_name("core-status.json")
+            }),
+        );
+        assert_eq!(
+            prepared["ok"], true,
+            "post-restart successor prepare failed: {prepared}"
+        );
+        let committed = reload(
+            &socket,
+            serde_json::json!({
+                "schema_version":1,"action":"commit","transaction_id":transaction
+            }),
+        );
+        assert_eq!(
+            committed["ok"], true,
+            "post-restart successor commit failed: {committed}"
+        );
+        assert_eq!(committed["generation"], 4);
+        for namespace in clients {
+            let output = Command::new("ip")
+                .args([
+                    "netns",
+                    "exec",
+                    namespace,
+                    "ping",
+                    "-q",
+                    "-I",
+                    "10.251.1.10",
+                    "-c",
+                    "20",
+                    "-i",
+                    "0.05",
+                    "-W",
+                    "1",
+                    "10.251.2.10",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .contains("20 packets transmitted, 20 received, 0% packet loss"),
+                "post-restart domain did not carry traffic namespace={namespace}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+        assert_eq!(tun_identity(&clients[0]), tuns_before[0]);
+        for (plan, (worker, io)) in server_plans.iter().zip(&redial_server_before) {
+            assert_eq!(
+                status(&plan.with_file_name("process.json")).unwrap(),
+                *worker,
+                "post-restart renewal replaced server Core"
+            );
+            assert_eq!(
+                status(&plan.with_file_name("io-process.json")).unwrap(),
+                *io
+            );
+        }
+        assert_eq!(
+            status(&server_plans[1].with_file_name("process.json")).unwrap(),
+            server_before[1].0,
+            "successor recovery restarted another domain"
+        );
+        probe_proxy();
+        post_restart_renewal =
+            Some(serde_json::json!({"prepared":prepared,"committed":committed,"icmp_received":20}));
+    }
+    private_json(
+        &root.join("mbb-evidence.json"),
+        &serde_json::json!({"gate":"PASS","scope":"bilateral Rust Core candidate protocol with real netd TUN clients and Runtime shared-listener server domains",
+        "rounds":receipts,"client_processes":client_before,"client_tun_ifindices":tuns_before,
+        "icmp_packets_per_domain":400,"icmp_loss":0,"proxy_survived":true,
+        "successor_ordinary_redial_after_original_cap":true,"runtime_cross_process_candidate_handoff":"separate_gate",
+        "post_recovery_exact_server_records":redial_server_before,
+        "recovered_static_generation_one_server":recovered_server,"post_restart_generation_four_renewal":post_restart_renewal}),
+    );
+}
+
 pub(super) fn verify() {
+    verify_scenario(false, false);
+}
+
+pub(super) fn verify_mbb() {
+    verify_scenario(true, false);
+}
+
+pub(super) fn verify_successor_restart() {
+    verify_scenario(true, true);
+}
+
+/// Exercise the two roles through one listener while one Proxy role is
+/// resource constrained.  The test deliberately uses the Runtime launcher;
+/// a direct Core invocation would bypass the production launcher boundary.
+pub(super) fn verify_mixed_role_fault_isolation() {
+    verify_scenario_mode(false, false, true);
+}
+
+fn verify_scenario(mbb: bool, restart_successor_server: bool) {
+    verify_scenario_mode(mbb, restart_successor_server, false);
+}
+
+fn verify_fault_isolation(root: &Path, fixture: &Path, registry: &Path, clients: &[String]) {
+    let before: Vec<_> = (0..2)
+        .flat_map(|domain| {
+            ["client", "server"].map(move |side| {
+                let directory = root.join(format!("domain-{domain}/{side}"));
+                (
+                    directory.clone(),
+                    status(&directory.join("process.json")).unwrap(),
+                    status(&directory.join("io-process.json")).unwrap(),
+                )
+            })
+        })
+        .collect();
+    let master = status(&registry.join("listener-master.json")).unwrap();
+    let proxy_workers = master_workers(master["process"]["pid"].as_u64().unwrap() as u32);
+    assert_eq!(
+        proxy_workers.len(),
+        1,
+        "exact Proxy worker population absent"
+    );
+    let tuns: Vec<_> = clients.iter().map(|name| tun_identity(name)).collect();
+    let output = Command::new("python3")
+        .args(["-c", include_str!("mixed_role_faults.py")])
+        .arg(root)
+        .arg(fixture)
+        .arg(core())
+        .arg(
+            std::env::var_os("CANDY_PROXY_CLIENT_BINARY")
+                .expect("Runtime candy-client launcher required"),
+        )
+        .args(clients)
+        .output()
+        .unwrap();
+    fs::write(root.join("mixed-role-faults.log"), &output.stdout).unwrap();
+    fs::write(root.join("mixed-role-faults-stderr.log"), &output.stderr).unwrap();
+    assert!(
+        output.status.success(),
+        "mixed-role quota/slow-consumer gate failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for (directory, worker, io) in before {
+        assert_eq!(
+            status(&directory.join("process.json")).unwrap(),
+            worker,
+            "Proxy pressure replaced SD-WAN worker"
+        );
+        assert_eq!(
+            status(&directory.join("io-process.json")).unwrap(),
+            io,
+            "Proxy pressure replaced infrastructure TUNIO"
+        );
+    }
+    for (name, tun) in clients.iter().zip(tuns) {
+        assert_eq!(
+            tun_identity(name),
+            tun,
+            "Proxy pressure replaced infrastructure TUN"
+        );
+    }
+    assert_eq!(
+        status(&registry.join("listener-master.json")).unwrap(),
+        master,
+        "Proxy pressure replaced shared listener"
+    );
+    for identity in &proxy_workers {
+        assert!(
+            candy_process_control::process_is_current(*identity),
+            "Proxy pressure restarted healthy worker"
+        );
+    }
+    assert!(
+        (40..42).all(|seed| committed_ack(registry, seed)),
+        "Proxy pressure lost exact SD-WAN activation"
+    );
+    private_json(
+        &root.join("mixed-role-infrastructure-evidence.json"),
+        &serde_json::json!({"gate":"PASS","master":master,"proxy_workers":proxy_workers,
+            "sdwan_domains":2,"domain_worker_records_unchanged":true,
+            "tunio_records_unchanged":true,"tun_ifindices_unchanged":true,
+            "exact_sdwan_activation_preserved":true}),
+    );
+}
+
+fn verify_scenario_mode(mbb: bool, restart_successor_server: bool, fault_isolation: bool) {
     assert_eq!(
         std::env::var("CANDY_NETD_ISOLATED_KERNEL_TEST").as_deref(),
         Ok("1")
@@ -203,6 +696,9 @@ pub(super) fn verify() {
             )
             .env("CANDY_SIGNED_FIXTURE_ENDPOINT", "10.200.0.2:18443")
             .env("CANDY_SIGNED_FIXTURE_GRANT_TTL_SECS", "600");
+        if mbb {
+            generator.env("CANDY_SIGNED_FIXTURE_CONNECTION_LIMIT", "4");
+        }
         if domain != 0 {
             generator.env(
                 "CANDY_SIGNED_FIXTURE_CERT_SOURCE",
@@ -320,7 +816,17 @@ pub(super) fn verify() {
     let master = root.join("master.toml");
     // SIGKILL is a QUIC blackhole: negotiate an explicit bounded idle timeout
     // so the fault gate measures recovery rather than the Linux 120s default.
-    fs::write(&master, format!("listen = \"10.200.0.2:18443\"\ncert_pem = {:?}\nkey_pem = {:?}\n[transport]\nkeep_alive_seconds = 1\nidle_timeout_seconds = 4\n[[users]]\nkey_id = \"alice\"\nsecret = \"shared-listener-test-secret-2026\"\n", fixture.join("server.cert.pem"), fixture.join("server.key.pem"))).unwrap();
+    let admission = if fault_isolation {
+        "[admission]\nmax_connections = 6\nmax_connections_per_user = 2\n"
+    } else {
+        ""
+    };
+    let features = if fault_isolation {
+        "features = [\"recommended\"]\n"
+    } else {
+        ""
+    };
+    fs::write(&master, format!("listen = \"10.200.0.2:18443\"\ncert_pem = {:?}\nkey_pem = {:?}\n[transport]\nkeep_alive_seconds = 1\nidle_timeout_seconds = 4\n{}[[users]]\nkey_id = \"alice\"\nsecret = \"shared-listener-test-secret-2026\"\n{}", fixture.join("server.cert.pem"), fixture.join("server.key.pem"), admission, features)).unwrap();
     fs::set_permissions(&master, fs::Permissions::from_mode(0o600)).unwrap();
     let mut master_index = processes.len();
     processes.push(spawn(
@@ -337,6 +843,9 @@ pub(super) fn verify() {
     // Client and server are separate logical hosts. Each Agent owns one
     // supervisor per domain; their infrastructure identities are independent.
     for side in ["client", "server"] {
+        if mbb && side == "client" {
+            continue;
+        }
         let cloud = root.join(format!("cloud-{side}"));
         fs::create_dir(&cloud).unwrap();
         fs::set_permissions(&cloud, fs::Permissions::from_mode(0o700)).unwrap();
@@ -359,6 +868,28 @@ pub(super) fn verify() {
                 .arg(agent),
             &root.join(format!("agent-{side}.log")),
         ));
+    }
+    let mut mbb_client_pids = Vec::new();
+    if mbb {
+        for (domain, namespace) in client_names.iter().enumerate() {
+            processes.push(spawn(
+                Command::new("ip")
+                    .args(["netns", "exec", namespace])
+                    .arg(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "signed_mbb_client_helper",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .env(
+                        "CANDY_MBB_PLAN",
+                        root.join(format!("domain-{domain}/client/plan.json")),
+                    ),
+                &root.join(format!("mbb-client-{domain}.log")),
+            ));
+            mbb_client_pids.push(processes.last().unwrap().0.id());
+        }
     }
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
@@ -399,6 +930,10 @@ pub(super) fn verify() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+    if fault_isolation {
+        verify_fault_isolation(root, &fixture, &registry, &client_names);
+        return;
+    }
     // Keep both actual Runtime workers alive while admitting Proxy work.
     let transport = fs::read_to_string(fixture.join("transport.toml")).unwrap();
     let pin = transport
@@ -419,6 +954,16 @@ pub(super) fn verify() {
         &root.join("proxy.log"),
     ));
     probe_proxy();
+    if mbb {
+        verify_live_reload(
+            root,
+            &client_names,
+            &server_plans,
+            &mbb_client_pids,
+            restart_successor_server,
+        );
+        return;
+    }
     let before: Vec<_> = server_plans
         .iter()
         .map(|path| status(&path.with_file_name("io-process.json")).unwrap())

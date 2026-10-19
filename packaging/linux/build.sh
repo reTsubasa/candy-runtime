@@ -56,13 +56,19 @@ stage=$dist_root/server/$artifact_arch
 	if command -v "$cargo_cmd" >/dev/null 2>&1; then
 		"$cargo_cmd" build --manifest-path "$repo_root/Cargo.toml" --release --locked \
 			--package candy-netd --package candy-sdwan-agent --package candy-cloud-enroll \
-			--package candy-cloud-sync --target "$target"
+			--package candy-cloud-sync --features candy-sdwan-agent/experimental-tunio-rebind --target "$target"
 	fi
 }
 [ -x "$sdwan_agent" ] || { printf '%s\n' "SD-WAN agent binary is missing: $sdwan_agent" >&2; exit 1; }
 [ -x "$netd_binary" ] || { printf '%s\n' "candy-netd binary is missing: $netd_binary" >&2; exit 1; }
 [ -x "$enroll_binary" ] || { printf '%s\n' "Cloud enrollment client is missing: $enroll_binary" >&2; exit 1; }
 [ -x "$sync_binary" ] || { printf '%s\n' "Cloud Runtime synchronizer is missing: $sync_binary" >&2; exit 1; }
+tunio_binary=${CANDY_TUNIO_BINARY:-$repo_root/linux/common/apps/candy-tunio/target/$target/release/candy-tunio}
+if [ ! -x "$tunio_binary" ]; then
+	"${CARGO_BIN:-cargo}" build --manifest-path "$repo_root/linux/common/apps/candy-tunio/Cargo.toml" \
+		--release --locked --target "$target"
+fi
+[ -x "$tunio_binary" ] || { printf '%s\n' "candy-tunio binary is missing: $tunio_binary" >&2; exit 1; }
 sh -n "$launcher"
 sh -n "$product_launcher"
 sh -n "$sdwan_runtime"
@@ -77,6 +83,7 @@ install -m 0755 "$product_launcher" "$stage/usr/local/bin/candy-server"
 install -m 0755 "$launcher" "$stage/usr/local/libexec/serverd-linux"
 install -m 0755 "$sdwan_runtime" "$stage/usr/local/libexec/candy-sdwan-runtime"
 install -m 0755 "$sdwan_agent" "$stage/usr/local/libexec/candy-sdwan-agent"
+install -m 0755 "$tunio_binary" "$stage/usr/local/libexec/candy-tunio"
 install -m 0755 "$netd_binary" "$stage/usr/local/libexec/candy-netd"
 install -m 0755 "$enroll_binary" "$stage/usr/local/libexec/candy-cloud-enroll"
 install -m 0755 "$sync_binary" "$stage/usr/local/libexec/candy-cloud-sync"
@@ -122,6 +129,7 @@ install -m 0755 "$edge_product" "$edge_stage/usr/local/bin/candy"
 install -m 0755 "$edge_launcher" "$edge_stage/usr/local/libexec/candy-client"
 install -m 0755 "$sdwan_runtime" "$edge_stage/usr/local/libexec/candy-sdwan-runtime"
 install -m 0755 "$sdwan_agent" "$edge_stage/usr/local/libexec/candy-sdwan-agent"
+install -m 0755 "$tunio_binary" "$edge_stage/usr/local/libexec/candy-tunio"
 install -m 0755 "$netd_binary" "$edge_stage/usr/local/libexec/candy-netd"
 install -m 0755 "$enroll_binary" "$edge_stage/usr/local/libexec/candy-cloud-enroll"
 install -m 0755 "$sync_binary" "$edge_stage/usr/local/libexec/candy-cloud-sync"

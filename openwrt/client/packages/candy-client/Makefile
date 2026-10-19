@@ -4,7 +4,7 @@ PKG_NAME:=candy-client
 PKG_VERSION:=0.4.0
 # OpenWrt requires a package revision. This is internal metadata, not part of
 # the Candy product version shown to users.
-PKG_RELEASE:=154
+PKG_RELEASE:=155
 CANDY_RUNTIME_BIN_DIR?=
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
@@ -31,11 +31,13 @@ define Build/Prepare
 	rm -rf $(PKG_BUILD_DIR)
 	mkdir -p $(PKG_BUILD_DIR)
 	[ -n "$(CANDY_RUNTIME_BIN_DIR)" ] || { echo "CANDY_RUNTIME_BIN_DIR is required"; exit 1; }
+	[ -x "$(CANDY_RUNTIME_BIN_DIR)/candy-tunio" ] || { echo "missing Runtime binary: candy-tunio"; exit 1; }
 	[ -x "$(CANDY_RUNTIME_BIN_DIR)/candy-netd" ] || { echo "missing Runtime binary: candy-netd"; exit 1; }
 	[ -x "$(CANDY_RUNTIME_BIN_DIR)/candy-sdwan-agent" ] || { echo "missing Runtime binary: candy-sdwan-agent"; exit 1; }
 	[ -x "$(CANDY_RUNTIME_BIN_DIR)/candy-cloud-enroll" ] || { echo "missing Runtime binary: candy-cloud-enroll"; exit 1; }
 	[ -x "$(CANDY_RUNTIME_BIN_DIR)/candy-cloud-sync" ] || { echo "missing Runtime binary: candy-cloud-sync"; exit 1; }
 	[ -x "./candy-sdwan-runtime" ] || { echo "missing Runtime binary: candy-sdwan-runtime"; exit 1; }
+	cp "$(CANDY_RUNTIME_BIN_DIR)/candy-tunio" "$(PKG_BUILD_DIR)/candy-tunio"
 	cp "$(CANDY_RUNTIME_BIN_DIR)/candy-netd" "$(PKG_BUILD_DIR)/candy-netd"
 	cp "$(CANDY_RUNTIME_BIN_DIR)/candy-sdwan-agent" "$(PKG_BUILD_DIR)/candy-sdwan-agent"
 	cp "$(CANDY_RUNTIME_BIN_DIR)/candy-cloud-enroll" "$(PKG_BUILD_DIR)/candy-cloud-enroll"
@@ -54,6 +56,7 @@ define Package/candy-client/install
 	$(INSTALL_BIN) ./candy-sdwan $(1)/usr/bin/candy-sdwan
 	ln -sf candy-client $(1)/usr/bin/client-cli
 	$(INSTALL_DIR) $(1)/usr/libexec
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-tunio $(1)/usr/libexec/candy-tunio
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-sdwan-runtime $(1)/usr/libexec/candy-sdwan-runtime
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-cloud-enroll $(1)/usr/libexec/candy-cloud-enroll
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/candy-cloud-sync $(1)/usr/libexec/candy-cloud-sync

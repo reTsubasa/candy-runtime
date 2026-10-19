@@ -384,8 +384,8 @@ fn candidate_preparation_has_no_kernel_side_effects_and_failed_commit_restores_o
         .is_err());
     assert!(
         matches!(fixture.call(Operation::ForwardStatus, 7).unwrap().0,
-        Body::ForwardStatus { owner: Some(active), phase: Some(Phase::Active), candidate_owner: None, .. }
-        if active == owner())
+        Body::ForwardStatus { owner: Some(active), phase: Some(Phase::Active), candidate_owner: None, last_fencing_token, .. }
+        if active == owner() && last_fencing_token == next_owner.fencing_token)
     );
     assert_eq!(
         fixture.observed.lock().unwrap().active_declaration,
@@ -398,13 +398,29 @@ fn candidate_preparation_has_no_kernel_side_effects_and_failed_commit_restores_o
                 Operation::ForwardPrepare {
                     infra_id: [2; 16],
                     infra_generation: 1,
-                    owner: next_owner,
-                    declaration: next_policy,
+                    owner: next_owner.clone(),
+                    declaration: next_policy.clone(),
                 },
                 8
             )
             .is_err(),
         "failed candidate fence must not be reused"
+    );
+    let mut retry_owner = next_owner;
+    retry_owner.fencing_token += 1;
+    prepare_candidate(&mut fixture, &retry_owner, &next_policy);
+    fixture
+        .call(
+            Operation::ForwardCommit {
+                owner: retry_owner.clone(),
+            },
+            9,
+        )
+        .unwrap();
+    assert!(
+        matches!(fixture.call(Operation::ForwardStatus, 10).unwrap().0,
+        Body::ForwardStatus { owner: Some(active), phase: Some(Phase::Active), candidate_owner: None, last_fencing_token, .. }
+        if active == retry_owner && last_fencing_token == retry_owner.fencing_token)
     );
 }
 
@@ -596,6 +612,120 @@ fn prepared_then_commit_is_valid_and_stale_or_cross_domain_owners_are_rejected()
         .call(Operation::ForwardCommit { owner: next }, 6)
         .unwrap();
     assert_eq!(fixture.observed.lock().unwrap().ifindex, Some(17));
+}
+
+#[test]
+fn identical_active_policy_owner_handoff_never_reinstalls_kernel_rules() {
+    let mut fixture = Fixture::new("owner_only");
+    fixture.ensure();
+    fixture.prepare();
+    fixture.commit();
+    let mut next = owner();
+    next.worker_epoch += 1;
+    next.fencing_token += 1;
+    let before = fixture.observed.lock().unwrap().events.clone();
+    prepare_candidate(&mut fixture, &next, &declaration());
+    assert_eq!(before, fixture.observed.lock().unwrap().events);
+    fixture
+        .call(
+            Operation::ForwardCommit {
+                owner: next.clone(),
+            },
+            6,
+        )
+        .unwrap();
+    assert_eq!(before, fixture.observed.lock().unwrap().events);
+    fixture
+        .call(
+            Operation::ForwardCommit {
+                owner: next.clone(),
+            },
+            7,
+        )
+        .unwrap();
+    assert_eq!(before, fixture.observed.lock().unwrap().events);
+    fixture.service = Fixture::service(&fixture.path, fixture.observed.clone());
+    assert!(!fixture.service.recover_expired(8).unwrap());
+    assert_eq!(before, fixture.observed.lock().unwrap().events);
+    assert!(
+        matches!(fixture.call(Operation::ForwardStatus, 9).unwrap().0,
+        Body::ForwardStatus { owner: Some(actual), phase: Some(Phase::Active), candidate_owner: None, .. } if actual == next)
+    );
+}
+
+#[test]
+fn owner_only_journal_failure_preserves_kernel_policy_and_exact_candidate() {
+    let mut fixture = Fixture::new("owner_only_journal");
+    fixture.ensure();
+    fixture.prepare();
+    fixture.commit();
+    let mut next = owner();
+    next.worker_epoch += 1;
+    next.fencing_token += 1;
+    prepare_candidate(&mut fixture, &next, &declaration());
+    let before = fixture.observed.lock().unwrap().events.clone();
+    let journal = fs::read(fixture.path.join("infra.journal")).unwrap();
+    let temporary = fixture
+        .path
+        .join(format!("infra.v2-tmp-{}", std::process::id()));
+    fs::create_dir(&temporary).unwrap();
+    assert!(fixture
+        .call(
+            Operation::ForwardCommit {
+                owner: next.clone()
+            },
+            6
+        )
+        .is_err());
+    assert_eq!(before, fixture.observed.lock().unwrap().events);
+    assert_eq!(
+        journal,
+        fs::read(fixture.path.join("infra.journal")).unwrap()
+    );
+    assert!(
+        matches!(fixture.call(Operation::ForwardStatus, 7).unwrap().0,
+        Body::ForwardStatus { owner: Some(actual), phase: Some(Phase::Active), candidate_owner: Some(candidate), .. } if actual == owner() && candidate == next)
+    );
+    fs::remove_dir(temporary).unwrap();
+    fixture
+        .call(
+            Operation::ForwardCommit {
+                owner: next.clone(),
+            },
+            8,
+        )
+        .unwrap();
+    assert_eq!(before, fixture.observed.lock().unwrap().events);
+}
+
+#[test]
+fn identical_declaration_with_changed_failed_routes_requires_kernel_transition() {
+    let mut fixture = Fixture::new("owner_only_failures");
+    fixture.ensure();
+    fixture.prepare();
+    fixture.commit();
+    let mut next = owner();
+    next.worker_epoch += 1;
+    next.fencing_token += 1;
+    prepare_candidate(&mut fixture, &next, &declaration());
+    let failed = declaration().routes[0].prefix;
+    fixture
+        .call(
+            Operation::ForwardFailedPrefixes {
+                owner: next.clone(),
+                failure_revision: 1,
+                failed_prefixes: vec![failed],
+            },
+            5,
+        )
+        .unwrap();
+    let before = fixture.observed.lock().unwrap().events.len();
+    fixture
+        .call(Operation::ForwardCommit { owner: next }, 6)
+        .unwrap();
+    let observed = fixture.observed.lock().unwrap();
+    assert!(observed.events[before..].contains(&"reject_routes"));
+    assert_eq!(observed.failed_prefixes, vec![failed]);
 }
 
 #[test]

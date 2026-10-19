@@ -325,6 +325,8 @@ pub enum Body {
         owner: Option<ForwardOwner>,
         phase: Option<Phase>,
         candidate_owner: Option<ForwardOwner>,
+        #[serde(default)]
+        last_fencing_token: u64,
         failure_revision: u64,
         failed_prefixes: Vec<Ipv4Prefix>,
         pending_failure_revision: Option<u64>,

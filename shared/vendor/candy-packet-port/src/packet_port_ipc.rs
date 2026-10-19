@@ -58,6 +58,21 @@ struct PacketPortHeaders {
 }
 
 impl UnixPacketPort {
+    /// Inspect the connected datagram queue without consuming or waiting. A
+    /// Finish receipt must not overtake a packet already accepted by the IPC.
+    pub fn has_pending_input(&self) -> io::Result<bool> {
+        let mut byte = [0_u8; 1];
+        match nix::sys::socket::recv(
+            self.socket.as_raw_fd(),
+            &mut byte,
+            nix::sys::socket::MsgFlags::MSG_DONTWAIT | nix::sys::socket::MsgFlags::MSG_PEEK,
+        ) {
+            Ok(_) => Ok(true),
+            Err(nix::errno::Errno::EAGAIN) => Ok(false),
+            Err(error) => Err(io::Error::from_raw_os_error(error as i32)),
+        }
+    }
+
     pub fn binding(&self) -> PacketPortBinding {
         self.binding
     }
@@ -374,6 +389,23 @@ mod tests {
             owner_epoch: 2,
             policy_generation: 3,
         }
+    }
+
+    #[tokio::test]
+    async fn pending_input_probe_preserves_packet_order_and_does_not_consume() {
+        let (infrastructure, worker) = UnixDatagram::pair().unwrap();
+        let infrastructure =
+            UnixPacketPort::new(infrastructure, binding(), PacketPortRole::Infrastructure).unwrap();
+        let worker = UnixPacketPort::new(worker, binding(), PacketPortRole::Worker).unwrap();
+        assert!(!infrastructure.has_pending_input().unwrap());
+        worker.send_packet(&[0x45; 64]).await.unwrap();
+        worker.send_packet(&[0x46; 64]).await.unwrap();
+        assert!(infrastructure.has_pending_input().unwrap());
+        assert!(infrastructure.has_pending_input().unwrap());
+        assert_eq!(infrastructure.recv_packet().await.unwrap(), vec![0x45; 64]);
+        assert!(infrastructure.has_pending_input().unwrap());
+        assert_eq!(infrastructure.recv_packet().await.unwrap(), vec![0x46; 64]);
+        assert!(!infrastructure.has_pending_input().unwrap());
     }
 
     #[tokio::test]

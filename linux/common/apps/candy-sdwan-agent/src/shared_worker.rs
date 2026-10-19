@@ -9,6 +9,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus};
 use std::time::{Duration, Instant};
 
+// Standalone Stage 1 API. Prepare cannot use it until authenticated Core
+// control exposes the exact original CandidateJournalRecord checksum.
+#[allow(dead_code)]
+#[path = "shared_domain_evidence.rs"]
+pub(super) mod domain_evidence;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SharedWorker {
@@ -59,19 +65,20 @@ fn terminal_status(response: Response) -> Option<ExitStatus> {
     Some(ExitStatus::from_raw(code << 8))
 }
 
-fn exchange(
+fn exchange_bytes(
     host: &SharedWorker,
     instance: &str,
     operation: &str,
     arguments: &[String],
     fds: &[i32],
-) -> Result<Response> {
+) -> Result<Vec<u8>> {
     use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
     anyhow::ensure!(
         candy_process_control::process_is_current_confirmed(host.identity)?,
         "code=shared_worker_identity_changed module=sdwan_host"
     );
-    let mut stream = UnixStream::connect(&host.socket)?;
+    let mut stream =
+        UnixStream::connect(&host.socket).context("connect shared worker control endpoint")?;
     anyhow::ensure!(
         candy_process_control::peer_identity(&stream)? == host.identity,
         "shared worker endpoint identity differs"
@@ -99,11 +106,29 @@ fn exchange(
         &serde_json::json!({"schema_version":1,"operation":operation,"instance":instance,"arguments":arguments,"namespace":fds.len()==2}),
     )?;
     anyhow::ensure!(bytes.len() <= 65536, "shared worker request exceeds budget");
-    stream.write_all(&bytes)?;
-    stream.shutdown(std::net::Shutdown::Write)?;
+    stream
+        .write_all(&bytes)
+        .context("write bounded shared worker request")?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .context("finish shared worker request")?;
     let mut reply = Vec::new();
-    stream.take(65537).read_to_end(&mut reply)?;
+    stream
+        .take(65537)
+        .read_to_end(&mut reply)
+        .context("read bounded shared worker response")?;
     anyhow::ensure!(reply.len() <= 65536, "shared worker reply exceeds budget");
+    Ok(reply)
+}
+
+fn exchange(
+    host: &SharedWorker,
+    instance: &str,
+    operation: &str,
+    arguments: &[String],
+    fds: &[i32],
+) -> Result<Response> {
+    let reply = exchange_bytes(host, instance, operation, arguments, fds)?;
     let response: Response = serde_json::from_slice(&reply)?;
     anyhow::ensure!(
         response.live_domains + response.completed_domains <= response.max_domains,
@@ -200,30 +225,29 @@ impl BusinessWorker {
             Self::Shared(domain) => domain.host.identity.pid,
         }
     }
-    pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+    // Keep control errors typed so transient IPC failures remain retryable.
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
         match self {
-            Self::Dedicated(child) => child.try_wait(),
-            Self::Shared(domain) => domain.completion().map_err(std::io::Error::other),
+            Self::Dedicated(child) => Ok(child.try_wait()?),
+            Self::Shared(domain) => domain.completion(),
         }
     }
-    pub fn kill(&mut self) -> std::io::Result<()> {
+    pub fn kill(&mut self) -> Result<()> {
         match self {
-            Self::Dedicated(child) => child.kill(),
-            Self::Shared(domain) => domain.stop().map_err(std::io::Error::other),
+            Self::Dedicated(child) => Ok(child.kill()?),
+            Self::Shared(domain) => domain.stop(),
         }
     }
-    pub fn wait(&mut self) -> std::io::Result<ExitStatus> {
+    pub fn wait(&mut self) -> Result<ExitStatus> {
         match self {
-            Self::Dedicated(child) => child.wait(),
-            Self::Shared(domain) => domain
-                .completion()
-                .map_err(std::io::Error::other)?
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::WouldBlock,
-                        "shared domain is still running",
-                    )
-                }),
+            Self::Dedicated(child) => Ok(child.wait()?),
+            Self::Shared(domain) => domain.completion()?.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "shared domain is still running",
+                )
+                .into()
+            }),
         }
     }
 }
@@ -248,7 +272,7 @@ pub(super) fn domain_running(host: &SharedWorker, instance: &Path) -> Result<boo
     if !candy_process_control::process_is_current_confirmed(host.identity)? {
         return Ok(false);
     }
-    Ok(exchange(
+    match exchange(
         host,
         instance
             .to_str()
@@ -256,13 +280,16 @@ pub(super) fn domain_running(host: &SharedWorker, instance: &Path) -> Result<boo
         "probe",
         &[],
         &[],
-    )?
-    .running)
+    ) {
+        Ok(response) => Ok(response.running),
+        Err(_) if !candy_process_control::process_is_current_confirmed(host.identity)? => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
 pub(super) fn forget_domain(host: &SharedWorker, instance: &Path) -> Result<()> {
-    exchange(
+    match exchange(
         host,
         instance
             .to_str()
@@ -270,8 +297,13 @@ pub(super) fn forget_domain(host: &SharedWorker, instance: &Path) -> Result<()> 
         "forget",
         &[],
         &[],
-    )?;
-    Ok(())
+    ) {
+        Ok(_) => Ok(()),
+        // A confirmed exited host cannot retain a business domain or its
+        // completion receipt. Recheck after exchange to cover a concurrent exit.
+        Err(_) if !candy_process_control::process_is_current_confirmed(host.identity)? => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) fn retire_host(host: &SharedWorker) -> Result<()> {
@@ -313,5 +345,54 @@ mod tests {
             Some(1)
         );
         assert!(!terminal_status(response(false, None)).unwrap().success());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shared_completion_timeout_preserves_retryable_io_cause() {
+        use std::os::unix::net::UnixListener;
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            connection.read_to_end(&mut request).unwrap();
+            std::thread::sleep(Duration::from_millis(1200));
+        });
+        let mut worker = BusinessWorker::Shared(SharedDomain {
+            host: SharedWorker {
+                socket,
+                identity: candy_process_control::process_identity(std::process::id()).unwrap(),
+            },
+            instance: "domain".into(),
+            control: root.path().join("domain.sock"),
+            token_sha256: "unused".into(),
+        });
+        let error = worker.try_wait().unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        assert!(crate::runtime_agent::transient_error(&error));
+        server.join().unwrap();
+    }
+
+    #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+    #[test]
+    fn domain_cleanup_requires_confirmed_host_exit_or_successful_exchange() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = SharedWorker {
+            socket: root.path().join("missing-host.sock"),
+            identity: candy_process_control::process_identity(std::process::id()).unwrap(),
+        };
+        let instance = root.path().join("domain.sock");
+        assert!(domain_running(&host, &instance).is_err());
+        assert!(forget_domain(&host, &instance).is_err());
+
+        host.identity.start_ticks += 1;
+        assert!(!domain_running(&host, &instance).unwrap());
+        forget_domain(&host, &instance).unwrap();
     }
 }

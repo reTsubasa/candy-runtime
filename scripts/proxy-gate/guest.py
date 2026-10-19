@@ -138,16 +138,23 @@ def udp_target():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
         udp.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
         udp.bind((SERVER, 19001))
+        udp.settimeout(.2)
         write_json(ROOT / 'udp-target-socket.json',
                    {'receive_buffer_bytes': udp.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)})
         # Keep diagnostic disk work out of the target's per-packet hot path.
         with (ROOT / 'udp-target.jsonl').open('a', buffering=65536) as log:
             flushed = time.monotonic()
             while True:
-                data, peer = udp.recvfrom(65535)
+                try:
+                    data, peer = udp.recvfrom(65535)
+                except socket.timeout:
+                    log.flush()
+                    flushed = time.monotonic()
+                    continue
+                received_at = time.monotonic()
                 udp.sendto(data, peer)
                 log.write(json.dumps({'bytes': len(data), 'prefix': data[:16].hex(),
-                                      'peer': peer, 'received_at': time.monotonic()}) + '\n')
+                                      'peer': peer, 'received_at': received_at}) + '\n')
                 if time.monotonic() - flushed >= .2:
                     log.flush()
                     flushed = time.monotonic()
@@ -196,7 +203,7 @@ def probes(profile):
                       'seconds': time.monotonic() - before}))
 
 
-def configure(workers, profile):
+def configure(workers, profile, proxy_drain=False):
     directory = ROOT / profile
     directory.mkdir(mode=0o700, exist_ok=True)
     cert, key = directory / 'cert.pem', directory / 'key.pem'
@@ -208,6 +215,8 @@ def configure(workers, profile):
     pin = 'sha256:' + hashlib.sha256(der).hexdigest()
     features = {'recommended': ['recommended'],
                 'stream_udp_fallback': ['stream_udp_fallback']}[profile]
+    if proxy_drain:
+        features.append('proxy_drain_v1')
     server = (f'listen = "{SERVER}:18443"\ncert_pem = "{cert}"\nkey_pem = "{key}"\n'
               'transport_memory_budget_mib = 2048\n'
               '[[users]]\nkey_id = "gate"\nsecret = "isolated-runtime-proxy-gate"\n'
@@ -416,6 +425,7 @@ def main():
     parser.add_argument('--worker-id', type=int)
     parser.add_argument('--owner-epoch', type=int)
     parser.add_argument('--remaining-ms', type=int, default=1200)
+    parser.add_argument('--proxy-drain', type=int, choices=(0, 1), default=0)
     args = parser.parse_args()
     if args.action == 'targets':
         import load
@@ -424,7 +434,7 @@ def main():
         threading.Thread(target=health_target, daemon=True).start()
         udp_target()
     elif args.action == 'configure':
-        configure(args.workers, args.profile)
+        configure(args.workers, args.profile, proxy_drain=bool(args.proxy_drain))
     elif args.action == 'server':
         server(args.profile, args.workers, drain_control=args.drain_control,
                drain_token_file=args.drain_token)

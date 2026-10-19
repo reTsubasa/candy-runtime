@@ -125,9 +125,7 @@ fn publish_registration(plan: &Plan, owner_path: &Path, prepared_ingress: bool) 
     }
     let record = crate::process_record::read(owner_path)?;
     let status = record.validate_bound_status(&plan.core, unix_time()?)?;
-    let listener_available = matches!(status["lifecycle"].as_str(), Some("active" | "starting"))
-        || status["lifecycle"] == "failed" && status["registered_listener_ready"] == true;
-    if !listener_available {
+    if !listener_available(&status) {
         bail!("code=listener_worker_unavailable module=listener_registry detail=bound transport listener is unavailable");
     }
     if record.worker_epoch != Some(plan.worker_epoch)
@@ -242,6 +240,11 @@ fn publish_registration(plan: &Plan, owner_path: &Path, prepared_ingress: bool) 
     let _ = fs::remove_file(temporary);
     result?;
     verify_activation(listener, &registration)
+}
+
+pub(super) fn listener_available(status: &serde_json::Value) -> bool {
+    matches!(status["lifecycle"].as_str(), Some("active" | "starting"))
+        || status["lifecycle"] == "failed" && status["registered_listener_ready"] == true
 }
 
 fn is_committed_equivalent(current: &Registration, proposed: &Registration) -> bool {
@@ -365,6 +368,29 @@ pub(super) fn publish_prepared_pending(plan: &Plan) {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_packet_lane_preserves_only_an_explicitly_live_listener() {
+        for lifecycle in ["active", "starting"] {
+            assert!(listener_available(
+                &serde_json::json!({"lifecycle": lifecycle})
+            ));
+        }
+        assert!(listener_available(&serde_json::json!({
+            "lifecycle": "failed", "registered_listener_ready": true
+        })));
+        for lifecycle in ["failed", "stopped", "unknown"] {
+            assert!(!listener_available(
+                &serde_json::json!({"lifecycle": lifecycle})
+            ));
+            assert!(!listener_available(&serde_json::json!({
+                "lifecycle": lifecycle, "registered_listener_ready": false
+            })));
+        }
+        assert!(!listener_available(&serde_json::json!({
+            "lifecycle": "stopped", "registered_listener_ready": true
+        })));
+    }
 
     #[test]
     fn activation_ack_requires_exact_master_owner_authority_and_phase() {

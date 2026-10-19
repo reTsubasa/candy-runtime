@@ -104,13 +104,19 @@ fn is_authorization_failure(error: &io::Error) -> bool {
 }
 
 pub enum PacketPortOwnerChange {
-    /// Stage exactly one candidate without opening data pumps or replacing the reader.
+    /// Stage one inbound candidate while retaining the sole active outbound owner.
     PrepareOwner {
         transaction: OwnerTransaction,
         port: UnixPacketPort,
         authorization: AuthorizationCheck,
     },
     CommitOwner {
+        transaction: OwnerTransaction,
+    },
+    FinishOwnerDrain {
+        transaction: OwnerTransaction,
+    },
+    RetireOwnerAfterFailure {
         transaction: OwnerTransaction,
     },
     AbortOwner {
@@ -177,6 +183,9 @@ pub struct PacketPortReceipt {
     pub pending: Option<OwnerTransactionReceipt>,
     pub last_transaction: Option<OwnerTransactionReceipt>,
     pub highest_transaction_revision: u64,
+    pub retained_owner_binding: Option<PacketPortBinding>,
+    pub old_owner_drained: bool,
+    pub forced_retirement: bool,
 }
 
 /// Only the authenticated local Agent may supply these changes. It must verify
@@ -197,6 +206,7 @@ struct Owner {
     transaction_cap: Option<Instant>,
     deadline: watch::Sender<Instant>,
     fence: Arc<OwnerFence>,
+    inbound_fence: Arc<OwnerFence>,
     to_worker: PacketOutput,
     to_tun: PacketOutput,
 }
@@ -212,6 +222,7 @@ impl Owner {
         let port = Arc::new(port);
         let (deadline, deadline_rx) = watch::channel(auth_deadline);
         let fence = Arc::new(OwnerFence::new());
+        let inbound_fence = Arc::new(OwnerFence::new());
         Self {
             to_worker: PacketOutput::new(Arc::new(DeadlinePort {
                 port: port.clone(),
@@ -223,18 +234,20 @@ impl Owner {
                 port: tun,
                 deadline: deadline_rx,
                 authorization,
-                fence: fence.clone(),
+                fence: inbound_fence.clone(),
             })),
             port,
             auth_deadline,
             transaction_cap,
             deadline,
             fence,
+            inbound_fence,
         }
     }
 
     fn retire(&self) {
         self.fence.retire();
+        self.inbound_fence.retire();
         self.to_worker.cancel();
         self.to_tun.cancel();
     }
@@ -287,7 +300,7 @@ impl OwnerFence {
 
 struct PendingOwner {
     transaction: OwnerTransaction,
-    port: UnixPacketPort,
+    owner: Owner,
     authorization: AuthorizationCheck,
 }
 
@@ -311,17 +324,31 @@ async fn owner_packet<P: PacketPort>(port: Option<&P>) -> io::Result<Vec<u8>> {
     }
 }
 
+async fn admitted_owner_packet<P: PacketPort>(
+    port: Option<&P>,
+    admission: Option<super::packet_port::OutputAdmission>,
+) -> io::Result<Vec<u8>> {
+    if let Some(admission) = admission {
+        admission.ready().await;
+    }
+    owner_packet(port).await
+}
+
 enum DataPacket {
-    FromTun(io::Result<Vec<u8>>),
-    FromWorker(io::Result<Vec<u8>>),
+    Tun(io::Result<Vec<u8>>),
+    Worker(io::Result<Vec<u8>>),
+    Retained(io::Result<Vec<u8>>),
+    Candidate(io::Result<Vec<u8>>),
 }
 
 async fn next_data_packet<T: PacketPort, W: PacketPort>(
     tun: &T,
     worker: Option<&W>,
+    retained: Option<&W>,
+    candidate: Option<&W>,
     prefer_worker: bool,
     to_worker: Option<super::packet_port::OutputAdmission>,
-    to_tun: Option<super::packet_port::OutputAdmission>,
+    to_tun: [Option<super::packet_port::OutputAdmission>; 3],
 ) -> DataPacket {
     let from_tun = async {
         if let Some(admission) = to_worker {
@@ -330,23 +357,25 @@ async fn next_data_packet<T: PacketPort, W: PacketPort>(
         tun.recv_packet().await
     };
     let from_worker = async {
-        if let Some(admission) = to_tun {
-            admission.ready().await;
+        let [active_admission, retained_admission, candidate_admission] = to_tun;
+        tokio::select! {
+            packet = admitted_owner_packet(worker, active_admission) => DataPacket::Worker(packet),
+            packet = admitted_owner_packet(retained, retained_admission) => DataPacket::Retained(packet),
+            packet = admitted_owner_packet(candidate, candidate_admission) => DataPacket::Candidate(packet),
         }
-        owner_packet(worker).await
     };
     // Control stays in the outer select; only the two data directions rotate.
     if prefer_worker {
         tokio::select! {
             biased;
-            packet = from_worker => DataPacket::FromWorker(packet),
-            packet = from_tun => DataPacket::FromTun(packet),
+            packet = from_worker => packet,
+            packet = from_tun => DataPacket::Tun(packet),
         }
     } else {
         tokio::select! {
             biased;
-            packet = from_tun => DataPacket::FromTun(packet),
-            packet = from_worker => DataPacket::FromWorker(packet),
+            packet = from_tun => DataPacket::Tun(packet),
+            packet = from_worker => packet,
         }
     }
 }
@@ -357,6 +386,13 @@ async fn owner_failure(owner: &mut Option<Owner>) -> (bool, io::Error) {
             error = owner.to_worker.failed() => (false, error),
             error = owner.to_tun.failed() => (true, error),
         },
+        None => std::future::pending().await,
+    }
+}
+
+async fn inbound_failure(owner: Option<&mut Owner>) -> io::Error {
+    match owner {
+        Some(owner) => owner.to_tun.failed().await,
         None => std::future::pending().await,
     }
 }
@@ -393,6 +429,7 @@ fn receipt(
     pending: Option<&PendingOwner>,
     last_transaction: Option<&OwnerTransactionReceipt>,
     highest_transaction_revision: u64,
+    drain: (Option<&Owner>, bool, bool),
 ) -> PacketPortReceipt {
     PacketPortReceipt {
         binding: owner.map(|owner| owner.port.binding()),
@@ -405,6 +442,9 @@ fn receipt(
         }),
         last_transaction: last_transaction.cloned(),
         highest_transaction_revision,
+        retained_owner_binding: drain.0.map(|owner| owner.port.binding()),
+        old_owner_drained: drain.1,
+        forced_retirement: drain.2,
     }
 }
 
@@ -545,6 +585,9 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
 ) -> io::Result<PacketBridgeCounters> {
     let tun = Arc::new(tun);
     let mut owner: Option<Owner> = None;
+    let mut retained: Option<Owner> = None;
+    let mut old_owner_drained = true;
+    let mut forced_retirement = false;
     let mut pending: Option<PendingOwner> = None;
     let mut last_transaction: Option<OwnerTransactionReceipt> = None;
     let mut highest_transaction_revision = 0;
@@ -564,7 +607,12 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
             break Ok(());
         }
         let worker = owner.as_ref().map(|owner| owner.port.clone());
+        let retained_worker = retained.as_ref().map(|owner| owner.port.clone());
+        let candidate = pending
+            .as_ref()
+            .map(|candidate| candidate.owner.port.clone());
         let expiry = owner.as_ref().map(|owner| owner.auth_deadline);
+        let retained_expiry = retained.as_ref().map(|owner| owner.auth_deadline);
         let pending_expiry = pending.as_ref().map(|candidate| {
             candidate
                 .transaction
@@ -572,7 +620,13 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
                 .min(candidate.transaction.auth_deadline)
         });
         let to_worker = owner.as_ref().map(|owner| owner.to_worker.admission());
-        let to_tun = owner.as_ref().map(|owner| owner.to_tun.admission());
+        let to_tun = [
+            owner.as_ref().map(|owner| owner.to_tun.admission()),
+            retained.as_ref().map(|owner| owner.to_tun.admission()),
+            pending
+                .as_ref()
+                .map(|candidate| candidate.owner.to_tun.admission()),
+        ];
         tokio::select! {
             biased;
             changed = shutdown.changed() => {
@@ -588,8 +642,15 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
                     owner_epoch = highest_owner_epoch, action = "revoke_domain_keep_infrastructure");
                 revoke(&mut owner, &mut counters, &mut outputs).await;
             }
+            _ = owner_expiry(retained_expiry) => {
+                if let Some(previous) = retained.take() { retire(previous, &mut retired); }
+                // Expiry is forced retirement, not an acknowledged drain.
+                old_owner_drained = false;
+                forced_retirement = true;
+            }
             _ = owner_expiry(pending_expiry) => {
                 let expired = pending.take().expect("pending expiry requires candidate");
+                retire(expired.owner, &mut retired);
                 last_transaction = Some(OwnerTransactionReceipt {
                     transaction: expired.transaction, phase: OwnerTransactionPhase::Expired,
                 });
@@ -630,6 +691,8 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
                             Err("code=owner_prepare_cleanup_busy module=packet_port_manager reason=retired_writer_cleanup_pending limit=8 action=retry_prepare".into())
                         } else if pending.is_some() {
                             Err("code=owner_prepare_capacity module=packet_port_manager reason=pending_candidate_exists limit=1 action=commit_or_abort_existing_candidate".into())
+                        } else if retained.is_some() {
+                            Err("code=owner_prepare_drain_pending module=packet_port_manager reason=old_inbound_owner_retained action=finish_owner_drain".into())
                         } else if active_epoch(owner.as_ref()) != transaction.expected_active_epoch {
                             Err(format!("code=owner_prepare_active_changed module=packet_port_manager expected={:?} actual={:?}", transaction.expected_active_epoch, active_epoch(owner.as_ref())))
                         } else if transaction.binding.owner_epoch <= highest_owner_epoch
@@ -643,7 +706,8 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
                             Err(format!("code=owner_prepare_unauthorized module=packet_port_manager detail={error}"))
                         } else {
                             highest_transaction_revision = transaction.revision;
-                            pending = Some(PendingOwner { transaction, port, authorization });
+                            let staged = Owner::new(port, tun.clone(), transaction.prepare_deadline, Some(transaction.auth_deadline), Some(authorization.clone()));
+                            pending = Some(PendingOwner { transaction, owner: staged, authorization });
                             Ok(())
                         }
                     }
@@ -663,12 +727,26 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
                             Err("code=owner_commit_expired module=packet_port_manager reason=prepare_or_authorization_deadline_elapsed action=preserve_active_owner".into())
                         } else if let Err(error) = (pending.as_ref().expect("validated pending transaction").authorization)() {
                             Err(format!("code=owner_commit_unauthorized module=packet_port_manager detail={error} action=preserve_active_owner"))
+                        } else if owner.as_ref().is_some_and(|previous| previous.to_worker.pending_packets() != 0) {
+                            // This actor is the only producer. No await separates
+                            // this check from the send fence and owner swap, so
+                            // accepted old output cannot be cancelled by commit.
+                            Err("code=owner_commit_queue_pending module=packet_port_manager reason=predecessor_outbound_packets_pending action=retry_exact_commit".into())
                         } else {
                             let candidate = pending.take().expect("validated pending transaction");
-                            let replacement = Owner::new(candidate.port, tun.clone(), transaction.auth_deadline, Some(transaction.auth_deadline), Some(candidate.authorization));
+                            let mut replacement = candidate.owner;
+                            replacement.auth_deadline = transaction.auth_deadline;
+                            replacement.deadline.send_replace(transaction.auth_deadline);
+                            forced_retirement = false;
+                            old_owner_drained = true;
                             // The fence is the linearization point. No await
                             // separates it from installing the prepared owner.
-                            if let Some(previous) = owner.take() { retire(previous, &mut retired); }
+                            if let Some(previous) = owner.take() {
+                                previous.fence.retire();
+                                previous.to_worker.cancel();
+                                retained = Some(previous);
+                                old_owner_drained = false;
+                            }
                             highest_owner_epoch = transaction.binding.owner_epoch;
                             highest_policy_generation = transaction.binding.policy_generation;
                             owner = Some(replacement);
@@ -677,9 +755,54 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
                             Ok(())
                         }
                     }
+                    PacketPortOwnerChange::FinishOwnerDrain { transaction } => {
+                        if !last_transaction.as_ref().is_some_and(|last| last.transaction == transaction && last.phase == OwnerTransactionPhase::Committed) {
+                            Err("code=owner_drain_not_committed module=packet_port_manager reason=exact_committed_transaction_required".into())
+                        } else if forced_retirement {
+                            Err("code=owner_drain_forced_retirement module=packet_port_manager reason=predecessor_expired_or_failed_without_acknowledged_drain".into())
+                        } else if let Some(previous) = &retained {
+                            match previous.port.has_pending_input().and_then(|pending| {
+                                previous.to_tun.drained_through(previous.to_tun.checkpoint()).map(|drained| !pending && drained)
+                            }) {
+                                Ok(true) => {
+                                    let previous = retained.take().expect("checked retained owner");
+                                    retire(previous, &mut retired);
+                                    old_owner_drained = true;
+                                    Ok(())
+                                }
+                                Ok(false) => Err("code=owner_drain_queue_pending module=packet_port_manager reason=predecessor_packets_still_in_ipc_or_tun_output action=retry_exact_finish".into()),
+                                Err(error) => Err(format!("code=owner_drain_probe_failed module=packet_port_manager detail={error}")),
+                            }
+                        } else {
+                            old_owner_drained = true;
+                            Ok(())
+                        }
+                    }
+                    PacketPortOwnerChange::RetireOwnerAfterFailure { transaction } => {
+                        if !last_transaction.as_ref().is_some_and(|last| last.transaction == transaction && last.phase == OwnerTransactionPhase::Committed)
+                            || owner.as_ref().is_none_or(|owner| owner.port.binding() != transaction.binding) {
+                            Err("code=owner_failure_retirement_not_committed module=packet_port_manager reason=exact_current_committed_transaction_required".into())
+                        } else if transaction.prepare_deadline > Instant::now() {
+                            Err("code=owner_failure_retirement_unexpired module=packet_port_manager reason=original_prepare_cap_still_valid action=retry_exact_drain".into())
+                        } else if old_owner_drained && retained.is_none() && !forced_retirement {
+                            Err("code=owner_failure_retirement_already_drained module=packet_port_manager reason=successful_drain_receipt_is_immutable".into())
+                        } else {
+                            if let Some(previous) = retained.take() {
+                                let known_queued_packets = previous.to_tun.pending_packets();
+                                tracing::warn!(code="owner_predecessor_retired_after_failure", module="packet_port_manager", known_queued_packets,
+                                    reason="original_prepare_deadline_elapsed", old_owner_drained=false,
+                                    "failed predecessor retired while preserving active owner and TUN");
+                                retire(previous, &mut retired);
+                            }
+                            forced_retirement = true;
+                            old_owner_drained = false;
+                            Ok(())
+                        }
+                    }
                     PacketPortOwnerChange::AbortOwner { transaction } => {
                         if pending.as_ref().is_some_and(|candidate| candidate.transaction == transaction) {
-                            pending = None;
+                            let candidate = pending.take().expect("validated candidate");
+                            retire(candidate.owner, &mut retired);
                             last_transaction = Some(OwnerTransactionReceipt { transaction, phase: OwnerTransactionPhase::Aborted });
                             Ok(())
                         } else if last_transaction.as_ref().is_some_and(|last| last.transaction == transaction && matches!(last.phase, OwnerTransactionPhase::Aborted | OwnerTransactionPhase::Expired)) {
@@ -706,6 +829,8 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
                             Err("packet port infrastructure or domain identity mismatch".into())
                         } else if retired.len() >= 8 {
                             Err("code=owner_attach_cleanup_busy module=packet_port_manager reason=retired_writer_cleanup_pending limit=8 action=retry_attach".into())
+                        } else if retained.is_some() {
+                            Err("code=owner_attach_drain_pending module=packet_port_manager reason=predecessor_inbound_retained action=finish_owner_drain".into())
                         } else if authorization.as_ref().is_some_and(|check| check().is_err())
                             || auth_deadline <= Instant::now() || binding.owner_epoch <= highest_owner_epoch
                             || binding.policy_generation < highest_policy_generation {
@@ -740,6 +865,11 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
                             Err("revocation refers to stale owner epoch".into())
                         } else {
                             revoke(&mut owner, &mut counters, &mut outputs).await;
+                            if let Some(previous) = retained.take() {
+                                retire(previous, &mut retired);
+                                forced_retirement = true;
+                                old_owner_drained = false;
+                            }
                             Ok(())
                         }
                     }
@@ -752,6 +882,7 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
                         highest_owner_epoch,
                         highest_policy_generation,
                         pending.as_ref(), last_transaction.as_ref(), highest_transaction_revision,
+                        (retained.as_ref(), old_owner_drained, forced_retirement),
                     ));
                 }
                 let _ = update.acknowledgement.send(result);
@@ -768,39 +899,80 @@ async fn run_packet_port_bridge_inner<P: PacketPort>(
                 counters.worker_failures += 1;
                 revoke(&mut owner, &mut counters, &mut outputs).await;
             }
+            error = inbound_failure(pending.as_mut().map(|candidate| &mut candidate.owner)) => {
+                if !is_authorization_failure(&error) { break Err(error); }
+                if let Some(candidate) = pending.take() {
+                    retire(candidate.owner, &mut retired);
+                    last_transaction = Some(OwnerTransactionReceipt { transaction: candidate.transaction, phase: OwnerTransactionPhase::Aborted });
+                }
+            }
+            error = inbound_failure(retained.as_mut()) => {
+                if !is_authorization_failure(&error) { break Err(error); }
+                if let Some(previous) = retained.take() { retire(previous, &mut retired); }
+                forced_retirement = true;
+                old_owner_drained = false;
+            }
             _ = sample_tick.tick(), if diagnostics.is_some() => {
                 if let Some(owner) = &owner {
                     collect(owner, &mut counters, &mut outputs);
                 }
+                if let Some(previous) = &retained { collect(previous, &mut counters, &mut outputs); }
+                if let Some(candidate) = &pending { collect(&candidate.owner, &mut counters, &mut outputs); }
                 outputs.revision = outputs.revision.saturating_add(1);
                 outputs.sampled_elapsed_millis = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
                 if let Some(sender) = &diagnostics { sender.send_replace(outputs.clone()); }
             }
-            packet = next_data_packet(tun.as_ref(), worker.as_deref(), prefer_worker, to_worker, to_tun) => {
-                prefer_worker = matches!(&packet, DataPacket::FromTun(_));
+            packet = next_data_packet(tun.as_ref(), worker.as_deref(), retained_worker.as_deref(), candidate.as_deref(), prefer_worker, to_worker, to_tun) => {
+                prefer_worker = matches!(&packet, DataPacket::Tun(_));
                 match packet {
-                    DataPacket::FromTun(Ok(packet)) => match &owner {
+                    DataPacket::Tun(Ok(packet)) => match &owner {
                         Some(owner) => { counters.record_enqueue(owner.to_worker.enqueue(packet)); }
                         None => counters.no_worker_drops += 1,
                     },
-                    DataPacket::FromTun(Err(error)) => break Err(error),
-                    DataPacket::FromWorker(Ok(packet)) => {
-                        if let Some(owner) = &owner {
-                            counters.record_enqueue(owner.to_tun.enqueue(packet));
-                        }
+                    DataPacket::Tun(Err(error)) => break Err(error),
+                    DataPacket::Worker(Ok(packet)) => {
+                        if let Some(owner) = &owner { counters.record_enqueue(owner.to_tun.enqueue(packet)); }
                     }
-                    DataPacket::FromWorker(Err(error)) => {
+                    DataPacket::Retained(Ok(packet)) => {
+                        if let Some(old) = &retained { counters.record_enqueue(old.to_tun.enqueue(packet)); }
+                    }
+                    DataPacket::Candidate(Ok(packet)) => {
+                        if let Some(candidate) = &pending { counters.record_enqueue(candidate.owner.to_tun.enqueue(packet)); }
+                    }
+                    DataPacket::Worker(Err(error)) => {
                         tracing::warn!(code = "packet_port_owner_failed", module = "sdwan_tun_io",
                             owner_epoch = highest_owner_epoch, detail = %error,
                             action = "revoke_domain_keep_infrastructure");
                         counters.worker_failures += 1;
                         revoke(&mut owner, &mut counters, &mut outputs).await;
                     }
+                    DataPacket::Retained(Err(error)) => {
+                        tracing::warn!(code = "packet_port_retained_inbound_failed", module = "sdwan_tun_io", detail = %error, action = "force_retire_without_drain_receipt");
+                        if let Some(mut old) = retained.take() { old.retire(); old.to_worker.stop().await; old.to_tun.stop().await; collect(&old, &mut counters, &mut outputs); }
+                        old_owner_drained = false;
+                        forced_retirement = true;
+                    }
+                    DataPacket::Candidate(Err(error)) => {
+                        tracing::warn!(code = "packet_port_candidate_inbound_failed", module = "sdwan_tun_io", detail = %error, action = "abort_owner_prepare");
+                        if let Some(candidate) = pending.take() {
+                            retire(candidate.owner, &mut retired);
+                            last_transaction = Some(OwnerTransactionReceipt { transaction: candidate.transaction, phase: OwnerTransactionPhase::Aborted });
+                        }
+                    }
                 }
             },
         }
     };
     revoke(&mut owner, &mut counters, &mut outputs).await;
+    if let Some(candidate) = pending.take() {
+        retire(candidate.owner, &mut retired);
+    }
+    if let Some(mut old) = retained.take() {
+        old.retire();
+        old.to_worker.stop().await;
+        old.to_tun.stop().await;
+        collect(&old, &mut counters, &mut outputs);
+    }
     while let Some(joined) = retired.join_next().await {
         let previous = joined.map_err(io::Error::other)?;
         collect(&previous, &mut counters, &mut outputs);
@@ -1012,20 +1184,24 @@ mod tests {
             next_data_packet(
                 &ReadyPort,
                 Some(&ReadyPort),
+                None,
+                None,
                 false,
                 Some(full.admission()),
-                Some(reverse.admission()),
+                [Some(reverse.admission()), None, None],
             ),
         )
         .await
         .expect("one direction blocked reverse ingress");
-        assert!(matches!(packet, DataPacket::FromWorker(Ok(data)) if data == vec![7; 64]));
+        assert!(matches!(packet, DataPacket::Worker(Ok(data)) if data == vec![7; 64]));
         let mut cancelled = Box::pin(next_data_packet(
             &ReadyPort,
             Some(&ReadyPort),
+            None,
+            None,
             false,
             Some(full.admission()),
-            Some(full.admission()),
+            [Some(full.admission()), None, None],
         ));
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(cancelled.as_mut().poll(&mut context).is_pending());

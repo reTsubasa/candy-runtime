@@ -40,7 +40,7 @@ sync=$tmp/candy-cloud-sync
 printf '#!/bin/sh\nexit 0\n' >"$sync"
 chmod 0755 "$sync"
 PATH="$fake_bin:$PATH" CANDY_LINUX_DIST_DIR="$dist" CANDY_SDWAN_AGENT_BINARY="$agent" \
-	CANDY_NETD_BINARY="$netd" \
+	CANDY_NETD_BINARY="$netd" CANDY_TUNIO_BINARY="$netd" \
 	CANDY_CLOUD_ENROLL_BINARY="$enroll" \
 	CANDY_CLOUD_SYNC_BINARY="$sync" \
 	CANDY_RELEASE_VERSION=0.4.0 CANDY_RELEASE_REVISION=62 \
@@ -54,6 +54,7 @@ grep -F 'proxy --config /etc/candy/proxy-server.toml --sdwan-config /etc/candy/s
 [ -x "$stage/usr/local/libexec/serverd-linux" ] || fail "internal compatibility launcher was not staged"
 [ -x "$stage/usr/local/libexec/candy-sdwan-runtime" ] || fail "SD-WAN Runtime helper was not staged"
 [ -x "$stage/usr/local/libexec/candy-sdwan-agent" ] || fail "server SD-WAN agent was not staged"
+[ -x "$stage/usr/local/libexec/candy-tunio" ] || fail "server TUN infrastructure binary was not staged"
 [ -x "$stage/usr/local/libexec/candy-netd" ] || fail "server netd was not staged"
 [ -x "$stage/usr/local/libexec/candy-cloud-enroll" ] || fail "server Cloud enrollment client was not staged"
 [ -x "$stage/usr/local/libexec/candy-cloud-sync" ] || fail "server Cloud Runtime synchronizer was not staged"

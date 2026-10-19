@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,11 @@ RUNTIME = Path(__file__).resolve().parents[1]
 CORE = RUNTIME.parent / "candy-core"
 TESTS = ("signed_cli_shared_pool_scales_and_isolates_four_domains",
          "signed_cli_shared_host_lifecycle_scale_gate",
-         "signed_cli_runtime_shared_listener_routes_two_domains")
+         "signed_cli_shared_domain_evidence_socket_gate",
+         "signed_cli_bilateral_candidate_reload_preserves_traffic",
+         "signed_cli_successor_server_restart_preserves_authorization",
+         "signed_cli_runtime_shared_listener_routes_two_domains",
+         "signed_cli_mixed_role_quota_and_slow_consumer_isolation")
 
 
 def bounded_run(command: list[str], log: Path, seconds: float) -> int:
@@ -65,8 +70,14 @@ def main() -> int:
     parser.add_argument("evidence", type=Path, nargs="?")
     parser.add_argument("test", choices=TESTS, nargs="?", default=TESTS[0])
     parser.add_argument("--self-check", action="store_true")
-    parser.add_argument("--build", type=Path, help="run verified frozen release artifacts directly")
+    parser.add_argument("--build", type=Path, help="run verified frozen artifacts directly")
+    parser.add_argument("--pin-cpus", action="store_true",
+                        help="bound frozen gate to three VM CPUs without a periodic CFS quota")
+    parser.add_argument("--snapshot-helper", type=Path,
+                        help="copy current Linux binaries and this test helper, then test immutable copies")
     args = parser.parse_args()
+    if args.pin_cpus and not args.build:
+        parser.error("--pin-cpus requires --build")
     if args.self_check:
         self_check()
         return 0
@@ -78,7 +89,8 @@ def main() -> int:
     started = time.monotonic()
     result = {"schema_version": 1, "test": args.test, "gate": "FAIL",
               "scope": "isolated source-worktree fixture; no release or platform acceptance",
-              "container": name, "host_deadline_seconds": 300}
+              "container": name, "host_deadline_seconds": 300,
+              "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
     exit_code = 1
     try:
         preflight = bounded_run(["docker", "info", "--format", "{{.ServerVersion}}"],
@@ -101,29 +113,118 @@ def main() -> int:
                    "timeout", "240", "cargo", "test", "--test", "signed_cli", args.test,
                    "--offline", "--", "--exact", "--ignored", "--nocapture"]
         if args.build:
+            resources = ["--cpus", "3"]
+            result["cpu_isolation"] = {"cfs_quota_cpus": 3}
+            if args.pin_cpus:
+                available = subprocess.run(
+                    ["docker", "info", "--format", "{{.NCPU}}"], check=True,
+                    text=True, capture_output=True, timeout=10)
+                if int(available.stdout.strip()) < 3:
+                    raise ValueError("--pin-cpus requires at least three Docker VM CPUs")
+                resources = ["--cpuset-cpus", "0-2"]
+                result["cpu_isolation"] = {"cpuset": "0-2", "cfs_quota": "none"}
             build = args.build.resolve()
             if json.loads((build / "result.json").read_text())["gate"] != "BUILD_PASS":
-                raise ValueError("frozen release build has not passed")
+                raise ValueError("frozen artifact build has not passed")
             hashes = json.loads((build / "binary-hashes.json").read_text())
             paths = {"CANDY_CORE_TEST_BINARY": "candy-core", "CANDY_NETD_TEST_BINARY": "candy-netd",
                      "CANDY_AGENT_TEST_BINARY": "candy-agent", "CANDY_SIGNED_FIXTURE_BINARY": "sdwan_signed_cli_fixture"}
             for label in (*paths.values(), "candy-tunio", "signed_cli_helper"):
                 if hashlib.sha256((build / "binaries" / label).read_bytes()).hexdigest() != hashes[label]:
-                    raise ValueError(f"frozen release binary checksum mismatch: {label}")
+                    raise ValueError(f"frozen artifact binary checksum mismatch: {label}")
             source = json.loads((build / "source-freeze.json").read_text())
-            result["scope"] = "isolated frozen release fixture; no platform or performance acceptance"
+            result["scope"] = "isolated frozen artifact fixture; no release, platform or performance acceptance"
             result["build"] = str(build)
             result["manifest_sha256"] = source["manifest_sha256"]
             result["binary_hashes"] = hashes
+            provenance = build / "build-provenance.json"
+            if provenance.exists():
+                result["build_provenance_sha256"] = hashlib.sha256(provenance.read_bytes()).hexdigest()
+                result["build_provenance"] = json.loads(provenance.read_text())
             command = ["docker", "run", "--name", name, "--rm", "--network", "none", "--privileged",
-                       "--cpus", "3", "--memory", "3g", "--pids-limit", "512",
+                       *resources, "--memory", "3g", "--pids-limit", "512",
                        "-v", f"{build / 'binaries'}:/binaries:ro",
+                       # Cargo embeds this path in debug signed_cli fixtures.
+                       "-v", f"{build / 'binaries'}:/build/debug:ro",
                        "-v", f"{build / 'binaries'}:/build/release:ro", "-v", f"{evidence}:/evidence",
                        "-e", "CANDY_NETD_ISOLATED_KERNEL_TEST=1", "-e", "CANDY_SIGNED_EVIDENCE_DIR=/evidence"]
             for variable, label in paths.items():
                 command.extend(["-e", f"{variable}=/binaries/{label}"])
+            command.extend(["candy-sdwan-perf-runner:20261013", "sh", "-eu", "-c",
+                            'for binary in /binaries/candy-core /binaries/candy-netd '
+                            '/binaries/candy-agent /binaries/signed_cli_helper '
+                            '/build/debug/candy-tunio /build/release/candy-tunio; do '
+                            'test -x "$binary" || { echo "code=frozen_binary_unavailable '
+                            'module=shared_pool_gate path=$binary" >&2; exit 70; }; done; '
+                            'cpu_stat() { for cpu_file in /sys/fs/cgroup/cpu.stat '
+                            '/sys/fs/cgroup/cpu/cpu.stat; do if test -r "$cpu_file"; then '
+                            'cat "$cpu_file"; return; fi; done; echo unavailable; }; '
+                            'cpu_stat > /evidence/cpu-stat-before.txt; '
+                            'if "$@"; then gate_status=0; else gate_status=$?; fi; '
+                            'cpu_stat > /evidence/cpu-stat-after.txt; exit "$gate_status"',
+                            "frozen-gate", "timeout", "240",
+                            "/binaries/signed_cli_helper", "--exact", args.test, "--ignored", "--nocapture"])
+        if args.snapshot_helper:
+            if args.build:
+                raise ValueError("choose frozen release or local binary snapshot")
+            binaries = evidence / "binaries"
+            binaries.mkdir()
+            sources = {
+                "candy-core": CORE / "target-linux-shared/debug/candy-core",
+                "candy-netd": RUNTIME / "target-linux-netd-v2/debug/candy-netd",
+                "candy-agent": RUNTIME / "target-linux-netd-v2/debug/candy-sdwan-agent",
+                "candy-tunio": RUNTIME / "target-linux-tunio/debug/candy-tunio",
+                "sdwan_signed_cli_fixture": CORE / "target-linux-shared/debug/examples/sdwan_signed_cli_fixture",
+                "signed_cli_helper": args.snapshot_helper.resolve(),
+            }
+            hashes = {}
+            for label, source in sources.items():
+                before = hashlib.sha256(source.read_bytes()).hexdigest()
+                shutil.copy2(source, binaries / label)
+                copied = hashlib.sha256((binaries / label).read_bytes()).hexdigest()
+                after = hashlib.sha256(source.read_bytes()).hexdigest()
+                if not before == copied == after:
+                    raise ValueError(f"binary changed during snapshot: {label}")
+                hashes[label] = copied
+            (evidence / "binary-hashes.json").write_text(json.dumps(hashes, indent=2) + "\n")
+            result.update(scope="isolated immutable binary snapshot; no source, release or platform acceptance",
+                          binary_hashes=hashes)
+            command = ["docker", "run", "--name", name, "--rm", "--network", "none", "--privileged",
+                       "-v", f"{binaries}:/binaries:ro",
+                       "-v", f"{binaries}:/workspace/target-linux-tunio/debug:ro",
+                       # The helper's embedded CARGO_BIN_EXE path comes from
+                       # the Linux build target used by the runner image.
+                       "-v", f"{binaries}:/runtime/target-linux-netd-v2/debug:ro",
+                       # Cargo embeds this path in signed_cli helpers built inside
+                       # the Linux workspace container.
+                       "-v", f"{binaries}:/build/debug:ro",
+                       "-v", f"{evidence}:/evidence",
+                       "-e", "CANDY_NETD_ISOLATED_KERNEL_TEST=1",
+                       "-e", "CANDY_SIGNED_EVIDENCE_DIR=/evidence"]
+            for variable, label in {
+                "CANDY_CORE_TEST_BINARY": "candy-core",
+                "CANDY_NETD_TEST_BINARY": "candy-netd",
+                "CANDY_AGENT_TEST_BINARY": "candy-agent",
+                "CANDY_SIGNED_FIXTURE_BINARY": "sdwan_signed_cli_fixture",
+            }.items():
+                command.extend(["-e", f"{variable}=/binaries/{label}"])
             command.extend(["candy-sdwan-perf-runner:20261013", "timeout", "240",
                             "/binaries/signed_cli_helper", "--exact", args.test, "--ignored", "--nocapture"])
+        if args.test == "signed_cli_mixed_role_quota_and_slow_consumer_isolation":
+            wrapper_source = (args.build.resolve() / "frozen/candy-runtime" if args.build else RUNTIME)
+            wrapper_source /= "openwrt/client/packages/candy-client/candy-client"
+            tools = evidence / "runtime-tools"
+            tools.mkdir()
+            wrapper = tools / "candy-client"
+            shutil.copy2(wrapper_source, wrapper)
+            result["runtime_client_wrapper_sha256"] = hashlib.sha256(wrapper.read_bytes()).hexdigest()
+            image_position = command.index("candy-sdwan-perf-runner:20261013")
+            core_binary = ("/binaries/candy-core" if args.build or args.snapshot_helper
+                           else "/core/target-linux-shared/debug/candy-core")
+            command[image_position:image_position] = [
+                "-v", f"{tools}:/runtime-tools:ro",
+                "-e", "CANDY_PROXY_CLIENT_BINARY=/runtime-tools/candy-client",
+                "-e", f"CANDY_CORE_BIN={core_binary}"]
         exit_code = bounded_run(command, evidence / "test.log", 300)
         log = (evidence / "test.log").read_text()
         accepted = exit_code == 0 and exactly_one_pass(log, args.test)

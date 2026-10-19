@@ -29,6 +29,18 @@ fn signed_cli_shared_host_lifecycle_scale_gate() {
 }
 
 #[test]
+#[ignore = "requires isolated Linux and actual shared Core domain processes"]
+fn signed_cli_shared_domain_evidence_socket_gate() {
+    shared_pool::verify_domain_evidence();
+}
+
+#[test]
+#[ignore = "subprocess helper authenticates as a different controller PID"]
+fn signed_shared_domain_evidence_other_controller_helper() {
+    shared_pool::evidence_other_controller_helper();
+}
+
+#[test]
 #[ignore = "requires disposable privileged Linux with four real signed domains"]
 fn signed_cli_shared_pool_scales_and_isolates_four_domains() {
     shared_pool::verify_domains();
@@ -38,6 +50,79 @@ fn signed_cli_shared_pool_scales_and_isolates_four_domains() {
 #[ignore = "requires disposable privileged Linux with actual Runtime mixed-listener domains"]
 fn signed_cli_runtime_shared_listener_routes_two_domains() {
     shared_listener::verify();
+}
+
+#[test]
+#[ignore = "requires disposable privileged Linux and the Runtime Rust Proxy launcher"]
+fn signed_cli_mixed_role_quota_and_slow_consumer_isolation() {
+    shared_listener::verify_mixed_role_fault_isolation();
+}
+
+#[test]
+#[ignore = "real authenticated Reserve/Prepare/Install/Activate/Drain with two netd TUN clients and Runtime server domains"]
+fn signed_cli_bilateral_candidate_reload_preserves_traffic() {
+    shared_listener::verify_mbb();
+}
+
+#[test]
+#[ignore = "requires durable activated successor recovery with an intentionally stale Cloud catalog"]
+fn signed_cli_successor_server_restart_preserves_authorization() {
+    shared_listener::verify_successor_restart();
+}
+
+#[test]
+#[ignore = "exec helper for isolated bilateral candidate reload"]
+fn signed_mbb_client_helper() {
+    let path = PathBuf::from(std::env::var_os("CANDY_MBB_PLAN").unwrap());
+    let plan: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let spec: InfraSpec = serde_json::from_value(plan["infrastructure"].clone()).unwrap();
+    let instance: [u8; 16] = serde_json::from_value(plan["instance_id"].clone()).unwrap();
+    let domain: [u8; 16] = serde_json::from_value(plan["domain_id"].clone()).unwrap();
+    let mut client = InfrastructureClient::new(plan["netd_socket"].as_str().unwrap(), instance);
+    let (body, _) = client
+        .exchange_in_domain(domain, spec.infra_id, Operation::InfraEnsure(spec.clone()))
+        .unwrap();
+    assert!(
+        matches!(body, Body::InfraStatus { spec: Some(_), .. }),
+        "{body:?}"
+    );
+    let (body, fd) = client
+        .exchange_in_domain(
+            domain,
+            spec.infra_id,
+            Operation::InfraAcquireIoFd {
+                infra_id: spec.infra_id,
+                generation: spec.generation,
+                io_epoch: std::env::var("CANDY_MBB_IO_EPOCH")
+                    .map_or(1, |value| value.parse().unwrap()),
+            },
+        )
+        .unwrap();
+    assert!(matches!(body, Body::IoFd { .. }), "{body:?}");
+    let fd = fd.unwrap();
+    ip(&["link", "set", "candy0", "up"]);
+    ip(&["route", "replace", "10.251.2.0/24", "dev", "candy0"]);
+    nix::fcntl::fcntl(
+        fd.as_raw_fd(),
+        nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
+    )
+    .unwrap();
+    let error = Command::new(core())
+        .args(["client", "sdwan", "run", "--config"])
+        .arg(
+            std::env::var("CANDY_MBB_CONFIG")
+                .unwrap_or_else(|_| plan["core_config"].as_str().unwrap().to_owned()),
+        )
+        .arg("--tun-fd")
+        .arg(fd.as_raw_fd().to_string())
+        .arg("--status")
+        .arg(plan["core_status"].as_str().unwrap())
+        .arg("--readiness-token")
+        .arg("0123456789abcdef0123456789abcdef")
+        .arg("--reload-socket")
+        .arg(path.with_file_name("reload.sock"))
+        .exec();
+    panic!("Core exec failed: {error}");
 }
 
 struct Process(Child);
