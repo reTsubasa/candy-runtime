@@ -1,0 +1,14 @@
+   Compiling candy-sdwan-agent v0.4.0 (/workspace/linux/common/apps/candy-sdwan-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.28s
+     Running unittests src/lib.rs (/target/debug/deps/candy_sdwan_agent-5329d8397b94947f)
+
+running 4 tests
+test experimental_tunio::managed_policy::tests::authority_refresh_is_scheduled_before_original_physical_expiry ... ok
+test experimental_tunio::managed_policy::tests::transport_trust_resource_identity_or_cap_changes_require_mbb ... ok
+test experimental_tunio::managed_policy::tests::catalog_and_routes_may_advance_without_changing_packet_owner ... ok
+level=warn code=managed_policy_owner_expired module=sdwan_activation policy_revision=1 evidence=/tmp/.tmpMTQonN/core-record.policy-update.policy-terminal-11501c01e77a43b086c8afae969b4890.json action=retain_terminal_intent_and_renew_authority
+level=warn code=managed_policy_owner_expired module=sdwan_activation policy_revision=1 evidence=/tmp/.tmpMTQonN/core-record.policy-update.policy-terminal-90afeca6812c4725a1cebf7514f3fa8d.json action=retain_terminal_intent_and_renew_authority
+level=info code=managed_policy_applied module=sdwan_activation policy_generation=4 binding_generation=3 worker_pid=283 worker_epoch=7 action=preserve_tun_io_authority_and_transports
+test experimental_tunio::managed_policy::linux::wire_tests::lost_or_rejected_ack_preserves_journal_and_exact_owner_until_retry_ack ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.11s

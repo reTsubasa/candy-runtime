@@ -39,6 +39,12 @@ struct Plan {
     worker_epoch: u64,
     fencing_token: u64,
     signed_generation: u64,
+    /// The packet socket and its signed authority keep their original generation.
+    /// Route/catalog publication advances signed_generation without replacing IO.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binding_policy_generation: Option<u64>,
+    #[serde(default)]
+    policy_revision: u64,
     auth_deadline_unix: u64,
     declaration: PrepareDeclaration,
     #[serde(default)]
@@ -148,8 +154,25 @@ mod candidate_core_control;
 mod candidate_ownership;
 #[path = "listener_registration.rs"]
 mod listener_registration;
+#[cfg(any(test, all(feature = "experimental-tunio-rebind", target_os = "linux")))]
+#[path = "managed_policy.rs"]
+mod managed_policy;
 #[path = "signed_renewal.rs"]
 mod signed_renewal;
+
+fn binding_policy_generation(plan: &Plan) -> u64 {
+    plan.binding_policy_generation
+        .unwrap_or(plan.signed_generation)
+}
+
+fn policy_reload_socket(plan: &Plan) -> Result<PathBuf> {
+    Ok(plan
+        .independent_worker
+        .as_ref()
+        .context("managed policy worker absent")?
+        .control_socket
+        .with_extension("policy.sock"))
+}
 
 pub(super) fn renew_authority(path: &Path) -> Result<()> {
     signed_renewal::run(path)
@@ -196,6 +219,31 @@ pub(super) fn recovery_disposition(path: &Path) -> Result<RecoveryDisposition> {
         crate::process_record::read_optional(&io.process_record).context(ManagedProofPending)?;
     let worker_record = crate::process_record::read_optional(&worker.process_record)
         .context(ManagedProofPending)?;
+    if worker
+        .process_record
+        .with_extension("policy-update.json")
+        .try_exists()?
+    {
+        return Ok(RecoveryDisposition::RenewAuthority);
+    }
+    let committed_plan = worker_record
+        .as_ref()
+        .and_then(|record| record.effective_plan_file.as_ref())
+        .map(|path| read_plan(path))
+        .transpose()?;
+    let physical_generation = committed_plan
+        .as_ref()
+        .map(binding_policy_generation)
+        .unwrap_or(binding_policy_generation(&plan));
+    let physical_deadline = committed_plan
+        .as_ref()
+        .filter(|current| {
+            current.binding_policy_generation.is_some()
+                && current.auth_deadline_unix <= plan.auth_deadline_unix
+        })
+        .map_or(plan.auth_deadline_unix, |current| {
+            current.auth_deadline_unix
+        });
     if cfg!(feature = "experimental-tunio-rebind") {
         if let Some(record) = &io_record {
             let io_alive = process_is_current_confirmed(ProcessIdentity {
@@ -219,8 +267,8 @@ pub(super) fn recovery_disposition(path: &Path) -> Result<RecoveryDisposition> {
                 {
                     bail!("live I/O differs from immutable infrastructure identity");
                 }
-                if record.policy_generation != plan.signed_generation
-                    || record.auth_deadline_unix != plan.auth_deadline_unix
+                if record.policy_generation != physical_generation
+                    || record.auth_deadline_unix != physical_deadline
                 {
                     return Ok(RecoveryDisposition::RenewAuthority);
                 }
@@ -238,6 +286,12 @@ pub(super) fn recovery_disposition(path: &Path) -> Result<RecoveryDisposition> {
                 if placement_changed(current.placement.as_ref(), plan.placement.as_ref())? {
                     return Ok(RecoveryDisposition::RenewAuthority);
                 }
+                #[cfg(any(test, all(feature = "experimental-tunio-rebind", target_os = "linux")))]
+                if current.binding_policy_generation.is_some()
+                    && managed_policy::authority_refresh_needed(&current, &plan, unix_time()?)
+                {
+                    return Ok(RecoveryDisposition::RenewAuthority);
+                }
             }
             if let Some(hash) = &record.authorization_snapshot_sha256 {
                 let (_, report) = compile_verified_plan(plan.clone())?;
@@ -249,9 +303,19 @@ pub(super) fn recovery_disposition(path: &Path) -> Result<RecoveryDisposition> {
     }
     let mut live = Vec::new();
     let mut records = 0;
-    for (record, executable, endpoint) in [
-        (worker_record.as_ref(), &plan.core, &worker.control_socket),
-        (io_record.as_ref(), &plan.tunio, &io.control_socket),
+    for (record, executable, endpoint, expected_generation) in [
+        (
+            worker_record.as_ref(),
+            &plan.core,
+            &worker.control_socket,
+            plan.signed_generation,
+        ),
+        (
+            io_record.as_ref(),
+            &plan.tunio,
+            &io.control_socket,
+            physical_generation,
+        ),
     ] {
         let record = match record {
             Some(record) => record,
@@ -265,9 +329,9 @@ pub(super) fn recovery_disposition(path: &Path) -> Result<RecoveryDisposition> {
         let current = record.business_is_current()?;
         if current {
             record.validate_identity(executable, unix_time()?)?;
-            if record.policy_generation != plan.signed_generation
+            if record.policy_generation != expected_generation
                 || record.infrastructure_generation != plan.infrastructure.generation
-                || record.auth_deadline_unix != plan.auth_deadline_unix
+                || record.auth_deadline_unix != physical_deadline
             {
                 bail!("existing process binding differs from verified recovery plan");
             }
@@ -448,6 +512,9 @@ fn read_plan(path: &Path) -> Result<Plan> {
         || plan.io_epoch == 0
         || plan.worker_epoch == 0
         || plan.signed_generation == 0
+        || plan
+            .binding_policy_generation
+            .is_some_and(|generation| generation == 0 || generation > plan.signed_generation)
     {
         bail!("experimental plan identity invalid");
     }
@@ -767,6 +834,7 @@ fn publish_worker_record_until(
     record.packet_binding_file = Some(plan.binding_file.clone());
     record.effective_plan_file = plan.effective_plan_file.clone();
     record.authorization_snapshot_sha256 = plan.authorization_snapshot_sha256.clone();
+    record.status_generation = Some(binding_policy_generation(plan));
     bind_shared_record(plan, &mut record);
     crate::process_record::publish(&worker.process_record, &record)?;
     match deadline {
@@ -982,6 +1050,10 @@ fn spawn_business_worker_with_slot(
                 "--experimental-packet-port-ipc".to_owned(),
                 "--experimental-independent-worker".to_owned(),
             ];
+            arguments.extend([
+                "--policy-reload-socket".to_owned(),
+                policy_reload_socket(plan)?.display().to_string(),
+            ]);
             for (name, value) in [
                 ("--config", plan.core_config.display().to_string()),
                 (
@@ -1064,6 +1136,8 @@ fn spawn_business_worker_with_slot(
         .arg(token);
     if let Some(worker) = &plan.independent_worker {
         command
+            .arg("--policy-reload-socket")
+            .arg(policy_reload_socket(plan)?)
             .arg("--experimental-independent-worker")
             .arg("--worker-control-socket")
             .arg(&worker.control_socket)
@@ -1336,13 +1410,17 @@ fn sync_failed_prefixes(
     if !candy_process_control::process_is_current_confirmed(worker_identity)? {
         bail!("code=forward_snapshot_process_changed module=sdwan_activation detail=Core PID epoch no longer current");
     }
-    let Some(status) =
-        crate::read_core_status(&plan.core_status, plan.signed_generation, worker_pid, token)?
+    let Some(status) = crate::read_core_status(
+        &plan.core_status,
+        binding_policy_generation(plan),
+        worker_pid,
+        token,
+    )?
     else {
         return Ok(());
     };
     if status.policy_generation != 0 && status.policy_generation != plan.signed_generation {
-        bail!("immutable packet-port binding cannot use a newer policy generation");
+        bail!("Core policy report differs from acknowledged active policy generation");
     }
     if !status.ready_report_verified {
         bail!("code=forward_snapshot_unverified module=sdwan_activation detail=Core route-owner snapshot lacks verified packet-path proof");
@@ -1399,7 +1477,9 @@ fn effective_worker_plan(
         || current.infrastructure != desired.infrastructure
         || current.domain_id != desired.domain_id
         || !same_io_lineage(&current, &desired)
-        || current.auth_deadline_unix != desired.auth_deadline_unix
+        || current.auth_deadline_unix > desired.auth_deadline_unix
+        || (current.binding_policy_generation.is_none()
+            && current.auth_deadline_unix != desired.auth_deadline_unix)
     {
         return Err(DesiredStateChanged.into());
     }
@@ -1554,6 +1634,7 @@ pub(super) fn cloud_activation_plan(
             || plan.pair_recovery.is_some()
             || plan.effective_plan_file.is_some()
             || plan.authorization_snapshot_sha256.is_some()
+            || plan.binding_policy_generation.is_some()
         {
             bail!("code=cloud_plan_template_rejected module=cloud_plan_bridge detail=template must declare independent Core/IO and contain no consumed authority receipts");
         }
@@ -2353,11 +2434,33 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
         candidate_owner,
         phase: previous_phase,
         last_fencing_token,
+        active_policy_revision,
+        active_policy_generation,
+        active_policy_hash,
+        pending_policy_revision,
         ..
     } = body
     else {
         bail!("independent Core forwarding receipt absent");
     };
+    if plan.binding_policy_generation.is_some()
+        && previous_phase == Some(candy_netd_proto::v2::Phase::Active)
+    {
+        anyhow::ensure!(pending_policy_revision.is_none()
+            && active_policy_revision == plan.policy_revision
+            && active_policy_generation == Some(plan.signed_generation)
+            && active_policy_hash.as_deref() == plan.authorization_snapshot_sha256.as_deref(),
+            "code=managed_policy_adoption_unconfirmed module=process_supervisor action=preserve_pending_policy_evidence");
+    }
+    let retain_policy_owner = plan.binding_policy_generation.is_some()
+        && previous_phase == Some(candy_netd_proto::v2::Phase::Active)
+        && candidate_owner.is_none();
+    if plan.binding_policy_generation.is_some() && !retain_policy_owner {
+        // A guarded/revoked physical authority still signs its original route
+        // declaration. Recover with a new signed MBB transaction rather than
+        // binding that old authority to the latest policy declaration.
+        return signed_renewal::run(path);
+    }
     let retained_owner = previous.clone();
     let previous = if let Some(candidate) = candidate_owner {
         if candidate.worker_epoch != plan.worker_epoch
@@ -2377,7 +2480,7 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
         previous
     };
     if previous.domain_id != plan.domain_id
-        || previous.signed_generation != plan.signed_generation
+        || previous.signed_generation != binding_policy_generation(&plan)
         || previous.worker_epoch != plan.worker_epoch
     {
         bail!("independent Core forwarding owner differs from managed binding");
@@ -2391,25 +2494,31 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
         .checked_add(u64::try_from(remaining.as_millis())?)
         .context("authorization overflow")?;
     // A new controller gets a new fence, while the signed generation and packet binding remain fixed.
-    let mut owner = ForwardOwner {
-        fencing_token: previous
-            .fencing_token
-            .max(last_fencing_token)
-            .checked_add(1)
-            .context("owner fence exhausted")?,
-        auth_deadline_mono_ms: previous.auth_deadline_mono_ms.min(auth_deadline),
-        lease_deadline_mono_ms: (now + 30000)
-            .min(previous.auth_deadline_mono_ms.min(auth_deadline)),
-        ..previous
+    let mut owner = if retain_policy_owner {
+        previous.clone()
+    } else {
+        ForwardOwner {
+            fencing_token: previous
+                .fencing_token
+                .max(last_fencing_token)
+                .checked_add(1)
+                .context("owner fence exhausted")?,
+            auth_deadline_mono_ms: previous.auth_deadline_mono_ms.min(auth_deadline),
+            lease_deadline_mono_ms: (now + 30000)
+                .min(previous.auth_deadline_mono_ms.min(auth_deadline)),
+            ..previous
+        }
     };
     // Controller adoption changes the fence, not the live business or I/O
     // owner. Preserve its route-to-TUN policy through this bookkeeping commit;
     // an ordinary active replacement briefly installs unreachable routes and
     // can terminate existing connected UDP application sockets.
-    if matches!(
-        previous_phase,
-        Some(candy_netd_proto::v2::Phase::Active | candy_netd_proto::v2::Phase::Guarded)
-    ) {
+    if !retain_policy_owner
+        && matches!(
+            previous_phase,
+            Some(candy_netd_proto::v2::Phase::Active | candy_netd_proto::v2::Phase::Guarded)
+        )
+    {
         if let Err(error) = expect_ack(
             &mut netd,
             Operation::ForwardGuard {
@@ -2422,6 +2531,18 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
     }
     let mut snapshot = None;
     let preparation = (|| -> Result<()> {
+        if retain_policy_owner {
+            sync_failed_prefixes(
+                &mut netd,
+                &plan,
+                managed.pid,
+                &token,
+                &owner,
+                managed,
+                &mut snapshot,
+            )?;
+            return Ok(());
+        }
         expect_ack(
             &mut netd,
             Operation::ForwardPrepare {
@@ -2504,6 +2625,12 @@ pub(super) fn adopt_worker_with_io(path: &Path, gate: bool, supervise_io: bool) 
         && business_is_current(&plan, managed)?
         && monotonic_ms()? < owner.auth_deadline_mono_ms
     {
+        #[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+        if plan.binding_policy_generation.is_some()
+            && managed_policy::authority_refresh_needed(&plan, &read_plan(path)?, unix_time()?)
+        {
+            return Err(DesiredStateChanged.into());
+        }
         if Instant::now() >= next_plan_check {
             next_plan_check = Instant::now() + Duration::from_secs(1);
             listener_registration::publish_pending(&plan, &supervision.process_record);
@@ -2688,7 +2815,7 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
     preserve_unrecorded_endpoint(&io.control_socket)?;
     if old_io.infrastructure_generation != retired.infrastructure.generation
         || old_worker.infrastructure_generation != retired.infrastructure.generation
-        || old_io.policy_generation != retired.signed_generation
+        || old_io.policy_generation != binding_policy_generation(&retired)
         || old_worker.policy_generation != retired.signed_generation
         || old_io.auth_deadline_unix != retired.auth_deadline_unix
         || old_worker.auth_deadline_unix != retired.auth_deadline_unix
@@ -2726,7 +2853,7 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
     };
     for owner in std::iter::once(&previous).chain(candidate_owner.iter()) {
         if owner.domain_id != retired.domain_id
-            || owner.signed_generation != retired.signed_generation
+            || owner.signed_generation != binding_policy_generation(&retired)
         {
             bail!("pair recovery cannot revoke another domain or signed generation");
         }
@@ -2781,6 +2908,9 @@ pub(super) fn recover_pair(path: &Path) -> Result<()> {
         old_io.io_epoch.context("recorded IO epoch absent")?,
         actual_io_epoch.unwrap_or(0),
     ])?;
+    // The recovered IO is a new physical owner of the latest verified policy.
+    plan.binding_policy_generation = None;
+    plan.policy_revision = 0;
     plan.worker_epoch = next_recovery_epoch([
         plan.worker_epoch,
         recovered.worker_epoch,
@@ -2937,7 +3067,8 @@ pub(super) fn rebind_core(path: &Path) -> Result<()> {
     if let Some(worker) = &plan.independent_worker {
         let record = crate::process_record::read(&worker.process_record)?;
         if let Some(effective_path) = &record.effective_plan_file {
-            if read_plan(effective_path)?.authority.is_some() {
+            let current = read_plan(effective_path)?;
+            if current.authority.is_some() || current.binding_policy_generation.is_some() {
                 return signed_renewal::run(path);
             }
         }

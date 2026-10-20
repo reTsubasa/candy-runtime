@@ -720,14 +720,18 @@ mod linux {
             envelope,
             transaction_id,
         };
+        let mut authority_probe = request(
+            AuthorityControlOperation::ProbeTransaction,
+            None,
+            uuid::Uuid::new_v4().simple().to_string(),
+        );
+        // Schema 3 exposes independently prepared owner transactions. A legacy
+        // probe must not hide UNKNOWN MBB state from a policy-only controller.
+        authority_probe.schema_version = 3;
         let mut actual = exchange_authority(
             &authority_path,
             io_identity,
-            &request(
-                AuthorityControlOperation::ProbeTransaction,
-                None,
-                uuid::Uuid::new_v4().simple().to_string(),
-            ),
+            &authority_probe,
             None,
             Instant::now() + Duration::from_secs(2),
         )?;
@@ -737,6 +741,42 @@ mod linux {
             .context("missing private owner directory")?;
         let old_worker = crate::process_record::read_optional(&original_worker.process_record)
             .context(ManagedProofPending)?;
+        let mut terminal_policy_retired = false;
+        // A dispatched policy update owns its exact recovery intent even if
+        // Cloud changes/reverts the desired input while its ACK is unknown.
+        if original_worker
+            .process_record
+            .with_extension("policy-update.json")
+            .try_exists()?
+        {
+            let renewal_path = original_worker
+                .process_record
+                .with_extension("renewal.json");
+            if renewal_path.try_exists()? {
+                let pending: Journal = read_private(&renewal_path)?;
+                anyhow::ensure!(
+                    pending.phase == "committed",
+                    "unresolved renewal prevents policy reconciliation"
+                );
+            }
+            let record = old_worker
+                .as_ref()
+                .context("pending policy worker record absent")?;
+            let current = read_plan(
+                record
+                    .effective_plan_file
+                    .as_ref()
+                    .context("pending policy effective plan absent")?,
+            )?;
+            anyhow::ensure!(
+                actual.pending.is_none(),
+                "pending authority prevents policy reconciliation"
+            );
+            if managed_policy::try_update(&desired, &current, record, &actual)? {
+                return adopt_worker_with_io(path, true, true);
+            }
+            terminal_policy_retired = true;
+        }
         let journal_path = original_worker
             .process_record
             .with_extension("renewal.json");
@@ -776,7 +816,8 @@ mod linux {
                 let new_plan = read_plan(&previous_journal.candidate_plan)?;
                 let (_, desired_report) = compile_verified_plan(desired.clone())?;
                 let candidate = crate::process_record::read(&original_worker.process_record)?;
-                if actual.owner_active
+                if !terminal_policy_retired
+                    && actual.owner_active
                     && previous_journal.envelope.as_ref() == actual.active.as_ref()
                     && desired_report["authorization_snapshot_sha256"]
                         == new_plan
@@ -1076,9 +1117,19 @@ mod linux {
         if let Some(old) = &old_plan {
             placement_changed(old.placement.as_ref(), desired.placement.as_ref())?;
         }
+        if let (Some(current), Some(record)) = (&old_plan, &old_worker) {
+            if !terminal_policy_retired
+                && managed_policy::try_update(&desired, current, record, &actual)?
+            {
+                return adopt_worker_with_io(path, true, true);
+            }
+        }
         let snapshot = Snapshot::capture(&desired.core_config, parent)?;
         let mut snapshot_cleanup = crate::signed_snapshot::CleanupGuard::new(&snapshot);
         let mut plan = desired.clone();
+        // A real transport replacement creates a fresh immutable packet owner.
+        plan.binding_policy_generation = None;
+        plan.policy_revision = 0;
         plan.core_config = snapshot.config.clone();
         let (mut plan, report) = compile_verified_plan(plan)?;
         let signed_hash = report["authorization_snapshot_sha256"]
@@ -1657,6 +1708,10 @@ mod epoch_tests {
             failed_prefixes: vec![],
             pending_failure_revision: None,
             pending_failed_prefixes: None,
+            active_policy_revision: 0,
+            active_policy_generation: None,
+            active_policy_hash: None,
+            pending_policy_revision: None,
         }
     }
 

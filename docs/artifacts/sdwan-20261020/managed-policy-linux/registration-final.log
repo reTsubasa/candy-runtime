@@ -1,0 +1,9 @@
+   Compiling candy-sdwan-agent v0.4.0 (/workspace/linux/common/apps/candy-sdwan-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.37s
+     Running unittests src/lib.rs (/target/debug/deps/candy_sdwan_agent-5329d8397b94947f)
+
+running 2 tests
+test experimental_tunio::listener_registration::tests::failed_packet_lane_preserves_only_an_explicitly_live_listener ... ok
+test experimental_tunio::listener_registration::tests::activation_ack_requires_exact_master_owner_authority_and_phase ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 155 filtered out; finished in 0.01s

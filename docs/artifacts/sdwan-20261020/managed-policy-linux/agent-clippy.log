@@ -1,0 +1,3 @@
+info: component 'clippy' for target 'aarch64-unknown-linux-gnu' is up to date
+    Checking candy-sdwan-agent v0.4.0 (/workspace/linux/common/apps/candy-sdwan-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.67s

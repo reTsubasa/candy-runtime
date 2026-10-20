@@ -35,9 +35,27 @@ struct Registration {
     effective_plan: PathBuf,
     authorization_sha256: String,
     policy_generation: u64,
+    #[serde(default)]
+    policy_revision: u64,
     auth_deadline_unix: u64,
     #[serde(default)]
     prepared_ingress: bool,
+}
+
+fn stale_registration(current: &Registration, proposed: &Registration) -> bool {
+    let same_owner = current.worker_epoch == proposed.worker_epoch
+        && current.worker_id == proposed.worker_id
+        && current.pid == proposed.pid
+        && current.process_start_ticks == proposed.process_start_ticks
+        && current.routing_domain_id == proposed.routing_domain_id;
+    current.worker_epoch > proposed.worker_epoch
+        || (current.worker_epoch == proposed.worker_epoch && !same_owner)
+        || current.policy_generation > proposed.policy_generation
+        || (same_owner
+            && (current.policy_revision > proposed.policy_revision
+                || (current.policy_revision == proposed.policy_revision
+                    && (current.policy_generation != proposed.policy_generation
+                        || current.authorization_sha256 != proposed.authorization_sha256))))
 }
 
 pub(super) fn validate(plan: &Plan) -> Result<()> {
@@ -135,6 +153,13 @@ fn publish_registration(plan: &Plan, owner_path: &Path, prepared_ingress: bool) 
     {
         bail!("code=listener_owner_mismatch module=listener_registry");
     }
+    if plan.policy_revision != 0
+        && (status["authorization_snapshot_sha256"].as_str()
+            != plan.authorization_snapshot_sha256.as_deref()
+            || status["policy_revision"] != plan.policy_revision)
+    {
+        bail!("code=listener_active_policy_unacknowledged module=listener_registry action=await_exact_core_policy_receipt");
+    }
     let registration = Registration {
         schema_version: 1,
         master_instance: master.instance,
@@ -160,6 +185,7 @@ fn publish_registration(plan: &Plan, owner_path: &Path, prepared_ingress: bool) 
             .clone()
             .context("signed authorization absent")?,
         policy_generation: plan.signed_generation,
+        policy_revision: plan.policy_revision,
         auth_deadline_unix: plan.auth_deadline_unix,
         prepared_ingress,
     };
@@ -197,14 +223,7 @@ fn publish_registration(plan: &Plan, owner_path: &Path, prepared_ingress: bool) 
             if is_committed_equivalent(&current, &registration) {
                 return verify_activation(listener, &current);
             }
-            if current.worker_epoch > registration.worker_epoch
-                || (current.worker_epoch == registration.worker_epoch
-                    && (current.pid, current.process_start_ticks)
-                        != (registration.pid, registration.process_start_ticks))
-                || current.policy_generation > registration.policy_generation
-                || (current.policy_generation == registration.policy_generation
-                    && current.authorization_sha256 != registration.authorization_sha256)
-            {
+            if stale_registration(&current, &registration) {
                 bail!("code=listener_epoch_stale module=listener_registry action=preserve_newer_owner");
             }
         }
@@ -432,11 +451,36 @@ mod tests {
             effective_plan: root.path().join("plan.json"),
             authorization_sha256: "ab".repeat(32),
             policy_generation: 9,
+            policy_revision: 0,
             auth_deadline_unix: 9999999999,
             prepared_ingress: false,
         };
         let path = root.path().join(format!("{}.activation", "01".repeat(16)));
         let mut prepared = expected.clone();
+        let mut refreshed = expected.clone();
+        refreshed.policy_revision = 1;
+        refreshed.authorization_sha256 = "cd".repeat(32);
+        assert!(!stale_registration(&expected, &refreshed));
+        assert!(stale_registration(&refreshed, &expected));
+        let mut conflict = refreshed.clone();
+        conflict.authorization_sha256 = "ef".repeat(32);
+        assert!(stale_registration(&refreshed, &conflict));
+        conflict.policy_generation += 1;
+        assert!(stale_registration(&refreshed, &conflict));
+        conflict.policy_revision += 1;
+        assert!(!stale_registration(&refreshed, &conflict));
+        let mut successor = refreshed.clone();
+        successor.worker_epoch += 1;
+        successor.pid += 1;
+        successor.process_start_ticks += 1;
+        successor.policy_revision = 0;
+        successor.authorization_sha256 = "ef".repeat(32);
+        // A new signed physical authority may renew a Grant in the same policy generation.
+        assert!(!stale_registration(&refreshed, &successor));
+        assert!(stale_registration(&successor, &refreshed));
+        let mut reused_epoch = successor.clone();
+        reused_epoch.worker_epoch = refreshed.worker_epoch;
+        assert!(stale_registration(&refreshed, &reused_epoch));
         prepared.prepared_ingress = true;
         assert!(is_committed_equivalent(&expected, &prepared));
         for fault in 0..6 {
