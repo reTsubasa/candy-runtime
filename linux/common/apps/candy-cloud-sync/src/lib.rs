@@ -473,6 +473,14 @@ struct SyncState {
     activation_rejected_at_unix: Option<u64>,
 }
 
+impl SyncState {
+    fn request_policy_resync(&mut self) {
+        self.etag = None;
+        self.activation_rejected_etag = None;
+        self.activation_rejected_at_unix = None;
+    }
+}
+
 fn local_operation_unavailable(error: &anyhow::Error) -> bool {
     error.downcast_ref::<std::io::Error>().is_some()
         || error.downcast_ref::<reqwest::Error>().is_some()
@@ -2425,6 +2433,20 @@ fn sync_once_with_retry(
                         grant::resolution_error_stage(&error), error_code, retryable,
                         sanitize_log_value(&format!("{error:#}"))
                     );
+                    if error_code == "route_policy_resync_required" {
+                        // Force one unconditional fetch of the latest policy,
+                        // keeping active receipts/Core and old flows intact.
+                        state.request_policy_resync();
+                        atomic_json(&state_path, &state, 0o600)?;
+                        write_local_sync_status(
+                            &args.state_dir,
+                            "configuration_resync_required",
+                            Some(error_code),
+                        )?;
+                        if allow_unconditional_retry {
+                            return sync_once_with_retry(args, public_endpoints, false);
+                        }
+                    }
                     if retryable {
                         return Err(error);
                     }
@@ -6812,6 +6834,32 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     mod cloud_fault_tests;
+    #[test]
+    fn policy_resync_clears_conditional_fetch_without_forgetting_active_proof() {
+        let publication = Uuid::new_v4();
+        let mut state = SyncState {
+            etag: Some("old-etag".into()),
+            activation_rejected_etag: Some("rejected-etag".into()),
+            activation_rejected_at_unix: Some(42),
+            projection_publication_id: Some(publication),
+            projection_content_hash: Some("signed-hash".into()),
+            activation_phase: Some("commit".into()),
+            activation_required: true,
+            ..SyncState::default()
+        };
+        state.request_policy_resync();
+        assert!(state.etag.is_none());
+        assert!(state.activation_rejected_etag.is_none());
+        assert!(state.activation_rejected_at_unix.is_none());
+        assert_eq!(state.projection_publication_id, Some(publication));
+        assert_eq!(
+            state.projection_content_hash.as_deref(),
+            Some("signed-hash")
+        );
+        assert_eq!(state.activation_phase.as_deref(), Some("commit"));
+        assert!(state.activation_required);
+    }
+
     #[test]
     fn chunked_response_is_bounded_before_collecting_the_entire_body() {
         use std::net::TcpListener;

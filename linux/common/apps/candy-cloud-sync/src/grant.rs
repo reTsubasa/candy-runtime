@@ -357,6 +357,7 @@ impl RefreshOutcome {
 pub enum FetchFailure {
     Transient(anyhow::Error),
     Denied(anyhow::Error),
+    PolicyResyncRequired,
 }
 
 pub fn fetch_from_cloud(
@@ -387,6 +388,20 @@ pub fn fetch_from_cloud(
             ));
         }
         _ => {
+            // A stale signed policy is a configuration synchronization problem,
+            // not an identity revocation. Only the explicit bounded Cloud code
+            // permits this recovery path; all other denials stay definitive.
+            if status == reqwest::StatusCode::CONFLICT {
+                let mut bytes = Vec::new();
+                if response
+                    .take(MAX_GRANT_ENVELOPE_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .is_ok()
+                    && is_policy_resync_response(&bytes)
+                {
+                    return Err(FetchFailure::PolicyResyncRequired);
+                }
+            }
             return Err(FetchFailure::Denied(
                 anyhow::anyhow!("Grant issuance returned HTTP {status}").context(failure(
                     "grant_http_response",
@@ -439,6 +454,16 @@ pub fn fetch_from_cloud(
             "grant_response_json_invalid",
         )))
     })
+}
+
+fn is_policy_resync_response(bytes: &[u8]) -> bool {
+    #[derive(Deserialize)]
+    struct Problem {
+        code: String,
+    }
+    bytes.len() <= MAX_GRANT_ENVELOPE_BYTES
+        && serde_json::from_slice::<Problem>(bytes)
+            .is_ok_and(|problem| problem.code == "route_policy_resync_required")
 }
 
 fn classify_grant_http_status(status: reqwest::StatusCode) -> &'static str {
@@ -598,6 +623,12 @@ impl GrantStore {
                         .context("Grant fetch failed and no unexpired cached Grant exists");
                 };
                 Ok(RefreshOutcome::RetainedAfterTransientFailure { grant, error })
+            }
+            Err(FetchFailure::PolicyResyncRequired) => {
+                // Preserve the exact old credential and pending issuance for
+                // existing flows. The caller fetches the latest signed policy;
+                // it must not activate this stale candidate or reuse its Grant.
+                Err(failure("grant_policy_binding", "route_policy_resync_required").into())
             }
             Err(FetchFailure::Denied(error)) => {
                 state.active = None;
@@ -762,7 +793,8 @@ pub fn resolution_error_stage(error: &anyhow::Error) -> &'static str {
 pub fn resolution_is_retryable(error: &anyhow::Error) -> bool {
     matches!(
         resolution_error_code(error),
-        "grant_transport_failed"
+        "route_policy_resync_required"
+            | "grant_transport_failed"
             | "grant_rate_limited"
             | "grant_service_unavailable"
             | "grant_response_media_type_invalid"
@@ -1235,6 +1267,121 @@ mod tests {
             )
             .is_err());
         assert!(store.load_usable(&subject(), 2_000).unwrap().is_none());
+    }
+
+    #[test]
+    fn policy_resync_preserves_old_credential_without_accepting_stale_candidate() {
+        let root = tempdir().unwrap();
+        let store = GrantStore::new(root.path());
+        store
+            .refresh(
+                &subject(),
+                1_000,
+                |_| Ok(response(10_000)),
+                |_| Ok(verification(10_000)),
+            )
+            .unwrap();
+        let error = store
+            .refresh(
+                &subject(),
+                8_000,
+                |_| Err(FetchFailure::PolicyResyncRequired),
+                |_| unreachable!(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            resolution_error_code(&error),
+            "route_policy_resync_required"
+        );
+        assert!(resolution_is_retryable(&error));
+        assert!(store.load_usable(&subject(), 8_001).unwrap().is_some());
+        // No permanent revocation marker: a later successful issuance works.
+        assert!(matches!(
+            store
+                .refresh(
+                    &subject(),
+                    8_002,
+                    |_| Ok(response(20_000)),
+                    |_| Ok(verification(20_000))
+                )
+                .unwrap(),
+            RefreshOutcome::Refreshed(_)
+        ));
+    }
+
+    #[test]
+    fn cloud_http_resync_is_distinct_from_other_authorization_denials() {
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        for (status, code, resync) in [
+            (409, "route_policy_resync_required", true),
+            (409, "conflict", false),
+            (403, "route_policy_resync_required", false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint =
+                Url::parse(&format!("http://{}/grants", listener.local_addr().unwrap())).unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                assert!(length < 4096);
+                reader.read_exact(&mut vec![0; length]).unwrap();
+                let body = format!("{{\"code\":\"{code}\"}}");
+                write!(stream, "HTTP/1.1 {status} Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            });
+            let client = super::super::SyncClient {
+                inner: reqwest::blocking::Client::builder()
+                    .no_proxy()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                    .unwrap(),
+                control: None,
+            };
+            let subject = subject();
+            let result =
+                fetch_from_cloud(&client, endpoint, &GrantIssueRequest::new(&subject, "test"));
+            assert_eq!(
+                matches!(result, Err(FetchFailure::PolicyResyncRequired)),
+                resync
+            );
+            if !resync {
+                assert!(matches!(result, Err(FetchFailure::Denied(_))));
+            }
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn policy_resync_requires_exact_bounded_cloud_problem() {
+        assert!(is_policy_resync_response(
+            br#"{"code":"route_policy_resync_required"}"#
+        ));
+        for bytes in [
+            br#"{"code":"denied"}"#.as_slice(),
+            br#"{"error":{"code":"route_policy_resync_required"}}"#,
+            b"route_policy_resync_required",
+        ] {
+            assert!(!is_policy_resync_response(bytes));
+        }
+        let oversized = format!(
+            "{{\"code\":\"route_policy_resync_required\",\"padding\":\"{}\"}}",
+            "x".repeat(MAX_GRANT_ENVELOPE_BYTES)
+        );
+        assert!(!is_policy_resync_response(oversized.as_bytes()));
     }
 
     #[test]
