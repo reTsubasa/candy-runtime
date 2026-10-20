@@ -102,7 +102,7 @@ cp -R "$state/identity" "$state/identity.repair-pending"
 FAKE_ENROLL_FAIL=1 run_runtime repair "$bootstrap" >/dev/null || fail "completed repair stage was not resumable"
 # A concurrent operator must not mutate identity or stop sync.
 if command -v flock >/dev/null 2>&1; then
-	(flock -n 9; FAKE_ENROLL_FAIL=1 run_runtime repair "$bootstrap" >/dev/null 2>&1 && fail "concurrent repair accepted") 9>"$run/identity-repair.lock"
+	(flock -n 9; if FAKE_ENROLL_FAIL=1 run_runtime repair "$bootstrap" >/dev/null 2>&1; then fail "concurrent repair accepted"; fi) 9>"$run/identity-repair.lock"
 else
 	mkdir "$run/identity-repair.lock"
 	FAKE_ENROLL_FAIL=1 run_runtime repair "$bootstrap" >/dev/null 2>&1 && fail "concurrent repair accepted"

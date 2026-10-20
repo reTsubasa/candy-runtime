@@ -114,7 +114,7 @@ dependencies = [
 
 [[package]]
 name = "candy-packet-port"
-version = "0.3.63"
+version = "0.3.64"
 dependencies = [
  "libc",
  "nix",

@@ -15,7 +15,9 @@ pub fn now_ms() -> std::io::Result<u64> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn timespec_ms(seconds: i64, nanos: i64) -> std::io::Result<u64> {
+fn timespec_ms(seconds: impl Into<i64>, nanos: impl Into<i64>) -> std::io::Result<u64> {
+    let seconds = seconds.into();
+    let nanos = nanos.into();
     let invalid = || std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid BOOTTIME value");
     if !(0..1_000_000_000).contains(&nanos) {
         return Err(invalid());

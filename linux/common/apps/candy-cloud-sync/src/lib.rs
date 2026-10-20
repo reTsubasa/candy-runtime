@@ -3680,19 +3680,10 @@ fn validate_core_path_status(status: &CoreRuntimeStatus) -> Result<()> {
     if status.paths.len() > status.configured_peers as usize || status.paths.len() > 256 {
         bail!("Core Runtime path count exceeds configured peer limit")
     }
-    // `paths` intentionally contains bounded historical failures so Cloud can
-    // explain a recent disconnect. Only paths with a ready stream represent
-    // currently active peers and participate in the cardinality invariant.
-    let active_path_count = status
-        .paths
-        .iter()
-        // Schema v2 has no stream counters: its paths retain the original
-        // active-only contract instead of silently becoming inactive.
-        .filter(|path| path.ready_streams.is_none_or(|ready| ready > 0))
-        .count();
-    if active_path_count > status.active_peers as usize {
-        bail!("active Core Runtime path count exceeds active peers")
-    }
+    // Transport stream readiness and route-peer readiness are independent:
+    // during policy replacement/probing a QUIC stream can remain ready while
+    // its peer is temporarily Connecting and excluded from active_peers.
+    // Keep validating the path list itself, but do not compare these counts.
     let mut paths = BTreeMap::new();
     for path in &status.paths {
         validate_hex(&path.peer_attachment_id, 16, "Core path peer attachment id")?;
@@ -5510,6 +5501,14 @@ fn render_transport_config(
                 .context("activation transport path is not UTF-8")?,
         )
     };
+    // Discovery uses the signed protocol vocabulary; the Core TOML schema
+    // uses kebab-case. Translate explicitly rather than copying wire values.
+    let core_preset = match candidate.transport_preset.as_str() {
+        "current" => "current",
+        "bbr_v1" => "bbr-v1",
+        "aggressive" => "aggressive",
+        other => bail!("unsupported discovered transport preset: {other}"),
+    };
     Ok(format!(
         "server = {}\nserver_name = {}\nserver_pin = {}\nkey_id = {}\nsecret = \"\"\nauth_profile = \"cloud_grant_v1\"\n\n[cloud_auth]\ngrant_envelope_path = {}\ndevice_signing_key_path = {}\n\n[transport]\nprofile = \"linux\"\ncongestion = \"candy-bbr\"\ncandy_bbr_preset = {}\nautomatic_bbr_fallback = false\n",
         quote(&candidate.endpoint)?,
@@ -5518,7 +5517,7 @@ fn render_transport_config(
         quote(&identity.device_key_id.to_string())?,
         path(grant_path)?,
         path(signing_key_path)?,
-        quote(&candidate.transport_preset)?,
+        quote(core_preset)?,
     ))
 }
 
@@ -8539,21 +8538,28 @@ default via 192.0.2.1 dev eth0 proto static
         assert!(valid_core_status_metadata(&status).unwrap());
         assert!(!core_data_plane_ready(&status));
         status.paths[0].ready_streams = Some(1);
-        assert!(validate_core_path_status(&status).is_err());
+        assert!(validate_core_path_status(&status).is_ok());
+        assert!(!core_data_plane_ready(&status));
     }
 
     #[test]
     fn historical_path_validation_keeps_bounds_duplicates_and_legacy_contract() {
         let mut status = product_core_status();
-        status.paths[0].ready_streams = None;
         status.active_peers = 0;
-        assert!(validate_core_path_status(&status).is_err());
+        status.ready_route_owners = 0;
+        // A transport stream may stay ready while its peer is temporarily
+        // excluded from route ownership during a policy-generation probe.
+        assert!(valid_core_status_metadata(&status).unwrap());
+        status.paths[0].ready_streams = None;
+        assert!(valid_core_status_metadata(&status).unwrap());
         status.active_peers = 1;
-        assert!(validate_core_path_status(&status).is_ok());
-        status.paths.push(product_core_status().paths.remove(0));
-        assert!(validate_core_path_status(&status).is_err());
+        status.paths[0].ready_streams = Some(1);
         status.configured_peers = 2;
-        status.active_peers = 2;
+        let mut second_path = product_core_status().paths.remove(0);
+        second_path.peer_attachment_id = "34".repeat(16);
+        status.paths.push(second_path);
+        assert!(valid_core_status_metadata(&status).unwrap());
+        status.paths[1].peer_attachment_id = status.paths[0].peer_attachment_id.clone();
         assert!(validate_core_path_status(&status).is_err());
     }
 
@@ -9799,6 +9805,60 @@ default via 192.0.2.1 dev eth0 proto static
         assert!(rendered.contains("issuer_id = \"31b6bd7f4fd742f9842c9e0d635c9ea9\""));
         assert!(rendered.contains("environment_id = \"d12c8a2f18d244ba810c7d5b5097058f\""));
         assert!(!rendered.contains("31b6bd7f-4fd7-42f9-842c-9e0d635c9ea9"));
+    }
+
+    #[test]
+    fn rendered_transport_translates_protocol_presets_to_core_toml() {
+        let mut candidate = DiscoveredCandidate {
+            candidate_id: "13".repeat(16),
+            peer_site_id: "14".repeat(16),
+            peer_attachment_id: "12".repeat(16),
+            kind: "direct".into(),
+            priority: 1,
+            endpoint: "198.51.100.2:443".into(),
+            node_pool_id: "15".repeat(16),
+            transport_node_id: "16".repeat(16),
+            transport_node_key_id: "17".repeat(16),
+            server_name: "peer.example".into(),
+            server_cert_sha256: "18".repeat(32),
+            transport_preset: "current".into(),
+            authorization: CorePolicyRef {
+                policy_id: "09".repeat(16),
+                generation: 5,
+                content_hash: "11".repeat(32),
+            },
+        };
+        for (wire, core) in [
+            ("current", "current"),
+            ("bbr_v1", "bbr-v1"),
+            ("aggressive", "aggressive"),
+        ] {
+            candidate.transport_preset = wire.into();
+            let rendered = render_transport_config(
+                &candidate,
+                &identity(),
+                Path::new("/secure/grant"),
+                Path::new("/secure/signing-key"),
+            )
+            .unwrap();
+            let document = rendered.parse::<toml_edit::DocumentMut>().unwrap();
+            assert_eq!(
+                document["transport"]["candy_bbr_preset"].as_str(),
+                Some(core)
+            );
+            assert_eq!(
+                document["transport"]["congestion"].as_str(),
+                Some("candy-bbr")
+            );
+        }
+        candidate.transport_preset = "unknown".into();
+        assert!(render_transport_config(
+            &candidate,
+            &identity(),
+            Path::new("/secure/grant"),
+            Path::new("/secure/key"),
+        )
+        .is_err());
     }
 
     #[test]

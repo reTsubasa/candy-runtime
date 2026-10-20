@@ -445,7 +445,7 @@ repair_identity() (
 		flock -n 9 || fail "code=identity_repair_busy module=identity_repair another repair is running"
 	else
 		mkdir "$lock" 2>/dev/null || fail "code=identity_repair_busy module=identity_repair another repair is running; check $lock before retrying"
-			printf '%s\n' "$$" >"$lock/pid"
+		printf '%s\n' "$$" >"$lock/pid"
 	fi
 	sync_paused=0
 	finish_repair() {

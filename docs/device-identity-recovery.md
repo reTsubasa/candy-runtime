@@ -1,0 +1,13 @@
+# Device identity recovery (Runtime 0.4.0-r156)
+
+Cloud nodes expose **修复身份**. An administrator issues a short-lived recovery file bound to the existing node, site, platform and architecture. Enrollment replaces the device keys and certificate while retaining the Cloud node ID, network membership, endpoints and policy. Recovery is privileged; do not use ordinary enrollment files for a different node.
+
+Linux: `sudo candy-server repair candy-node-bootstrap.json`.
+
+OpenWrt: **Candy → SD-WAN → 修复身份 → 导入并修复身份**. Import the file downloaded from Cloud. Ordinary bootstrap still rejects a registered device. CSRF protection and bounded private file uploads apply to both operations.
+
+Runtime pauses only Cloud sync, enrolls in `identity.repair-pending`, verifies that the enrollment output bundle is complete, retains `identity.repair-previous`, and publishes the new directory. Enrollment failure preserves the existing local identity and all network state. Cloud can already have revoked the old certificate after issuing the new one; therefore keep the pending transaction and retry with a recovery file rather than discarding it. A completed pending bundle is published without another enrollment. An interrupted cache commit resumes using the private `.repair-ready` marker. Proxy, TUN, Profile, active configurations and routing are not stopped or deleted by this operation. Sync resumes on both success and failure. Check actual Cloud sync and data-plane readiness after issuance; certificate issuance alone does not establish online status.
+
+The supported Linux/OpenWrt hosts use kernel `flock` to release the recovery lock on process death. A directory lock is retained as a portable fallback; on a host without `flock`, an uncatchable process kill requires an operator to verify that no repair process remains before removing its stale lock. Identity publication uses two directory renames; after a host crash in that gap, run recovery again to restore the previous directory and finish the retained transaction. Both bundles are private and durable; retained backups contain secrets and follow the state directory permissions.
+
+Validation: Runtime lifecycle tests cover failed enrollment preservation, successful publication and backup, staged transaction replay, interrupted cache commit, concurrent repair rejection and ordinary bootstrap rejection. Server wrapper tests cover repair routing. LuCI multipart tests cover explicit repair dispatch; productization tests verify the UI upload contract. Cloud real-database tests cover expired-certificate grace, replay, expiry boundaries and preservation of the control node on identity replacement.

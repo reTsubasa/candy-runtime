@@ -6,6 +6,8 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/candy-openwrt-sdk-profile-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
 mkdir -p "$tmp/bin" "$tmp/runtime-bin"
+printf '#!/bin/sh\nexit 0\n' > "$tmp/runtime-bin/candy-tunio"
+chmod 0755 "$tmp/runtime-bin/candy-tunio"
 printf '#!/bin/sh\nexit 0\n' > "$tmp/runtime-bin/candy-netd"
 chmod 0755 "$tmp/runtime-bin/candy-netd"
 printf '#!/bin/sh\nexit 0\n' > "$tmp/runtime-bin/candy-sdwan-agent"

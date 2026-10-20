@@ -115,6 +115,7 @@ managed_files='usr/local/bin/candy-core-manager
 usr/local/libexec/serverd-linux
 usr/local/libexec/candy-sdwan-runtime
 usr/local/libexec/candy-sdwan-agent
+usr/local/libexec/candy-tunio
 usr/local/libexec/candy-netd
 usr/local/libexec/candy-cloud-enroll
 usr/local/libexec/candy-cloud-sync
@@ -470,7 +471,7 @@ while IFS= read -r member; do
 	case "$member" in ''|.) continue ;; /*|../*|*/../*|*/..|..|*\\*) die "unsafe archive member: $member" ;; esac
 	case "$member" in
 		usr/|usr/local/|usr/local/bin/|usr/local/libexec/|systemd/|install/|etc/|etc/candy/) ;;
-		usr/local/bin/candy-server|usr/local/bin/candy-core-manager|usr/local/libexec/serverd-linux|usr/local/libexec/candy-sdwan-runtime|usr/local/libexec/candy-sdwan-agent|usr/local/libexec/candy-netd|usr/local/libexec/candy-cloud-enroll|usr/local/libexec/candy-cloud-sync|usr/local/libexec/candy-server-health-check) ;;
+		usr/local/bin/candy-server|usr/local/bin/candy-core-manager|usr/local/libexec/serverd-linux|usr/local/libexec/candy-sdwan-runtime|usr/local/libexec/candy-sdwan-agent|usr/local/libexec/candy-tunio|usr/local/libexec/candy-netd|usr/local/libexec/candy-cloud-enroll|usr/local/libexec/candy-cloud-sync|usr/local/libexec/candy-server-health-check) ;;
 		systemd/candy-server.service|systemd/candy-proxy.service|systemd/candy-netd.service|systemd/candy-cloud-sync.service|systemd/candy-cloud-upgrade.service|systemd/candy-cloud-sync.timer|systemd/candy.tmpfiles) ;;
 		install/install-candy-server.sh|install/upgrade-candy-server.sh|etc/candy/server.toml.example|etc/candy/cloud-sync.env.example|README.md|VERSION|RUNTIME-RELEASE|RUNTIME-ARCH) ;;
 		*) die "unexpected archive member: $member" ;;
