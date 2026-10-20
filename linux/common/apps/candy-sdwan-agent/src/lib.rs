@@ -6184,15 +6184,20 @@ exit 17
 
     #[test]
     fn policy_update_calls_core_without_starting_a_netd_tunnel_transaction() {
-        exercise_policy_update_reply(false);
+        exercise_policy_update_reply(false, false);
     }
 
     #[test]
     fn lost_policy_reply_does_not_restore_old_netd_policy_or_stop_core() {
-        exercise_policy_update_reply(true);
+        exercise_policy_update_reply(true, false);
     }
 
-    fn exercise_policy_update_reply(lost_reply: bool) {
+    #[test]
+    fn policy_update_ack_with_partial_peer_loss_keeps_new_policy_and_committed_receipt() {
+        exercise_policy_update_reply(false, true);
+    }
+
+    fn exercise_policy_update_reply(lost_reply: bool, partial_peer_loss: bool) {
         let (root, current) = server_runtime_fixture();
         let mut replacement = current.clone();
         replacement.generation = current.generation + 1;
@@ -6325,6 +6330,46 @@ exit 17
         );
         assert_eq!(child.id(), core_pid);
         assert!(child.try_wait().unwrap().is_none());
+        if partial_peer_loss {
+            let token = "policy-partial-peer-proof";
+            write_private(
+                &replacement.status,
+                serde_json::json!({
+                    "schema_version": 3, "generation": current.generation,
+                    "policy_generation": replacement.generation, "pid": core_pid,
+                    "readiness_token": token, "lifecycle": "active",
+                    "configured_peers": 2, "active_peers": 1,
+                    "required_route_owners": 2, "ready_route_owners": 1,
+                    "failed_prefixes": ["10.30.0.0/16"], "fail_open_required": true,
+                    "inbound_listener_configured": true, "inbound_listener_ready": true,
+                    "inbound_listener_endpoints": ["127.0.0.1:8443"],
+                    "last_error_code": "route_has_no_active_peer",
+                    "paths": [{"rtt_sample_count": 1, "probe_misses": 0, "rx_bytes": 0, "rx_idle_ms": 0}]
+                })
+                .to_string()
+                .as_bytes(),
+            );
+            let applied = adopt_policy_activation(&current, &replacement);
+            assert_eq!(
+                read_core_readiness_with_policy(
+                    &applied.status,
+                    applied.generation,
+                    core_pid,
+                    token,
+                    ReadinessPolicy::CommittedServer
+                )
+                .unwrap(),
+                Some(ReadinessState::Degraded)
+            );
+            assert!(PendingReceipt::committed(&applied, core_pid, token).is_none());
+            let receipt: serde_json::Value = serde_json::from_slice(
+                &fs::read(applied.activation_ready.as_ref().unwrap()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(receipt["state"], "committed");
+            assert_eq!(receipt["generation"], replacement.generation);
+            assert_eq!(receipt["core_proof"]["pid"], core_pid);
+        }
         assert_eq!(
             netd_task.join().unwrap(),
             ["prepare", "commit", "policy_update", "lease"]

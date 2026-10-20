@@ -100,6 +100,16 @@ pub struct GrantIssueRequest<'a> {
     pub node_pool_id: Uuid,
     pub service_class: &'static str,
     pub service_permission: &'static str,
+    #[serde(borrow)]
+    pub route_policy: GrantRoutePolicyRequest<'a>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantRoutePolicyRequest<'a> {
+    pub policy_id: Uuid,
+    pub generation: u64,
+    pub content_hash: &'a str,
 }
 
 impl<'a> GrantIssueRequest<'a> {
@@ -109,6 +119,11 @@ impl<'a> GrantIssueRequest<'a> {
             node_pool_id: subject.node_pool_id,
             service_class: "private",
             service_permission: "private.tun.connect",
+            route_policy: GrantRoutePolicyRequest {
+                policy_id: subject.projection_id,
+                generation: subject.projection_generation,
+                content_hash: &subject.projection_content_hash,
+            },
         }
     }
 }
@@ -1030,6 +1045,25 @@ mod tests {
             assert_eq!(resolution_error_stage(&error), *stage);
             assert_eq!(resolution_error_code(&error), *code);
         }
+    }
+
+    #[test]
+    fn grant_request_names_the_exact_signed_projection_instead_of_implicitly_using_the_latest() {
+        let subject = subject();
+        let request = GrantIssueRequest::new(&subject, "test-request");
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            value["route_policy"]["policy_id"],
+            subject.projection_id.to_string()
+        );
+        assert_eq!(
+            value["route_policy"]["generation"],
+            subject.projection_generation
+        );
+        assert_eq!(
+            value["route_policy"]["content_hash"],
+            subject.projection_content_hash
+        );
     }
 
     #[test]

@@ -43,8 +43,8 @@ const MAX_CONFIGURATION_BYTES: u64 = 3 * 1024 * 1024;
 const MAX_ROUTE_ENVELOPE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_LOCAL_ROUTE_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_LOCAL_NETWORKS: usize = 64;
-const MAX_COMPATIBILITY_GENERATIONS: usize = 1;
-const MAX_COMPATIBILITY_PROJECTIONS: usize = 256;
+const MAX_COMPATIBILITY_GENERATIONS: usize = 32;
+const MAX_COMPATIBILITY_PROJECTIONS: usize = 4096;
 const LOCAL_ROUTE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 // Peer listeners and dialers consume the same Cloud generation asynchronously.
 // Keep the failed candidate withdrawn, but re-fetch soon enough that the later
@@ -4888,7 +4888,7 @@ fn validate_compatibility_report(
         || report.device_id == uuid_hex(identity.device_id)
         || report.device_key_id == uuid_hex(identity.device_key_id)
     {
-        bail!("Candy Core compatibility report does not match the authenticated N-1 peer catalog")
+        bail!("Candy Core compatibility report does not match the authenticated retained peer catalog")
     }
     Ok(())
 }
@@ -5173,14 +5173,15 @@ fn validate_compatibility_generations(configuration: &RuntimeConfiguration) -> R
     if configuration.compatibility_generations.len() > MAX_COMPATIBILITY_GENERATIONS {
         bail!("Cloud Runtime configuration contains too many compatibility generations")
     }
+    let mut previous_generation = 0;
+    let mut retained_peers = HashSet::new();
     for generation in &configuration.compatibility_generations {
-        if generation.segment_generation == 0
-            || generation.segment_generation.checked_add(1)
-                != Some(configuration.segment_generation)
+        if generation.segment_generation <= previous_generation
+            || generation.segment_generation >= configuration.segment_generation
             || generation.peer_projection_catalog.is_empty()
             || generation.peer_projection_catalog.len() > MAX_COMPATIBILITY_PROJECTIONS
         {
-            bail!("Cloud Runtime compatibility generation must be the non-empty N-1 catalog")
+            bail!("Cloud Runtime compatibility generation must be a non-empty strictly ordered older signed catalog")
         }
         validate_hex(
             &generation.segment_content_hash,
@@ -5195,6 +5196,19 @@ fn validate_compatibility_generations(configuration: &RuntimeConfiguration) -> R
             bail!("compatibility segment content hash must not be zero")
         }
         validate_catalog(&generation.peer_projection_catalog)?;
+        previous_generation = generation.segment_generation;
+        for peer in &generation.peer_projection_catalog {
+            if peer.projection_id == configuration.projection_id
+                || !retained_peers.insert(peer.projection_id)
+            {
+                bail!("Cloud Runtime compatibility catalogs repeat a retained peer identity")
+            }
+        }
+        if configuration.peer_projection_catalog.len() + retained_peers.len()
+            > MAX_COMPATIBILITY_PROJECTIONS
+        {
+            bail!("Cloud Runtime current and retained catalogs exceed total signed-policy capacity")
+        }
     }
     Ok(())
 }
@@ -8772,13 +8786,22 @@ default via 192.0.2.1 dev eth0 proto static
     }
 
     #[test]
-    fn compatibility_catalog_accepts_only_one_exact_previous_generation() {
+    fn compatibility_catalog_accepts_bounded_ordered_exact_retained_generations() {
         let identity = identity();
         let mut configuration = configuration();
         configuration.compatibility_generations = vec![compatibility_generation()];
         validate_configuration(&configuration, &identity).unwrap();
 
         configuration.compatibility_generations[0].segment_generation = 2;
+        validate_configuration(&configuration, &identity).unwrap();
+        let mut newer = compatibility_generation();
+        newer.peer_projection_catalog[0].projection_id = Uuid::new_v4();
+        configuration.compatibility_generations.push(newer);
+        validate_configuration(&configuration, &identity).unwrap();
+        configuration.compatibility_generations.reverse();
+        assert!(validate_configuration(&configuration, &identity).is_err());
+        configuration.compatibility_generations = vec![compatibility_generation()];
+        configuration.compatibility_generations[0].segment_generation = 4;
         assert!(validate_configuration(&configuration, &identity).is_err());
         configuration.compatibility_generations[0].segment_generation = 3;
         configuration.compatibility_generations[0]
@@ -8789,6 +8812,117 @@ default via 192.0.2.1 dev eth0 proto static
         let generation = compatibility_generation();
         configuration.compatibility_generations = vec![generation.clone(), generation];
         assert!(validate_configuration(&configuration, &identity).is_err());
+    }
+
+    #[test]
+    fn compatibility_catalog_enforces_generation_and_total_policy_bounds() {
+        let mut configuration = configuration();
+        configuration.segment_generation = 100;
+        configuration.compatibility_generations = (1..=32)
+            .map(|generation| {
+                let mut catalog = compatibility_generation();
+                catalog.segment_generation = generation;
+                catalog.peer_projection_catalog[0].projection_id =
+                    Uuid::from_u128(generation as u128);
+                catalog
+            })
+            .collect();
+        validate_compatibility_generations(&configuration).unwrap();
+        let mut extra = compatibility_generation();
+        extra.segment_generation = 33;
+        extra.peer_projection_catalog[0].projection_id = Uuid::from_u128(33);
+        configuration.compatibility_generations.push(extra);
+        assert!(validate_compatibility_generations(&configuration).is_err());
+
+        configuration.compatibility_generations.truncate(1);
+        let template =
+            configuration.compatibility_generations[0].peer_projection_catalog[0].clone();
+        configuration.compatibility_generations[0].peer_projection_catalog = (1..=4096)
+            .map(|id| RuntimePeerProjection {
+                projection_id: Uuid::from_u128(id),
+                ..template.clone()
+            })
+            .collect();
+        validate_compatibility_generations(&configuration).unwrap();
+        configuration
+            .peer_projection_catalog
+            .push(RuntimePeerProjection {
+                projection_id: Uuid::from_u128(4097),
+                ..template
+            });
+        assert!(validate_compatibility_generations(&configuration).is_err());
+    }
+
+    /// Bridge the real Cloud database publisher and local Core signer to the
+    /// Runtime verifier. This gate verifies configuration and signatures; it
+    /// deliberately does not claim to exercise a live TUN or QUIC data path.
+    #[test]
+    #[ignore = "requires the Cloud database signed-policy fixture and local Core binary"]
+    fn cloud_database_core_runtime_signed_policy_bridge() {
+        let fixture = PathBuf::from(
+            std::env::var_os("CANDY_POLICY_FIXTURE_OUTPUT_DIR")
+                .expect("set CANDY_POLICY_FIXTURE_OUTPUT_DIR"),
+        );
+        let core = PathBuf::from(
+            std::env::var_os("CANDY_POLICY_FIXTURE_CORE_PATH")
+                .expect("set CANDY_POLICY_FIXTURE_CORE_PATH"),
+        );
+        let configuration: RuntimeConfiguration =
+            serde_json::from_slice(&fs::read(fixture.join("runtime-configuration.json")).unwrap())
+                .unwrap();
+        let fields: serde_json::Value =
+            serde_json::from_slice(&fs::read(fixture.join("identity.json")).unwrap()).unwrap();
+        let field = |name: &str| Uuid::parse_str(fields[name].as_str().unwrap()).unwrap();
+        let mut identity = identity();
+        identity.tenant_id = Some(field("tenant_id"));
+        identity.site_id = Some(field("site_id"));
+        identity.device_id = field("device_id");
+        identity.device_key_id = field("device_key_id");
+        validate_configuration(&configuration, &identity).unwrap();
+        assert_eq!(configuration.compatibility_generations.len(), 2);
+        assert!(
+            configuration.compatibility_generations[0].segment_generation
+                < configuration.compatibility_generations[1].segment_generation
+        );
+        let segment = decode_envelope(&configuration.segment_snapshot, "bridge segment").unwrap();
+        let projection =
+            decode_envelope(&configuration.site_projection, "bridge projection").unwrap();
+        let state = tempfile::tempdir().unwrap();
+        verify_control_with_core(
+            state.path(),
+            Some(&core),
+            &configuration,
+            &identity,
+            &segment,
+            &projection,
+            None,
+        )
+        .unwrap();
+        let compatibility =
+            decode_compatibility_generations(&configuration.compatibility_generations).unwrap();
+        verify_compatibility_with_core(
+            state.path(),
+            Some(&core),
+            &configuration,
+            &identity,
+            &compatibility,
+            None,
+        )
+        .unwrap();
+
+        let mut tampered = projection;
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(verify_control_with_core(
+            state.path(),
+            Some(&core),
+            &configuration,
+            &identity,
+            &segment,
+            &tampered,
+            None
+        )
+        .is_err());
     }
 
     #[test]
@@ -9208,6 +9342,37 @@ default via 192.0.2.1 dev eth0 proto static
         assert_eq!(proof.activation_id, activation_id);
         assert_eq!(proof.projection_generation, 7);
         assert_eq!(proof.state, "committed");
+    }
+
+    #[test]
+    fn partial_peer_loss_does_not_reject_or_block_a_committed_policy_receipt() {
+        let (directory, activation_id) = activation_outcome_fixture("committed", None, 7);
+        let status_path = directory.path().join("core.status.json");
+        let mut status: serde_json::Value =
+            read_bounded_json(&status_path, MAX_PROFILE_BYTES).unwrap();
+        status["configured_peers"] = 2.into();
+        status["active_peers"] = 1.into();
+        status["required_route_owners"] = 2.into();
+        status["ready_route_owners"] = 1.into();
+        status["fail_open_required"] = true.into();
+        status["failed_prefixes"] = serde_json::json!(["10.30.0.0/16"]);
+        status["last_error_code"] = "route_has_no_active_peer".into();
+        atomic_json(&status_path, &status, 0o600).unwrap();
+        let outcome = read_activation_ready_receipt(directory.path())
+            .unwrap()
+            .unwrap();
+        promote_committed_activation(directory.path(), &outcome).unwrap();
+        assert_eq!(
+            fs::read_link(directory.path().join("active")).unwrap(),
+            Path::new("activations").join(activation_id)
+        );
+        let proof: ActiveActivationProof = read_bounded_json(
+            &directory.path().join("active-activation-v1.json"),
+            MAX_PROFILE_BYTES,
+        )
+        .unwrap();
+        assert_eq!(proof.state, "committed");
+        assert_eq!(proof.projection_generation, 7);
     }
 
     #[test]

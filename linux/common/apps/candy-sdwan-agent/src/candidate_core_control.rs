@@ -1,16 +1,25 @@
 //! Authenticated management adapter for immutable cross-process handoffs.
-use anyhow::{ensure, Context, Result};
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+use anyhow::Context;
+use anyhow::{ensure, Result};
+use candy_process_control::ProcessIdentity;
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
 use candy_process_control::{
     exchange, exchange_document, process_identity, ControlOperation, ControlRequest,
-    ProcessIdentity,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
+use serde::Serialize;
 use serde_json::Value;
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
 use std::path::Path;
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
 use std::time::{Duration, Instant};
 
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
 const MAX_CANDIDATE_CONTROL_BYTES: usize = 1024 * 1024;
 
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Request<'a> {
@@ -37,6 +46,7 @@ struct Response {
     detail: Option<String>,
 }
 
+#[cfg(all(feature = "experimental-tunio-rebind", target_os = "linux"))]
 pub(super) fn exchange_candidate(
     path: &Path,
     process: ProcessIdentity,
@@ -145,6 +155,7 @@ mod tests {
             detail: None,
         };
         assert!(validate_response(&reply, process, controller, 2, &reply.nonce).is_ok());
+        assert_eq!(reply.payload.as_ref().unwrap()["phase"], "installed");
         for field in ["process", "controller", "epoch", "nonce", "rejected"] {
             reply.process = process;
             reply.controller = controller;
