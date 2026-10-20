@@ -84,6 +84,36 @@ pub fn stage_firewall(
         return Err(NetworkError::Backend);
     }
     let mut batch = Batch::new();
+    append_firewall_rules(&mut batch, plan, clamp_tcp_mss);
+    send_batch(&socket, batch)?;
+    stage_docker_forward_compatibility()
+}
+
+pub fn replace_firewall(
+    plan: &LinuxNetworkPlan,
+    allow_forward: bool,
+    clamp_tcp_mss: bool,
+) -> Result<(), NetworkError> {
+    if !allow_forward {
+        return Err(NetworkError::Backend);
+    }
+    let socket = open_socket()?;
+    if owned_table_state(&socket, plan)? != OwnedTableState::Candy {
+        return Err(NetworkError::Backend);
+    }
+    let mut batch = Batch::new();
+    batch.push(
+        nft_type(nix::libc::NFT_MSG_DELTABLE),
+        nix::libc::NLM_F_ACK as u16,
+        vec![string_attr(NFTA_TABLE_NAME, &plan.nft_table_name)],
+    );
+    append_firewall_rules(&mut batch, plan, clamp_tcp_mss);
+    // nftables applies the delete and recreated table as one transaction.
+    send_batch(&socket, batch)?;
+    stage_docker_forward_compatibility()
+}
+
+fn append_firewall_rules(batch: &mut Batch, plan: &LinuxNetworkPlan, clamp_tcp_mss: bool) {
     batch.push(
         nft_type(nix::libc::NFT_MSG_NEWTABLE),
         create_flags(),
@@ -153,8 +183,6 @@ pub fn stage_firewall(
             remote_egress_masquerade_rule(plan),
         );
     }
-    send_batch(&socket, batch)?;
-    stage_docker_forward_compatibility()
 }
 
 fn iptables_status(args: &[&str]) -> Result<Option<ExitStatus>, NetworkError> {

@@ -236,7 +236,8 @@ impl Drop for ControlLease {
 
 fn request_queue_bytes(request: &Request) -> Result<usize, InfrastructureError> {
     let heap = match &request.operation {
-        Operation::ForwardPrepare { declaration, .. } => declaration
+        Operation::ForwardPrepare { declaration, .. }
+        | Operation::ForwardPolicyUpdate { declaration, .. } => declaration
             .routes
             .capacity()
             .checked_mul(std::mem::size_of::<candy_netd_proto::RouteDeclaration>())
@@ -278,6 +279,21 @@ fn request_queue_bytes(request: &Request) -> Result<usize, InfrastructureError> 
             "control allocation size overflow",
         )
     })?;
+    let heap = if let Operation::ForwardPolicyUpdate {
+        authorization_snapshot_sha256,
+        ..
+    } = &request.operation
+    {
+        heap.checked_add(authorization_snapshot_sha256.capacity())
+            .ok_or_else(|| {
+                reject(
+                    "domain_control_budget_invalid",
+                    "control allocation size overflow",
+                )
+            })?
+    } else {
+        heap
+    };
     std::mem::size_of::<DomainRequest>()
         .checked_add(heap)
         .ok_or_else(|| {
@@ -365,6 +381,15 @@ impl DomainIdentity {
                     return Err(invalid());
                 }
             }
+            Operation::ForwardPolicyUpdate {
+                owner, declaration, ..
+            } => {
+                if owner.domain_id != self.config.domain_id
+                    || declaration.table_id != self.config.table_id
+                {
+                    return Err(invalid());
+                }
+            }
             Operation::ForwardCommit { owner }
             | Operation::ForwardAuthorize { owner, .. }
             | Operation::ForwardCommitAuthorized { owner, .. }
@@ -387,6 +412,15 @@ impl DomainIdentity {
             self.validate_operation(&Operation::InfraEnsure(spec.clone()))?;
         }
         for record in state.forward.iter().chain(state.candidate.iter()) {
+            if let Some(pending) = &record.pending_policy {
+                self.validate_operation(&Operation::ForwardPolicyUpdate {
+                    owner: record.owner.clone(),
+                    policy_revision: pending.revision,
+                    policy_generation: pending.generation,
+                    authorization_snapshot_sha256: pending.authorization_snapshot_sha256.clone(),
+                    declaration: pending.declaration.clone(),
+                })?;
+            }
             self.validate_operation(&Operation::ForwardPrepare {
                 infra_id: self.config.infra_id,
                 infra_generation: state.spec.as_ref().map_or(1, |spec| spec.generation),
@@ -1459,6 +1493,57 @@ mod budget_tests {
         finish.send(()).unwrap();
         worker.join().unwrap();
         gate.reserve(128).unwrap();
+    }
+
+    #[test]
+    fn policy_queue_accounts_declaration_and_hash_allocations() {
+        let mut request = Request {
+            request_id: 1,
+            caller_instance_id: [1; 16],
+            caller_pid: 1,
+            operation: Operation::ForwardFailedPrefixes {
+                owner: ForwardOwner {
+                    domain_id: [1; 16],
+                    signed_generation: 1,
+                    worker_epoch: 1,
+                    fencing_token: 1,
+                    auth_deadline_mono_ms: 10,
+                    lease_deadline_mono_ms: 10,
+                },
+                failure_revision: 1,
+                failed_prefixes: vec![],
+            },
+        };
+        let Operation::ForwardFailedPrefixes { owner, .. } = request.operation else {
+            unreachable!()
+        };
+        let routes = Vec::with_capacity(32);
+        let exclusions = Vec::with_capacity(16);
+        let hash = String::with_capacity(128);
+        let expected = std::mem::size_of::<DomainRequest>()
+            + routes.capacity() * std::mem::size_of::<candy_netd_proto::RouteDeclaration>()
+            + exclusions.capacity() * std::mem::size_of::<candy_netd_proto::UnderlayExclusion>()
+            + hash.capacity();
+        request.operation = Operation::ForwardPolicyUpdate {
+            owner,
+            policy_revision: 1,
+            policy_generation: 2,
+            authorization_snapshot_sha256: hash,
+            declaration: candy_netd_proto::PrepareDeclaration {
+                table_id: 20000,
+                overlay_router_ipv4: [100, 64, 0, 1],
+                effective_mtu: 1398,
+                routes,
+                exclusions,
+                firewall: candy_netd_proto::FirewallPolicy {
+                    allow_forward: true,
+                    clamp_tcp_mss: true,
+                    require_ipv4_forwarding: true,
+                    manage_rp_filter: true,
+                },
+            },
+        };
+        assert_eq!(request_queue_bytes(&request).unwrap(), expected);
     }
 
     #[test]

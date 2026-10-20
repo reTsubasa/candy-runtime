@@ -28,6 +28,9 @@ struct Observed {
     fail_prefix_update: bool,
     fail_stamp_once: bool,
     guarded: bool,
+    fail_live_policy: bool,
+    fail_discard_policy: bool,
+    rejected_declarations: Vec<PrepareDeclaration>,
 }
 
 struct Backend(Arc<Mutex<Observed>>);
@@ -102,6 +105,35 @@ impl NetworkBackend for Backend {
 }
 
 impl InfrastructureBackend for Backend {
+    fn update_live_policy(
+        &mut self,
+        _: &PrepareDeclaration,
+        target: &PrepareDeclaration,
+        failed: &[Ipv4Prefix],
+    ) -> Result<(), NetworkError> {
+        let mut observed = self.0.lock().unwrap();
+        observed.events.push("live_policy");
+        // Simulate a failure after target routes were already installed.
+        observed.active_declaration = Some(target.clone());
+        if observed.fail_live_policy {
+            return Err(NetworkError::Backend);
+        }
+        observed.failed_prefixes = failed.to_vec();
+        Ok(())
+    }
+    fn discard_live_policy(
+        &mut self,
+        previous: &PrepareDeclaration,
+        _: &PrepareDeclaration,
+    ) -> Result<(), NetworkError> {
+        let mut observed = self.0.lock().unwrap();
+        observed.events.push("discard_live_policy");
+        if observed.fail_discard_policy {
+            return Err(NetworkError::Backend);
+        }
+        observed.active_declaration = Some(previous.clone());
+        Ok(())
+    }
     fn restore_forwarding_with_failures(
         &mut self,
         declaration: &PrepareDeclaration,
@@ -157,7 +189,12 @@ impl InfrastructureBackend for Backend {
         self.0.lock().unwrap().ifindex = None;
         self.event("infra_retire")
     }
-    fn reject_forwarding(&mut self, _: &PrepareDeclaration) -> Result<(), NetworkError> {
+    fn reject_forwarding(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
+        self.0
+            .lock()
+            .unwrap()
+            .rejected_declarations
+            .push(declaration.clone());
         self.event("reject_routes")
     }
     fn guard_forwarding(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError> {
@@ -1964,4 +2001,211 @@ fn real_linux_failed_prefix_only_changes_its_route_and_retains_healthy_prefix() 
         .unwrap()
         .success());
     fs::remove_dir_all(path).unwrap();
+}
+
+fn policy_update(revision: u64, generation: u64, declaration: PrepareDeclaration) -> Operation {
+    Operation::ForwardPolicyUpdate {
+        owner: owner(),
+        policy_revision: revision,
+        policy_generation: generation,
+        authorization_snapshot_sha256: "a".repeat(64),
+        declaration,
+    }
+}
+fn active_fixture(label: &str) -> Fixture {
+    let mut fixture = Fixture::new(label);
+    fixture.ensure();
+    fixture.prepare();
+    fixture.commit();
+    fixture.observed.lock().unwrap().events.clear();
+    fixture
+}
+fn changed_policy() -> PrepareDeclaration {
+    let mut target = declaration();
+    target.routes[0].prefix = Ipv4Prefix::new([10, 9, 0, 0], 16).unwrap();
+    target
+}
+
+#[test]
+fn live_policy_metadata_replay_and_route_change_preserve_physical_owner() {
+    let mut f = active_fixture("policy_live");
+    f.call(policy_update(1, 11, declaration()), 4).unwrap();
+    assert!(f.observed.lock().unwrap().events.is_empty());
+    f.call(policy_update(1, 11, declaration()), 5).unwrap();
+    assert!(f.observed.lock().unwrap().events.is_empty());
+    f.call(policy_update(2, 12, changed_policy()), 6).unwrap();
+    assert_eq!(f.observed.lock().unwrap().events, ["live_policy"]);
+    assert!(matches!(f.call(Operation::ForwardStatus, 7).unwrap().0,
+        Body::ForwardStatus {owner:Some(current), phase:Some(Phase::Active),
+            active_policy_revision:2,active_policy_generation:Some(12),
+            active_policy_hash:Some(hash), pending_policy_revision:None,..}
+        if current==owner() && hash=="a".repeat(64)));
+    assert_eq!(f.observed.lock().unwrap().ifindex, Some(17));
+    f.service = Fixture::service(&f.path, f.observed.clone());
+    assert!(matches!(
+        f.call(Operation::ForwardStatus, 8).unwrap().0,
+        Body::ForwardStatus {
+            active_policy_revision: 2,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn live_policy_rejects_stale_revision_owner_and_infrastructure_changes() {
+    let mut f = active_fixture("policy_reject");
+    f.call(policy_update(2, 12, declaration()), 4).unwrap();
+    assert!(f.call(policy_update(1, 12, declaration()), 5).is_err());
+    assert!(f.call(policy_update(2, 12, changed_policy()), 6).is_err());
+    assert!(f.call(policy_update(3, 11, declaration()), 7).is_err());
+    let mut target = declaration();
+    target.effective_mtu = 1300;
+    assert!(f.call(policy_update(3, 13, target), 8).is_err());
+    let mut op = policy_update(3, 13, declaration());
+    if let Operation::ForwardPolicyUpdate { owner, .. } = &mut op {
+        owner.worker_epoch += 1;
+    }
+    assert!(f.call(op, 9).is_err());
+    let (owner, target) = candidate();
+    prepare_candidate(&mut f, &owner, &target);
+    assert!(f.call(policy_update(3, 13, declaration()), 10).is_err());
+    assert!(f.observed.lock().unwrap().events.is_empty());
+}
+
+#[test]
+fn live_policy_partial_failure_retains_exact_intent_across_restart() {
+    let mut f = active_fixture("policy_pending");
+    f.observed.lock().unwrap().fail_live_policy = true;
+    assert!(f.call(policy_update(1, 11, changed_policy()), 4).is_err());
+    assert!(matches!(
+        f.call(Operation::ForwardStatus, 5).unwrap().0,
+        Body::ForwardStatus {
+            phase: Some(Phase::Active),
+            active_policy_revision: 0,
+            pending_policy_revision: Some(1),
+            ..
+        }
+    ));
+    assert!(f.call(policy_update(2, 12, declaration()), 6).is_err());
+    {
+        let observed = f.observed.lock().unwrap();
+        assert!(observed.events.iter().all(|e| *e == "live_policy"));
+        assert_eq!(observed.ifindex, Some(17));
+    }
+    f.service = Fixture::service(&f.path, f.observed.clone());
+    f.observed.lock().unwrap().fail_live_policy = false;
+    f.call(policy_update(1, 11, changed_policy()), 7).unwrap();
+    assert!(matches!(
+        f.call(Operation::ForwardStatus, 8).unwrap().0,
+        Body::ForwardStatus {
+            active_policy_revision: 1,
+            pending_policy_revision: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn live_policy_journal_intent_failure_does_not_fence_active_traffic() {
+    let mut f = active_fixture("policy_journal_fail");
+    let obstruction = f.path.join(format!("infra.v2-tmp-{}", std::process::id()));
+    fs::create_dir(&obstruction).unwrap();
+    assert!(f.call(policy_update(1, 11, changed_policy()), 4).is_err());
+    assert!(f.observed.lock().unwrap().events.is_empty());
+    fs::remove_dir(obstruction).unwrap();
+    assert!(matches!(
+        f.call(Operation::ForwardStatus, 5).unwrap().0,
+        Body::ForwardStatus {
+            phase: Some(Phase::Active),
+            pending_policy_revision: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn expired_partial_policy_fences_target_routes_without_reapplying_or_losing_tun() {
+    let mut f = active_fixture("policy_expired");
+    f.observed.lock().unwrap().fail_live_policy = true;
+    assert!(f.call(policy_update(1, 11, changed_policy()), 4).is_err());
+    f.observed.lock().unwrap().events.clear();
+    f.service = Fixture::service(&f.path, f.observed.clone());
+    assert!(matches!(
+        f.call(Operation::ForwardStatus, 1001).unwrap().0,
+        Body::ForwardStatus {
+            phase: Some(Phase::Revoked),
+            pending_policy_revision: None,
+            ..
+        }
+    ));
+    let observed = f.observed.lock().unwrap();
+    assert!(!observed.events.contains(&"live_policy"));
+    assert!(observed.events.contains(&"discard_live_policy"));
+    assert!(observed
+        .rejected_declarations
+        .iter()
+        .any(|d| d.routes == changed_policy().routes));
+    assert_eq!(observed.ifindex, Some(17));
+}
+
+#[test]
+fn revoked_partial_policy_cleanup_retry_never_reapplies_live_target() {
+    let mut f = active_fixture("policy_cancelled");
+    {
+        let mut observed = f.observed.lock().unwrap();
+        observed.fail_live_policy = true;
+        observed.fail_discard_policy = true;
+    }
+    assert!(f.call(policy_update(1, 11, changed_policy()), 4).is_err());
+    assert!(f
+        .call(Operation::ForwardRevoke { owner: owner() }, 5)
+        .is_err());
+    f.service = Fixture::service(&f.path, f.observed.clone());
+    {
+        let mut observed = f.observed.lock().unwrap();
+        observed.events.clear();
+        observed.fail_live_policy = false;
+        observed.fail_discard_policy = false;
+    }
+    assert!(matches!(
+        f.call(Operation::ForwardStatus, 6).unwrap().0,
+        Body::ForwardStatus {
+            phase: Some(Phase::Revoked),
+            pending_policy_revision: None,
+            ..
+        }
+    ));
+    assert!(!f.observed.lock().unwrap().events.contains(&"live_policy"));
+}
+
+#[test]
+fn large_live_policy_journal_survives_reload_above_old_64k_limit() {
+    let mut f = active_fixture("policy_large");
+    let mut target = declaration();
+    target.routes = (0..2048_u32)
+        .map(|n| RouteDeclaration {
+            prefix: Ipv4Prefix::new((0x0a000000 + n).to_be_bytes(), 32).unwrap(),
+            kind: RouteKind::Remote,
+        })
+        .collect();
+    f.call(policy_update(1, 11, target.clone()), 4).unwrap();
+    assert!(fs::metadata(f.path.join("infra.journal")).unwrap().len() > 65_536);
+    f.service = Fixture::service(&f.path, f.observed.clone());
+    f.call(policy_update(1, 11, target.clone()), 5).unwrap();
+    for route in &mut target.routes {
+        route.prefix.network[1] = 1;
+    }
+    f.observed.lock().unwrap().fail_live_policy = true;
+    assert!(f.call(policy_update(2, 12, target), 6).is_err());
+    assert!(fs::metadata(f.path.join("infra.journal")).unwrap().len() > 131_072);
+    f.service = Fixture::service(&f.path, f.observed.clone());
+    f.observed.lock().unwrap().fail_live_policy = false;
+    assert!(matches!(
+        f.call(Operation::ForwardStatus, 7).unwrap().0,
+        Body::ForwardStatus {
+            active_policy_revision: 2,
+            pending_policy_revision: None,
+            ..
+        }
+    ));
 }

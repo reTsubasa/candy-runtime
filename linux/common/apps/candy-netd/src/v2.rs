@@ -19,7 +19,31 @@ pub mod clock;
 #[cfg(target_os = "linux")]
 pub mod domains;
 
+// Current+candidate OR current+pending policy; never three declarations.
+const MAX_INFRASTRUCTURE_JOURNAL_BYTES: usize = 2 * candy_netd_proto::MAX_NETD_FRAME_LEN + 65_536;
+
 pub trait InfrastructureBackend: NetworkBackend {
+    /// Idempotent route/nft publication on a live owner; never guard or mutate TUN.
+    fn update_live_policy(
+        &mut self,
+        _previous: &PrepareDeclaration,
+        _target: &PrepareDeclaration,
+        _failed: &[Ipv4Prefix],
+    ) -> Result<(), NetworkError> {
+        Err(NetworkError::InvalidTransition)
+    }
+
+    /// Remove a partially published policy after its owner has been fenced.
+    /// Callers retain durable intent until this completes.
+    fn discard_live_policy(
+        &mut self,
+        previous: &PrepareDeclaration,
+        target: &PrepareDeclaration,
+    ) -> Result<(), NetworkError> {
+        self.remove_stale_forwarding(target, previous)?;
+        self.reject_forwarding(previous)
+    }
+
     fn interface_identity(&mut self) -> Result<Option<u32>, NetworkError>;
     fn interface_ownership_marker(&mut self) -> Result<Option<String>, NetworkError>;
     fn stamp_infrastructure_ownership(&mut self, marker: &str) -> Result<(), NetworkError>;
@@ -61,6 +85,23 @@ pub trait InfrastructureBackend: NetworkBackend {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct PendingPolicy {
+    #[serde(default, skip_serializing_if = "is_false")]
+    cancelled: bool,
+    revision: u64,
+    generation: u64,
+    authorization_snapshot_sha256: String,
+    declaration: PrepareDeclaration,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct ForwardRecord {
     owner: ForwardOwner,
     declaration: PrepareDeclaration,
@@ -75,6 +116,14 @@ struct ForwardRecord {
     pending_failure_revision: Option<u64>,
     #[serde(default)]
     authority: Option<candy_netd_proto::v2::ForwardAuthority>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    policy_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_policy: Option<PendingPolicy>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -156,9 +205,9 @@ impl InfrastructureJournal {
         }
         let mut bytes = Vec::new();
         Read::by_ref(&mut file)
-            .take(65_537)
+            .take(MAX_INFRASTRUCTURE_JOURNAL_BYTES as u64 + 1)
             .read_to_end(&mut bytes)?;
-        if bytes.len() > 65_536 {
+        if bytes.len() > MAX_INFRASTRUCTURE_JOURNAL_BYTES {
             return Err(io::Error::other("oversized journal"));
         }
         let envelope: Envelope = serde_json::from_slice(&bytes)?;
@@ -189,6 +238,42 @@ impl InfrastructureJournal {
                 validate_failed_prefixes(&forward.declaration, pending)
                     .map_err(|error| io::Error::other(error.to_string()))?;
             }
+            let metadata_valid = match (
+                forward.policy_revision,
+                forward.policy_generation,
+                &forward.policy_hash,
+            ) {
+                (0, None, None) => true,
+                (revision, Some(generation), Some(hash)) => {
+                    revision > 0
+                        && generation >= forward.owner.signed_generation
+                        && valid_policy_hash(hash)
+                }
+                _ => false,
+            };
+            if !metadata_valid {
+                return Err(io::Error::other("invalid active policy metadata"));
+            }
+            if let Some(pending) = &forward.pending_policy {
+                pending
+                    .declaration
+                    .validate()
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                validate_live_policy_identity(&forward.declaration, &pending.declaration)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                if pending.revision <= forward.policy_revision
+                    || pending.generation
+                        < forward
+                            .policy_generation
+                            .unwrap_or(forward.owner.signed_generation)
+                    || !valid_policy_hash(&pending.authorization_snapshot_sha256)
+                    || forward.pending_failed_prefixes.is_some()
+                    || envelope.state.candidate.is_some()
+                    || forward.phase != Phase::Active
+                {
+                    return Err(io::Error::other("invalid pending policy intent"));
+                }
+            }
             if forward.pending_failed_prefixes.is_some()
                 != forward.pending_failure_revision.is_some()
                 || forward
@@ -211,7 +296,7 @@ impl InfrastructureJournal {
             state: state.clone(),
         };
         let bytes = serde_json::to_vec(&envelope)?;
-        if bytes.len() > 65_536 {
+        if bytes.len() > MAX_INFRASTRUCTURE_JOURNAL_BYTES {
             return Err(io::Error::other("oversized journal"));
         }
         let result = (|| {
@@ -538,6 +623,24 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
                 "retry the pending scoped route update before replacing forwarding",
             ));
         }
+        if self
+            .state
+            .forward
+            .as_ref()
+            .is_some_and(|f| f.pending_policy.is_some())
+            && matches!(
+                request.operation,
+                Operation::ForwardPrepare { .. }
+                    | Operation::ForwardCommit { .. }
+                    | Operation::ForwardGuard { .. }
+                    | Operation::ForwardFailedPrefixes { .. }
+            )
+        {
+            return Err(reject(
+                "forward_policy_repair_pending",
+                "retained policy publication must complete before another route transaction",
+            ));
+        }
         let mut next = self.state.clone();
         match &request.operation {
             Operation::InDomain { .. } => {
@@ -808,6 +911,10 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
                             pending_failed_prefixes: None,
                             pending_failure_revision: None,
                             authority: None,
+                            policy_revision: 0,
+                            policy_generation: None,
+                            policy_hash: None,
+                            pending_policy: None,
                         });
                         next.last_fencing_token = owner.fencing_token;
                         self.persist(next)?;
@@ -829,6 +936,10 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
                     pending_failed_prefixes: None,
                     pending_failure_revision: None,
                     authority: None,
+                    policy_revision: 0,
+                    policy_generation: None,
+                    policy_hash: None,
+                    pending_policy: None,
                 });
                 next.last_fencing_token = owner.fencing_token;
                 self.persist(next.clone())?;
@@ -1038,11 +1149,19 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
                     }
                 }
                 let current = same_owner(next.forward.as_mut(), owner)?;
-                self.backend.reject_forwarding(&current.declaration)?;
-                self.backend.remove_firewall(&current.declaration)?;
+                if let Some(pending) = &mut current.pending_policy {
+                    pending.cancelled = true;
+                    // Revoke is durable before cleanup; a lost reply cannot
+                    // cause recovery to reapply a still-live cancelled target.
+                    self.persist(next.clone())?;
+                }
+                let retained = next.forward.as_ref().unwrap().clone();
+                self.fence_policy_intent(&retained)?;
+                let current = next.forward.as_mut().unwrap();
                 current.phase = Phase::Revoked;
                 current.pending_failed_prefixes = None;
                 current.pending_failure_revision = None;
+                current.pending_policy = None;
                 next.candidate = None;
             }
             Operation::ForwardLeaseRenew { owner } => {
@@ -1155,6 +1274,85 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
                 self.persist(next)?;
                 return Ok((Body::Ack, None));
             }
+            Operation::ForwardPolicyUpdate {
+                owner,
+                policy_revision,
+                policy_generation,
+                authorization_snapshot_sha256,
+                declaration,
+            } => {
+                self.administrator(&request)?;
+                ensure_live(owner, now)?;
+                let spec = next
+                    .spec
+                    .clone()
+                    .ok_or_else(|| reject("infra_missing", "infrastructure unavailable"))?;
+                self.identity(spec.infra_id, spec.generation)?;
+                if next.candidate.is_some() {
+                    return Err(reject(
+                        "forward_candidate_pending",
+                        "policy update requires no candidate",
+                    ));
+                }
+                let current = same_owner(next.forward.as_mut(), owner)?;
+                if current.phase != Phase::Active {
+                    return Err(reject(
+                        "forward_not_active",
+                        "policy update requires exact live active owner",
+                    ));
+                }
+                if current.pending_failed_prefixes.is_some() {
+                    return Err(reject(
+                        "forward_prefix_repair_pending",
+                        "finish failed-prefix repair before policy publication",
+                    ));
+                }
+                if current.pending_policy.is_some() {
+                    return Err(reject(
+                        "forward_policy_repair_pending",
+                        "retry retained policy intent before another publication",
+                    ));
+                }
+                validate_live_policy_identity(&current.declaration, declaration)?;
+                if *policy_revision < current.policy_revision
+                    || *policy_generation
+                        < current
+                            .policy_generation
+                            .unwrap_or(current.owner.signed_generation)
+                    || (*policy_revision == current.policy_revision
+                        && (current.declaration != *declaration
+                            || current.policy_generation != Some(*policy_generation)
+                            || current.policy_hash.as_ref() != Some(authorization_snapshot_sha256)))
+                {
+                    return Err(reject(
+                        "stale_policy_revision",
+                        "policy revision must advance or replay exact metadata and declaration",
+                    ));
+                }
+                if *policy_revision == current.policy_revision {
+                    return Ok((Body::Ack, None));
+                }
+                let intent = PendingPolicy {
+                    cancelled: false,
+                    revision: *policy_revision,
+                    generation: *policy_generation,
+                    authorization_snapshot_sha256: authorization_snapshot_sha256.clone(),
+                    declaration: declaration.clone(),
+                };
+                if current.declaration == *declaration {
+                    current.policy_revision = *policy_revision;
+                    current.policy_generation = Some(*policy_generation);
+                    current.policy_hash = Some(authorization_snapshot_sha256.clone());
+                    self.persist(next)?;
+                    return Ok((Body::Ack, None));
+                }
+                self.backend
+                    .validate_forwarding_replacement(&current.declaration, declaration)?;
+                current.pending_policy = Some(intent);
+                self.persist(next)?;
+                self.reconcile_live_policy(now)?;
+                return Ok((Body::Ack, None));
+            }
             Operation::ForwardStatus => {
                 return Ok((
                     Body::ForwardStatus {
@@ -1183,6 +1381,22 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
                             .forward
                             .as_ref()
                             .and_then(|forward| forward.pending_failed_prefixes.clone()),
+                        active_policy_revision: next
+                            .forward
+                            .as_ref()
+                            .map_or(0, |f| f.policy_revision),
+                        active_policy_generation: next
+                            .forward
+                            .as_ref()
+                            .and_then(|f| f.policy_generation),
+                        active_policy_hash: next
+                            .forward
+                            .as_ref()
+                            .and_then(|f| f.policy_hash.clone()),
+                        pending_policy_revision: next
+                            .forward
+                            .as_ref()
+                            .and_then(|f| f.pending_policy.as_ref().map(|p| p.revision)),
                     },
                     None,
                 ))
@@ -1201,6 +1415,87 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
         Ok((Body::Ack, None))
     }
 
+    fn fence_policy_intent(&mut self, forward: &ForwardRecord) -> Result<(), InfrastructureError> {
+        self.backend.reject_forwarding(&forward.declaration)?;
+        if let Some(pending) = &forward.pending_policy {
+            // A partial target can contain new routes. Fence those too; do not
+            // install target Local throws over an old Remote reject.
+            let mut remote = pending.declaration.clone();
+            remote.routes.retain(|route| route.kind != RouteKind::Local);
+            if !remote.routes.is_empty() {
+                self.backend.reject_forwarding(&remote)?;
+            }
+        }
+        self.backend.remove_firewall(&forward.declaration)?;
+        if let Some(pending) = &forward.pending_policy {
+            // Retain intent if cleanup fails. Expired intent is never replayed.
+            self.backend
+                .discard_live_policy(&forward.declaration, &pending.declaration)?;
+        }
+        Ok(())
+    }
+
+    fn reconcile_live_policy(&mut self, now: u64) -> Result<(), InfrastructureError> {
+        let forward = self
+            .state
+            .forward
+            .clone()
+            .ok_or_else(|| reject("forward_missing", "policy owner absent"))?;
+        ensure_live(&forward.owner, now)?;
+        if forward.phase != Phase::Active
+            || self.state.candidate.is_some()
+            || forward.pending_failed_prefixes.is_some()
+        {
+            return Err(reject(
+                "forward_policy_repair_pending",
+                "policy intent cannot run across owner or route transaction",
+            ));
+        }
+        let pending = forward
+            .pending_policy
+            .as_ref()
+            .ok_or_else(|| reject("forward_policy_intent_missing", "policy intent absent"))?;
+        if pending.cancelled {
+            return Err(reject(
+                "forward_policy_cancelled",
+                "cancelled policy cannot be replayed",
+            ));
+        }
+        let spec = self
+            .state
+            .spec
+            .clone()
+            .ok_or_else(|| reject("infra_missing", "infrastructure unavailable"))?;
+        self.identity(spec.infra_id, spec.generation)?;
+        let failed = forward
+            .failed_prefixes
+            .iter()
+            .copied()
+            .filter(|prefix| {
+                pending
+                    .declaration
+                    .routes
+                    .iter()
+                    .any(|route| route.prefix == *prefix && route.kind != RouteKind::Local)
+            })
+            .collect::<Vec<_>>();
+        self.backend
+            .update_live_policy(&forward.declaration, &pending.declaration, &failed)
+            .map_err(|cause| InfrastructureError::Transition {
+                stage: "live_policy_routes_firewall",
+                cause,
+            })?;
+        let mut next = self.state.clone();
+        let current = next.forward.as_mut().unwrap();
+        current.declaration = pending.declaration.clone();
+        current.policy_revision = pending.revision;
+        current.policy_generation = Some(pending.generation);
+        current.policy_hash = Some(pending.authorization_snapshot_sha256.clone());
+        current.failed_prefixes = failed;
+        current.pending_policy = None;
+        self.persist(next)
+    }
+
     pub fn recover_expired(&mut self, now: u64) -> Result<bool, InfrastructureError> {
         self.complete_creation()?;
         let mut candidate_recovered = false;
@@ -1215,6 +1510,34 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
                 let mut next = self.state.clone();
                 next.candidate = None;
                 self.persist(next)?;
+                candidate_recovered = true;
+            }
+        }
+        if self
+            .state
+            .forward
+            .as_ref()
+            .and_then(|f| f.pending_policy.as_ref())
+            .is_some_and(|p| p.cancelled)
+        {
+            let forward = self.state.forward.clone().unwrap();
+            self.fence_policy_intent(&forward)?;
+            let mut next = self.state.clone();
+            let retained = next.forward.as_mut().unwrap();
+            retained.phase = Phase::Revoked;
+            retained.pending_policy = None;
+            self.persist(next)?;
+            candidate_recovered = true;
+        }
+        if self.state.forward.as_ref().is_some_and(|f| {
+            f.pending_policy.is_some()
+                && f.phase == Phase::Active
+                && ensure_live(&f.owner, now).is_ok()
+        }) && self.state.boot_id == current_boot_id()?
+        {
+            if let Err(error) = self.reconcile_live_policy(now) {
+                crate::eprintln!("level=warn code=forward_policy_repair_pending module=netd_v2 reason={error} action=retry_exact_intent_preserve_live_owner");
+            } else {
                 candidate_recovered = true;
             }
         }
@@ -1268,10 +1591,17 @@ impl<T: TunFactory, B: InfrastructureBackend> InfrastructureService<T, B> {
             self.restart_recovery_pending = false;
             return Ok(candidate_recovered);
         }
-        self.backend.reject_forwarding(&forward.declaration)?;
-        self.backend.remove_firewall(&forward.declaration)?;
+        let mut forward = forward.clone();
+        if let Some(pending) = &mut forward.pending_policy {
+            pending.cancelled = true;
+            let mut intent = self.state.clone();
+            intent.forward = Some(forward.clone());
+            self.persist(intent)?;
+        }
+        self.fence_policy_intent(&forward)?;
         let mut next = self.state.clone();
         next.forward.as_mut().unwrap().phase = Phase::Revoked;
+        next.forward.as_mut().unwrap().pending_policy = None;
         next.forward.as_mut().unwrap().pending_failed_prefixes = None;
         next.forward.as_mut().unwrap().pending_failure_revision = None;
         self.persist(next)?;
@@ -1578,4 +1908,26 @@ mod identity_tests {
         assert!(!io_owner_alive(&owner));
         child.wait().unwrap();
     }
+}
+
+fn validate_live_policy_identity(
+    previous: &PrepareDeclaration,
+    target: &PrepareDeclaration,
+) -> Result<(), InfrastructureError> {
+    if previous.table_id != target.table_id
+        || previous.overlay_router_ipv4 != target.overlay_router_ipv4
+        || previous.effective_mtu != target.effective_mtu
+        || previous.exclusions != target.exclusions
+        || previous.firewall != target.firewall
+    {
+        return Err(reject("infra_policy_attribute_conflict", "live policy may change routes only; TUN, exclusions, firewall flags and sysctls are immutable"));
+    }
+    Ok(())
+}
+
+fn valid_policy_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }

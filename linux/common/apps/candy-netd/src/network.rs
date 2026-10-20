@@ -126,6 +126,14 @@ pub trait NetworkBackend {
         Ok(())
     }
     fn prepare_firewall(&mut self, declaration: &PrepareDeclaration) -> Result<(), NetworkError>;
+    fn replace_firewall(
+        &mut self,
+        previous: &PrepareDeclaration,
+        replacement: &PrepareDeclaration,
+    ) -> Result<(), NetworkError> {
+        self.remove_firewall(previous)?;
+        self.prepare_firewall(replacement)
+    }
     fn prepare_sysctls(
         &mut self,
         declaration: &PrepareDeclaration,

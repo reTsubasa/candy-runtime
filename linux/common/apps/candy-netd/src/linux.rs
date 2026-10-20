@@ -853,6 +853,18 @@ mod backend {
             )
         }
 
+        fn replace_firewall(
+            &mut self,
+            _previous: &PrepareDeclaration,
+            replacement: &PrepareDeclaration,
+        ) -> Result<(), NetworkError> {
+            nft::replace_firewall(
+                &Self::plan(replacement)?,
+                replacement.firewall.allow_forward,
+                replacement.firewall.clamp_tcp_mss,
+            )
+        }
+
         fn prepare_sysctls(
             &mut self,
             _declaration: &PrepareDeclaration,
@@ -1034,6 +1046,29 @@ mod backend {
     }
 
     impl crate::v2::InfrastructureBackend for LinuxNetworkBackend {
+        fn update_live_policy(
+            &mut self,
+            previous: &PrepareDeclaration,
+            target: &PrepareDeclaration,
+            failed: &[Ipv4Prefix],
+        ) -> Result<(), NetworkError> {
+            // TUN, ownership, sysctls and owner identity are deliberately untouched.
+            self.apply_v2_forward_routes(target, failed, None)?;
+            self.replace_firewall(previous, target)?;
+            self.remove_stale_forwarding(previous, target)
+        }
+
+        fn discard_live_policy(
+            &mut self,
+            previous: &PrepareDeclaration,
+            target: &PrepareDeclaration,
+        ) -> Result<(), NetworkError> {
+            self.remove_stale_forwarding(target, previous)?;
+            let failed = Self::plan(previous)?.remote_routes;
+            // Also reconcile selectors potentially left by the partial target.
+            self.apply_v2_forward_routes(previous, &failed, None)
+        }
+
         fn interface_ownership_marker(&mut self) -> Result<Option<String>, NetworkError> {
             let handle = self.handle.clone();
             self.with_async(async move {

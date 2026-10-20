@@ -165,6 +165,13 @@ pub enum Operation {
         failure_revision: u64,
         failed_prefixes: Vec<Ipv4Prefix>,
     },
+    ForwardPolicyUpdate {
+        owner: ForwardOwner,
+        policy_revision: u64,
+        policy_generation: u64,
+        authorization_snapshot_sha256: String,
+        declaration: PrepareDeclaration,
+    },
     ForwardStatus,
 }
 
@@ -231,6 +238,33 @@ impl Request {
                     return Err(NetdProtocolError::InvalidRequest);
                 }
                 owner.validate()?;
+                declaration.validate()?;
+                for prefix in declaration
+                    .routes
+                    .iter()
+                    .map(|r| r.prefix)
+                    .chain(declaration.exclusions.iter().map(|e| e.prefix))
+                {
+                    crate::Ipv4Prefix::new(prefix.network, prefix.prefix_len)?;
+                }
+            }
+            Operation::ForwardPolicyUpdate {
+                owner,
+                policy_revision,
+                policy_generation,
+                authorization_snapshot_sha256,
+                declaration,
+            } => {
+                owner.validate()?;
+                if *policy_revision == 0
+                    || *policy_generation == 0
+                    || authorization_snapshot_sha256.len() != 64
+                    || !authorization_snapshot_sha256
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                {
+                    return Err(NetdProtocolError::InvalidDeclaration);
+                }
                 declaration.validate()?;
                 for prefix in declaration
                     .routes
@@ -331,6 +365,14 @@ pub enum Body {
         failed_prefixes: Vec<Ipv4Prefix>,
         pending_failure_revision: Option<u64>,
         pending_failed_prefixes: Option<Vec<Ipv4Prefix>>,
+        #[serde(default)]
+        active_policy_revision: u64,
+        #[serde(default)]
+        active_policy_generation: Option<u64>,
+        #[serde(default)]
+        active_policy_hash: Option<String>,
+        #[serde(default)]
+        pending_policy_revision: Option<u64>,
     },
     Ack,
     Error {
@@ -399,6 +441,68 @@ mod tests {
             Request::decode(&wrong),
             Err(NetdProtocolError::UnsupportedVersion)
         );
+    }
+
+    #[test]
+    fn live_policy_round_trips_and_rejects_invalid_metadata() {
+        let mut request = Request {
+            request_id: 1,
+            caller_instance_id: [1; 16],
+            caller_pid: 1,
+            operation: Operation::ForwardPolicyUpdate {
+                owner: ForwardOwner {
+                    domain_id: [2; 16],
+                    signed_generation: 10,
+                    worker_epoch: 4,
+                    fencing_token: 8,
+                    auth_deadline_mono_ms: 2000,
+                    lease_deadline_mono_ms: 1000,
+                },
+                policy_revision: 1,
+                policy_generation: 11,
+                authorization_snapshot_sha256: "a".repeat(64),
+                declaration: PrepareDeclaration {
+                    table_id: 20000,
+                    overlay_router_ipv4: [100, 64, 0, 10],
+                    effective_mtu: 1398,
+                    routes: vec![crate::RouteDeclaration {
+                        prefix: Ipv4Prefix::new([10, 2, 0, 0], 16).unwrap(),
+                        kind: crate::RouteKind::Remote,
+                    }],
+                    exclusions: vec![crate::UnderlayExclusion {
+                        prefix: Ipv4Prefix::new([192, 0, 2, 1], 32).unwrap(),
+                        kind: crate::UnderlayKind::CloudApi,
+                    }],
+                    firewall: crate::FirewallPolicy {
+                        allow_forward: true,
+                        clamp_tcp_mss: true,
+                        require_ipv4_forwarding: true,
+                        manage_rp_filter: true,
+                    },
+                },
+            },
+        };
+        assert_eq!(
+            Request::decode(&request.encode().unwrap()).unwrap(),
+            request
+        );
+        if let Operation::ForwardPolicyUpdate {
+            policy_revision, ..
+        } = &mut request.operation
+        {
+            *policy_revision = 0;
+        }
+        assert!(request.validate().is_err());
+        if let Operation::ForwardPolicyUpdate {
+            policy_revision,
+            authorization_snapshot_sha256,
+            ..
+        } = &mut request.operation
+        {
+            *policy_revision = 1;
+            *authorization_snapshot_sha256 = "A".repeat(64);
+        }
+        assert!(request.validate().is_err());
     }
 
     #[test]
