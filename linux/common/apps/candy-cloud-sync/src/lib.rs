@@ -3660,19 +3660,10 @@ fn validate_core_path_status(status: &CoreRuntimeStatus) -> Result<()> {
     if status.paths.len() > status.configured_peers as usize || status.paths.len() > 256 {
         bail!("Core Runtime path count exceeds configured peer limit")
     }
-    // `paths` intentionally contains bounded historical failures so Cloud can
-    // explain a recent disconnect. Only paths with a ready stream represent
-    // currently active peers and participate in the cardinality invariant.
-    let active_path_count = status
-        .paths
-        .iter()
-        // Schema v2 has no stream counters: its paths retain the original
-        // active-only contract instead of silently becoming inactive.
-        .filter(|path| path.ready_streams.is_none_or(|ready| ready > 0))
-        .count();
-    if active_path_count > status.active_peers as usize {
-        bail!("active Core Runtime path count exceeds active peers")
-    }
+    // Transport stream readiness and route-peer readiness are independent:
+    // during policy replacement/probing a QUIC stream can remain ready while
+    // its peer is temporarily Connecting and excluded from active_peers.
+    // Keep validating the path list itself, but do not compare these counts.
     let mut paths = BTreeMap::new();
     for path in &status.paths {
         validate_hex(&path.peer_attachment_id, 16, "Core path peer attachment id")?;
@@ -8389,21 +8380,28 @@ default via 192.0.2.1 dev eth0 proto static
         assert!(valid_core_status_metadata(&status).unwrap());
         assert!(!core_data_plane_ready(&status));
         status.paths[0].ready_streams = Some(1);
-        assert!(validate_core_path_status(&status).is_err());
+        assert!(validate_core_path_status(&status).is_ok());
+        assert!(!core_data_plane_ready(&status));
     }
 
     #[test]
     fn historical_path_validation_keeps_bounds_duplicates_and_legacy_contract() {
         let mut status = product_core_status();
-        status.paths[0].ready_streams = None;
         status.active_peers = 0;
-        assert!(validate_core_path_status(&status).is_err());
+        status.ready_route_owners = 0;
+        // A transport stream may stay ready while its peer is temporarily
+        // excluded from route ownership during a policy-generation probe.
+        assert!(valid_core_status_metadata(&status).unwrap());
+        status.paths[0].ready_streams = None;
+        assert!(valid_core_status_metadata(&status).unwrap());
         status.active_peers = 1;
-        assert!(validate_core_path_status(&status).is_ok());
-        status.paths.push(product_core_status().paths.remove(0));
-        assert!(validate_core_path_status(&status).is_err());
+        status.paths[0].ready_streams = Some(1);
         status.configured_peers = 2;
-        status.active_peers = 2;
+        let mut second_path = product_core_status().paths.remove(0);
+        second_path.peer_attachment_id = "34".repeat(16);
+        status.paths.push(second_path);
+        assert!(valid_core_status_metadata(&status).unwrap());
+        status.paths[1].peer_attachment_id = status.paths[0].peer_attachment_id.clone();
         assert!(validate_core_path_status(&status).is_err());
     }
 
