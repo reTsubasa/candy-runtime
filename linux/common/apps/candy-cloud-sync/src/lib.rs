@@ -2319,9 +2319,6 @@ fn sync_once_with_retry(
             let configuration: RuntimeConfiguration =
                 serde_json::from_slice(&bytes).context("parse Runtime configuration")?;
             validate_configuration(&configuration, &identity)?;
-            if args.server_config.is_none() && !configuration.compatibility_generations.is_empty() {
-                bail!("Cloud sent an inbound compatibility catalog to a non-server Runtime")
-            }
             let segment = decode_envelope(&configuration.segment_snapshot, "segment snapshot")?;
             let projection = decode_envelope(&configuration.site_projection, "site projection")?;
             let peer_projections = decode_peer_projections(&configuration.peer_projection_catalog)?;
@@ -2545,6 +2542,7 @@ fn sync_once_with_retry(
                         &segment,
                         &projection,
                         &peer_projections,
+                        &compatibility_generations,
                         &discovery,
                         &resolved_grants,
                         args.invocation_control.as_ref(),
@@ -5192,7 +5190,9 @@ fn validate_catalog(catalog: &[RuntimePeerProjection]) -> Result<()> {
 }
 
 fn validate_compatibility_generations(configuration: &RuntimeConfiguration) -> Result<()> {
-    if configuration.compatibility_generations.len() > MAX_COMPATIBILITY_GENERATIONS {
+    if configuration.peer_projection_catalog.len() > MAX_COMPATIBILITY_PROJECTIONS
+        || configuration.compatibility_generations.len() > MAX_COMPATIBILITY_GENERATIONS
+    {
         bail!("Cloud Runtime configuration contains too many compatibility generations")
     }
     let mut previous_generation = 0;
@@ -5226,8 +5226,9 @@ fn validate_compatibility_generations(configuration: &RuntimeConfiguration) -> R
                 bail!("Cloud Runtime compatibility catalogs repeat a retained peer identity")
             }
         }
-        if configuration.peer_projection_catalog.len() + retained_peers.len()
-            > MAX_COMPATIBILITY_PROJECTIONS
+        if retained_peers.len() > MAX_COMPATIBILITY_PROJECTIONS
+            || configuration.peer_projection_catalog.len() + retained_peers.len()
+                > MAX_COMPATIBILITY_PROJECTIONS * 2
         {
             bail!("Cloud Runtime current and retained catalogs exceed total signed-policy capacity")
         }
@@ -5601,15 +5602,37 @@ fn render_server_activation_config(
     compatibility_generations: &[ServerCompatibilityGenerationPaths],
     outbound_peers: &[ServerOutboundPeerActivation],
 ) -> Result<String> {
-    use std::str::FromStr;
-    use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
-
     if configuration.grant_verification_keys.is_empty() {
         bail!("server activation requires at least one scoped Grant verification key")
     }
     let text = String::from_utf8(read_bounded(ordinary_config, MAX_CONFIGURATION_BYTES)?)
         .context("ordinary Candy Server config is not UTF-8")?;
-    let mut document = DocumentMut::from_str(&text).context("parse ordinary Candy Server TOML")?;
+    render_signed_server_catalog(
+        &text,
+        proxy_config,
+        configuration,
+        segment_path,
+        local_projection_path,
+        peer_projection_paths,
+        compatibility_generations,
+        outbound_peers,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_signed_server_catalog(
+    text: &str,
+    proxy_config: Option<&Path>,
+    configuration: &RuntimeConfiguration,
+    segment_path: &Path,
+    local_projection_path: &Path,
+    peer_projection_paths: &[PathBuf],
+    compatibility_generations: &[ServerCompatibilityGenerationPaths],
+    outbound_peers: &[ServerOutboundPeerActivation],
+) -> Result<String> {
+    use std::str::FromStr;
+    use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
+    let mut document = DocumentMut::from_str(text).context("parse ordinary Candy Server TOML")?;
     if document.as_table().contains_key("cloud_auth") {
         bail!("ordinary Candy Server config already defines cloud_auth")
     }
@@ -5802,6 +5825,66 @@ fn netd_prefix_sort_key(prefix: &str) -> (u32, u8) {
     (u32::from(address), length)
 }
 
+// The signed inbound closure is independent of the static listener/TLS template.
+// Reuse the server verifier rather than constructing peer rights from local routes.
+fn render_client_activation_control(
+    staging: &Path,
+    directory: &Path,
+    configuration: &RuntimeConfiguration,
+    peers: &[(&DiscoveredCandidate, u64, &Path)],
+) -> Result<String> {
+    let mut control = render_core_control_config(directory, configuration, peers)?;
+    if configuration.peer_projection_catalog.is_empty() {
+        return Ok(control);
+    }
+    let projections = configuration
+        .peer_projection_catalog
+        .iter()
+        .map(|entry| {
+            directory.join("peer-projections").join(format!(
+                "{}-{}.projection",
+                entry.projection_id.simple(),
+                entry.projection_generation
+            ))
+        })
+        .collect::<Vec<_>>();
+    let outbound = peers
+        .iter()
+        .map(
+            |(candidate, tunnel_id, path)| ServerOutboundPeerActivation {
+                candidate_id: candidate.candidate_id.clone(),
+                tunnel_id: *tunnel_id,
+                transport_config: path.to_path_buf(),
+            },
+        )
+        .collect::<Vec<_>>();
+    let inbound = render_signed_server_catalog(
+        "listen = \"127.0.0.1:1\"\n",
+        None,
+        configuration,
+        &directory.join("segment.snapshot"),
+        &directory.join("site.projection"),
+        &projections,
+        &server_compatibility_paths(directory, &configuration.compatibility_generations),
+        &outbound,
+    )?;
+    atomic_bytes(&staging.join("inbound.toml"), inbound.as_bytes(), 0o600)?;
+    // Insert at the root before any TOML tables.
+    control.insert_str(
+        0,
+        &format!(
+            "inbound_server_config = {}\n",
+            serde_json::to_string(
+                directory
+                    .join("inbound.toml")
+                    .to_str()
+                    .context("inbound path not UTF-8")?
+            )?
+        ),
+    );
+    Ok(control)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn publish_client_activation(
     state_dir: &Path,
@@ -5815,6 +5898,7 @@ fn publish_client_activation(
     segment: &[u8],
     projection: &[u8],
     peer_projections: &[Vec<u8>],
+    compatibility_generations: &[DecodedCompatibilityGeneration],
     discovery: &DiscoveredControlReport,
     grants: &[(grant::GrantSubject, grant::CachedGrant)],
     control: Option<&SyncControl>,
@@ -5854,6 +5938,13 @@ fn publish_client_activation(
                 );
                 atomic_bytes(&staged_peers.join(name), envelope, 0o600)?;
             }
+            write_compatibility_directories(
+                &staging,
+                &configuration.compatibility_generations,
+                compatibility_generations,
+                0o600,
+                0o700,
+            )?;
             let key_pem = String::from_utf8(read_bounded(
                 &identity_dir.join("operational-key.pem"),
                 MAX_PROFILE_BYTES,
@@ -5896,7 +5987,8 @@ fn publish_client_activation(
                 .iter()
                 .map(|(candidate, tunnel_id, path)| (*candidate, *tunnel_id, path.as_path()))
                 .collect::<Vec<_>>();
-            let core_config = render_core_control_config(&staging, configuration, &peers)?;
+            let core_config =
+                render_client_activation_control(&staging, &staging, configuration, &peers)?;
             let core_config_path = staging.join("core.toml");
             atomic_bytes(&core_config_path, core_config.as_bytes(), 0o600)?;
             let output = command_probe::output_controlled(
@@ -5946,8 +6038,12 @@ fn publish_client_activation(
                 .iter()
                 .map(|(candidate, tunnel_id, path)| (*candidate, *tunnel_id, path.as_path()))
                 .collect::<Vec<_>>();
-            let final_core_config =
-                render_core_control_config(&generation, configuration, &final_peer_refs)?;
+            let final_core_config = render_client_activation_control(
+                &staging,
+                &generation,
+                configuration,
+                &final_peer_refs,
+            )?;
             atomic_bytes(&core_config_path, final_core_config.as_bytes(), 0o600)?;
             atomic_bytes(&staging.join("declaration.json"), &declaration_bytes, 0o600)?;
             atomic_json(
@@ -8892,6 +8988,13 @@ default via 192.0.2.1 dev eth0 proto static
             })
             .collect();
         validate_compatibility_generations(&configuration).unwrap();
+        configuration.peer_projection_catalog = (1..=4096)
+            .map(|id| RuntimePeerProjection {
+                projection_id: Uuid::from_u128(id),
+                ..template.clone()
+            })
+            .collect();
+        validate_compatibility_generations(&configuration).unwrap();
         configuration
             .peer_projection_catalog
             .push(RuntimePeerProjection {
@@ -9733,6 +9836,53 @@ default via 192.0.2.1 dev eth0 proto static
         }];
         assert!(activation_required(true, &configuration, &discovery));
         assert!(!activation_required(false, &configuration, &discovery));
+    }
+
+    #[test]
+    fn client_activation_carries_signed_inbound_catalog_and_retained_references() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = configuration();
+        config.grant_verification_keys = vec![RuntimeGrantVerificationKey {
+            key_id: "grant-key".into(),
+            ed25519_public_key: "44".repeat(32),
+            issuer_id: Uuid::from_bytes([11; 16]),
+            environment_id: Uuid::from_bytes([12; 16]),
+        }];
+        config.peer_projection_catalog = vec![RuntimePeerProjection {
+            projection_id: Uuid::from_bytes([10; 16]),
+            projection_generation: 5,
+            projection_content_hash: "33".repeat(32),
+            site_projection: URL_SAFE_NO_PAD.encode(b"signed-peer"),
+        }];
+        config.compatibility_generations = vec![compatibility_generation()];
+        let rendered = render_client_activation_control(
+            directory.path(),
+            Path::new("/immutable/activation"),
+            &config,
+            &[],
+        )
+        .unwrap();
+        let control: toml_edit::DocumentMut = rendered.parse().unwrap();
+        assert_eq!(
+            control["inbound_server_config"].as_str(),
+            Some("/immutable/activation/inbound.toml")
+        );
+        let inbound: toml_edit::DocumentMut =
+            fs::read_to_string(directory.path().join("inbound.toml"))
+                .unwrap()
+                .parse()
+                .unwrap();
+        assert_eq!(inbound["sdwan"]["peer_projections"][0].as_str(), Some("/immutable/activation/peer-projections/0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a-5.projection"));
+        assert!(
+            inbound["sdwan"]["compatibility_generations"][0]["segment_snapshot"]
+                .as_str()
+                .unwrap()
+                .starts_with("/immutable/activation/compatibility-generations/")
+        );
+        assert_eq!(
+            inbound["cloud_auth"]["verification_keys"][0]["key_id"].as_str(),
+            Some("grant-key")
+        );
     }
 
     #[test]

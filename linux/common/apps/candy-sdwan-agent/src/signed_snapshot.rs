@@ -104,6 +104,78 @@ fn read_with_budget(path: &Path, remaining: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn visit_inbound_references(
+    document: &mut DocumentMut,
+    mut visit: impl FnMut(&mut Item, bool) -> Result<()>,
+) -> Result<()> {
+    let sdwan = document
+        .get_mut("sdwan")
+        .and_then(Item::as_table_like_mut)
+        .context("inbound signed catalog has no sdwan table")?;
+    for key in ["segment_snapshot", "local_projection"] {
+        visit(
+            sdwan
+                .get_mut(key)
+                .context("inbound signed reference absent")?,
+            false,
+        )?;
+    }
+    // TOML arrays contain Values, so use a temporary Item to retain the same
+    // absolute-path and byte-budget checks as every other signed reference.
+    fn projections(
+        item: &mut Item,
+        visit: &mut impl FnMut(&mut Item, bool) -> Result<()>,
+    ) -> Result<()> {
+        let array = item
+            .as_array_mut()
+            .context("inbound projections must be an array")?;
+        for entry in array.iter_mut() {
+            let mut item = Item::Value(entry.clone());
+            visit(&mut item, false)?;
+            *entry = item
+                .as_value()
+                .context("inbound reference must stay a value")?
+                .clone();
+        }
+        Ok(())
+    }
+    if let Some(peers) = sdwan.get_mut("peer_projections") {
+        projections(peers, &mut visit)?;
+    }
+    if let Some(catalogs) = sdwan
+        .get_mut("compatibility_generations")
+        .and_then(Item::as_array_of_tables_mut)
+    {
+        for catalog in catalogs.iter_mut() {
+            visit(
+                catalog
+                    .get_mut("segment_snapshot")
+                    .context("retained snapshot absent")?,
+                false,
+            )?;
+            projections(
+                catalog
+                    .get_mut("peer_projections")
+                    .context("retained peers absent")?,
+                &mut visit,
+            )?;
+        }
+    }
+    if let Some(peers) = sdwan
+        .get_mut("outbound_peers")
+        .and_then(Item::as_array_of_tables_mut)
+    {
+        for peer in peers.iter_mut() {
+            visit(
+                peer.get_mut("transport_config")
+                    .context("inbound outbound transport absent")?,
+                true,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn fingerprint(config: &Path) -> Result<Vec<u8>> {
     let mut total = 0;
     let mut entries = Vec::new();
@@ -159,6 +231,29 @@ pub(super) fn fingerprint(config: &Path) -> Result<Vec<u8>> {
             }
         }
     }
+    if let Some(reference) = document.get("inbound_server_config") {
+        let bytes = read_entry("inbound-catalog".to_owned(), &reference_path(reference)?)?;
+        let mut inbound: DocumentMut = String::from_utf8(bytes)?.parse()?;
+        let mut index = 0;
+        visit_inbound_references(&mut inbound, |reference, transport| {
+            let bytes = read_entry(format!("inbound-{index}"), &reference_path(reference)?)?;
+            index += 1;
+            if transport {
+                let transport: DocumentMut = String::from_utf8(bytes)?.parse()?;
+                if let Some(cloud) = transport.get("cloud_auth").and_then(Item::as_table_like) {
+                    for key in ["grant_envelope_path", "device_signing_key_path"] {
+                        if let Some(reference) = cloud.get(key) {
+                            read_entry(
+                                format!("inbound-{index}-{key}"),
+                                &reference_path(reference)?,
+                            )?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })?;
+    }
     Ok(Sha256::digest(serde_json::to_vec(&entries)?).to_vec())
 }
 
@@ -213,6 +308,29 @@ impl Builder {
         let bytes = self.read(Path::new(path))?;
         let output = self.write(format!("{}-{label}.bin", self.files.len()), &bytes)?;
         *item = value(output.to_str().context("snapshot reference is not UTF-8")?);
+        Ok(())
+    }
+
+    fn inbound(&mut self, item: &mut Item) -> Result<()> {
+        let path = item
+            .as_str()
+            .context("inbound catalog reference must be a string")?;
+        if !Path::new(path).is_absolute() {
+            bail!("inbound catalog requires absolute reference");
+        }
+        let mut document: DocumentMut = String::from_utf8(self.read(Path::new(path))?)?.parse()?;
+        visit_inbound_references(&mut document, |item, transport| {
+            if transport {
+                self.transport(item)
+            } else {
+                self.reference(item, "inbound-signed")
+            }
+        })?;
+        let output = self.write(
+            format!("{}-inbound.toml", self.files.len()),
+            document.to_string().as_bytes(),
+        )?;
+        *item = value(output.to_str().context("snapshot inbound path not UTF-8")?);
         Ok(())
     }
 
@@ -272,6 +390,9 @@ impl Snapshot {
                             .context("missing peer transport")?,
                     )?;
                 }
+            }
+            if let Some(inbound) = document.get_mut("inbound_server_config") {
+                builder.inbound(inbound)?;
             }
             let config =
                 builder.write("client.toml".to_owned(), document.to_string().as_bytes())?;
@@ -370,6 +491,69 @@ fn remove_if_present(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbound_current_retained_and_transport_are_in_signed_closure() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let input = |name: &str| {
+            let path = root.path().join(name);
+            fs::write(&path, name).unwrap();
+            path
+        };
+        let segment = input("segment");
+        let projection = input("local");
+        let peer = input("peer");
+        let retained = input("retained");
+        let old_segment = input("old-segment");
+        let grant = input("grant");
+        let key = input("key");
+        let transport = root.path().join("transport.toml");
+        fs::write(
+            &transport,
+            format!(
+                "[cloud_auth]\ngrant_envelope_path={grant:?}\ndevice_signing_key_path={key:?}\n"
+            ),
+        )
+        .unwrap();
+        let inbound = root.path().join("inbound.toml");
+        fs::write(&inbound, format!("[sdwan]\nsegment_snapshot={segment:?}\nlocal_projection={projection:?}\npeer_projections=[{peer:?}]\n[[sdwan.compatibility_generations]]\nsegment_generation=1\nsegment_snapshot={old_segment:?}\npeer_projections=[{retained:?}]\n[[sdwan.outbound_peers]]\ntransport_config={transport:?}\n")).unwrap();
+        let config = root.path().join("config");
+        fs::write(&config, format!("segment_snapshot={segment:?}\nsite_projection={projection:?}\ninbound_server_config={inbound:?}\n")).unwrap();
+        let before = fingerprint(&config).unwrap();
+        let snapshot = Snapshot::capture(&config, root.path()).unwrap();
+        fs::write(&retained, b"revoked-retained-policy").unwrap();
+        assert_ne!(
+            before,
+            fingerprint(&config).unwrap(),
+            "retained envelopes must affect change detection"
+        );
+        fs::write(&key, b"rotated-key").unwrap();
+        snapshot.verify().unwrap();
+        let control: DocumentMut = fs::read_to_string(&snapshot.config)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut copied: DocumentMut =
+            fs::read_to_string(control["inbound_server_config"].as_str().unwrap())
+                .unwrap()
+                .parse()
+                .unwrap();
+        visit_inbound_references(&mut copied, |item, _| {
+            assert!(Path::new(item.as_str().unwrap()).starts_with(&snapshot.directory));
+            Ok(())
+        })
+        .unwrap();
+        assert!(snapshot
+            .files
+            .iter()
+            .any(|file| fs::read(snapshot.directory.join(&file.name)).unwrap() == b"retained"));
+        assert!(snapshot
+            .files
+            .iter()
+            .any(|file| fs::read(snapshot.directory.join(&file.name)).unwrap() == b"key"));
+        snapshot.retire().unwrap();
+    }
 
     #[test]
     fn retirement_preserves_nonempty_transaction_evidence_and_original_manifest() {
