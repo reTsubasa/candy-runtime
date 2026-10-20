@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
-pub mod v2;
 pub mod probe;
+pub mod v2;
 
 use candy_netd_proto::{
     ErrorCode, LeaseOwner, NetdOperation, NetdProtocolError, NetdRequest, NetdResponse,

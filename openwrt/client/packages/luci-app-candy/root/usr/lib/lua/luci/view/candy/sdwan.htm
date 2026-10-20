@@ -200,6 +200,7 @@ local result = luci.http.formvalue("result") or ""
 	</style>
 
 	<div class="cbi-map">
+		<% if result == "repaired" then %><div class="candy-sdwan-result"><%:Identity repaired. Verify Cloud synchronization and SD-WAN status.%></div><% end %>
 		<% if result == "joined" then %><div class="candy-sdwan-result"><%:This node has joined Candy Cloud.%></div><% end %>
 		<% if result == "reconnecting" then %><div class="candy-sdwan-result"><%:Reconnect requested.%></div><% end %>
 		<% if result == "starting" then %><div class="candy-sdwan-result"><%:SD-WAN start requested.%></div><% end %>
@@ -230,6 +231,16 @@ local result = luci.http.formvalue("result") or ""
 			<div class="candy-sdwan-actions"><button class="cbi-button cbi-button-apply" type="submit"><%:Import and join%></button></div>
 		</form>
 	<% else %>
+		<details class="candy-sdwan-details">
+			<summary><%:Repair identity%></summary>
+			<form class="candy-sdwan-form" method="post" enctype="multipart/form-data" action="<%=luci.dispatcher.build_url('admin/services/candy/sdwan_join')%>">
+				<input type="hidden" name="token" value="<%=xml.pcdata(luci.dispatcher.context.authsession or '')%>" />
+				<input type="hidden" name="identity_action" value="repair" />
+				<p><%:In Candy Cloud, choose this node and Repair identity. Import its recovery file here to replace expired credentials while preserving the Profile and network.%></p>
+				<input name="bootstrap_file" type="file" accept="application/json,.json" required="required" />
+				<button class="cbi-button cbi-button-apply" type="submit"><%:Import and repair identity%></button>
+			</form>
+		</details>
 			<div class="candy-cloud-profile">
 				<div class="candy-cloud-profile-head">
 					<span class="candy-cloud-avatar">C</span>

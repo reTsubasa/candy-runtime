@@ -6,21 +6,25 @@ import {promisify} from 'node:util';
 import {observeHost} from './host-observer.mjs';
 
 const [buildDirectory, destination, mode = 'renewal-smoke'] = process.argv.slice(2);
-if (!buildDirectory || !destination || !['renewal-smoke', 'comparison', 'diagnostic', 'soak'].includes(mode)) {
-  throw new Error('usage: node run-renewing-soak.mjs <frozen build> <new evidence directory> [renewal-smoke|comparison|diagnostic|soak]');
+if (!buildDirectory || !destination || !['renewal-smoke', 'comparison', 'diagnostic', 'stability-20m', 'renewal-20m', 'soak'].includes(mode)) {
+  throw new Error('usage: node run-renewing-soak.mjs <frozen build> <new evidence directory> [renewal-smoke|comparison|diagnostic|stability-20m|renewal-20m|soak]');
 }
 const root = path.resolve(destination), build = path.resolve(buildDirectory);
 const workspace = path.resolve(new URL('../../..', import.meta.url).pathname);
 const runner = path.resolve(new URL('./run-two-docker-perf.mjs', import.meta.url).pathname);
 const smoke = mode === 'renewal-smoke';
-const ttl = smoke ? 60 : 1800, renewalInterval = smoke ? 30 : 900;
-const rounds = smoke || mode === 'comparison' ? 4 : mode === 'diagnostic' ? 12 : 120;
+const continuousRenewal = mode === 'renewal-20m';
+const stability = mode === 'stability-20m';
+const ttl = smoke ? 180 : continuousRenewal ? 90 : 1800;
+const renewalInterval = stability ? null : smoke ? 15 : continuousRenewal ? 45 : 900;
+const rounds = smoke || mode === 'comparison' ? 4 : mode === 'diagnostic' ? 12 : continuousRenewal || stability ? 20 : 120;
 const seconds = smoke ? 20 : 60;
 const policyTtl = 10800;
-const requireOutputs = process.env.CANDY_PERF_REQUIRE_OUTPUT_DIAGNOSTICS === '1';
+const requireOutputs = process.env.CANDY_PERF_REQUIRE_OUTPUT_DIAGNOSTICS === '1' || continuousRenewal || stability;
 if (fs.existsSync(root)) throw new Error('new evidence directory required');
 fs.mkdirSync(root, {recursive: true, mode: 0o700});
 const write = (name, value) => fs.writeFileSync(path.join(root, name), JSON.stringify(value, null, 2), {mode: 0o600});
+const event = (name, value = {}) => fs.appendFileSync(path.join(root, 'renewal-events.jsonl'), `${JSON.stringify({at: new Date().toISOString(), event: name, ...value})}\n`, {mode: 0o600});
 const read = name => JSON.parse(fs.readFileSync(path.join(root, name)));
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const env = {...process.env, CANDY_PERF_TOPOLOGY: 'ipc', CANDY_PERF_RUNTIME_AGENT: '1', CANDY_PERF_TRANSACTIONS: '0', CANDY_PERF_GRANT_TTL_SECS: String(ttl), CANDY_SIGNED_FIXTURE_POLICY_TTL_SECS: String(policyTtl)};
@@ -52,7 +56,8 @@ const status = async () => {
       }
       return {record, core, io, io_status: await readPrivate('/run/candy-perf/io-status.json'), outputs, link: JSON.parse(await inClient('ip', '-j', 'link', 'show', 'candy0'))};
     } catch (error) {
-      if (!String(error.stderr || '').includes('No such file or directory') || attempt === 19) throw error;
+      const transientPublication = String(error.stderr || '').includes('No such file or directory') || error instanceof SyntaxError;
+      if (!transientPublication || attempt === 19) throw error;
       await delay(100);
     }
   }
@@ -60,9 +65,13 @@ const status = async () => {
 };
 const sameInfrastructure = (before, after) => before.io.pid === after.io.pid && before.io.process_start_ticks === after.io.process_start_ticks && before.link[0].ifindex === after.link[0].ifindex;
 const renew = async () => {
+  event('renewal_started');
   const before = await status();
+  event('renewal_before_status', {pid: before.record.pid, worker_epoch: before.record.worker_epoch, auth_deadline_unix: before.record.auth_deadline_unix});
   const stdout = await inClient('env', 'CANDY_SIGNED_FIXTURE_RENEW_ROOT=/bench/fixture', `CANDY_SIGNED_FIXTURE_GRANT_TTL_SECS=${ttl}`, '/bench/binaries/sdwan_signed_cli_fixture');
+  event('renewal_fixture_signed');
   const compiled = JSON.parse(await inClient('/bench/binaries/candy-core', 'client', 'sdwan', 'compile-control', '--config', '/bench/fixture/client.toml'));
+  event('renewal_control_compiled', {authorization_expires_at_unix: compiled.authorization_expires_at_unix});
   const plan = read('plan.json');
   plan.auth_deadline_unix = compiled.authorization_expires_at_unix;
   const temporary = path.join(root, '.plan-renewal.json');
@@ -74,6 +83,7 @@ const renew = async () => {
     if (after.record.pid !== before.record.pid && after.core.worker_authority_sha256 === compiled.authorization_snapshot_sha256 && after.io_status.auth_deadline_unix === compiled.authorization_expires_at_unix && after.core.dataplane_phase === 'data_plane_active') {
       if (!sameInfrastructure(before, after) || after.record.worker_epoch <= before.record.worker_epoch || after.record.auth_deadline_unix <= before.record.auth_deadline_unix) throw new Error('renewal changed infrastructure or failed monotonic authorization checks');
       write(`renewal-${++renewalCount}.json`, {at: new Date().toISOString(), stdout, compiled, before, after, source: 'isolated signed fixture; real Agent/IO/netd authority transaction; no Cloud mTLS'});
+      event('renewal_committed', {pid: after.record.pid, worker_epoch: after.record.worker_epoch, auth_deadline_unix: after.record.auth_deadline_unix});
       console.log(`renewal ${renewalCount} PASS epoch=${after.record.worker_epoch}`);
       return;
     }
@@ -92,7 +102,7 @@ const snapshot = async name => {
 try {
   fs.cpSync(path.join(build, 'binaries'), path.join(root, 'binaries'), {recursive: true});
   for (const name of ['binary-hashes.json', 'source-freeze.json', 'build-provenance.json']) fs.copyFileSync(path.join(build, name), path.join(root, name));
-  write('renewal-run.json', {mode, require_output_diagnostics: requireOutputs, executor_diagnostics: process.env.CANDY_PERF_EXECUTOR_DIAGNOSTICS === '1', ttl_seconds: ttl, policy_ttl_seconds: policyTtl, renewal_interval_seconds: renewalInterval, rounds, seconds, runner_sha256: crypto.createHash('sha256').update(fs.readFileSync(new URL(import.meta.url))).digest('hex'), scope: 'isolated aarch64 Docker renewal stability; not physical-link acceptance'});
+  write('renewal-run.json', {mode, require_output_diagnostics: requireOutputs || continuousRenewal, executor_diagnostics: process.env.CANDY_PERF_EXECUTOR_DIAGNOSTICS === '1', ttl_seconds: ttl, policy_ttl_seconds: policyTtl, renewal_interval_seconds: renewalInterval, rounds, seconds, target_duration_seconds: continuousRenewal ? 1200 : mode === 'soak' ? 7200 : rounds * seconds, runner_sha256: crypto.createHash('sha256').update(fs.readFileSync(new URL(import.meta.url))).digest('hex'), scope: 'isolated aarch64 Docker signed-renewal stability; not physical-link acceptance'});
   phase('setup');
   identity = read('run-identity.json');
   stopHostObserver = observeHost(path.join(root, 'scheduler-host.jsonl'));
@@ -100,11 +110,16 @@ try {
   const initial = await status();
   if (initial.record.auth_deadline_unix - Math.floor(Date.now() / 1000) < ttl - 15) throw new Error('initial verified authorization cannot support renewal interval');
   renewalTask = (async () => {
-    let next = Date.now() + renewalInterval * 1000;
-    while (!stop) {
+    let next = renewalInterval === null ? Infinity : Date.now() + renewalInterval * 1000;
+    while (!stop && renewalInterval !== null) {
       await delay(250);
       if (Date.now() >= next && !stop) {
-        await renew();
+        try {
+          await renew();
+        } catch (error) {
+          event('renewal_failed', {error: String(error)});
+          throw error;
+        }
         next = Date.now() + renewalInterval * 1000;
       }
     }
@@ -114,7 +129,13 @@ try {
     if (renewalError) throw renewalError;
     const direction = round % 2 ? 'upload' : 'download', label = `sample-p4-${direction}-r${round}`;
     write(`${label}-before.json`, {client: await snapshot(identity.client), server: await snapshot(identity.server)});
-    const data = JSON.parse(await inClient('iperf3', '-c', '10.251.2.10', '-B', '10.251.1.10', '-p', '5201', '-P', '4', '-b', '187500000', '-t', String(seconds), '-J', ...(direction === 'download' ? ['-R'] : [])));
+    let data;
+    try {
+      data = JSON.parse(await inClient('iperf3', '-c', '10.251.2.10', '-B', '10.251.1.10', '-p', '5201', '-P', '4', '-b', '187500000', '-t', String(seconds), '-J', ...(direction === 'download' ? ['-R'] : [])));
+    } catch (error) {
+      event('iperf_result_invalid', {round, direction, error: String(error), stderr: error.stderr});
+      throw error;
+    }
     write(`${label}.json`, data);
     write(`${label}-after.json`, {client: await snapshot(identity.client), server: await snapshot(identity.server)});
     if (data.error) throw new Error(data.error);
@@ -125,9 +146,11 @@ try {
   stop = true;
   await renewalTask;
   if (renewalError) throw renewalError;
-  const sufficient = mode !== 'soak' || samples.reduce((sum, row) => sum + row.measured_seconds, 0) >= 7199;
-  write('completion.json', {mode, renewals: renewalCount, sufficient_duration: sufficient, samples, throughput_gate: samples.every(row => row.receiver_mbps >= 712.5) ? 'PASS' : 'FAIL', gate: 'REVIEW_REQUIRED', note: 'requires counter/resource integrity review; throughput alone cannot pass stability'});
+  const measuredDuration = samples.reduce((sum, row) => sum + row.measured_seconds, 0);
+  const sufficient = measuredDuration >= (continuousRenewal || stability ? 1199 : mode === 'soak' ? 7199 : 0);
+  write('completion.json', {mode, renewals: renewalCount, measured_duration_seconds: measuredDuration, sufficient_duration: sufficient, samples, throughput_gate: samples.every(row => row.receiver_mbps >= 712.5) ? 'PASS' : 'FAIL', gate: 'REVIEW_REQUIRED', note: 'requires signed renewal, counter/resource integrity review; throughput alone cannot pass stability'});
 } catch (error) {
+  event('run_failed', {error: String(error)});
   write('failure.json', {error: String(error), at: new Date().toISOString(), renewals: renewalCount, stdout: error.stdout, stderr: error.stderr});
   if (identity) {
     try {

@@ -1086,7 +1086,8 @@ function action_sdwan_join()
 		redirect_sdwan(detail == "bootstrap file is too large" and "file-too-large" or "invalid-file")
 		return
 	end
-	local ok, output = process.capture({ SDWAN_RUNTIME, "bootstrap", temporary }, { timeout = 90 })
+	local repair = luci.http.formvalue("identity_action") == "repair"
+	local ok, output = process.capture({ SDWAN_RUNTIME, repair and "repair" or "bootstrap", temporary }, { timeout = 90 })
 	fs.unlink(temporary)
 	local detail = trim(output or ""):gsub("[\r\n]+", " "):sub(1, 1024)
 	local log = io.open(SERVICE_LOG_FILE, "a")
@@ -1098,7 +1099,7 @@ function action_sdwan_join()
 		redirect_sdwan("error")
 		return
 	end
-	redirect_sdwan("joined")
+	redirect_sdwan(repair and "repaired" or "joined")
 end
 
 function action_sdwan_reconnect()

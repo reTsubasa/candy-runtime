@@ -2454,3 +2454,15 @@ msgstr "其他版本与本地安装"
 
 msgid "Installed versions and technical details"
 msgstr "已安装版本与技术信息"
+
+msgid "Repair identity"
+msgstr "修复身份"
+
+msgid "Import and repair identity"
+msgstr "导入并修复身份"
+
+msgid "In Candy Cloud, choose this node and Repair identity. Import its recovery file here to replace expired credentials while preserving the Profile and network."
+msgstr "在 Candy Cloud 中选择本节点，点击“修复身份”，然后在此导入修复文件。现有网络配置将被保留。"
+
+msgid "Identity repaired. Verify Cloud synchronization and SD-WAN status."
+msgstr "身份已修复，请确认 Cloud 同步和 SD-WAN 状态恢复。"

@@ -19,6 +19,8 @@ local parsed = false
 local status_code
 local redirected
 local runtime_called = false
+local identity_action
+local captured_action
 
 local fs = {}
 function fs.lstat(path)
@@ -36,6 +38,7 @@ package.preload["luci.candy.process"] = function()
 		capture = function(arguments)
 			if arguments[1] == "/usr/libexec/candy-sdwan-runtime" then
 				runtime_called = true
+				captured_action = arguments[2]
 				return false, "invalid bootstrap fixture"
 			end
 			return false, ""
@@ -61,6 +64,7 @@ luci = {
 				handler({ name = "bootstrap_file", file = "candy-node-bootstrap.json" }, '"cloud_address":"https://cloud.example.test"}', true)
 			end
 			if name == "token" then return "csrf-token" end
+			if name == "identity_action" then return identity_action end
 		end,
 		status = function(code) status_code = code end,
 		redirect = function(url) redirected = url end
@@ -73,5 +77,10 @@ assert(runtime_called, "a continuation chunk without metadata must reach Runtime
 assert(status_code == nil, "valid multipart streaming must not return a raw HTTP error")
 assert(redirected == "/sdwan?result=error", "Runtime rejection must return to the SD-WAN page")
 
+assert(captured_action == "bootstrap")
+parsed = false
+identity_action = "repair"
+action_sdwan_join()
+assert(captured_action == "repair", "explicit repair must use the isolated Runtime operation")
 print("OpenWrt Candy SD-WAN multipart upload test passed")
 LUA

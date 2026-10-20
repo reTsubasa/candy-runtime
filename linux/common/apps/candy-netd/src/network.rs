@@ -674,15 +674,20 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             .recovery_candidate
             .as_ref()
             .ok_or(NetworkError::InvalidTransition)?;
+        let routes_changed = record.declaration.routes != candidate.routes;
+        let firewall_changed = firewall_policy_changed(&record.declaration, candidate);
         // Candidate installation is idempotent from the backend's point of
         // view. Remove any partial candidate, then restore the last-good
         // policy. Keep RollingBack intent if either operation fails so the
         // next netd instance retries without touching the tunnel.
-        self.backend.remove_firewall(candidate)?;
-        self.backend.remove_routes(candidate)?;
-        self.backend
-            .reconcile_routes(&record.declaration, &record.failed_prefixes)?;
-        self.backend.prepare_firewall(&record.declaration)?;
+        if routes_changed {
+            self.backend
+                .reconcile_routes(&record.declaration, &record.failed_prefixes)?;
+        }
+        if firewall_changed {
+            self.backend
+                .replace_firewall(candidate, &record.declaration)?;
+        }
         if record.completed_steps & STEP_POLICY_RULE != 0 {
             self.backend.install_policy_rule(&record.declaration)?;
         }
@@ -902,6 +907,8 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
                 })
             })
             .collect();
+        let routes_changed = previous.routes != declaration.routes;
+        let firewall_changed = firewall_policy_changed(&previous, &declaration);
         {
             let record = self
                 .record
@@ -913,11 +920,13 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
             self.journal.store(record)?;
         }
         let applied = (|| {
-            self.backend.remove_firewall(&previous)?;
-            self.backend.remove_routes(&previous)?;
-            self.backend
-                .reconcile_routes(&declaration, &retained_failed_prefixes)?;
-            self.backend.prepare_firewall(&declaration)?;
+            if routes_changed {
+                self.backend
+                    .reconcile_routes(&declaration, &retained_failed_prefixes)?;
+            }
+            if firewall_changed {
+                self.backend.replace_firewall(&previous, &declaration)?;
+            }
             if policy_is_active {
                 self.backend.install_policy_rule(&declaration)?;
             }
@@ -950,15 +959,22 @@ impl<B: NetworkBackend, J: NetworkJournal> NetworkTransaction<B, J> {
         candidate: &PrepareDeclaration,
     ) -> Result<(), NetworkError> {
         let mut first_error = None;
-        for result in [
-            self.backend.remove_firewall(candidate),
-            self.backend.remove_routes(candidate),
-            self.backend.reconcile_routes(
+        let routes_changed = previous_record.declaration.routes != candidate.routes;
+        let firewall_changed = firewall_policy_changed(&previous_record.declaration, candidate);
+        let mut restore = Vec::new();
+        if routes_changed {
+            restore.push(self.backend.reconcile_routes(
                 &previous_record.declaration,
                 &previous_record.failed_prefixes,
-            ),
-            self.backend.prepare_firewall(&previous_record.declaration),
-        ] {
+            ));
+        }
+        if firewall_changed {
+            restore.push(
+                self.backend
+                    .replace_firewall(candidate, &previous_record.declaration),
+            );
+        }
+        for result in restore {
             if let Err(error) = result {
                 first_error.get_or_insert(error);
             }
@@ -1342,6 +1358,36 @@ fn ensure_owner(retained: LeaseOwner, request: LeaseOwner) -> Result<(), Network
     } else {
         Err(NetworkError::Conflict)
     }
+}
+
+fn firewall_policy_changed(current: &PrepareDeclaration, candidate: &PrepareDeclaration) -> bool {
+    if current.firewall != candidate.firewall {
+        return true;
+    }
+    let mut current_local = current
+        .routes
+        .iter()
+        .filter_map(|route| (route.kind == RouteKind::Local).then_some(route.prefix))
+        .collect::<Vec<_>>();
+    let mut candidate_local = candidate
+        .routes
+        .iter()
+        .filter_map(|route| (route.kind == RouteKind::Local).then_some(route.prefix))
+        .collect::<Vec<_>>();
+    current_local.sort_unstable();
+    candidate_local.sort_unstable();
+    current_local != candidate_local
+        || current.routes.iter().any(|route| {
+            matches!(
+                route.kind,
+                RouteKind::RemoteEgress | RouteKind::RemoteEgressGateway
+            )
+        }) != candidate.routes.iter().any(|route| {
+            matches!(
+                route.kind,
+                RouteKind::RemoteEgress | RouteKind::RemoteEgressGateway
+            )
+        })
 }
 
 fn ensure_reconfigure_owner(retained: LeaseOwner, request: LeaseOwner) -> Result<(), NetworkError> {

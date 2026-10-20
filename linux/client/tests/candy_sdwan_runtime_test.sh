@@ -48,6 +48,7 @@ chmod 0700 "$state_dir"
 printf '%s\n' '{"schema_version":1,"cloud_address":"https://cloud.example.test","organization_id":"00000000-0000-0000-0000-000000000001","device_id":"00000000-0000-0000-0000-000000000002","device_key_id":"00000000-0000-0000-0000-000000000003","not_after":"2030-01-01T00:00:00Z"}' >"$state_dir/device-identity-v1.json"
 printf '%s\n' private >"$state_dir/operational-key.pem"
 printf '%s\n' certificate >"$state_dir/device-cert.pem"
+for file in root-key.pem device-cert.der device-chain.pem device-mtls.pem; do printf '%s\n' fixture >"$state_dir/$file"; done
 printf '%s\n' candy-persistent-installation >"$state_dir/installation-instance-id"
 chmod 0600 "$state_dir"/*
 printf '%s\n' '{"schema_version":1,"state":"registered"}'
@@ -82,6 +83,36 @@ fi
 if run_runtime bootstrap "$bootstrap" >/dev/null 2>&1; then
 	fail "registered identity was replaceable without leaving the Cloud"
 fi
+
+# Recovery failure must preserve live identity, Profile and active pointers.
+printf '%s\n' profile-preserved >"$state/profile-v1.json"
+identity_before=$(cat "$state/identity/device-identity-v1.json")
+FAKE_ENROLL_FAIL=1 run_runtime repair "$bootstrap" >/dev/null 2>&1 && fail "failed repair succeeded"
+[ "$(cat "$state/identity/device-identity-v1.json")" = "$identity_before" ] || fail "failed repair replaced identity"
+[ "$(cat "$state/profile-v1.json")" = profile-preserved ] || fail "failed repair removed Profile"
+[ ! -d "$run/identity-repair.lock" ] || fail "failed repair leaked lock"
+[ "$(tail -n 1 "$fake_sync_calls")" = start ] || fail "failed repair did not resume sync"
+FAKE_ENROLL_FAIL=0 run_runtime repair "$bootstrap" >/dev/null
+[ -s "$state/identity.repair-previous/device-identity-v1.json" ] || fail "repair did not retain identity backup"
+[ "$(cat "$state/profile-v1.json")" = profile-preserved ] || fail "repair changed Profile"
+[ ! -d "$state/identity.repair-pending" ] || fail "completed identity was not published"
+grep -F '"action":"identity-repair","outcome":"completed"' "$state/events-v1.log" >/dev/null || fail "repair not audited"
+# Resume a fully enrolled stage after interruption without calling enrollment.
+cp -R "$state/identity" "$state/identity.repair-pending"
+FAKE_ENROLL_FAIL=1 run_runtime repair "$bootstrap" >/dev/null || fail "completed repair stage was not resumable"
+# A concurrent operator must not mutate identity or stop sync.
+if command -v flock >/dev/null 2>&1; then
+	(flock -n 9; FAKE_ENROLL_FAIL=1 run_runtime repair "$bootstrap" >/dev/null 2>&1 && fail "concurrent repair accepted") 9>"$run/identity-repair.lock"
+else
+	mkdir "$run/identity-repair.lock"
+	FAKE_ENROLL_FAIL=1 run_runtime repair "$bootstrap" >/dev/null 2>&1 && fail "concurrent repair accepted"
+	rmdir "$run/identity-repair.lock"
+fi
+# Crash after identity publication resumes the cache without re-enrollment.
+printf '%s\n' ready >"$state/identity/.repair-ready"
+FAKE_ENROLL_FAIL=1 run_runtime repair "$bootstrap" >/dev/null || fail "published repair did not resume"
+[ ! -e "$state/identity/.repair-ready" ] || fail "publication marker not cleared"
+
 
 status_before=$(cat "$run/sdwan-status.json")
 case "$status_before" in

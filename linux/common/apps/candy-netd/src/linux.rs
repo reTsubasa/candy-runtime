@@ -358,13 +358,7 @@ mod backend {
                     }
                 }
             }
-            for route in stale_owned {
-                if let Err(error) = handle.route().del(route).execute().await {
-                    if !route_delete_is_idempotent(&error) {
-                        return Err(NetworkError::Backend);
-                    }
-                }
-            }
+            let mut replaced_healthy = std::collections::HashSet::new();
             for prefix in healthy_remote.difference(&present_healthy) {
                 let mut route = RouteMessageBuilder::<Ipv4Addr>::new()
                     .destination_prefix(Ipv4Addr::from(prefix.network), prefix.prefix_len)
@@ -380,10 +374,13 @@ mod backend {
                 handle
                     .route()
                     .add(route)
+                    .replace()
                     .execute()
                     .await
                     .map_err(|_| NetworkError::Backend)?;
+                replaced_healthy.insert(*prefix);
             }
+            let mut replaced_throw = std::collections::HashSet::new();
             for prefix in expected_throw.difference(&present_throw) {
                 let route = RouteMessageBuilder::<Ipv4Addr>::new()
                     .destination_prefix(Ipv4Addr::from(prefix.network), prefix.prefix_len)
@@ -394,9 +391,31 @@ mod backend {
                 handle
                     .route()
                     .add(route)
+                    .replace()
                     .execute()
                     .await
                     .map_err(|_| NetworkError::Backend)?;
+                replaced_throw.insert(*prefix);
+            }
+            for route in stale_owned {
+                // Same-prefix route changes are installed with RTM_NEWROUTE
+                // | NLM_F_REPLACE above. Delete only prefixes that disappeared
+                // or route kinds that are no longer desired. Unrelated
+                // forwarding entries stay installed during policy updates.
+                if let Some(prefix) = Self::route_prefix(&route) {
+                    if (route.header.kind == RouteType::Unicast
+                        && replaced_healthy.contains(&prefix))
+                        || (route.header.kind == RouteType::Throw
+                            && replaced_throw.contains(&prefix))
+                    {
+                        continue;
+                    }
+                }
+                if let Err(error) = handle.route().del(route).execute().await {
+                    if !route_delete_is_idempotent(&error) {
+                        return Err(NetworkError::Backend);
+                    }
+                }
             }
             Ok(())
         }

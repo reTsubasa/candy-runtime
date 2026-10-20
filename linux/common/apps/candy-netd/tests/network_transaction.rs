@@ -303,6 +303,15 @@ impl NetworkBackend for RecordingBackend {
         Ok(())
     }
 
+    fn replace_firewall(
+        &mut self,
+        _previous: &PrepareDeclaration,
+        _replacement: &PrepareDeclaration,
+    ) -> Result<(), NetworkError> {
+        self.event("replace_firewall");
+        Ok(())
+    }
+
     fn prepare_sysctls(
         &mut self,
         _declaration: &PrepareDeclaration,
@@ -519,10 +528,8 @@ fn policy_update_replaces_only_routes_and_firewall_and_keeps_active_owner() {
     assert_eq!(
         *events.borrow(),
         [
-            "remove_firewall",
-            "remove_routes",
             "reconcile_routes",
-            "prepare_firewall",
+            "replace_firewall",
             "install_policy_rule"
         ]
     );
@@ -555,6 +562,7 @@ fn failed_policy_update_restores_last_good_active_policy() {
         prefix: Ipv4Prefix::new([10, 3, 0, 0], 16).unwrap(),
         kind: RouteKind::Remote,
     };
+    policy.firewall.allow_forward = false;
     armed.set(true);
     assert!(transaction.update_policy(owner(), policy).is_err());
 
@@ -596,13 +604,7 @@ fn kill9_during_policy_update_restores_policy_without_tearing_down_tunnel() {
 
     assert_eq!(
         *events.borrow(),
-        [
-            "remove_firewall",
-            "remove_routes",
-            "reconcile_routes",
-            "prepare_firewall",
-            "install_policy_rule"
-        ]
+        ["reconcile_routes", "install_policy_rule"]
     );
     assert!(!events.borrow().contains(&"deactivate_link"));
     assert!(!events.borrow().contains(&"remove_link"));
@@ -611,6 +613,64 @@ fn kill9_during_policy_update_restores_policy_without_tearing_down_tunnel() {
     assert_eq!(restored.phase, TransactionPhase::Active);
     assert_eq!(restored.declaration, declaration());
     assert!(restored.recovery_candidate.is_none());
+}
+
+#[test]
+fn route_only_policy_update_keeps_existing_routes_firewall_and_tunnel() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let journal = MemoryJournal::default();
+    let mut transaction =
+        NetworkTransaction::new(RecordingBackend(events.clone()), journal.clone()).unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+    events.borrow_mut().clear();
+
+    let mut policy = declaration();
+    policy.routes[1] = RouteDeclaration {
+        prefix: Ipv4Prefix::new([10, 9, 0, 0], 16).unwrap(),
+        kind: RouteKind::Remote,
+    };
+    transaction.update_policy(owner(), policy.clone()).unwrap();
+
+    assert_eq!(
+        *events.borrow(),
+        ["reconcile_routes", "install_policy_rule"]
+    );
+    assert!(!events.borrow().contains(&"remove_routes"));
+    assert!(!events.borrow().contains(&"remove_firewall"));
+    assert!(!events.borrow().contains(&"deactivate_link"));
+    assert!(!events.borrow().contains(&"remove_link"));
+    let record = journal.load().unwrap().unwrap();
+    assert_eq!(record.phase, TransactionPhase::Active);
+    assert_eq!(record.declaration, policy);
+}
+
+#[test]
+fn egress_policy_update_atomically_refreshes_nat_without_removing_routes() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let journal = MemoryJournal::default();
+    let mut transaction =
+        NetworkTransaction::new(RecordingBackend(events.clone()), journal).unwrap();
+    transaction.prepare(owner(), declaration()).unwrap();
+    transaction.commit(owner()).unwrap();
+    events.borrow_mut().clear();
+
+    let mut policy = declaration();
+    policy.routes[1].kind = RouteKind::RemoteEgress;
+    transaction.update_policy(owner(), policy).unwrap();
+
+    assert_eq!(
+        *events.borrow(),
+        [
+            "reconcile_routes",
+            "replace_firewall",
+            "install_policy_rule"
+        ]
+    );
+    assert!(!events.borrow().contains(&"remove_routes"));
+    assert!(!events.borrow().contains(&"remove_firewall"));
+    assert!(!events.borrow().contains(&"deactivate_link"));
+    assert!(!events.borrow().contains(&"remove_link"));
 }
 
 #[test]

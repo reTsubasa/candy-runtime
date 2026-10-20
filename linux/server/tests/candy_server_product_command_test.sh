@@ -37,7 +37,7 @@ printf '<state-dir=%s><state-root=%s>' "${CANDY_SDWAN_STATE_DIR:-}" "${CANDY_SDW
 printf '\n' >>"$FAKE_SDWAN_CALLS"
 case "${1:-}" in
 	status) printf '%s\n' '{"schema_version":1,"registration":{"state":"unregistered"}}' ;;
-	bootstrap) [ "$#" -eq 2 ] && [ -f "$2" ] ;;
+	bootstrap|repair) [ "$#" -eq 2 ] && [ -f "$2" ] ;;
 	*) : ;;
 esac
 EOF
@@ -84,5 +84,7 @@ FAKE_SDWAN_CALLS="$calls" CANDY_SDWAN_RUNTIME="$fake_runtime" PATH="$fake_bin:$P
 grep -F "<bootstrap><$bootstrap>" "$calls" >/dev/null || fail "server bootstrap did not use the Runtime boundary"
 [ "$(stat -c '%a' "$bootstrap" 2>/dev/null || stat -f '%Lp' "$bootstrap")" = 600 ] || fail "server bootstrap did not protect its input"
 grep -F 'joined Candy Cloud' "$tmp/bootstrap.out" >/dev/null || fail "server bootstrap success is not actionable"
+FAKE_SDWAN_CALLS="$calls" CANDY_SDWAN_RUNTIME="$fake_runtime" PATH="$fake_bin:$PATH" "$launcher" repair "$bootstrap" >/dev/null
+grep -F "<repair><$bootstrap>" "$calls" >/dev/null || fail "server repair did not use Runtime boundary"
 
 printf '%s\n' "Candy server product command passed"
